@@ -1,0 +1,44 @@
+[workspace]
+members = ["crates/griffr-common", "crates/griffr-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+authors = ["Small_Ku <small_ku@outlook.com>"]
+license = "UNLICENSED"
+repository = "https://github.com/Small-Ku/griffr"
+rust-version = "1.78"
+
+[workspace.dependencies]
+# Core
+tokio = { version = "1.43", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# HTTP/Networking
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+indicatif = "0.17"
+
+# File/Archive
+zip = "2.2"
+md-5 = "0.10"
+
+# Platform
+dirs = "5.0"
+
+# griffr crates
+griffr-common = { path = "crates/griffr-common" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

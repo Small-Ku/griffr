@@ -1,0 +1,36 @@
+[package]
+name = "griffr-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI for Griffr game launcher"
+
+[[bin]]
+name = "griffr"
+path = "src/main.rs"
+
+[dependencies]
+griffr-common = { workspace = true }
+
+# Core
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+
+# CLI
+clap = { workspace = true }
+indicatif = { workspace = true }
+
+# Async utilities
+futures-util = "0.3"
+
+# Serialization
+serde_json = "1.0"
+chrono = "0.4"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.14"

@@ -1,0 +1,53 @@
+[package]
+name = "griffr-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared library for Griffr launcher"
+
+[dependencies]
+# Core
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+
+# HTTP/Networking
+reqwest = { workspace = true }
+futures-util = { workspace = true }
+
+# File/Archive
+zip = { workspace = true }
+md-5 = { workspace = true }
+
+# Crypto
+aes = "0.8"
+cbc = "0.1"
+base64 = "0.22"
+
+# Platform
+dirs = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Security",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_Com",
+] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.14"
