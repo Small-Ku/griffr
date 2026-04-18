@@ -169,6 +169,12 @@ enum Commands {
         #[command(subcommand)]
         command: DebugCommands,
     },
+
+    /// Account session snapshot operations (explicit paths, no central registry)
+    Account {
+        #[command(subcommand)]
+        command: AccountCommands,
+    },
 }
 
 #[derive(Args)]
@@ -266,6 +272,77 @@ enum DebugCommands {
         /// Optional output file path for JSON payload
         #[arg(long = "output-file", id = "fetch_media_output")]
         output: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountCommands {
+    /// Capture current local account state into a directory bundle
+    Capture {
+        /// Known game id
+        #[arg(value_parser = ["arknights", "endfield"])]
+        game: String,
+
+        /// Optional server hint to narrow default sdk_data discovery roots
+        #[arg(
+            long,
+            value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic"]
+        )]
+        server_hint: Option<String>,
+
+        /// Output bundle directory
+        #[arg(long = "to")]
+        bundle: std::path::PathBuf,
+
+        /// Explicit sdk_data_* directory (defaults to latest under LocalLow)
+        #[arg(long)]
+        sdk_dir: Option<std::path::PathBuf>,
+
+        /// Install root path for optional install-local mmkv capture
+        #[arg(long)]
+        install_path: Option<std::path::PathBuf>,
+
+        /// Include optional install-local mmkv directory in the bundle
+        #[arg(long)]
+        include_install_mmkv: bool,
+
+        /// Replace bundle destination if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Activate account state from a directory bundle
+    Activate {
+        /// Known game id
+        #[arg(value_parser = ["arknights", "endfield"])]
+        game: String,
+
+        /// Optional server hint to narrow default sdk_data discovery roots
+        #[arg(
+            long,
+            value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic"]
+        )]
+        server_hint: Option<String>,
+
+        /// Input bundle directory
+        #[arg(long = "from")]
+        bundle: std::path::PathBuf,
+
+        /// Explicit sdk_data_* target directory (defaults to latest under LocalLow)
+        #[arg(long)]
+        sdk_dir: Option<std::path::PathBuf>,
+
+        /// Install root path for optional install-local mmkv restore
+        #[arg(long)]
+        install_path: Option<std::path::PathBuf>,
+
+        /// Restore optional install-local mmkv directory from the bundle
+        #[arg(long)]
+        include_install_mmkv: bool,
+
+        /// Replace target directories if they already exist
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -460,6 +537,54 @@ async fn main() -> Result<()> {
                 let game_id = remote.game.parse::<GameId>()?;
                 let server_id = remote.server.parse::<ServerId>()?;
                 commands::debug_fetch_media(game_id, server_id, language, output, opts).await?;
+            }
+        },
+        Commands::Account { command } => match command {
+            AccountCommands::Capture {
+                game,
+                server_hint,
+                bundle,
+                sdk_dir,
+                install_path,
+                include_install_mmkv,
+                force,
+            } => {
+                let game_id = game.parse::<GameId>()?;
+                let server_hint = server_hint.map(|s| s.parse::<ServerId>()).transpose()?;
+                commands::account_capture(
+                    game_id,
+                    server_hint,
+                    bundle,
+                    sdk_dir,
+                    install_path,
+                    include_install_mmkv,
+                    force,
+                    opts,
+                )
+                .await?;
+            }
+            AccountCommands::Activate {
+                game,
+                server_hint,
+                bundle,
+                sdk_dir,
+                install_path,
+                include_install_mmkv,
+                force,
+            } => {
+                let game_id = game.parse::<GameId>()?;
+                let server_hint = server_hint.map(|s| s.parse::<ServerId>()).transpose()?;
+                commands::account_activate(
+                    game_id,
+                    server_hint,
+                    bundle,
+                    sdk_dir,
+                    install_path,
+                    include_install_mmkv,
+                    force,
+                    opts,
+                )
+                .await?;
             }
         },
     }
