@@ -3,11 +3,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use tracing::{info, warn};
+use serde_json::json;
 
 use super::local::detect_local_install;
 use crate::progress::StepProgress;
-use crate::GlobalOptions;
+use crate::ui;
+use crate::{GlobalOptions, OutputFormat};
 
 fn is_launcher_metadata_issue(path: &str) -> bool {
     matches!(
@@ -30,21 +31,28 @@ pub async fn verify(
     let manager = local.as_manager()?;
     let api_client = ApiClient::new()?;
 
-    info!(
-        "verify path={} game={:?} server={} version={}",
-        local.install_path.display(),
+    ui::print_phase(format!(
+        "Verifying {} ({}) at {}",
         game_id,
         server_id,
-        installed_version
-    );
-
-    let verify_bar = Arc::new(StepProgress::new(
-        if repair { "verify+repair" } else { "verify" },
-        opts.verbose,
+        local.install_path.display(),
     ));
-    let verify_bar_cb = verify_bar.clone();
-    let progress_cb = |current: usize, total: usize, file: &str| {
-        verify_bar_cb.update(current, total, file);
+    ui::print_info(format!("Installed version: {}", installed_version));
+
+    let progress_cb = if opts.output == OutputFormat::Json {
+        None
+    } else {
+        let verify_bar = Arc::new(StepProgress::new(
+            if repair { "verify+repair" } else { "verify" },
+            opts.verbose,
+        ));
+        let verify_bar_cb = verify_bar.clone();
+        Some((
+            verify_bar,
+            move |current: usize, total: usize, file: &str| {
+                verify_bar_cb.update(current, total, file);
+            },
+        ))
     };
 
     let mut source_roots = Vec::new();
@@ -74,15 +82,48 @@ pub async fn verify(
             repair,
             &source_roots,
             force_copy,
-            Some(progress_cb),
+            progress_cb.as_ref().map(|(_, cb)| cb),
         )
         .await
         .context("run_integrity_pool failed")?;
-    verify_bar.finish();
-    info!("verify issues={}", summary.issues.len());
-    if repair {
-        info!("repair.downloaded_files={}", summary.downloaded_files);
-        info!("repair.reused_files={}", summary.reused_files);
+    if let Some((bar, _)) = progress_cb {
+        bar.finish();
+    }
+
+    if opts.output == OutputFormat::Json {
+        let issue_list = summary
+            .issues
+            .iter()
+            .map(|issue| {
+                json!({
+                    "path": issue.path,
+                    "kind": format!("{:?}", issue.kind),
+                    "expected_size": issue.expected_size,
+                    "actual_size": issue.actual_size,
+                    "expected_md5": issue.expected_md5,
+                    "actual_md5": issue.actual_md5,
+                    "is_metadata": is_launcher_metadata_issue(&issue.path),
+                })
+            })
+            .collect::<Vec<_>>();
+        ui::emit_json(&json!({
+            "path": local.install_path.display().to_string(),
+            "game": game_id.to_string(),
+            "server": server_id.to_string(),
+            "version": installed_version,
+            "repair": repair,
+            "issues": issue_list,
+            "downloaded_files": summary.downloaded_files,
+            "reused_files": summary.reused_files,
+        }))?;
+    } else {
+        ui::print_info(format!("Integrity issues found: {}", summary.issues.len()));
+        if repair {
+            ui::print_info(format!(
+                "Repair summary: downloaded={} reused={}",
+                summary.downloaded_files, summary.reused_files
+            ));
+        }
     }
 
     if summary.issues.is_empty() {
@@ -96,7 +137,7 @@ pub async fn verify(
     }
 
     for issue in &summary.issues {
-        warn!(
+        ui::print_warning(format!(
             "{} {:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
             issue.path,
             issue.kind,
@@ -104,7 +145,7 @@ pub async fn verify(
             issue.actual_size,
             issue.expected_md5,
             issue.actual_md5
-        );
+        ));
     }
 
     if repair {
@@ -121,17 +162,21 @@ pub async fn verify(
             .count();
 
         if !metadata_issues.is_empty() {
-            info!(
-                "repair.metadata_issues_ignored={} (metadata will be normalized by launcher sync)",
+            ui::print_info(format!(
+                "Ignored metadata-only issues: {} (launcher metadata files will be normalized)",
                 metadata_issues.len()
-            );
+            ));
         }
-        info!("repair.syncing_metadata=started");
+        if opts.output != OutputFormat::Json {
+            ui::print_phase("Syncing launcher metadata");
+        }
         manager
             .sync_launcher_metadata(&api_client)
             .await
             .context("Failed to sync launcher metadata after repair")?;
-        info!("repair.syncing_metadata=done");
+        if opts.output != OutputFormat::Json {
+            ui::print_success("Launcher metadata synced");
+        }
 
         if remaining_non_metadata > 0 {
             anyhow::bail!(
@@ -141,5 +186,12 @@ pub async fn verify(
         }
     }
 
+    if opts.output != OutputFormat::Json {
+        ui::print_success(if repair {
+            "Verify+repair complete"
+        } else {
+            "Verify complete"
+        });
+    }
     Ok(())
 }

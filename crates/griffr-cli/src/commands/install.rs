@@ -12,10 +12,10 @@ use griffr_common::game::{
     download_vfs_resources, materialize_game_files_with_pool, FileReuseConfig, GameManager,
     SourceInstallInput,
 };
-use tracing::{info, warn};
 
 use super::local::detect_local_install;
 use crate::progress::StepProgress;
+use crate::ui;
 use crate::GlobalOptions;
 
 fn is_launcher_metadata_issue(path: &str) -> bool {
@@ -107,16 +107,21 @@ pub async fn install(
         .context("No package information available")?;
     let total_size: u64 = pkg.packs.iter().map(|p| p.size()).sum();
 
-    info!(
-        "install game={:?} server={} path={} version={} packs={} bytes={} reuse_sources={}",
+    ui::print_phase(format!(
+        "Installing {} ({}) into {}",
         game_id,
         server_id,
-        install_path.display(),
+        install_path.display()
+    ));
+    ui::print_info(format!(
+        "Target version: {} | Archives: {} | Size: {}",
         version_info.version,
         pkg.packs.len(),
-        total_size,
-        reuse_paths.len()
-    );
+        ui::format_bytes(total_size)
+    ));
+    if !reuse_paths.is_empty() {
+        ui::print_info(format!("Reuse sources: {}", reuse_paths.len()));
+    }
 
     let mut game_config = GameConfig {
         install_path: Some(install_path.clone()),
@@ -132,6 +137,7 @@ pub async fn install(
     let manager = GameManager::new(game_id, game_config);
 
     if reuse_paths.is_empty() {
+        ui::print_phase("Downloading and extracting archives");
         let download_dir = install_path.join("downloads");
         compio::fs::create_dir_all(&download_dir)
             .await
@@ -209,6 +215,7 @@ pub async fn install(
             );
         }
     } else {
+        ui::print_phase("Materializing files from reuse sources");
         let mut source_installs = Vec::new();
         for reuse_path in &reuse_paths {
             let source = detect_local_install(reuse_path).await.with_context(|| {
@@ -234,6 +241,8 @@ pub async fn install(
                 install_path: source.install_path.clone(),
             });
         }
+        let materialize_bar = Arc::new(StepProgress::new("install.materialize", opts.verbose));
+        let materialize_bar_cb = materialize_bar.clone();
         let materialized = materialize_game_files_with_pool(
             &api_client,
             game_id,
@@ -248,15 +257,16 @@ pub async fn install(
                 source_installs,
             },
             Some(|current: usize, total: usize, file: &str| {
-                if opts.verbose || total <= 10 || current % 25 == 0 {
-                    info!("install.materialize {}/{} {}", current + 1, total, file);
-                }
+                materialize_bar_cb.update(current, total, file);
             }),
         )
         .await
         .context("Failed to materialize files during install")?;
-        info!("install.reused_files={}", materialized.reused_files);
-        info!("install.downloaded_files={}", materialized.downloaded_files);
+        materialize_bar.finish();
+        ui::print_info(format!(
+            "Materialized files: reused={} downloaded={}",
+            materialized.reused_files, materialized.downloaded_files
+        ));
         if !materialized.issues.is_empty() {
             anyhow::bail!(
                 "Install materialization finished with {} issue(s)",
@@ -270,6 +280,7 @@ pub async fn install(
         .await
         .context("Failed to sync launcher metadata after install staging")?;
 
+    ui::print_phase("Verifying install integrity");
     let verify_bar = Arc::new(StepProgress::new("install.verify+repair", opts.verbose));
     let verify_bar_cb = verify_bar.clone();
     let verify_progress = move |current: usize, total: usize, file: &str| {
@@ -283,15 +294,15 @@ pub async fn install(
         let mut repairable_issues = Vec::new();
         let mut metadata_issues = Vec::new();
         for issue in summary.issues.iter().take(20) {
-            warn!(
-                "install.verify.issue path={} kind={:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
+            ui::print_warning(format!(
+                "integrity issue path={} kind={:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
                 issue.path,
                 issue.kind,
                 issue.expected_size,
                 issue.actual_size,
                 issue.expected_md5,
                 issue.actual_md5
-            );
+            ));
         }
         for issue in &summary.issues {
             if is_launcher_metadata_issue(&issue.path) {
@@ -302,10 +313,10 @@ pub async fn install(
         }
 
         if !metadata_issues.is_empty() {
-            info!(
-                "install.verify.metadata_issues_ignored={} (will be normalized by launcher metadata sync)",
+            ui::print_info(format!(
+                "Ignored metadata-only issues: {} (launcher metadata files will be normalized)",
                 metadata_issues.len()
-            );
+            ));
         }
 
         if !repairable_issues.is_empty() {
@@ -317,6 +328,7 @@ pub async fn install(
     }
 
     if !opts.skip_vfs {
+        ui::print_phase("Syncing VFS resources");
         let streaming_assets = install_path
             .join(game_id.streaming_assets_subdir())
             .join("StreamingAssets");
@@ -333,6 +345,6 @@ pub async fn install(
         .await;
     }
 
-    info!("install complete");
+    ui::print_success("Install complete");
     Ok(())
 }

@@ -2,8 +2,8 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use tracing::info;
 
+use crate::ui;
 use crate::GlobalOptions;
 
 pub async fn uninstall(
@@ -18,13 +18,10 @@ pub async fn uninstall(
         path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
     };
 
-    info!(
-        "uninstall path={} keep_files={}",
-        target.display(),
-        keep_files
-    );
+    ui::print_phase(format!("Uninstall target: {}", target.display()));
 
     if keep_files {
+        ui::print_success("Skipped file deletion due to --keep-files");
         return Ok(());
     }
 
@@ -36,6 +33,7 @@ pub async fn uninstall(
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         if !input.trim().eq_ignore_ascii_case("y") {
+            ui::print_info("Uninstall cancelled.");
             return Ok(());
         }
     }
@@ -52,6 +50,9 @@ pub async fn uninstall(
     };
     if exists {
         std::fs::remove_dir_all(&target)?;
+        ui::print_success(format!("Deleted {}", target.display()));
+    } else {
+        ui::print_info("Target path does not exist; nothing to remove.");
     }
 
     Ok(())

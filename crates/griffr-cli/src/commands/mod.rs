@@ -12,7 +12,8 @@ pub mod verify;
 
 pub use debug::{
     config_ini as debug_config_ini, detect as debug_detect, fetch_file as debug_fetch_file,
-    fetch_game_files as debug_fetch_game_files, game_files as debug_game_files,
+    fetch_game_files as debug_fetch_game_files, fetch_media as debug_fetch_media,
+    game_files as debug_game_files,
 };
 pub use info::show as info_show;
 pub use install::install;

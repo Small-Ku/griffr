@@ -1,11 +1,12 @@
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
-use tracing::{debug, info};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use tracing::debug;
 
 use griffr_common::config::{GameId, ServerId};
 
 mod commands;
 mod progress;
+mod ui;
 
 /// Griffr - Hypergryph Game Launcher CLI
 #[derive(Parser)]
@@ -25,6 +26,16 @@ struct Cli {
     #[arg(short, long, global = true, help = "Enable verbose logging")]
     verbose: bool,
 
+    /// Output format for user-facing command results
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        help = "Choose text or JSON output for report-style commands"
+    )]
+    output: OutputFormat,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -34,10 +45,14 @@ enum Commands {
     /// Download and install a game to an explicit path
     Install {
         /// Known game id
+        #[arg(value_parser = ["arknights", "endfield"])]
         game: String,
 
         /// Known server id
-        #[arg(long)]
+        #[arg(
+            long,
+            value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic"]
+        )]
         server: String,
 
         /// Install root
@@ -163,11 +178,14 @@ struct QueryTarget {
     path: Option<std::path::PathBuf>,
 
     /// Known game id for remote lookup when no local path is provided
-    #[arg(long)]
+    #[arg(long, value_parser = ["arknights", "endfield"])]
     game: Option<String>,
 
     /// Known server id for remote lookup when no local path is provided
-    #[arg(long)]
+    #[arg(
+        long,
+        value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic"]
+    )]
     server: Option<String>,
 
     /// Launcher language
@@ -177,11 +195,21 @@ struct QueryTarget {
 
 #[derive(Args)]
 struct RemoteTarget {
-    #[arg(long)]
+    #[arg(long, value_parser = ["arknights", "endfield"])]
     game: String,
 
-    #[arg(long)]
+    #[arg(
+        long,
+        value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic"]
+    )]
     server: String,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
+pub enum OutputFormat {
+    #[default]
+    Text,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -209,7 +237,7 @@ enum DebugCommands {
         #[arg(long)]
         version: Option<String>,
 
-        #[arg(long)]
+        #[arg(long, id = "fetch_game_files_output")]
         output: Option<std::path::PathBuf>,
     },
     /// Fetch one file referenced by the latest remote game_files manifest
@@ -223,8 +251,21 @@ enum DebugCommands {
         #[arg(long)]
         file: String,
 
-        #[arg(long)]
+        #[arg(long, id = "fetch_file_output")]
         output: std::path::PathBuf,
+    },
+    /// Fetch raw media/news payload as JSON
+    FetchMedia {
+        #[command(flatten)]
+        remote: RemoteTarget,
+
+        /// Launcher language
+        #[arg(long, default_value = "zh-cn")]
+        language: String,
+
+        /// Optional output file path for JSON payload
+        #[arg(long = "output-file", id = "fetch_media_output")]
+        output: Option<std::path::PathBuf>,
     },
 }
 
@@ -236,6 +277,7 @@ pub struct GlobalOptions {
     pub skip_verify: bool,
     pub force_full_package: bool,
     pub skip_vfs: bool,
+    pub output: OutputFormat,
 }
 
 impl GlobalOptions {
@@ -249,7 +291,7 @@ impl GlobalOptions {
     /// Print a dry run message
     pub fn dry_run(&self, msg: impl AsRef<str>) {
         if self.dry_run {
-            info!(dry_run = true, "{}", msg.as_ref());
+            crate::ui::print_info(format!("DRY RUN: {}", msg.as_ref()));
         }
     }
 
@@ -264,9 +306,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let default_level = if cli.verbose {
-        "info,griffr=debug,griffr_common=debug"
+        "warn,griffr=debug,griffr_common=debug"
     } else {
-        "info"
+        "warn"
     };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
@@ -283,6 +325,7 @@ async fn main() -> Result<()> {
         skip_verify: false,
         force_full_package: false,
         skip_vfs: false,
+        output: cli.output,
     };
 
     if opts.verbose {
@@ -408,6 +451,15 @@ async fn main() -> Result<()> {
                 let game_id = remote.game.parse::<GameId>()?;
                 let server_id = remote.server.parse::<ServerId>()?;
                 commands::debug_fetch_file(game_id, server_id, version, file, output, opts).await?;
+            }
+            DebugCommands::FetchMedia {
+                remote,
+                language,
+                output,
+            } => {
+                let game_id = remote.game.parse::<GameId>()?;
+                let server_id = remote.server.parse::<ServerId>()?;
+                commands::debug_fetch_media(game_id, server_id, language, output, opts).await?;
             }
         },
     }

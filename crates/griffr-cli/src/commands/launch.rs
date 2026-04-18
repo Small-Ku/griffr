@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use griffr_common::game::admin::ensure_admin;
 use griffr_common::game::Launcher;
-use tracing::info;
 
 use super::local::detect_local_install;
+use crate::ui;
 use crate::GlobalOptions;
 
 pub async fn launch(path: PathBuf, force: bool, opts: GlobalOptions) -> Result<()> {
@@ -18,12 +18,7 @@ pub async fn launch(path: PathBuf, force: bool, opts: GlobalOptions) -> Result<(
     let launcher = Launcher::new(game_id, &local.install_path);
     let exe_path = launcher.game_exe_path();
 
-    info!(
-        "launch path={} game={:?} exe={}",
-        local.install_path.display(),
-        game_id,
-        exe_path.display()
-    );
+    ui::print_phase(format!("Launching {} from {}", game_id, exe_path.display()));
 
     match compio::fs::metadata(&exe_path).await {
         Ok(_) => {}
@@ -49,9 +44,11 @@ pub async fn launch(path: PathBuf, force: bool, opts: GlobalOptions) -> Result<(
                 local.install_path.display()
             );
         }
+        ui::print_info("Existing game process detected; terminating due to --force");
         launcher.kill_game().await?;
     }
 
     let _child = launcher.launch().await?;
+    ui::print_success("Game process started");
     Ok(())
 }

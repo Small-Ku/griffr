@@ -13,10 +13,10 @@ use griffr_common::game::{
     download_vfs_resources, materialize_game_files_with_pool, FileReuseConfig, GameManager,
     SourceInstallInput,
 };
-use tracing::{info, warn};
 
 use super::local::detect_local_install;
 use crate::progress::StepProgress;
+use crate::ui;
 use crate::GlobalOptions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +87,7 @@ async fn verify_updated_install(
     skip_verify: bool,
 ) -> Result<()> {
     if skip_verify {
+        ui::print_info("Skipping post-update integrity verification (--skip-verify)");
         manager.set_version(target_version.to_string());
         manager
             .sync_launcher_metadata(api_client)
@@ -98,13 +99,13 @@ async fn verify_updated_install(
     let summary = manager
         .run_integrity_pool(api_client, true, &[], false, None::<fn(usize, usize, &str)>)
         .await?;
-    info!("update.verify.issues={}", summary.issues.len());
-    info!(
-        "update.repair.downloaded_files={}",
+    ui::print_info(format!(
+        "Verification summary: issues={} repaired_downloads={}",
+        summary.issues.len(),
         summary.downloaded_files
-    );
+    ));
     for issue in summary.issues.iter().take(20) {
-        warn!("{} {:?}", issue.path, issue.kind);
+        ui::print_warning(format!("{} {:?}", issue.path, issue.kind));
     }
     let remaining_non_metadata = summary
         .issues
@@ -175,6 +176,8 @@ async fn update_via_reuse(
         reuse_paths.len()
     ));
 
+    let materialize_bar = Arc::new(StepProgress::new("update.materialize", opts.verbose));
+    let materialize_bar_cb = materialize_bar.clone();
     let materialized = materialize_game_files_with_pool(
         api_client,
         game_id,
@@ -189,15 +192,16 @@ async fn update_via_reuse(
             source_installs,
         },
         Some(|current: usize, total: usize, file: &str| {
-            if opts.verbose || total <= 10 || current % 25 == 0 {
-                info!("update.materialize {}/{} {}", current + 1, total, file);
-            }
+            materialize_bar_cb.update(current, total, file);
         }),
     )
     .await?;
+    materialize_bar.finish();
 
-    info!("update.reused_files={}", materialized.reused_files);
-    info!("update.downloaded_files={}", materialized.downloaded_files);
+    ui::print_info(format!(
+        "Materialized files: reused={} downloaded={}",
+        materialized.reused_files, materialized.downloaded_files
+    ));
     if !materialized.issues.is_empty() {
         anyhow::bail!(
             "Update materialization finished with {} issue(s)",
@@ -215,7 +219,10 @@ async fn download_and_extract_archives(
     opts: &GlobalOptions,
 ) -> Result<()> {
     let total_size: u64 = archives.iter().map(|p| p.size()).sum();
-    info!("update.label={} bytes={}", label, total_size);
+    ui::print_phase(format!(
+        "Downloading {label} package archives ({})",
+        ui::format_bytes(total_size)
+    ));
 
     let download_dir = install_path.join("downloads");
     compio::fs::create_dir_all(&download_dir)
@@ -335,17 +342,19 @@ pub async fn update(
         .get_latest_game(game_id, server_id, Some(&current_version))
         .await?;
 
-    info!(
-        "update path={} game={:?} server={} current={} latest={}",
-        local.install_path.display(),
+    ui::print_phase(format!(
+        "Updating {} ({}) at {}",
         game_id,
         server_id,
-        current_version,
-        version_info.version
-    );
+        local.install_path.display(),
+    ));
+    ui::print_info(format!(
+        "Current version: {} | Latest version: {}",
+        current_version, version_info.version
+    ));
 
     if current_version == version_info.version || !version_info.has_update() {
-        info!("update noop");
+        ui::print_success("Already up to date");
         return Ok(());
     }
 
@@ -377,6 +386,7 @@ pub async fn update(
     }
 
     if !reuse_paths.is_empty() {
+        ui::print_phase("Applying update via local file reuse");
         update_via_reuse(
             &api_client,
             &local,
@@ -389,6 +399,7 @@ pub async fn update(
         .await?;
 
         if !opts.skip_vfs {
+            ui::print_phase("Syncing VFS resources");
             let streaming_assets = local
                 .install_path
                 .join(game_id.streaming_assets_subdir())
@@ -406,7 +417,7 @@ pub async fn update(
             .await;
         }
 
-        info!("update complete");
+        ui::print_success("Update complete");
         return Ok(());
     }
 
@@ -444,6 +455,7 @@ pub async fn update(
     }
 
     if !opts.skip_vfs {
+        ui::print_phase("Syncing VFS resources");
         let streaming_assets = local
             .install_path
             .join(game_id.streaming_assets_subdir())
@@ -461,7 +473,7 @@ pub async fn update(
         .await;
     }
 
-    info!("update complete");
+    ui::print_success("Update complete");
     Ok(())
 }
 

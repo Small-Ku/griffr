@@ -12,7 +12,7 @@ use super::FileIssue;
 use crate::api::types::{ChannelConfig, Game, Region};
 use crate::api::ApiClient;
 use crate::config::{GameConfig, GameId, ServerConfig, ServerId};
-use crate::game::task_pool::{run_tasks, ProgressEvent, Task, TaskPoolConfig};
+use crate::game::task_pool::{run_tasks_with_progress, ProgressEvent, Task, TaskPoolConfig};
 
 /// Manages game installation state and version tracking
 #[derive(Debug)]
@@ -380,35 +380,34 @@ impl GameManager {
             })
             .collect::<Vec<_>>();
         let total = tasks.len();
-        let result = run_tasks(tasks, TaskPoolConfig::default())?;
-
         let mut issues = Vec::new();
         let mut finished = 0usize;
         let mut downloaded_paths = HashSet::new();
         let mut reused_paths = HashSet::new();
-        for event in result.events {
-            match event {
-                ProgressEvent::Verified { path, issue, .. } => {
-                    if let Some(ref cb) = progress_callback {
-                        cb(finished, total, &path);
-                    }
-                    finished += 1;
-                    if let Some(issue) = issue {
-                        issues.push(issue);
-                    }
+
+        let mut on_event = |event: &ProgressEvent| match event {
+            ProgressEvent::Verified { path, issue, .. } => {
+                if let Some(ref cb) = progress_callback {
+                    cb(finished, total, path);
                 }
-                ProgressEvent::Downloaded { path, .. } => {
-                    downloaded_paths.insert(path);
+                finished += 1;
+                if let Some(issue) = issue.clone() {
+                    issues.push(issue);
                 }
-                ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {
-                    reused_paths.insert(path);
-                }
-                ProgressEvent::Failed { path, reason } => {
-                    tracing::warn!("verify failed for {}: {}", path, reason);
-                }
-                _ => {}
             }
-        }
+            ProgressEvent::Downloaded { path, .. } => {
+                downloaded_paths.insert(path.clone());
+            }
+            ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {
+                reused_paths.insert(path.clone());
+            }
+            ProgressEvent::Failed { path, reason } => {
+                tracing::warn!("verify failed for {}: {}", path, reason);
+            }
+            _ => {}
+        };
+
+        let _ = run_tasks_with_progress(tasks, TaskPoolConfig::default(), Some(&mut on_event))?;
 
         Ok(IntegrityRunSummary {
             issues,
