@@ -1,9 +1,10 @@
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
+use griffr_common::api::types::PackageInfo;
 use griffr_common::config::{GameConfig, GameId, ServerId};
 use griffr_common::game::task_pool::{
     run_tasks_with_progress, ArchivePart, ProgressEvent, Task, TaskPoolConfig,
@@ -40,6 +41,75 @@ fn archive_base_from_url(url: &str) -> Option<String> {
         return Some(stem.to_string());
     }
     None
+}
+
+fn parse_package_total_size(pkg: &PackageInfo) -> u64 {
+    pkg.total_size.parse::<u64>().unwrap_or(0)
+}
+
+fn required_install_bytes(pkg: &PackageInfo) -> u64 {
+    let archive_bytes: u64 = pkg.packs.iter().map(|p| p.size()).sum();
+    let package_total = parse_package_total_size(pkg);
+    archive_bytes.max(package_total)
+}
+
+#[cfg(windows)]
+fn disk_available_bytes(path: &Path) -> Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let query_path = path
+        .ancestors()
+        .find(|candidate| candidate.exists())
+        .unwrap_or(path);
+    let path_wide: Vec<u16> = query_path
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+
+    let mut free_bytes_available_to_caller = 0u64;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            path_wide.as_ptr(),
+            &mut free_bytes_available_to_caller as *mut u64,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        anyhow::bail!(
+            "Failed to query free disk space for {}",
+            query_path.display()
+        );
+    }
+
+    Ok(free_bytes_available_to_caller)
+}
+
+#[cfg(not(windows))]
+fn disk_available_bytes(_path: &Path) -> Result<u64> {
+    Ok(u64::MAX)
+}
+
+fn validate_install_disk_space(pkg: &PackageInfo, install_path: &Path) -> Result<()> {
+    let required_bytes = required_install_bytes(pkg);
+    let available_bytes = disk_available_bytes(install_path)?;
+
+    if available_bytes < required_bytes {
+        anyhow::bail!(
+            "Insufficient disk space for install at {}: required {} ({}), available {} ({}), shortfall {} ({})",
+            install_path.display(),
+            required_bytes,
+            ui::format_bytes(required_bytes),
+            available_bytes,
+            ui::format_bytes(available_bytes),
+            required_bytes - available_bytes,
+            ui::format_bytes(required_bytes - available_bytes)
+        );
+    }
+
+    Ok(())
 }
 
 pub async fn install(
@@ -106,6 +176,7 @@ pub async fn install(
         .as_ref()
         .context("No package information available")?;
     let total_size: u64 = pkg.packs.iter().map(|p| p.size()).sum();
+    validate_install_disk_space(pkg, &install_path)?;
 
     ui::print_phase(format!(
         "Installing {} ({}) into {}",
@@ -347,4 +418,76 @@ pub async fn install(
 
     ui::print_success("Install complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use griffr_common::api::types::PackFile;
+
+    #[test]
+    fn required_install_bytes_uses_larger_of_archives_and_package_total() {
+        let pkg = PackageInfo {
+            packs: vec![
+                PackFile {
+                    url: "https://example.com/full.zip.001".to_string(),
+                    md5: "abc".to_string(),
+                    package_size: "8".to_string(),
+                },
+                PackFile {
+                    url: "https://example.com/full.zip.002".to_string(),
+                    md5: "def".to_string(),
+                    package_size: "7".to_string(),
+                },
+            ],
+            total_size: "20".to_string(),
+            file_path: "https://example.com/files".to_string(),
+            game_files_md5: None,
+        };
+
+        assert_eq!(required_install_bytes(&pkg), 20);
+    }
+
+    #[test]
+    fn required_install_bytes_falls_back_to_archive_sum_when_total_size_invalid() {
+        let pkg = PackageInfo {
+            packs: vec![
+                PackFile {
+                    url: "https://example.com/full.zip.001".to_string(),
+                    md5: "abc".to_string(),
+                    package_size: "4".to_string(),
+                },
+                PackFile {
+                    url: "https://example.com/full.zip.002".to_string(),
+                    md5: "def".to_string(),
+                    package_size: "6".to_string(),
+                },
+            ],
+            total_size: "invalid".to_string(),
+            file_path: "https://example.com/files".to_string(),
+            game_files_md5: None,
+        };
+
+        assert_eq!(required_install_bytes(&pkg), 10);
+    }
+
+    #[test]
+    #[ignore = "Uses host filesystem to query real free disk space"]
+    fn disk_available_bytes_reads_real_disk() {
+        let cwd = std::env::current_dir().expect("current dir");
+        let available = disk_available_bytes(&cwd).expect("query free space for cwd");
+        assert!(available > 0, "expected positive available space");
+
+        // Exercise fallback for not-yet-existing install paths.
+        let deep_missing_path = cwd
+            .join("griffr-test")
+            .join("disk-space")
+            .join("missing-target");
+        let fallback_available =
+            disk_available_bytes(&deep_missing_path).expect("query free space for nested path");
+        assert!(
+            fallback_available > 0,
+            "expected positive available space for nested path"
+        );
+    }
 }

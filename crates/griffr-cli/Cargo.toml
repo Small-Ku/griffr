@@ -35,3 +35,6 @@ chrono = "0.4"
 tempfile = "3.14"
 zip = { workspace = true }
 md-5 = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
