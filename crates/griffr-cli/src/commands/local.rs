@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -116,7 +117,7 @@ pub fn resolve_named_path(path: &Path, filename: &str) -> PathBuf {
 
 pub async fn decrypt_config_ini(path: &Path) -> Result<ParsedConfigIni> {
     let config_path = resolve_named_path(path, "config.ini");
-    let encrypted = tokio::fs::read(&config_path)
+    let encrypted = compio::fs::read(&config_path)
         .await
         .with_context(|| format!("Failed to read {}", config_path.display()))?;
     let raw = crypto::decrypt_game_files(&encrypted)
@@ -144,7 +145,32 @@ pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
     let install_path = resolve_install_path(path);
     let config_ini = decrypt_config_ini(&install_path).await?;
 
-    let game_id = detect_game_id(&config_ini, &install_path);
+    let has_arknights_exe = match compio::fs::metadata(install_path.join("Arknights.exe")).await {
+        Ok(_) => true,
+        Err(err) if err.kind() == ErrorKind::NotFound => false,
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "Failed to stat {}",
+                    install_path.join("Arknights.exe").display()
+                )
+            })
+        }
+    };
+    let has_endfield_exe = match compio::fs::metadata(install_path.join("Endfield.exe")).await {
+        Ok(_) => true,
+        Err(err) if err.kind() == ErrorKind::NotFound => false,
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "Failed to stat {}",
+                    install_path.join("Endfield.exe").display()
+                )
+            })
+        }
+    };
+
+    let game_id = detect_game_id(&config_ini, has_arknights_exe, has_endfield_exe);
     let server_id = detect_server_id(&config_ini);
 
     Ok(LocalInstall {
@@ -155,7 +181,11 @@ pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
     })
 }
 
-fn detect_game_id(config_ini: &ParsedConfigIni, install_path: &Path) -> Option<GameId> {
+fn detect_game_id(
+    config_ini: &ParsedConfigIni,
+    has_arknights_exe: bool,
+    has_endfield_exe: bool,
+) -> Option<GameId> {
     match config_ini.appcode() {
         Some("GzD1CpaWgmSq1wew") => return Some(GameId::Arknights),
         Some("6LL0KJuqHBVz33WK") | Some("YDUTE5gscDZ229CW") => return Some(GameId::Endfield),
@@ -166,9 +196,9 @@ fn detect_game_id(config_ini: &ParsedConfigIni, install_path: &Path) -> Option<G
         Some(entry) if entry.eq_ignore_ascii_case("Arknights.exe") => Some(GameId::Arknights),
         Some(entry) if entry.eq_ignore_ascii_case("Endfield.exe") => Some(GameId::Endfield),
         _ => {
-            if install_path.join("Arknights.exe").exists() {
+            if has_arknights_exe {
                 Some(GameId::Arknights)
-            } else if install_path.join("Endfield.exe").exists() {
+            } else if has_endfield_exe {
                 Some(GameId::Endfield)
             } else {
                 None

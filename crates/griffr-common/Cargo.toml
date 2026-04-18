@@ -9,7 +9,9 @@ description = "Shared library for Griffr launcher"
 
 [dependencies]
 # Core
-tokio = { workspace = true }
+compio = { workspace = true }
+cyper = { workspace = true }
+flume = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
@@ -17,8 +19,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 
-# HTTP/Networking
-reqwest = { workspace = true }
 futures-util = { workspace = true }
 
 # File/Archive
@@ -49,5 +49,4 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
-tokio-test = "0.4"
 tempfile = "3.14"

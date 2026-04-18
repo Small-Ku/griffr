@@ -1,8 +1,10 @@
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use griffr_common::game::admin::ensure_admin;
 use griffr_common::game::Launcher;
+use tracing::info;
 
 use super::local::detect_local_install;
 use crate::GlobalOptions;
@@ -16,15 +18,23 @@ pub async fn launch(path: PathBuf, force: bool, opts: GlobalOptions) -> Result<(
     let launcher = Launcher::new(game_id, &local.install_path);
     let exe_path = launcher.game_exe_path();
 
-    println!(
+    info!(
         "launch path={} game={:?} exe={}",
         local.install_path.display(),
         game_id,
         exe_path.display()
     );
 
-    if !exe_path.exists() {
-        anyhow::bail!("Executable not found: {}", exe_path.display());
+    match compio::fs::metadata(&exe_path).await {
+        Ok(_) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            anyhow::bail!("Executable not found: {}", exe_path.display());
+        }
+        Err(err) => {
+            return Err(err)
+                .map_err(anyhow::Error::from)
+                .with_context(|| format!("Failed to stat executable {}", exe_path.display()))
+        }
     }
 
     if opts.is_dry_run() {

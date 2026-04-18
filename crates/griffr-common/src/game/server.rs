@@ -1,5 +1,6 @@
 //! Server/channel management for game switching
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -15,6 +16,14 @@ pub struct Server {
 }
 
 impl Server {
+    async fn path_exists(path: &Path) -> bool {
+        match compio::fs::metadata(path).await {
+            Ok(_) => true,
+            Err(err) if err.kind() == ErrorKind::NotFound => false,
+            Err(_) => false,
+        }
+    }
+
     /// Create a new server instance
     pub fn new(game_id: GameId, server_id: ServerId, base_path: impl Into<PathBuf>) -> Self {
         Self {
@@ -49,15 +58,13 @@ impl Server {
     /// Check if this server is installed (directory exists and has files)
     pub async fn is_installed(&self) -> bool {
         let path = self.server_path();
-        if !path.exists() {
+        if !Self::path_exists(&path).await {
             return false;
         }
 
         // Check if the directory has any files
-        match tokio::fs::read_dir(&path).await {
-            Ok(mut entries) => {
-                matches!(entries.next_entry().await, Ok(Some(_)))
-            }
+        match std::fs::read_dir(&path) {
+            Ok(mut entries) => matches!(entries.next(), Some(Ok(_))),
             Err(_) => false,
         }
     }
@@ -68,12 +75,12 @@ impl Server {
         use std::os::windows::fs::MetadataExt;
 
         let active_path = self.active_path();
-        if !active_path.exists() {
+        if !Self::path_exists(&active_path).await {
             return false;
         }
 
         // On Windows, check if the active path is a junction/reparse point
-        match tokio::fs::metadata(&active_path).await {
+        match std::fs::metadata(&active_path) {
             Ok(metadata) => {
                 // Check if it's a reparse point (junction/symlink)
                 let file_attributes = metadata.file_attributes();
@@ -96,11 +103,11 @@ impl Server {
     #[cfg(not(windows))]
     pub async fn is_active(&self) -> bool {
         let active_path = self.active_path();
-        if !active_path.exists() {
+        if !Self::path_exists(&active_path).await {
             return false;
         }
 
-        match tokio::fs::read_link(&active_path).await {
+        match std::fs::read_link(&active_path) {
             Ok(target) => target == self.server_path(),
             Err(_) => false,
         }
@@ -112,7 +119,7 @@ impl Server {
         let active_path = self.active_path();
 
         // Ensure server directory exists
-        tokio::fs::create_dir_all(&server_path)
+        compio::fs::create_dir_all(&server_path)
             .await
             .with_context(|| {
                 format!(
@@ -122,20 +129,22 @@ impl Server {
             })?;
 
         // Remove existing active junction/symlink if it exists
-        if active_path.exists() {
+        if Self::path_exists(&active_path).await {
             #[cfg(windows)]
             {
                 // On Windows, we need to use std::fs for removing junctions
-                std::fs::remove_dir(&active_path).with_context(|| {
-                    format!(
-                        "Failed to remove existing active junction at {}",
-                        active_path.display()
-                    )
-                })?;
+                compio::fs::remove_dir(&active_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to remove existing active junction at {}",
+                            active_path.display()
+                        )
+                    })?;
             }
             #[cfg(not(windows))]
             {
-                tokio::fs::remove_file(&active_path).await?;
+                compio::fs::remove_file(&active_path).await?;
             }
         }
 
@@ -146,7 +155,7 @@ impl Server {
         }
         #[cfg(not(windows))]
         {
-            tokio::fs::symlink(&server_path, &active_path).await?;
+            std::os::unix::fs::symlink(&server_path, &active_path)?;
         }
 
         Ok(())
@@ -196,19 +205,18 @@ impl Server {
     /// Calculate the total size of the server installation
     pub async fn calculate_size(&self) -> Result<u64> {
         let server_path = self.server_path();
-        if !server_path.exists() {
+        if !Self::path_exists(&server_path).await {
             return Ok(0);
         }
 
-        let mut total_size: u64 = 0;
-        let mut entries = tokio::fs::read_dir(&server_path).await?;
-
-        while let Some(entry) = entries.next_entry().await? {
-            let metadata = entry.metadata().await?;
+        let mut total_size = 0u64;
+        for entry in std::fs::read_dir(&server_path)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
             if metadata.is_file() {
                 total_size += metadata.len();
             } else if metadata.is_dir() {
-                total_size += self.calculate_dir_size(entry.path()).await?;
+                total_size += self.calculate_dir_size(entry.path())?;
             }
         }
 
@@ -216,16 +224,15 @@ impl Server {
     }
 
     /// Recursively calculate directory size
-    async fn calculate_dir_size(&self, path: PathBuf) -> Result<u64> {
-        let mut total_size: u64 = 0;
-        let mut entries = tokio::fs::read_dir(&path).await?;
-
-        while let Some(entry) = entries.next_entry().await? {
-            let metadata = entry.metadata().await?;
+    fn calculate_dir_size(&self, path: PathBuf) -> Result<u64> {
+        let mut total_size = 0u64;
+        for entry in std::fs::read_dir(&path)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
             if metadata.is_file() {
                 total_size += metadata.len();
             } else if metadata.is_dir() {
-                total_size += Box::pin(self.calculate_dir_size(entry.path())).await?;
+                total_size += self.calculate_dir_size(entry.path())?;
             }
         }
 

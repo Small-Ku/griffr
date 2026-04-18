@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
+use tracing::{debug, info};
 
 use griffr_common::config::{GameId, ServerId};
 
@@ -241,14 +242,14 @@ impl GlobalOptions {
     /// Print a message if verbose mode is enabled
     pub fn verbose(&self, msg: impl AsRef<str>) {
         if self.verbose {
-            println!("[VERBOSE] {}", msg.as_ref());
+            debug!("{}", msg.as_ref());
         }
     }
 
     /// Print a dry run message
     pub fn dry_run(&self, msg: impl AsRef<str>) {
         if self.dry_run {
-            println!("[DRY-RUN] {}", msg.as_ref());
+            info!(dry_run = true, "{}", msg.as_ref());
         }
     }
 
@@ -258,20 +259,23 @@ impl GlobalOptions {
     }
 }
 
-#[tokio::main]
+#[compio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Setup logging based on verbose flag
-    if cli.verbose {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .init();
+    let default_level = if cli.verbose {
+        "info,griffr=debug,griffr_common=debug"
     } else {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .init();
-    }
+        "info"
+    };
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .without_time()
+        .init();
 
     let opts = GlobalOptions {
         dry_run: cli.dry_run,
@@ -282,9 +286,9 @@ async fn main() -> Result<()> {
     };
 
     if opts.verbose {
-        println!("Griffr CLI started");
-        println!("  Dry run: {}", opts.dry_run);
-        println!("  Verbose: {}", opts.verbose);
+        debug!("Griffr CLI started");
+        debug!("Dry run: {}", opts.dry_run);
+        debug!("Verbose: {}", opts.verbose);
     }
 
     match cli.command {
@@ -306,7 +310,10 @@ async fn main() -> Result<()> {
                 "Install command: game={:?}, server={:?}, path={:?}, reuse_from={:?}, force_copy={}, skip_vfs={}",
                 game_id, server_id, path, reuse_from, force_copy, skip_vfs
             ));
-            commands::install(game_id, server_id, path, force, reuse_from, force_copy, opts).await?;
+            commands::install(
+                game_id, server_id, path, force, reuse_from, force_copy, opts,
+            )
+            .await?;
         }
 
         Commands::Uninstall {

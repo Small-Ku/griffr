@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -43,13 +44,20 @@ impl Config {
 
     /// Load configuration from a specific path
     pub async fn load_from(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
+        match compio::fs::metadata(path).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Self::default()),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("Failed to stat config at {}", path.display()))
+            }
         }
 
-        let content = tokio::fs::read_to_string(path)
+        let bytes = compio::fs::read(path)
             .await
             .with_context(|| format!("Failed to read config from {}", path.display()))?;
+        let content =
+            String::from_utf8(bytes).context("Failed to decode config file as UTF-8 text")?;
 
         let config: Config =
             serde_json::from_str(&content).with_context(|| "Failed to parse config JSON")?;
@@ -66,14 +74,15 @@ impl Config {
     /// Save configuration to a specific path
     pub async fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.with_context(|| {
+            compio::fs::create_dir_all(parent).await.with_context(|| {
                 format!("Failed to create config directory {}", parent.display())
             })?;
         }
 
-        let content = serde_json::to_string_pretty(self)?;
-        tokio::fs::write(path, content)
-            .await
+        let content = serde_json::to_string_pretty(self)?.into_bytes();
+        let write_result = compio::fs::write(path, content).await;
+        write_result
+            .0
             .with_context(|| format!("Failed to write config to {}", path.display()))?;
 
         Ok(())
@@ -331,7 +340,7 @@ fn default_retry_attempts() -> u32 {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[compio::test]
     async fn test_config_save_load() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("test_config.json");
@@ -352,7 +361,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn test_config_persistence() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("persistent_config.json");
@@ -507,7 +516,7 @@ mod tests {
         assert_eq!(config.defaults.concurrent_connections, 4);
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn test_config_nonexistent_file() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("nonexistent.json");

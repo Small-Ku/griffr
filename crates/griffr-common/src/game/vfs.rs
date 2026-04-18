@@ -14,6 +14,7 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
+use tracing::{debug, info, warn};
 
 use crate::api::client::ApiClient;
 use crate::api::crypto::RES_INDEX_KEY;
@@ -61,7 +62,7 @@ pub async fn download_vfs_resources(
         .await
         .context("Failed to get latest VFS resources")?;
 
-    println!(
+    info!(
         "VFS resource version: {} ({} resource groups)",
         resources.res_version,
         resources.resources.len()
@@ -77,7 +78,7 @@ pub async fn download_vfs_resources(
 
     // Step 2: Process each resource group (main, initial)
     for resource in &resources.resources {
-        println!(
+        info!(
             "Processing VFS resource group: {} (version {})",
             resource.name, resource.version
         );
@@ -89,7 +90,7 @@ pub async fn download_vfs_resources(
             .await
             .with_context(|| format!("Failed to fetch resource index for {}", resource.name))?;
 
-        println!(
+        info!(
             "  VFS index: {} files ({} groups)",
             index.files.len(),
             resource.name
@@ -115,14 +116,14 @@ pub async fn download_vfs_resources(
 
     // Step 4: Print summary
     if total_result.downloaded_files > 0 {
-        println!(
+        info!(
             "VFS download complete: {} files downloaded ({:.2} GB), {} files up-to-date",
             total_result.downloaded_files,
             total_result.downloaded_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
             total_result.skipped_files,
         );
     } else {
-        println!(
+        info!(
             "VFS files: all {} files up-to-date",
             total_result.total_files
         );
@@ -161,7 +162,7 @@ async fn download_vfs_files(
         // Quick check: file must exist with correct size.
         // We skip the full MD5 read for performance — size is a very reliable
         // indicator for VFS files, and the download verifies MD5 anyway.
-        let needs_download = match tokio::fs::metadata(&local_path).await {
+        let needs_download = match compio::fs::metadata(&local_path).await {
             Ok(metadata) => metadata.len() != file.size,
             Err(_) => true, // File doesn't exist
         };
@@ -179,7 +180,7 @@ async fn download_vfs_files(
 
     // Calculate total download size
     let total_size: u64 = files_to_download.iter().map(|f| f.size).sum();
-    println!(
+    info!(
         "  Downloading {} VFS files ({:.2} GB)...",
         files_to_download.len(),
         total_size as f64 / 1024.0 / 1024.0 / 1024.0
@@ -193,7 +194,9 @@ async fn download_vfs_files(
 
         // Create parent directory
         if let Some(parent) = local_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            compio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
         }
 
         // Download with retry
@@ -207,7 +210,7 @@ async fn download_vfs_files(
             }
             Err(e) => {
                 // Log error but continue with other files
-                eprintln!("  WARN: Failed to download VFS file {}: {}", file.name, e);
+                warn!("Failed to download VFS file {}: {}", file.name, e);
                 // Try without MD5 verification as fallback
                 match api_client
                     .download_file(&download_url, &local_path, false)
@@ -218,8 +221,8 @@ async fn download_vfs_files(
                         result.downloaded_files += 1;
                     }
                     Err(e2) => {
-                        eprintln!(
-                            "  ERROR: Failed to download VFS file {} (no verify): {}",
+                        warn!(
+                            "Failed to download VFS file {} (no verify): {}",
                             file.name, e2
                         );
                     }
@@ -232,18 +235,16 @@ async fn download_vfs_files(
             cb(downloaded_bytes, total_size);
         }
 
-        // Print progress periodically
+        // Emit progress periodically.
         if (i + 1) % 50 == 0 || i + 1 == files_to_download.len() {
-            print!(
-                "\r  VFS progress: {}/{} files ({:.1}%)",
+            debug!(
+                "VFS progress: {}/{} files ({:.1}%)",
                 i + 1,
                 files_to_download.len(),
                 (i + 1) as f64 / files_to_download.len() as f64 * 100.0
             );
         }
     }
-
-    println!(); // Newline after progress
 
     result.downloaded_bytes = downloaded_bytes;
     Ok(result)
@@ -275,10 +276,7 @@ pub async fn get_vfs_resource_info(
                 total_size += index.files.iter().map(|f| f.size).sum::<u64>();
             }
             Err(e) => {
-                eprintln!(
-                    "  WARN: Could not fetch VFS index for {}: {}",
-                    resource.name, e
-                );
+                warn!("Could not fetch VFS index for {}: {}", resource.name, e);
             }
         }
     }

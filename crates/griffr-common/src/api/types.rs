@@ -109,10 +109,7 @@ impl ChannelConfig {
     };
 
     /// Get channel configuration for a game/server pair.
-    pub fn for_game_server(
-        game: crate::config::GameId,
-        server: crate::config::ServerId,
-    ) -> Self {
+    pub fn for_game_server(game: crate::config::GameId, server: crate::config::ServerId) -> Self {
         let _ = game;
         use crate::config::ServerId;
         match server {
@@ -763,8 +760,7 @@ mod tests {
         assert_eq!(endfield_bilibili.channel, "2");
         assert_eq!(endfield_bilibili.sub_channel, "2");
 
-        let global =
-            ChannelConfig::for_game_server(GameId::Endfield, ServerId::GlobalOfficial);
+        let global = ChannelConfig::for_game_server(GameId::Endfield, ServerId::GlobalOfficial);
         assert_eq!(global.channel, "6");
         assert_eq!(global.sub_channel, "6");
 

@@ -1,16 +1,22 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::GameId;
-use griffr_common::download::{DownloadOptions, Downloader};
-use griffr_common::game::{
-    apply_file_reuse_flow, download_vfs_resources, FileReuseConfig, GameManager, SourceInstallInput,
+use griffr_common::game::task_pool::{
+    run_tasks_with_progress, ArchivePart, ProgressEvent, Task, TaskPoolConfig,
 };
+use griffr_common::game::{
+    download_vfs_resources, materialize_game_files_with_pool, FileReuseConfig, GameManager,
+    SourceInstallInput,
+};
+use tracing::{info, warn};
 
 use super::local::detect_local_install;
-use crate::progress::IndicatifProgress;
+use crate::progress::StepProgress;
 use crate::GlobalOptions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,19 +44,11 @@ fn archive_base_from_url(url: &str) -> Option<String> {
     None
 }
 
-fn archive_bases_from_urls<'a>(urls: impl IntoIterator<Item = &'a str>) -> Result<Vec<String>> {
-    let mut bases: HashSet<String> = HashSet::new();
-    for url in urls {
-        if let Some(base) = archive_base_from_url(url) {
-            bases.insert(base);
-        }
-    }
-    if bases.is_empty() {
-        anyhow::bail!("Could not determine archive base name from pack URLs");
-    }
-    let mut bases: Vec<String> = bases.into_iter().collect();
-    bases.sort();
-    Ok(bases)
+fn is_launcher_metadata_issue(path: &str) -> bool {
+    matches!(
+        path.replace('\\', "/").to_ascii_lowercase().as_str(),
+        "game_files" | "package_files"
+    )
 }
 
 fn choose_update_package(
@@ -97,12 +95,27 @@ async fn verify_updated_install(
         return Ok(());
     }
 
-    let issues = manager
-        .verify_integrity(api_client, None::<fn(usize, usize, &str)>)
+    let summary = manager
+        .run_integrity_pool(api_client, true, &[], false, None::<fn(usize, usize, &str)>)
         .await?;
-    println!("update.verify.issues={}", issues.len());
-    for issue in issues.iter().take(20) {
-        println!("{} {:?}", issue.path, issue.kind);
+    info!("update.verify.issues={}", summary.issues.len());
+    info!(
+        "update.repair.downloaded_files={}",
+        summary.downloaded_files
+    );
+    for issue in summary.issues.iter().take(20) {
+        warn!("{} {:?}", issue.path, issue.kind);
+    }
+    let remaining_non_metadata = summary
+        .issues
+        .iter()
+        .filter(|issue| !is_launcher_metadata_issue(&issue.path))
+        .count();
+    if remaining_non_metadata > 0 {
+        anyhow::bail!(
+            "Post-update integrity has {} non-metadata issue(s)",
+            remaining_non_metadata
+        );
     }
 
     manager.set_version(target_version.to_string());
@@ -133,9 +146,9 @@ async fn update_via_reuse(
     let mut source_installs = Vec::new();
 
     for reuse_path in reuse_paths {
-        let source = detect_local_install(reuse_path).await.with_context(|| {
-            format!("Failed to inspect reuse source {}", reuse_path.display())
-        })?;
+        let source = detect_local_install(reuse_path)
+            .await
+            .with_context(|| format!("Failed to inspect reuse source {}", reuse_path.display()))?;
         let source_game_id = source.require_known_game()?;
         if source_game_id != game_id {
             anyhow::bail!(
@@ -162,7 +175,7 @@ async fn update_via_reuse(
         reuse_paths.len()
     ));
 
-    let linked = apply_file_reuse_flow(
+    let materialized = materialize_game_files_with_pool(
         api_client,
         game_id,
         target_server_id,
@@ -175,10 +188,22 @@ async fn update_via_reuse(
             dry_run: opts.is_dry_run(),
             source_installs,
         },
+        Some(|current: usize, total: usize, file: &str| {
+            if opts.verbose || total <= 10 || current % 25 == 0 {
+                info!("update.materialize {}/{} {}", current + 1, total, file);
+            }
+        }),
     )
     .await?;
 
-    println!("update.reused_files={}", linked);
+    info!("update.reused_files={}", materialized.reused_files);
+    info!("update.downloaded_files={}", materialized.downloaded_files);
+    if !materialized.issues.is_empty() {
+        anyhow::bail!(
+            "Update materialization finished with {} issue(s)",
+            materialized.issues.len()
+        );
+    }
     verify_updated_install(api_client, manager, &version_info.version, opts.skip_verify).await?;
     Ok(())
 }
@@ -188,47 +213,109 @@ async fn download_and_extract_archives(
     install_path: &Path,
     label: &str,
     opts: &GlobalOptions,
-) -> Result<Vec<griffr_common::download::extractor::MultiVolumeExtractor>> {
+) -> Result<()> {
     let total_size: u64 = archives.iter().map(|p| p.size()).sum();
-    println!("update.label={} bytes={}", label, total_size);
+    info!("update.label={} bytes={}", label, total_size);
 
     let download_dir = install_path.join("downloads");
-    tokio::fs::create_dir_all(&download_dir).await?;
+    compio::fs::create_dir_all(&download_dir)
+        .await
+        .with_context(|| format!("Failed to create {}", download_dir.display()))?;
 
-    let downloader = Downloader::with_options(DownloadOptions {
-        concurrent_connections: 4,
-        retry_attempts: 3,
-        resume: true,
-        verify_md5: true,
-    })?;
-    let progress = std::sync::Arc::new(IndicatifProgress::new(total_size));
-    downloader
-        .download_packs(archives, &download_dir, Some(progress))
-        .await?;
-
-    let bases = archive_bases_from_urls(archives.iter().map(|p| p.url.as_str()))?;
-    let mut extractors = Vec::with_capacity(bases.len());
-    for base in &bases {
-        opts.verbose(format!("extracting archive base {}", base));
-        let extractor = griffr_common::download::extractor::MultiVolumeExtractor::from_directory(
-            &download_dir,
-            base,
-        )?;
-        extractor.extract_to(install_path)?;
-        extractors.push(extractor);
+    let mut grouped: HashMap<String, Vec<ArchivePart>> = HashMap::new();
+    for archive in archives {
+        let filename = archive
+            .filename()
+            .context("Failed to extract archive filename")?
+            .split('?')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let base = archive_base_from_url(&archive.url)
+            .context("Could not determine archive base name from pack URL")?;
+        grouped.entry(base).or_default().push(ArchivePart {
+            url: archive.url.clone(),
+            dest: download_dir.join(&filename),
+            logical_path: filename,
+            expected_md5: archive.md5.clone(),
+            expected_size: archive.size(),
+        });
     }
-    Ok(extractors)
+    if grouped.is_empty() {
+        anyhow::bail!("No archives to process");
+    }
+
+    let mut tasks = Vec::with_capacity(grouped.len());
+    for (base_name, mut parts) in grouped {
+        parts.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
+        opts.verbose(format!("queued archive state-machine {}", base_name));
+        tasks.push(Task::InstallArchive {
+            source_dir: download_dir.clone(),
+            base_name,
+            dest: install_path.to_path_buf(),
+            cleanup: true,
+            parts,
+        });
+    }
+
+    let archive_total = tasks.len();
+    let archive_bar = Arc::new(StepProgress::new(
+        format!("update.{}.archives", label),
+        opts.verbose,
+    ));
+    let archive_bar_cb = archive_bar.clone();
+    let mut archive_done = 0usize;
+    let mut cfg = TaskPoolConfig::default();
+    cfg.io_slots = 4;
+    cfg.max_retries = 3;
+    let result = run_tasks_with_progress(
+        tasks,
+        cfg,
+        Some(&mut |event: &ProgressEvent| {
+            if let ProgressEvent::Extracted { path } = event {
+                archive_bar_cb.update(
+                    archive_done,
+                    archive_total,
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("archive"),
+                );
+                archive_done += 1;
+            }
+        }),
+    )?;
+    archive_bar.finish();
+
+    let mut failures = Vec::new();
+    for event in result.events {
+        if let ProgressEvent::Failed { path, reason } = event {
+            failures.push(format!("{} ({})", path, reason));
+        }
+    }
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "Update archive pipeline failed for {} item(s): {}",
+            failures.len(),
+            failures.join(", ")
+        );
+    }
+
+    Ok(())
 }
 
-fn validate_patch_target(game_id: GameId, install_path: &Path) -> Result<()> {
+async fn validate_patch_target(game_id: GameId, install_path: &Path) -> Result<()> {
     let expected_exe = install_path.join(match game_id {
         GameId::Arknights => "Arknights.exe",
         GameId::Endfield => "Endfield.exe",
     });
-    if !expected_exe.exists() {
-        anyhow::bail!("Patch target missing {}", expected_exe.display());
+    match compio::fs::metadata(&expected_exe).await {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            anyhow::bail!("Patch target missing {}", expected_exe.display());
+        }
+        Err(err) => Err(err)
+            .with_context(|| format!("Failed to stat patch target {}", expected_exe.display())),
     }
-    Ok(())
 }
 
 pub async fn update(
@@ -248,7 +335,7 @@ pub async fn update(
         .get_latest_game(game_id, server_id, Some(&current_version))
         .await?;
 
-    println!(
+    info!(
         "update path={} game={:?} server={} current={} latest={}",
         local.install_path.display(),
         game_id,
@@ -258,7 +345,7 @@ pub async fn update(
     );
 
     if current_version == version_info.version || !version_info.has_update() {
-        println!("update noop");
+        info!("update noop");
         return Ok(());
     }
 
@@ -319,20 +406,19 @@ pub async fn update(
             .await;
         }
 
-        println!("update complete");
+        info!("update complete");
         return Ok(());
     }
 
     match package_kind {
         UpdatePackageKind::Patch => {
-            validate_patch_target(game_id, &local.install_path)?;
+            validate_patch_target(game_id, &local.install_path).await?;
             let patch = version_info
                 .patch
                 .as_ref()
                 .context("No patch package information available")?;
-            let extractors =
-                download_and_extract_archives(&patch.patches, &local.install_path, "patch", &opts)
-                    .await?;
+            download_and_extract_archives(&patch.patches, &local.install_path, "patch", &opts)
+                .await?;
             verify_updated_install(
                 &api_client,
                 &mut manager,
@@ -340,18 +426,13 @@ pub async fn update(
                 opts.skip_verify,
             )
             .await?;
-            for extractor in &extractors {
-                extractor.cleanup()?;
-            }
         }
         UpdatePackageKind::Full => {
             let pkg = version_info
                 .pkg
                 .as_ref()
                 .context("No full package information available")?;
-            let extractors =
-                download_and_extract_archives(&pkg.packs, &local.install_path, "full", &opts)
-                    .await?;
+            download_and_extract_archives(&pkg.packs, &local.install_path, "full", &opts).await?;
             verify_updated_install(
                 &api_client,
                 &mut manager,
@@ -359,9 +440,6 @@ pub async fn update(
                 opts.skip_verify,
             )
             .await?;
-            for extractor in &extractors {
-                extractor.cleanup()?;
-            }
         }
     }
 
@@ -383,7 +461,7 @@ pub async fn update(
         .await;
     }
 
-    println!("update complete");
+    info!("update complete");
     Ok(())
 }
 

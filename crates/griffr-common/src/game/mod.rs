@@ -5,13 +5,13 @@ pub mod files_reuse;
 pub mod launcher;
 pub mod manager;
 pub mod server;
+pub mod task_pool;
 pub mod vfs;
 
 pub use admin::{ensure_admin, is_running_as_admin, restart_as_admin};
 pub use files_reuse::{
-    apply_file_reuse_flow, derive_files_base_url, download_remaining_files, execute_reuse_plan,
-    plan_file_reuse, print_reuse_plan_summary, FileReuseConfig, ReuseOptions, ReusePlan,
-    SourceInstallInput,
+    apply_file_reuse_flow, derive_files_base_url, materialize_game_files_with_pool,
+    FileReuseConfig, MaterializeSummary, SourceInstallInput,
 };
 pub use launcher::{GameProcess, Launcher};
 pub use manager::GameManager;

@@ -1,20 +1,32 @@
 //! Game installation and version management
 
+use std::collections::HashSet;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::{fs::File, io::Read};
 
 use anyhow::{Context, Result};
 use md5::{Digest, Md5};
 
-use super::{FileIssue, FileIssueKind};
+use super::FileIssue;
 use crate::api::types::{ChannelConfig, Game, Region};
 use crate::api::ApiClient;
 use crate::config::{GameConfig, GameId, ServerConfig, ServerId};
+use crate::game::task_pool::{run_tasks, ProgressEvent, Task, TaskPoolConfig};
 
 /// Manages game installation state and version tracking
 #[derive(Debug)]
 pub struct GameManager {
     game_id: GameId,
     config: GameConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IntegrityRunSummary {
+    pub issues: Vec<FileIssue>,
+    pub verified_files: usize,
+    pub downloaded_files: usize,
+    pub reused_files: usize,
 }
 
 impl GameManager {
@@ -155,12 +167,18 @@ impl GameManager {
             None => return Ok(None),
         };
 
-        if !ini_path.exists() {
-            return Ok(None);
+        match compio::fs::metadata(&ini_path).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("Failed to stat config.ini at {}", ini_path.display())
+                })
+            }
         }
 
         // config.ini is encrypted with the same AES-256-CBC key/IV as game_files
-        let encrypted = tokio::fs::read(&ini_path)
+        let encrypted = compio::fs::read(&ini_path)
             .await
             .with_context(|| format!("Failed to read config.ini from {}", ini_path.display()))?;
 
@@ -197,8 +215,9 @@ impl GameManager {
             .context("Failed to encrypt config.ini content")?;
 
         // Write to file
-        tokio::fs::write(&ini_path, encrypted)
-            .await
+        let write_result = compio::fs::write(&ini_path, encrypted).await;
+        write_result
+            .0
             .with_context(|| format!("Failed to write config.ini to {}", ini_path.display()))?;
 
         Ok(())
@@ -303,11 +322,14 @@ impl GameManager {
     }
 
     /// Verify integrity of game files
-    pub async fn verify_integrity(
+    pub async fn run_integrity_pool(
         &self,
         api_client: &ApiClient,
+        repair: bool,
+        source_roots: &[PathBuf],
+        allow_copy_fallback: bool,
         progress_callback: Option<impl Fn(usize, usize, &str)>,
-    ) -> Result<Vec<FileIssue>> {
+    ) -> Result<IntegrityRunSummary> {
         let install_path = self.install_path().context("Game not installed")?;
 
         // Fetch version info for the version currently installed on disk so updates can
@@ -326,69 +348,96 @@ impl GameManager {
         let entries = api_client
             .fetch_game_files(&pkg.file_path, pkg.game_files_md5.as_deref())
             .await?;
+        let files_base_url = pkg.file_path.trim_end_matches("/game_files");
+
+        let tasks = entries
+            .iter()
+            .map(|entry| {
+                if repair {
+                    let source_candidates = source_roots
+                        .iter()
+                        .map(|root| root.join(&entry.path))
+                        .collect::<Vec<_>>();
+                    Task::EnsureFile {
+                        dest: install_path.join(&entry.path),
+                        logical_path: entry.path.clone(),
+                        expected_md5: entry.md5.clone(),
+                        expected_size: entry.size,
+                        source_candidates,
+                        download_url: Some(format!("{}/{}", files_base_url, entry.path)),
+                        allow_copy_fallback,
+                        retry_count: 0,
+                    }
+                } else {
+                    Task::Verify {
+                        path: install_path.join(&entry.path),
+                        logical_path: entry.path.clone(),
+                        expected_md5: entry.md5.clone(),
+                        expected_size: Some(entry.size),
+                        on_fail: None,
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        let total = tasks.len();
+        let result = run_tasks(tasks, TaskPoolConfig::default())?;
 
         let mut issues = Vec::new();
-        let total = entries.len();
-
-        for (i, entry) in entries.into_iter().enumerate() {
-            if let Some(ref cb) = progress_callback {
-                cb(i, total, &entry.path);
-            }
-
-            let file_path = install_path.join(&entry.path);
-
-            if !file_path.exists() {
-                issues.push(FileIssue {
-                    path: entry.path,
-                    expected_md5: entry.md5,
-                    expected_size: entry.size,
-                    actual_size: None,
-                    actual_md5: None,
-                    kind: FileIssueKind::Missing,
-                });
-                continue;
-            }
-
-            // Check size first (fast)
-            let metadata = std::fs::metadata(&file_path)?;
-            if metadata.len() != entry.size {
-                issues.push(FileIssue {
-                    path: entry.path,
-                    expected_md5: entry.md5,
-                    expected_size: entry.size,
-                    actual_size: Some(metadata.len()),
-                    actual_md5: None,
-                    kind: FileIssueKind::SizeMismatch,
-                });
-                continue;
-            }
-
-            // Check MD5 (slow)
-            let actual_md5 = self.calculate_file_md5(&file_path).await?;
-            if actual_md5 != entry.md5.to_lowercase() {
-                issues.push(FileIssue {
-                    path: entry.path,
-                    expected_md5: entry.md5,
-                    expected_size: entry.size,
-                    actual_size: Some(metadata.len()),
-                    actual_md5: Some(actual_md5),
-                    kind: FileIssueKind::Md5Mismatch,
-                });
+        let mut finished = 0usize;
+        let mut downloaded_paths = HashSet::new();
+        let mut reused_paths = HashSet::new();
+        for event in result.events {
+            match event {
+                ProgressEvent::Verified { path, issue, .. } => {
+                    if let Some(ref cb) = progress_callback {
+                        cb(finished, total, &path);
+                    }
+                    finished += 1;
+                    if let Some(issue) = issue {
+                        issues.push(issue);
+                    }
+                }
+                ProgressEvent::Downloaded { path, .. } => {
+                    downloaded_paths.insert(path);
+                }
+                ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {
+                    reused_paths.insert(path);
+                }
+                ProgressEvent::Failed { path, reason } => {
+                    tracing::warn!("verify failed for {}: {}", path, reason);
+                }
+                _ => {}
             }
         }
 
-        Ok(issues)
+        Ok(IntegrityRunSummary {
+            issues,
+            verified_files: finished,
+            downloaded_files: downloaded_paths.len(),
+            reused_files: reused_paths.len(),
+        })
+    }
+
+    /// Verify integrity of game files
+    pub async fn verify_integrity(
+        &self,
+        api_client: &ApiClient,
+        progress_callback: Option<impl Fn(usize, usize, &str)>,
+    ) -> Result<Vec<FileIssue>> {
+        Ok(self
+            .run_integrity_pool(api_client, false, &[], false, progress_callback)
+            .await?
+            .issues)
     }
 
     /// Calculate file MD5 hash
     async fn calculate_file_md5(&self, path: &Path) -> Result<String> {
-        let mut file = tokio::fs::File::open(path).await?;
+        let mut file = File::open(path)?;
         let mut hasher = Md5::new();
         let mut buffer = vec![0; 8192];
 
-        use tokio::io::AsyncReadExt;
         loop {
-            let n = file.read(&mut buffer).await?;
+            let n = file.read(&mut buffer)?;
             if n == 0 {
                 break;
             }
@@ -396,52 +445,6 @@ impl GameManager {
         }
 
         Ok(format!("{:x}", hasher.finalize()))
-    }
-
-    /// Repair problematic files
-    pub async fn repair_files(
-        &self,
-        api_client: &ApiClient,
-        issues: &[FileIssue],
-        progress_callback: Option<impl Fn(usize, usize, &str)>,
-    ) -> Result<()> {
-        let install_path = self.install_path().context("Game not installed")?;
-
-        // Fetch version info to get base URL for files
-        let server_id = self.active_server();
-        let version_info = api_client
-            .get_latest_game(self.game_id, server_id, None)
-            .await?;
-        let pkg = version_info
-            .pkg
-            .as_ref()
-            .context("No package information available")?;
-
-        // Base URL for individual files is pkg.file_path (which usually points to /files/game_files)
-        // We need the /files/ part. pkg.file_path is likely ".../files/game_files"
-        let files_base_url = pkg.file_path.trim_end_matches("/game_files");
-
-        let total = issues.len();
-        for (i, issue) in issues.iter().enumerate() {
-            if let Some(ref cb) = progress_callback {
-                cb(i, total, &issue.path);
-            }
-
-            let file_url = format!("{}/{}", files_base_url, issue.path);
-            let output_path = install_path.join(&issue.path);
-
-            // Create parent directory if needed
-            if let Some(parent) = output_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-
-            // Download file and verify its MD5
-            api_client
-                .download_file_with_verify(&file_url, &output_path, &issue.expected_md5)
-                .await?;
-        }
-
-        Ok(())
     }
 
     /// Consume the manager and return the updated config
@@ -614,13 +617,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[compio::test]
     async fn test_write_config_ini_uses_launcher_format() {
         let temp = tempfile::tempdir().unwrap();
         let exe_path = temp.path().join("Endfield.exe");
-        tokio::fs::write(&exe_path, b"endfield exe bytes")
-            .await
-            .unwrap();
+        std::fs::write(&exe_path, b"endfield exe bytes").unwrap();
 
         let mut config = GameConfig {
             install_path: Some(temp.path().to_path_buf()),
@@ -637,9 +638,7 @@ mod tests {
         let manager = GameManager::new(GameId::Endfield, config);
         manager.write_config_ini().await.unwrap();
 
-        let encrypted = tokio::fs::read(temp.path().join("config.ini"))
-            .await
-            .unwrap();
+        let encrypted = std::fs::read(temp.path().join("config.ini")).unwrap();
         let decrypted = crate::api::crypto::decrypt_game_files(&encrypted).unwrap();
 
         assert!(decrypted.starts_with("[Game]\n"));

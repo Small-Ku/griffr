@@ -1,11 +1,12 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::game::{execute_reuse_plan, plan_file_reuse, ReuseOptions, SourceInstallInput};
+use tracing::{info, warn};
 
 use super::local::detect_local_install;
+use crate::progress::StepProgress;
 use crate::GlobalOptions;
 
 fn is_launcher_metadata_issue(path: &str) -> bool {
@@ -29,7 +30,7 @@ pub async fn verify(
     let manager = local.as_manager()?;
     let api_client = ApiClient::new()?;
 
-    println!(
+    info!(
         "verify path={} game={:?} server={} version={}",
         local.install_path.display(),
         game_id,
@@ -37,25 +38,54 @@ pub async fn verify(
         installed_version
     );
 
+    let verify_bar = Arc::new(StepProgress::new(
+        if repair { "verify+repair" } else { "verify" },
+        opts.verbose,
+    ));
+    let verify_bar_cb = verify_bar.clone();
     let progress_cb = |current: usize, total: usize, file: &str| {
-        if opts.verbose {
-            print!("\rverify {}/{} {}", current + 1, total, file);
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-        } else if current > 0 && current % 25 == 0 {
-            print!("\rverify {}/{} {}", current, total, file);
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-        }
+        verify_bar_cb.update(current, total, file);
     };
 
-    let issues = manager
-        .verify_integrity(&api_client, Some(progress_cb))
-        .await
-        .context("verify_integrity failed")?;
-    println!("\nverify issues={}", issues.len());
+    let mut source_roots = Vec::new();
+    if repair {
+        for reuse_path in &reuse_paths {
+            let source = detect_local_install(reuse_path).await.with_context(|| {
+                format!("Failed to inspect reuse source {}", reuse_path.display())
+            })?;
+            let source_game_id = source.require_known_game()?;
+            if source_game_id != game_id {
+                anyhow::bail!(
+                    "Reuse source {} is {:?}, expected {:?}",
+                    source.install_path.display(),
+                    source_game_id,
+                    game_id
+                );
+            }
+            if source.install_path != local.install_path {
+                source_roots.push(source.install_path.clone());
+            }
+        }
+    }
 
-    if issues.is_empty() {
+    let summary = manager
+        .run_integrity_pool(
+            &api_client,
+            repair,
+            &source_roots,
+            force_copy,
+            Some(progress_cb),
+        )
+        .await
+        .context("run_integrity_pool failed")?;
+    verify_bar.finish();
+    info!("verify issues={}", summary.issues.len());
+    if repair {
+        info!("repair.downloaded_files={}", summary.downloaded_files);
+        info!("repair.reused_files={}", summary.reused_files);
+    }
+
+    if summary.issues.is_empty() {
         if repair {
             manager
                 .sync_launcher_metadata(&api_client)
@@ -65,8 +95,8 @@ pub async fn verify(
         return Ok(());
     }
 
-    for issue in &issues {
-        println!(
+    for issue in &summary.issues {
+        warn!(
             "{} {:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
             issue.path,
             issue.kind,
@@ -78,184 +108,35 @@ pub async fn verify(
     }
 
     if repair {
-        let downloaded;
-        if !reuse_paths.is_empty() {
-            let version_info = api_client
-                .get_latest_game(game_id, server_id, Some(&installed_version))
-                .await?;
-            let pkg = version_info
-                .pkg
-                .as_ref()
-                .context("No package information available")?;
-            let target_manifest = api_client
-                .fetch_game_files(&pkg.file_path, pkg.game_files_md5.as_deref())
-                .await?;
+        let metadata_issues: Vec<_> = summary
+            .issues
+            .iter()
+            .filter(|issue| is_launcher_metadata_issue(&issue.path))
+            .cloned()
+            .collect();
+        let remaining_non_metadata = summary
+            .issues
+            .iter()
+            .filter(|issue| !is_launcher_metadata_issue(&issue.path))
+            .count();
 
-            let mut source_installs = Vec::new();
-            for reuse_path in &reuse_paths {
-                let source = detect_local_install(reuse_path).await.with_context(|| {
-                    format!("Failed to inspect reuse source {}", reuse_path.display())
-                })?;
-                let source_game_id = source.require_known_game()?;
-                if source_game_id != game_id {
-                    anyhow::bail!(
-                        "Reuse source {} is {:?}, expected {:?}",
-                        source.install_path.display(),
-                        source_game_id,
-                        game_id
-                    );
-                }
-                let source_server_id = source.require_known_server()?;
-                let source_version = source.require_version()?.to_string();
-                if source.install_path == local.install_path {
-                    continue;
-                }
-                source_installs.push(SourceInstallInput {
-                    server_id: source_server_id,
-                    version: source_version,
-                    install_path: source.install_path.clone(),
-                });
-            }
-            let reuse_plan = plan_file_reuse(
-                game_id,
-                server_id,
-                &installed_version,
-                &target_manifest,
-                &source_installs,
-                &api_client,
-            )
-            .await
-            .context("Failed to plan file reuse for repair")?;
-
-            let issue_paths: HashSet<&str> = issues.iter().map(|i| i.path.as_str()).collect();
-            let reusable_files: Vec<_> = reuse_plan
-                .reusable_files
-                .into_iter()
-                .filter(|f| issue_paths.contains(f.path.as_str()))
-                .collect();
-
-            let reused_paths: HashSet<String> =
-                reusable_files.iter().map(|f| f.path.clone()).collect();
-            if !reusable_files.is_empty() {
-                let scoped_plan = griffr_common::game::ReusePlan {
-                    source_servers: reuse_plan.source_servers,
-                    reusable_files,
-                    download_files: Vec::new(),
-                    reusable_size: 0,
-                    download_size: 0,
-                    requires_copy_fallback: false,
-                };
-                execute_reuse_plan(
-                    &local.install_path,
-                    &scoped_plan,
-                    ReuseOptions {
-                        allow_copy_fallback: force_copy,
-                        dry_run: false,
-                    },
-                )
-                .await
-                .context("Failed to reuse local files during repair")?;
-                println!("repair.reused_files={}", reused_paths.len());
-            }
-
-            let remaining_issues: Vec<_> = issues
-                .iter()
-                .filter(|issue| !reused_paths.contains(&issue.path))
-                .cloned()
-                .collect();
-            let metadata_issues: Vec<_> = remaining_issues
-                .iter()
-                .filter(|issue| is_launcher_metadata_issue(&issue.path))
-                .cloned()
-                .collect();
-            let downloadable_issues: Vec<_> = remaining_issues
-                .iter()
-                .filter(|issue| !is_launcher_metadata_issue(&issue.path))
-                .cloned()
-                .collect();
-            if !metadata_issues.is_empty() {
-                println!(
-                    "repair.metadata_issues_ignored={} (metadata will be normalized by launcher sync)",
-                    metadata_issues.len()
-                );
-            }
-            downloaded = downloadable_issues.len();
-            if !downloadable_issues.is_empty() {
-                let repair_progress = |current: usize, total: usize, file: &str| {
-                    println!("repair {}/{} {}", current + 1, total, file);
-                };
-                manager
-                    .repair_files(&api_client, &downloadable_issues, Some(repair_progress))
-                    .await?;
-            }
-        } else {
-            let metadata_issues: Vec<_> = issues
-                .iter()
-                .filter(|issue| is_launcher_metadata_issue(&issue.path))
-                .cloned()
-                .collect();
-            let downloadable_issues: Vec<_> = issues
-                .iter()
-                .filter(|issue| !is_launcher_metadata_issue(&issue.path))
-                .cloned()
-                .collect();
-            if !metadata_issues.is_empty() {
-                println!(
-                    "repair.metadata_issues_ignored={} (metadata will be normalized by launcher sync)",
-                    metadata_issues.len()
-                );
-            }
-            downloaded = downloadable_issues.len();
-            if !downloadable_issues.is_empty() {
-                let repair_progress = |current: usize, total: usize, file: &str| {
-                    println!("repair {}/{} {}", current + 1, total, file);
-                };
-                manager
-                    .repair_files(&api_client, &downloadable_issues, Some(repair_progress))
-                    .await?;
-            }
+        if !metadata_issues.is_empty() {
+            info!(
+                "repair.metadata_issues_ignored={} (metadata will be normalized by launcher sync)",
+                metadata_issues.len()
+            );
         }
-
-        println!("repair.downloaded_files={}", downloaded);
-        println!("repair.syncing_metadata=started");
+        info!("repair.syncing_metadata=started");
         manager
             .sync_launcher_metadata(&api_client)
             .await
             .context("Failed to sync launcher metadata after repair")?;
-        println!("repair.syncing_metadata=done");
+        info!("repair.syncing_metadata=done");
 
-        let post_progress = |current: usize, total: usize, file: &str| {
-            if opts.verbose {
-                print!("\rrepair.post_verify {}/{} {}", current + 1, total, file);
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-            } else if current > 0 && current % 25 == 0 {
-                print!("\rrepair.post_verify {}/{} {}", current, total, file);
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-            }
-        };
-        println!("repair.post_verify=started");
-        let post_issues = manager
-            .verify_integrity(&api_client, Some(post_progress))
-            .await
-            .context("Post-repair verify_integrity failed")?;
-        println!("\nrepair.post_verify.issues={}", post_issues.len());
-        if !post_issues.is_empty() {
-            for issue in post_issues.iter().take(20) {
-                println!(
-                    "repair.post_verify.issue path={} kind={:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
-                    issue.path,
-                    issue.kind,
-                    issue.expected_size,
-                    issue.actual_size,
-                    issue.expected_md5,
-                    issue.actual_md5
-                );
-            }
+        if remaining_non_metadata > 0 {
             anyhow::bail!(
-                "Post-repair verify reported {} issue(s)",
-                post_issues.len()
+                "verify+repair finished with {} remaining non-metadata issue(s)",
+                remaining_non_metadata
             );
         }
     }

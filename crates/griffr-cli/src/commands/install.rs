@@ -1,16 +1,21 @@
-use std::collections::HashSet;
+use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::{GameConfig, GameId, ServerId};
-use griffr_common::download::{DownloadOptions, Downloader};
-use griffr_common::game::{
-    apply_file_reuse_flow, download_vfs_resources, FileReuseConfig, GameManager, SourceInstallInput,
+use griffr_common::game::task_pool::{
+    run_tasks_with_progress, ArchivePart, ProgressEvent, Task, TaskPoolConfig,
 };
+use griffr_common::game::{
+    download_vfs_resources, materialize_game_files_with_pool, FileReuseConfig, GameManager,
+    SourceInstallInput,
+};
+use tracing::{info, warn};
 
 use super::local::detect_local_install;
-use crate::progress::IndicatifProgress;
+use crate::progress::StepProgress;
 use crate::GlobalOptions;
 
 fn is_launcher_metadata_issue(path: &str) -> bool {
@@ -18,6 +23,23 @@ fn is_launcher_metadata_issue(path: &str) -> bool {
         path.replace('\\', "/").to_ascii_lowercase().as_str(),
         "game_files" | "package_files"
     )
+}
+
+fn strip_url_query(s: &str) -> &str {
+    s.split('?').next().unwrap_or(s)
+}
+
+fn archive_base_from_url(url: &str) -> Option<String> {
+    let filename = url.split('/').next_back()?;
+    let filename = strip_url_query(filename);
+
+    if let Some(stem) = filename.strip_suffix(".zip.001") {
+        return Some(stem.to_string());
+    }
+    if let Some(stem) = filename.strip_suffix(".zip") {
+        return Some(stem.to_string());
+    }
+    None
 }
 
 pub async fn install(
@@ -29,11 +51,19 @@ pub async fn install(
     force_copy: bool,
     opts: GlobalOptions,
 ) -> Result<()> {
-    if install_path.exists() && !force {
-        let mut entries = tokio::fs::read_dir(&install_path)
-            .await
+    let install_path_exists = match compio::fs::metadata(&install_path).await {
+        Ok(_) => true,
+        Err(err) if err.kind() == ErrorKind::NotFound => false,
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("Failed to stat install path {}", install_path.display()))
+        }
+    };
+
+    if install_path_exists && !force {
+        let mut entries = std::fs::read_dir(&install_path)
             .with_context(|| format!("Failed to read {}", install_path.display()))?;
-        if entries.next_entry().await?.is_some() {
+        if entries.next().is_some() {
             anyhow::bail!(
                 "Install path is not empty: {} (pass --force to reuse it)",
                 install_path.display()
@@ -61,7 +91,7 @@ pub async fn install(
         return Ok(());
     }
 
-    tokio::fs::create_dir_all(&install_path)
+    compio::fs::create_dir_all(&install_path)
         .await
         .with_context(|| format!("Failed to create {}", install_path.display()))?;
 
@@ -77,7 +107,7 @@ pub async fn install(
         .context("No package information available")?;
     let total_size: u64 = pkg.packs.iter().map(|p| p.size()).sum();
 
-    println!(
+    info!(
         "install game={:?} server={} path={} version={} packs={} bytes={} reuse_sources={}",
         game_id,
         server_id,
@@ -103,57 +133,87 @@ pub async fn install(
 
     if reuse_paths.is_empty() {
         let download_dir = install_path.join("downloads");
-        tokio::fs::create_dir_all(&download_dir).await?;
-
-        let downloader = Downloader::with_options(DownloadOptions {
-            concurrent_connections: 4,
-            retry_attempts: 3,
-            resume: true,
-            verify_md5: true,
-        })?;
-        let progress = std::sync::Arc::new(IndicatifProgress::new(total_size));
-        downloader
-            .download_packs(&pkg.packs, &download_dir, Some(progress))
+        compio::fs::create_dir_all(&download_dir)
             .await
-            .context("Failed to download pack archives")?;
+            .with_context(|| format!("Failed to create {}", download_dir.display()))?;
 
-        let mut bases: HashSet<String> = HashSet::new();
+        let mut archives: std::collections::HashMap<String, Vec<ArchivePart>> =
+            std::collections::HashMap::new();
         for pack in &pkg.packs {
             let filename = pack
-                .url
-                .split('/')
-                .next_back()
-                .and_then(|name| name.split('?').next())
-                .context("Pack URL missing filename")?;
-            let base = filename
-                .strip_suffix(".zip.001")
-                .context("Pack URL did not end with .zip.001")?;
-            bases.insert(base.to_string());
+                .filename()
+                .context("Failed to extract pack filename")?
+                .split('?')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            let base = archive_base_from_url(&pack.url)
+                .context("Pack URL did not end with .zip.001 or .zip")?;
+            archives.entry(base).or_default().push(ArchivePart {
+                url: pack.url.clone(),
+                dest: download_dir.join(&filename),
+                logical_path: filename,
+                expected_md5: pack.md5.clone(),
+                expected_size: pack.size(),
+            });
         }
 
-        let mut bases: Vec<String> = bases.into_iter().collect();
-        bases.sort();
-
-        let mut extractors = Vec::with_capacity(bases.len());
-        for base in &bases {
-            let extractor =
-                griffr_common::download::extractor::MultiVolumeExtractor::from_directory(
-                    &download_dir,
-                    base,
-                )?;
-            extractor.extract_to(&install_path)?;
-            extractors.push(extractor);
+        let mut tasks = Vec::with_capacity(archives.len());
+        for (base_name, mut parts) in archives {
+            parts.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
+            tasks.push(Task::InstallArchive {
+                source_dir: download_dir.clone(),
+                base_name,
+                dest: install_path.clone(),
+                cleanup: true,
+                parts,
+            });
         }
 
-        for extractor in &extractors {
-            extractor.cleanup()?;
+        let archive_total = tasks.len();
+        let archive_bar = Arc::new(StepProgress::new("install.archives", opts.verbose));
+        let archive_bar_cb = archive_bar.clone();
+        let mut archive_done = 0usize;
+        let mut cfg = TaskPoolConfig::default();
+        cfg.io_slots = 4;
+        cfg.max_retries = 3;
+        let result = run_tasks_with_progress(
+            tasks,
+            cfg,
+            Some(&mut |event: &ProgressEvent| {
+                if let ProgressEvent::Extracted { path } = event {
+                    archive_bar_cb.update(
+                        archive_done,
+                        archive_total,
+                        path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("archive"),
+                    );
+                    archive_done += 1;
+                }
+            }),
+        )?;
+        archive_bar.finish();
+
+        let mut failures = Vec::new();
+        for event in result.events {
+            if let ProgressEvent::Failed { path, reason } = event {
+                failures.push(format!("{} ({})", path, reason));
+            }
+        }
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "Install archive pipeline failed for {} item(s): {}",
+                failures.len(),
+                failures.join(", ")
+            );
         }
     } else {
         let mut source_installs = Vec::new();
         for reuse_path in &reuse_paths {
-            let source = detect_local_install(reuse_path)
-                .await
-                .with_context(|| format!("Failed to inspect reuse source {}", reuse_path.display()))?;
+            let source = detect_local_install(reuse_path).await.with_context(|| {
+                format!("Failed to inspect reuse source {}", reuse_path.display())
+            })?;
             let source_game_id = source.require_known_game()?;
             if source_game_id != game_id {
                 anyhow::bail!(
@@ -174,7 +234,7 @@ pub async fn install(
                 install_path: source.install_path.clone(),
             });
         }
-        let linked = apply_file_reuse_flow(
+        let materialized = materialize_game_files_with_pool(
             &api_client,
             game_id,
             server_id,
@@ -187,10 +247,22 @@ pub async fn install(
                 dry_run: false,
                 source_installs,
             },
+            Some(|current: usize, total: usize, file: &str| {
+                if opts.verbose || total <= 10 || current % 25 == 0 {
+                    info!("install.materialize {}/{} {}", current + 1, total, file);
+                }
+            }),
         )
         .await
-        .context("Failed to apply reuse flow during install")?;
-        println!("install.reused_files={}", linked);
+        .context("Failed to materialize files during install")?;
+        info!("install.reused_files={}", materialized.reused_files);
+        info!("install.downloaded_files={}", materialized.downloaded_files);
+        if !materialized.issues.is_empty() {
+            anyhow::bail!(
+                "Install materialization finished with {} issue(s)",
+                materialized.issues.len()
+            );
+        }
     }
 
     manager
@@ -198,26 +270,20 @@ pub async fn install(
         .await
         .context("Failed to sync launcher metadata after install staging")?;
 
-    let verify_progress = |current: usize, total: usize, file: &str| {
-        if opts.verbose {
-            print!("\rinstall.verify {}/{} {}", current + 1, total, file);
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-        } else if current > 0 && current % 25 == 0 {
-            print!("\rinstall.verify {}/{} {}", current, total, file);
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-        }
+    let verify_bar = Arc::new(StepProgress::new("install.verify+repair", opts.verbose));
+    let verify_bar_cb = verify_bar.clone();
+    let verify_progress = move |current: usize, total: usize, file: &str| {
+        verify_bar_cb.update(current, total, file);
     };
-    let issues = manager
-        .verify_integrity(&api_client, Some(verify_progress))
+    let summary = manager
+        .run_integrity_pool(&api_client, true, &[], false, Some(verify_progress))
         .await?;
-    println!();
-    if !issues.is_empty() {
+    verify_bar.finish();
+    if !summary.issues.is_empty() {
         let mut repairable_issues = Vec::new();
         let mut metadata_issues = Vec::new();
-        for issue in issues.iter().take(20) {
-            println!(
+        for issue in summary.issues.iter().take(20) {
+            warn!(
                 "install.verify.issue path={} kind={:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
                 issue.path,
                 issue.kind,
@@ -227,7 +293,7 @@ pub async fn install(
                 issue.actual_md5
             );
         }
-        for issue in &issues {
+        for issue in &summary.issues {
             if is_launcher_metadata_issue(&issue.path) {
                 metadata_issues.push(issue.clone());
             } else {
@@ -235,41 +301,18 @@ pub async fn install(
             }
         }
 
-        if !repairable_issues.is_empty() {
-            println!(
-                "install.verify.repairing_non_metadata_issues={}",
-                repairable_issues.len()
-            );
-            let repair_progress = |current: usize, total: usize, file: &str| {
-                println!("install.repair {}/{} {}", current + 1, total, file);
-            };
-            manager
-                .repair_files(&api_client, &repairable_issues, Some(repair_progress))
-                .await
-                .context("Failed to repair post-install issues")?;
-        }
-
         if !metadata_issues.is_empty() {
-            println!(
+            info!(
                 "install.verify.metadata_issues_ignored={} (will be normalized by launcher metadata sync)",
                 metadata_issues.len()
             );
         }
 
         if !repairable_issues.is_empty() {
-            let remaining = manager
-                .verify_integrity(&api_client, None::<fn(usize, usize, &str)>)
-                .await?;
-            let remaining_non_metadata = remaining
-                .iter()
-                .filter(|i| !is_launcher_metadata_issue(&i.path))
-                .count();
-            if remaining_non_metadata > 0 {
-                anyhow::bail!(
-                    "Post-install verify still reports {} non-metadata issue(s) after repair",
-                    remaining_non_metadata
-                );
-            }
+            anyhow::bail!(
+                "Post-install integrity still reports {} non-metadata issue(s)",
+                repairable_issues.len()
+            );
         }
     }
 
@@ -290,6 +333,6 @@ pub async fn install(
         .await;
     }
 
-    println!("install complete");
+    info!("install complete");
     Ok(())
 }

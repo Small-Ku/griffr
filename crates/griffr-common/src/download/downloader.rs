@@ -1,12 +1,13 @@
 //! Parallel download with resume support
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use md5::{Digest, Md5};
-use tokio::io::AsyncWriteExt;
+use tracing::{info, warn};
 
 use crate::api::types::PackFile;
+use crate::game::task_pool::{run_tasks, ProgressEvent, Task, TaskPoolConfig};
 
 /// Progress callback trait for download updates
 pub trait ProgressCallback: Send + Sync {
@@ -20,13 +21,13 @@ pub trait ProgressCallback: Send + Sync {
     fn on_complete(&self, filename: &str, success: bool);
 }
 
-/// Simple progress callback that prints to stdout
+/// Simple progress callback that emits tracing events
 pub struct ConsoleProgress;
 
 impl ProgressCallback for ConsoleProgress {
     fn on_start(&self, filename: &str, total_bytes: u64) {
         let mb = total_bytes as f64 / 1024.0 / 1024.0;
-        println!("Downloading {} ({:.1} MB)...", filename, mb);
+        info!("Downloading {} ({:.1} MB)...", filename, mb);
     }
 
     fn on_progress(&self, _filename: &str, _downloaded_bytes: u64, _total_bytes: u64) {
@@ -35,9 +36,9 @@ impl ProgressCallback for ConsoleProgress {
 
     fn on_complete(&self, filename: &str, success: bool) {
         if success {
-            println!("Downloaded {}", filename);
+            info!("Downloaded {}", filename);
         } else {
-            println!("Failed to download {}", filename);
+            warn!("Failed to download {}", filename);
         }
     }
 }
@@ -72,7 +73,6 @@ impl Default for DownloadOptions {
 /// Download manager
 #[derive(Debug, Clone)]
 pub struct Downloader {
-    client: reqwest::Client,
     options: DownloadOptions,
 }
 
@@ -84,51 +84,7 @@ impl Downloader {
 
     /// Create a new downloader with custom options
     pub fn with_options(options: DownloadOptions) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .context("Failed to create HTTP client")?;
-
-        Ok(Self { client, options })
-    }
-
-    pub async fn download_pack(
-        &self,
-        pack: &PackFile,
-        output_dir: &Path,
-        progress: Option<&dyn ProgressCallback>,
-    ) -> Result<PathBuf> {
-        let filename = pack
-            .filename()
-            .context("Failed to extract filename from URL")?;
-
-        // Remove query parameters from filename
-        let filename = filename.split('?').next().unwrap_or(filename);
-        let output_path = output_dir.join(filename);
-
-        if let Some(p) = progress {
-            p.on_start(filename, pack.size());
-        }
-
-        let result = self
-            .download_with_retry(&pack.url, &output_path, pack.size(), progress)
-            .await;
-
-        // Verify MD5 if requested and download succeeded
-        if result.is_ok() && self.options.verify_md5 {
-            if let Err(e) = self.verify_file_md5(&output_path, &pack.md5).await {
-                if let Some(p) = progress {
-                    p.on_complete(filename, false);
-                }
-                return Err(e);
-            }
-        }
-
-        if let Some(p) = progress {
-            p.on_complete(filename, result.is_ok());
-        }
-
-        result.map(|_| output_path)
+        Ok(Self { options })
     }
 
     /// Download multiple pack files in parallel
@@ -138,176 +94,90 @@ impl Downloader {
         output_dir: &Path,
         progress: Option<std::sync::Arc<dyn ProgressCallback>>,
     ) -> Result<Vec<PathBuf>> {
-        use futures_util::stream::{self, StreamExt};
-
-        let concurrent = self.options.concurrent_connections as usize;
-
-        let results = stream::iter(packs)
-            .map(|pack| {
-                let downloader = self.clone();
-                let output_dir = output_dir.to_path_buf();
-                let progress = progress.clone();
-                async move {
-                    downloader
-                        .download_pack(pack, &output_dir, progress.as_deref())
-                        .await
-                }
-            })
-            .buffer_unordered(concurrent)
-            .collect::<Vec<_>>()
-            .await;
-
-        let mut paths = Vec::with_capacity(packs.len());
-        for res in results {
-            paths.push(res?);
+        if packs.is_empty() {
+            return Ok(Vec::new());
         }
 
-        Ok(paths)
-    }
-
-    /// Download a file with retry logic
-    async fn download_with_retry(
-        &self,
-        url: &str,
-        output_path: &Path,
-        expected_size: u64,
-        progress: Option<&dyn ProgressCallback>,
-    ) -> Result<()> {
-        let mut last_error = None;
-
-        for attempt in 0..self.options.retry_attempts {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_secs(2u64.pow(attempt));
-                tokio::time::sleep(delay).await;
-            }
-
-            match self
-                .download_file(url, output_path, expected_size, progress)
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    tracing::warn!("Download attempt {} failed: {}", attempt + 1, e);
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All download attempts failed")))
-    }
-
-    /// Download a single file with optional resume
-    async fn download_file(
-        &self,
-        url: &str,
-        output_path: &Path,
-        expected_size: u64,
-        progress: Option<&dyn ProgressCallback>,
-    ) -> Result<()> {
-        // Create output directory
-        if let Some(parent) = output_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
-        // Determine start byte for resume
-        let start_byte = if self.options.resume && output_path.exists() {
-            let metadata = tokio::fs::metadata(output_path).await?;
-            let size = metadata.len();
-            if size >= expected_size {
-                // File already complete
-                return Ok(());
-            }
-            Some(size)
-        } else {
-            None
-        };
-
-        // Build request
-        let mut request = self.client.get(url);
-        if let Some(start) = start_byte {
-            request = request.header(reqwest::header::RANGE, format!("bytes={}-", start));
-        }
-
-        let response = request
-            .send()
+        compio::fs::create_dir_all(output_dir)
             .await
-            .with_context(|| format!("Failed to send request to {}", url))?;
+            .with_context(|| format!("Failed to create {}", output_dir.display()))?;
 
-        let status = response.status();
-        if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
-            anyhow::bail!("HTTP error: {}", status);
+        let mut expected = Vec::with_capacity(packs.len());
+        let mut tasks = Vec::with_capacity(packs.len());
+        for pack in packs {
+            let filename = pack
+                .filename()
+                .context("Failed to extract filename from URL")?
+                .split('?')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            let output_path = output_dir.join(&filename);
+            expected.push((filename.clone(), output_path.clone(), pack.size()));
+            tasks.push(Task::Download {
+                url: pack.url.clone(),
+                dest: output_path,
+                logical_path: filename,
+                expected_md5: pack.md5.clone(),
+                expected_size: Some(pack.size()),
+                retry_count: 0,
+            });
         }
 
-        // Open file for writing
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .append(start_byte.is_some())
-            .truncate(start_byte.is_none())
-            .open(output_path)
-            .await
-            .with_context(|| format!("Failed to open file {}", output_path.display()))?;
-
-        // Stream response body to file
-        let mut stream = response.bytes_stream();
-        use futures_util::StreamExt;
-
-        let mut downloaded = start_byte.unwrap_or(0);
-        let filename = output_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("Failed to read response chunk")?;
-            let chunk_len = chunk.len() as u64;
-            file.write_all(&chunk).await?;
-
-            downloaded += chunk_len;
-            if let Some(p) = progress {
-                p.on_progress(filename, downloaded, expected_size);
+        if let Some(p) = progress.as_deref() {
+            for (filename, _, size) in &expected {
+                p.on_start(filename, *size);
             }
         }
 
-        file.flush().await?;
+        let mut config = TaskPoolConfig::default();
+        config.io_slots = self.options.concurrent_connections.max(1) as usize;
+        config.max_retries = self.options.retry_attempts;
 
-        Ok(())
-    }
-
-    /// Verify file MD5
-    async fn verify_file_md5(&self, path: &Path, expected_md5: &str) -> Result<()> {
-        use tokio::io::AsyncReadExt;
-
-        let mut file = tokio::fs::File::open(path).await.with_context(|| {
-            format!(
-                "Failed to open file for MD5 verification: {}",
-                path.display()
-            )
-        })?;
-
-        let mut hasher = Md5::new();
-        let mut buffer = vec![0u8; 8192];
-
-        loop {
-            let n = file.read(&mut buffer).await?;
-            if n == 0 {
-                break;
+        let result = run_tasks(tasks, config)?;
+        let mut failed = Vec::new();
+        for event in result.events {
+            match event {
+                ProgressEvent::Downloaded { path, bytes } => {
+                    if let Some(p) = progress.as_deref() {
+                        p.on_progress(&path, bytes, bytes);
+                    }
+                }
+                ProgressEvent::Verified { path, ok, .. } => {
+                    if !ok {
+                        failed.push(path.clone());
+                    }
+                    if let Some(p) = progress.as_deref() {
+                        p.on_complete(&path, ok);
+                    }
+                }
+                ProgressEvent::Failed { path, .. } => failed.push(path),
+                _ => {}
             }
-            hasher.update(&buffer[..n]);
         }
 
-        let result = hasher.finalize();
-        let actual_md5 = format!("{:x}", result);
-
-        if actual_md5 != expected_md5.to_lowercase() {
+        if !failed.is_empty() {
             anyhow::bail!(
-                "MD5 mismatch: expected {}, got {}",
-                expected_md5,
-                actual_md5
+                "Failed to download {} pack(s): {}",
+                failed.len(),
+                failed.join(", ")
             );
         }
 
-        Ok(())
+        let mut paths = Vec::with_capacity(expected.len());
+        for (_, path, _) in expected {
+            match compio::fs::metadata(&path).await {
+                Ok(_) => {}
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    anyhow::bail!("Missing downloaded pack: {}", path.display());
+                }
+                Err(err) => {
+                    return Err(err).with_context(|| format!("Failed to stat {}", path.display()))
+                }
+            }
+            paths.push(path);
+        }
+        Ok(paths)
     }
 }
 

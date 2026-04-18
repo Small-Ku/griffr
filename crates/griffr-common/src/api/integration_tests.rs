@@ -267,7 +267,7 @@ async fn assert_game_files_for_server(client: &ApiClient, game: GameId, server: 
     assert_game_files_entries(&entries);
 }
 
-#[tokio::test]
+#[compio::test]
 #[ignore = "Makes real network request"]
 async fn test_real_api_latest_matrix() {
     let client = ApiClient::new().expect("Failed to create API client");
@@ -291,7 +291,7 @@ async fn test_real_api_latest_matrix() {
     }
 }
 
-#[tokio::test]
+#[compio::test]
 #[ignore = "Makes real network request"]
 async fn test_real_api_media_matrix() {
     let client = ApiClient::new().expect("Failed to create API client");
@@ -315,7 +315,7 @@ async fn test_real_api_media_matrix() {
     }
 }
 
-#[tokio::test]
+#[compio::test]
 #[ignore = "Makes real network request"]
 async fn test_real_api_game_files_matrix() {
     let client = ApiClient::new().expect("Failed to create API client");
@@ -339,7 +339,7 @@ async fn test_real_api_game_files_matrix() {
     }
 }
 
-#[tokio::test]
+#[compio::test]
 #[ignore = "Makes real network request"]
 async fn test_real_endfield_os_known_versions_return_full_or_patch_payloads() {
     let client = ApiClient::new().expect("Failed to create API client");

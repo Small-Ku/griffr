@@ -5,11 +5,15 @@
 //! - Graceful kill sequence per TODO requirements
 //! - Game launch
 
+use std::io::ErrorKind;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::process::Child;
 use tracing::{debug, info, warn};
 
 use crate::config::GameId;
@@ -202,7 +206,7 @@ impl Launcher {
 
         // 3. Wait 1.5 seconds for handles to release
         debug!("Waiting 1.5s for processes to terminate gracefully...");
-        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+        thread::sleep(Duration::from_millis(1500));
 
         // 4. Second pass: Force kill any remaining processes
         let remaining = self.find_game_processes();
@@ -223,7 +227,7 @@ impl Launcher {
             }
 
             // Wait a bit more and verify
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            thread::sleep(Duration::from_millis(500));
             let final_check = self.find_game_processes();
             if !final_check.is_empty() {
                 return Err(anyhow::anyhow!(
@@ -326,11 +330,19 @@ impl Launcher {
     pub async fn launch(&self) -> Result<Child> {
         let exe_path = self.game_exe_path();
 
-        if !exe_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Game executable not found: {}",
-                exe_path.display()
-            ));
+        match compio::fs::metadata(&exe_path).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                return Err(anyhow::anyhow!(
+                    "Game executable not found: {}",
+                    exe_path.display()
+                ));
+            }
+            Err(err) => {
+                return Err(err).map_err(anyhow::Error::from).with_context(|| {
+                    format!("Failed to stat game executable {}", exe_path.display())
+                });
+            }
         }
 
         let working_dir = exe_path
@@ -345,7 +357,7 @@ impl Launcher {
             const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
             const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
 
-            let mut cmd = tokio::process::Command::new(&exe_path);
+            let mut cmd = Command::new(&exe_path);
             cmd.current_dir(&working_dir)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -361,7 +373,7 @@ impl Launcher {
 
         #[cfg(not(windows))]
         {
-            let mut cmd = tokio::process::Command::new(&exe_path);
+            let mut cmd = Command::new(&exe_path);
             cmd.current_dir(&working_dir)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());

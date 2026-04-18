@@ -1,6 +1,8 @@
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use tracing::info;
 
 use crate::GlobalOptions;
 
@@ -16,7 +18,7 @@ pub async fn uninstall(
         path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
     };
 
-    println!(
+    info!(
         "uninstall path={} keep_files={}",
         target.display(),
         keep_files
@@ -43,8 +45,13 @@ pub async fn uninstall(
         return Ok(());
     }
 
-    if target.exists() {
-        tokio::fs::remove_dir_all(&target).await?;
+    let exists = match compio::fs::metadata(&target).await {
+        Ok(_) => true,
+        Err(err) if err.kind() == ErrorKind::NotFound => false,
+        Err(err) => return Err(anyhow::Error::from(err)),
+    };
+    if exists {
+        std::fs::remove_dir_all(&target)?;
     }
 
     Ok(())

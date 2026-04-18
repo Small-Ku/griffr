@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use md5::{Digest, Md5};
-use reqwest::header;
+use std::io::ErrorKind;
 
 use super::crypto;
 use super::types::*;
@@ -11,7 +11,7 @@ use crate::config::{GameId, ServerId};
 /// API client for Hypergryph game services
 #[derive(Debug, Clone)]
 pub struct ApiClient {
-    client: reqwest::Client,
+    client: cyper::Client,
     user_agent: String,
 }
 
@@ -31,10 +31,7 @@ impl ApiClient {
     pub fn with_user_agent(user_agent: impl Into<String>) -> Result<Self> {
         let user_agent = user_agent.into();
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .context("Failed to create HTTP client")?;
+        let client = cyper::Client::new();
 
         Ok(Self { client, user_agent })
     }
@@ -103,18 +100,16 @@ impl ApiClient {
         let response = self
             .client
             .post(url)
-            .header(header::USER_AGENT, &self.user_agent)
-            .header(header::CONTENT_TYPE, "application/json")
+            .context("Failed to build batch request")?
+            .header("User-Agent", &self.user_agent)
+            .context("Failed to set User-Agent header")?
+            .header("Content-Type", "application/json")
+            .context("Failed to set Content-Type header")?
             .json(request)
+            .context("Failed to serialize batch request body")?
             .send()
             .await
             .with_context(|| format!("Failed to send batch request to {}", url))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("API returned error {}: {}", status, body);
-        }
 
         let status = response.status();
         if !status.is_success() {
@@ -263,17 +258,17 @@ impl ApiClient {
 
         let app_code = game_type.app_code(region);
 
+        let url = format!(
+            "{}?appcode={}&game_version={}&version={}&platform={}&rand_str={}",
+            url, app_code, version_minor, game_version, platform, rand_str
+        );
+
         let response = self
             .client
             .get(&url)
-            .header(header::USER_AGENT, &self.user_agent)
-            .query(&[
-                ("appcode", app_code),
-                ("game_version", &version_minor),
-                ("version", game_version),
-                ("platform", platform),
-                ("rand_str", rand_str),
-            ])
+            .context("Failed to build get_latest_resources request")?
+            .header("User-Agent", &self.user_agent)
+            .context("Failed to set User-Agent header")?
             .send()
             .await
             .with_context(|| format!("Failed to get latest resources from {}", url))?;
@@ -303,7 +298,9 @@ impl ApiClient {
         let response = self
             .client
             .get(&url)
-            .header(header::USER_AGENT, &self.user_agent)
+            .context("Failed to build game_files request")?
+            .header("User-Agent", &self.user_agent)
+            .context("Failed to set User-Agent header")?
             .send()
             .await
             .with_context(|| format!("Failed to download game_files from {}", url))?;
@@ -353,7 +350,9 @@ impl ApiClient {
         let response = self
             .client
             .get(url)
-            .header(header::USER_AGENT, &self.user_agent)
+            .context("Failed to build resource index request")?
+            .header("User-Agent", &self.user_agent)
+            .context("Failed to set User-Agent header")?
             .send()
             .await
             .with_context(|| format!("Failed to download resource index from {}", url))?;
@@ -385,7 +384,9 @@ impl ApiClient {
         let response = self
             .client
             .get(url)
-            .header(header::USER_AGENT, &self.user_agent)
+            .context("Failed to build resource patch request")?
+            .header("User-Agent", &self.user_agent)
+            .context("Failed to set User-Agent header")?
             .send()
             .await
             .with_context(|| format!("Failed to download resource patch from {}", url))?;
@@ -410,81 +411,66 @@ impl ApiClient {
         output_path: &std::path::Path,
         resume: bool,
     ) -> Result<String> {
-        let mut request = self.client.get(url);
+        let mut request = self
+            .client
+            .get(url)
+            .context("Failed to build download request")?
+            .header("User-Agent", &self.user_agent)
+            .context("Failed to set User-Agent header")?;
 
-        // Check if we should resume
-        let start_byte = if resume && output_path.exists() {
-            let metadata = tokio::fs::metadata(output_path).await?;
-            let size = metadata.len();
-            if size > 0 {
-                request = request.header(header::RANGE, format!("bytes={}-", size));
-                Some(size)
-            } else {
-                None
+        let existing = if resume {
+            match compio::fs::read(output_path).await {
+                Ok(bytes) => {
+                    if !bytes.is_empty() {
+                        request = request
+                            .header("Range", format!("bytes={}-", bytes.len()))
+                            .context("Failed to set Range header")?;
+                    }
+                    bytes
+                }
+                Err(err) if err.kind() == ErrorKind::NotFound => Vec::new(),
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("Failed to read {}", output_path.display()))
+                }
             }
         } else {
-            None
+            Vec::new()
         };
 
         let response = request
-            .header(header::USER_AGENT, &self.user_agent)
             .send()
             .await
             .with_context(|| format!("Failed to download from {}", url))?;
 
         let status = response.status();
-        if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
+        if !status.is_success() && status.as_u16() != 206 {
             anyhow::bail!("Download returned error status: {}", status);
         }
 
-        // Create parent directory if needed
         if let Some(parent) = output_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            compio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
         }
 
-        // Open file for writing (append if resuming)
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .append(start_byte.is_some())
-            .truncate(start_byte.is_none())
-            .open(output_path)
-            .await
-            .with_context(|| format!("Failed to open output file {}", output_path.display()))?;
-
-        let mut stream = response.bytes_stream();
-        let mut hasher = Md5::new();
-
-        use futures_util::StreamExt;
-        use tokio::io::AsyncWriteExt;
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("Failed to download chunk")?;
-            file.write_all(&chunk).await?;
-            hasher.update(&chunk);
-        }
-
-        file.flush().await?;
-
-        // If we resumed, we can't easily calculate MD5 of the WHOLE file from the stream
-        // But for repair we don't usually resume small files.
-        // For simplicity, let's recalculate from disk if resumed.
-        if start_byte.is_some() {
-            let mut file = tokio::fs::File::open(output_path).await?;
-            let mut hasher = Md5::new();
-            let mut buffer = vec![0; 8192];
-            use tokio::io::AsyncReadExt;
-            loop {
-                let n = file.read(&mut buffer).await?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..n]);
-            }
-            Ok(format!("{:x}", hasher.finalize()))
+        let downloaded = response.bytes().await.context("Failed to download bytes")?;
+        let final_bytes = if !existing.is_empty() && status.as_u16() == 206 {
+            let mut merged = existing;
+            merged.extend_from_slice(downloaded.as_ref());
+            merged
         } else {
-            Ok(format!("{:x}", hasher.finalize()))
-        }
+            downloaded.to_vec()
+        };
+
+        let write_result = compio::fs::write(output_path, final_bytes.clone()).await;
+        write_result
+            .0
+            .with_context(|| format!("Failed to write output file {}", output_path.display()))?;
+
+        let mut hasher = Md5::new();
+        hasher.update(&final_bytes);
+        Ok(format!("{:x}", hasher.finalize()))
     }
 
     /// Download a file and verify its MD5
