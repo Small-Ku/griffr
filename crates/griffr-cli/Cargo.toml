@@ -33,3 +33,5 @@ chrono = "0.4"
 
 [dev-dependencies]
 tempfile = "3.14"
+zip = { workspace = true }
+md-5 = { workspace = true }

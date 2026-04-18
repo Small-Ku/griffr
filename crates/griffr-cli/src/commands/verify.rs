@@ -27,7 +27,7 @@ pub async fn verify(
     let local = detect_local_install(&path).await?;
     let game_id = local.require_known_game()?;
     let server_id = local.require_known_server()?;
-    let installed_version = local.require_version()?.to_string();
+    let installed_version = local.require_config_ini_version()?.to_string();
     let manager = local.as_manager()?;
     let api_client = ApiClient::new()?;
 

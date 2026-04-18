@@ -63,7 +63,12 @@ impl LocalInstall {
         ))
     }
 
-    pub fn require_version(&self) -> Result<&str> {
+    /// Resolve installed game version from decrypted `config.ini`.
+    ///
+    /// `config.ini` is the only supported version source of truth for local
+    /// installs, because it is launcher-managed metadata shipped with official
+    /// game files.
+    pub fn require_config_ini_version(&self) -> Result<&str> {
         self.config_ini.version().context(format!(
             "config.ini at {} does not contain a version field",
             self.config_ini.path.display()
@@ -73,7 +78,7 @@ impl LocalInstall {
     pub fn as_game_config(&self) -> Result<GameConfig> {
         let game_id = self.require_known_game()?;
         let server_id = self.require_known_server()?;
-        let version = self.require_version()?.to_string();
+        let version = self.require_config_ini_version()?.to_string();
 
         let mut config = GameConfig {
             install_path: Some(self.install_path.clone()),
@@ -249,5 +254,42 @@ mod tests {
     fn detect_server_maps_global_epic_tuple() {
         let parsed = parsed_with_channel("6", "801");
         assert_eq!(detect_server_id(&parsed), Some(ServerId::GlobalEpic));
+    }
+
+    #[test]
+    fn require_config_ini_version_returns_version() {
+        let mut fields = BTreeMap::new();
+        fields.insert("version".to_string(), "1.1.9".to_string());
+
+        let local = LocalInstall {
+            install_path: PathBuf::from("C:\\Games\\Endfield"),
+            config_ini: ParsedConfigIni {
+                path: PathBuf::from("config.ini"),
+                raw: "version=1.1.9".to_string(),
+                fields,
+            },
+            game_id: Some(GameId::Endfield),
+            server_id: Some(ServerId::CnOfficial),
+        };
+
+        assert_eq!(local.require_config_ini_version().unwrap(), "1.1.9");
+    }
+
+    #[test]
+    fn require_config_ini_version_errors_when_missing() {
+        let local = LocalInstall {
+            install_path: PathBuf::from("C:\\Games\\Endfield"),
+            config_ini: ParsedConfigIni {
+                path: PathBuf::from("config.ini"),
+                raw: String::new(),
+                fields: BTreeMap::new(),
+            },
+            game_id: Some(GameId::Endfield),
+            server_id: Some(ServerId::CnOfficial),
+        };
+
+        let err = local.require_config_ini_version().unwrap_err();
+        assert!(err.to_string().contains("config.ini"));
+        assert!(err.to_string().contains("version field"));
     }
 }

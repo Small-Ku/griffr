@@ -998,10 +998,12 @@ dependencies = [
  "futures-util",
  "griffr-common",
  "indicatif",
+ "md-5",
  "serde_json",
  "tempfile",
  "tracing",
  "tracing-subscriber",
+ "zip",
 ]
 
 [[package]]

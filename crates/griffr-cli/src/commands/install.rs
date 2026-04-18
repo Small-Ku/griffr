@@ -231,7 +231,7 @@ pub async fn install(
                 );
             }
             let source_server_id = source.require_known_server()?;
-            let source_version = source.require_version()?.to_string();
+            let source_version = source.require_config_ini_version()?.to_string();
             if source.install_path == install_path {
                 continue;
             }
