@@ -30,6 +30,8 @@ pub struct VfsMaterializeConfig {
     pub source_streaming_assets: Vec<std::path::PathBuf>,
     /// Allow copy fallback when hardlinking from source installs fails.
     pub allow_copy_fallback: bool,
+    /// Prefer relinking from reuse sources even when local files already verify.
+    pub prefer_reuse: bool,
 }
 
 /// Result of a VFS resource check/download operation
@@ -116,7 +118,7 @@ pub async fn plan_vfs_tasks(
                 source_candidates,
                 download_url: Some(format!("{}/{}", resource.path, file.name)),
                 allow_copy_fallback: materialize.allow_copy_fallback,
-                prefer_reuse: false,
+                prefer_reuse: materialize.prefer_reuse,
                 retry_count: 0,
             });
         }

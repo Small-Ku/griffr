@@ -598,6 +598,7 @@ pub async fn update(
             &VfsMaterializeConfig {
                 source_streaming_assets,
                 allow_copy_fallback: force_copy,
+                prefer_reuse: !reuse_paths.is_empty(),
             },
         )
         .await

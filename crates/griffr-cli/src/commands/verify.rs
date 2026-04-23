@@ -117,6 +117,7 @@ pub async fn verify(
                 &VfsMaterializeConfig {
                     source_streaming_assets,
                     allow_copy_fallback: force_copy,
+                    prefer_reuse: relink_reuse,
                 },
             )
             .await
