@@ -2,6 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
+fn null_string_as_empty<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// Game identifier for API requests
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Game {
@@ -604,9 +611,9 @@ pub struct GameFileEntry {
 /// Decrypted resource index (index_main.json / index_initial.json)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResIndex {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_string_as_empty")]
     pub version: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_string_as_empty")]
     pub path: String,
     pub files: Vec<ResIndexFile>,
 }
@@ -616,13 +623,15 @@ pub struct ResIndex {
 pub struct ResIndexFile {
     #[serde(default)]
     pub index: u64,
+    #[serde(default, deserialize_with = "null_string_as_empty")]
     pub name: String,
     #[serde(default)]
     pub hash: Option<String>,
     pub size: u64,
     #[serde(default)]
     pub r#type: u64,
-    pub md5: String,
+    #[serde(default)]
+    pub md5: Option<String>,
     #[serde(default)]
     pub manifest: u64,
 }

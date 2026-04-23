@@ -16,7 +16,10 @@ pub use files_reuse::{
 pub use launcher::{GameProcess, Launcher};
 pub use manager::GameManager;
 pub use server::Server;
-pub use vfs::{download_vfs_resources, get_vfs_resource_info, VfsUpdateResult};
+pub use vfs::{
+    download_vfs_resources, get_vfs_resource_info, plan_vfs_tasks, VfsMaterializeConfig,
+    VfsTaskPlan, VfsUpdateResult,
+};
 
 use serde::{Deserialize, Serialize};
 

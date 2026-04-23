@@ -247,7 +247,7 @@ impl ApiClient {
             Region::CN => game_type.cn_gateway(),
             Region::OS => game_type.os_gateway(),
         };
-        let url = format!("https://{}/game/get_latest_resources", api_base);
+        let url = format!("https://{}/api/game/get_latest_resources", api_base);
 
         // Derive the version minor (major.minor) from the full version
         let version_minor = game_version

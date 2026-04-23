@@ -7,11 +7,12 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::PackageInfo;
 use griffr_common::config::{GameConfig, GameId, ServerId};
 use griffr_common::game::task_pool::{
-    run_tasks_with_progress, ArchivePart, ProgressEvent, Task, TaskPoolConfig,
+    ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
 use griffr_common::game::{
-    download_vfs_resources, materialize_game_files_with_pool, FileReuseConfig, GameManager,
+    materialize_game_files_with_pool, plan_vfs_tasks, FileReuseConfig, GameManager,
     SourceInstallInput,
+    VfsMaterializeConfig, VfsTaskPlan,
 };
 
 use super::local::detect_local_install;
@@ -206,6 +207,9 @@ pub async fn install(
     server.install_path = Some(install_path.clone());
     server.version = Some(version_info.version.clone());
     let manager = GameManager::new(game_id, game_config);
+    let mut task_pool_cfg = TaskPoolConfig::default();
+    task_pool_cfg.max_retries = 3;
+    let mut task_pool = TaskPoolRunner::new(task_pool_cfg)?;
 
     if reuse_paths.is_empty() {
         ui::print_phase("Downloading and extracting archives");
@@ -251,12 +255,8 @@ pub async fn install(
         let archive_bar = Arc::new(StepProgress::new("install.archives", opts.verbose));
         let archive_bar_cb = archive_bar.clone();
         let mut archive_done = 0usize;
-        let mut cfg = TaskPoolConfig::default();
-        cfg.io_slots = 4;
-        cfg.max_retries = 3;
-        let result = run_tasks_with_progress(
+        let result = task_pool.run_batch_with_progress(
             tasks,
-            cfg,
             Some(&mut |event: &ProgressEvent| {
                 if let ProgressEvent::Extracted { path } = event {
                     archive_bar_cb.update(
@@ -327,6 +327,7 @@ pub async fn install(
                 dry_run: false,
                 source_installs,
             },
+            Some(&mut task_pool),
             Some(|current: usize, total: usize, file: &str| {
                 materialize_bar_cb.update(current, total, file);
             }),
@@ -351,14 +352,55 @@ pub async fn install(
         .await
         .context("Failed to sync launcher metadata after install staging")?;
 
-    ui::print_phase("Verifying install integrity");
+    let extra_tasks = if !opts.skip_vfs {
+        ui::print_phase("Verifying install integrity + syncing VFS resources (single DAG batch)");
+        let streaming_assets = install_path
+            .join(game_id.streaming_assets_subdir())
+            .join("StreamingAssets");
+        let source_streaming_assets = reuse_paths
+            .iter()
+            .filter(|path| **path != install_path)
+            .map(|path| {
+                path.join(game_id.streaming_assets_subdir())
+                    .join("StreamingAssets")
+            })
+            .collect::<Vec<_>>();
+        let rand_str = version_info.rand_str();
+        let VfsTaskPlan { tasks, .. } = plan_vfs_tasks(
+            &api_client,
+            game_id,
+            server_id,
+            &version_info.version,
+            &rand_str,
+            &streaming_assets,
+            &VfsMaterializeConfig {
+                source_streaming_assets,
+                allow_copy_fallback: force_copy,
+            },
+        )
+        .await
+        .context("Failed to plan VFS tasks")?;
+        tasks
+    } else {
+        ui::print_phase("Verifying install integrity");
+        Vec::new()
+    };
     let verify_bar = Arc::new(StepProgress::new("install.verify+repair", opts.verbose));
     let verify_bar_cb = verify_bar.clone();
     let verify_progress = move |current: usize, total: usize, file: &str| {
         verify_bar_cb.update(current, total, file);
     };
     let summary = manager
-        .run_integrity_pool(&api_client, true, &[], false, Some(verify_progress))
+        .run_integrity_pool_with_runner(
+            &api_client,
+            true,
+            &[],
+            false,
+            false,
+            extra_tasks,
+            Some(&mut task_pool),
+            Some(verify_progress),
+        )
         .await?;
     verify_bar.finish();
     if !summary.issues.is_empty() {
@@ -396,24 +438,6 @@ pub async fn install(
                 repairable_issues.len()
             );
         }
-    }
-
-    if !opts.skip_vfs {
-        ui::print_phase("Syncing VFS resources");
-        let streaming_assets = install_path
-            .join(game_id.streaming_assets_subdir())
-            .join("StreamingAssets");
-        let rand_str = version_info.rand_str();
-        let _ = download_vfs_resources(
-            &api_client,
-            game_id,
-            server_id,
-            &version_info.version,
-            &rand_str,
-            &streaming_assets,
-            None,
-        )
-        .await;
     }
 
     ui::print_success("Install complete");

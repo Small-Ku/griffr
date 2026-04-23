@@ -57,6 +57,7 @@ pub enum Task {
         source_candidates: Vec<PathBuf>,
         download_url: Option<String>,
         allow_copy_fallback: bool,
+        prefer_reuse: bool,
         retry_count: u32,
     },
     Extract {
@@ -139,90 +140,114 @@ pub struct TaskPoolResult {
     pub events: Vec<ProgressEvent>,
 }
 
-pub fn run_tasks_with_progress(
-    initial_tasks: Vec<Task>,
-    config: TaskPoolConfig,
-    mut on_event: Option<&mut dyn FnMut(&ProgressEvent)>,
-) -> Result<TaskPoolResult> {
-    let (io_tx, io_rx) = flume::unbounded::<Task>();
-    let (cpu_tx, cpu_rx) = flume::unbounded::<Task>();
-    let (extract_tx, extract_rx) = flume::unbounded::<Task>();
-    let (event_tx, event_rx) = flume::unbounded::<ProgressEvent>();
+pub struct TaskPoolRunner {
+    ctx: WorkerContext,
+    event_rx: Receiver<ProgressEvent>,
+}
 
-    let pending = Arc::new(AtomicUsize::new(0));
-    let done_pair = Arc::new((Mutex::new(()), Condvar::new()));
-    let shutdown = Arc::new(AtomicBool::new(false));
+impl TaskPoolRunner {
+    pub fn new(config: TaskPoolConfig) -> Result<Self> {
+        let (io_tx, io_rx) = flume::unbounded::<Task>();
+        let (cpu_tx, cpu_rx) = flume::unbounded::<Task>();
+        let (extract_tx, extract_rx) = flume::unbounded::<Task>();
+        let (event_tx, event_rx) = flume::unbounded::<ProgressEvent>();
 
-    let dispatcher_threads = dispatcher_thread_count(&config);
-    let shared_dispatcher = Arc::new(
-        Dispatcher::builder()
-            .worker_threads(
-                NonZeroUsize::new(dispatcher_threads)
-                    .context("dispatcher threads must be non-zero")?,
-            )
-            .build()
-            .context("Failed to create task-pool dispatcher")?,
-    );
+        let pending = Arc::new(AtomicUsize::new(0));
+        let done_pair = Arc::new((Mutex::new(()), Condvar::new()));
+        let shutdown = Arc::new(AtomicBool::new(false));
 
-    let ctx = WorkerContext {
-        io_tx: io_tx.clone(),
-        cpu_tx: cpu_tx.clone(),
-        extract_tx: extract_tx.clone(),
-        event_tx: event_tx.clone(),
-        pending: Arc::clone(&pending),
-        done_pair: Arc::clone(&done_pair),
-        shutdown: Arc::clone(&shutdown),
-        config,
-        shared_dispatcher: Arc::clone(&shared_dispatcher),
-    };
+        let dispatcher_threads = dispatcher_thread_count(&config);
+        let shared_dispatcher = Arc::new(
+            Dispatcher::builder()
+                .worker_threads(
+                    NonZeroUsize::new(dispatcher_threads)
+                        .context("dispatcher threads must be non-zero")?,
+                )
+                .build()
+                .context("Failed to create task-pool dispatcher")?,
+        );
 
-    spawn_workers(WorkerKind::Io, ctx.config.io_slots, io_rx, ctx.clone())?;
-    spawn_workers(WorkerKind::Cpu, ctx.config.cpu_slots, cpu_rx, ctx.clone())?;
-    spawn_workers(
-        WorkerKind::Extract,
-        ctx.config.extract_slots,
-        extract_rx,
-        ctx.clone(),
-    )?;
+        let ctx = WorkerContext {
+            io_tx: io_tx.clone(),
+            cpu_tx: cpu_tx.clone(),
+            extract_tx: extract_tx.clone(),
+            event_tx: event_tx.clone(),
+            pending,
+            done_pair,
+            shutdown,
+            config,
+            shared_dispatcher,
+        };
 
-    for task in initial_tasks {
-        enqueue_task(&ctx, task)?;
+        spawn_workers(WorkerKind::Io, ctx.config.io_slots, io_rx, ctx.clone())?;
+        spawn_workers(WorkerKind::Cpu, ctx.config.cpu_slots, cpu_rx, ctx.clone())?;
+        spawn_workers(
+            WorkerKind::Extract,
+            ctx.config.extract_slots,
+            extract_rx,
+            ctx.clone(),
+        )?;
+
+        Ok(Self { ctx, event_rx })
     }
 
-    let mut events = Vec::new();
-    let (lock, cv) = &*done_pair;
-    let mut guard = lock.lock().unwrap();
-    loop {
-        while let Ok(event) = event_rx.try_recv() {
+    pub fn run_batch_with_progress(
+        &mut self,
+        initial_tasks: Vec<Task>,
+        mut on_event: Option<&mut dyn FnMut(&ProgressEvent)>,
+    ) -> Result<TaskPoolResult> {
+        while self.event_rx.try_recv().is_ok() {}
+
+        for task in initial_tasks {
+            enqueue_task(&self.ctx, task)?;
+        }
+
+        let mut events = Vec::new();
+        let (lock, cv) = &*self.ctx.done_pair;
+        let mut guard = lock.lock().unwrap();
+        loop {
+            while let Ok(event) = self.event_rx.try_recv() {
+                if let Some(cb) = on_event.as_mut() {
+                    cb(&event);
+                }
+                events.push(event);
+            }
+
+            if self.ctx.pending.load(Ordering::Acquire) == 0 {
+                break;
+            }
+
+            let (new_guard, _) = cv.wait_timeout(guard, Duration::from_millis(100)).unwrap();
+            guard = new_guard;
+        }
+        drop(guard);
+
+        while let Ok(event) = self.event_rx.try_recv() {
             if let Some(cb) = on_event.as_mut() {
                 cb(&event);
             }
             events.push(event);
         }
 
-        if pending.load(Ordering::Acquire) == 0 {
-            break;
-        }
-
-        let (new_guard, _) = cv.wait_timeout(guard, Duration::from_millis(100)).unwrap();
-        guard = new_guard;
+        Ok(TaskPoolResult { events })
     }
-    drop(guard);
+}
 
-    shutdown.store(true, Ordering::Release);
-    drop(event_tx);
-    drop(io_tx);
-    drop(cpu_tx);
-    drop(extract_tx);
-
-    while let Ok(event) = event_rx.try_recv() {
-        if let Some(cb) = on_event.as_mut() {
-            cb(&event);
-        }
-        events.push(event);
+impl Drop for TaskPoolRunner {
+    fn drop(&mut self) {
+        self.ctx.shutdown.store(true, Ordering::Release);
+        let (_, cv) = &*self.ctx.done_pair;
+        cv.notify_all();
     }
+}
 
-    Ok(TaskPoolResult { events })
+pub fn run_tasks_with_progress(
+    initial_tasks: Vec<Task>,
+    config: TaskPoolConfig,
+    on_event: Option<&mut dyn FnMut(&ProgressEvent)>,
+) -> Result<TaskPoolResult> {
+    let mut runner = TaskPoolRunner::new(config)?;
+    runner.run_batch_with_progress(initial_tasks, on_event)
 }
 
 pub fn extract_archives_pooled(
@@ -439,6 +464,7 @@ fn execute_task(
             source_candidates,
             download_url,
             allow_copy_fallback,
+            prefer_reuse,
             retry_count,
         } => execute_ensure_file(
             EnsureFileInput {
@@ -449,6 +475,7 @@ fn execute_task(
                 source_candidates,
                 download_url,
                 allow_copy_fallback,
+                prefer_reuse,
                 retry_count,
                 max_retries: ctx.config.max_retries,
             },
@@ -694,6 +721,7 @@ struct EnsureFileInput {
     source_candidates: Vec<PathBuf>,
     download_url: Option<String>,
     allow_copy_fallback: bool,
+    prefer_reuse: bool,
     retry_count: u32,
     max_retries: u32,
 }
@@ -777,14 +805,14 @@ fn execute_ensure_file(
     spawned: &mut Vec<Task>,
     events: &mut Vec<ProgressEvent>,
 ) {
-    if build_issue(
+    let existing_ok = build_issue(
         &input.dest,
         &input.logical_path,
         &input.expected_md5,
         Some(input.expected_size),
     )
-    .is_none()
-    {
+    .is_none();
+    if existing_ok && !input.prefer_reuse {
         events.push(ProgressEvent::Verified {
             path: input.logical_path,
             ok: true,
@@ -856,6 +884,15 @@ fn execute_ensure_file(
         }
     }
 
+    if existing_ok {
+        events.push(ProgressEvent::Verified {
+            path: input.logical_path,
+            ok: true,
+            issue: None,
+        });
+        return;
+    }
+
     if let Some(download_url) = &input.download_url {
         match do_download(
             io_dispatcher,
@@ -914,6 +951,7 @@ fn execute_ensure_file(
                     source_candidates: input.source_candidates,
                     download_url: input.download_url,
                     allow_copy_fallback: input.allow_copy_fallback,
+                    prefer_reuse: input.prefer_reuse,
                     retry_count: input.retry_count + 1,
                 });
                 return;
@@ -1393,6 +1431,43 @@ mod tests {
             std::fs::read(&original).unwrap(),
             b"before",
             "writing linked path must not mutate the original hardlinked file"
+        );
+    }
+
+    #[test]
+    fn ensure_file_can_relink_verified_target_when_prefer_reuse_enabled() {
+        let tmp = tempdir().unwrap();
+        let source = tmp.path().join("source.bin");
+        let target = tmp.path().join("target.bin");
+        std::fs::write(&source, b"same-bytes").unwrap();
+        std::fs::write(&target, b"same-bytes").unwrap();
+        let expected_md5 = format!("{:x}", Md5::digest(b"same-bytes"));
+
+        let tasks = vec![Task::EnsureFile {
+            dest: target.clone(),
+            logical_path: "target.bin".to_string(),
+            expected_md5,
+            expected_size: 10,
+            source_candidates: vec![source.clone()],
+            download_url: None,
+            allow_copy_fallback: false,
+            prefer_reuse: true,
+            retry_count: 0,
+        }];
+
+        let result = run_tasks(tasks, TaskPoolConfig::default()).unwrap();
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|e| matches!(e, ProgressEvent::Hardlinked { .. })),
+            "expected hardlink event when prefer_reuse is enabled"
+        );
+        assert!(
+            result.events.iter().any(
+                |e| matches!(e, ProgressEvent::Verified { ok: true, issue: None, .. })
+            ),
+            "expected verify success after relink"
         );
     }
 

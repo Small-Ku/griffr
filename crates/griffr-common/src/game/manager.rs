@@ -12,7 +12,9 @@ use super::FileIssue;
 use crate::api::types::{ChannelConfig, Game, Region};
 use crate::api::ApiClient;
 use crate::config::{GameConfig, GameId, ServerConfig, ServerId};
-use crate::game::task_pool::{run_tasks_with_progress, ProgressEvent, Task, TaskPoolConfig};
+use crate::game::task_pool::{
+    run_tasks_with_progress, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
+};
 
 /// Manages game installation state and version tracking
 #[derive(Debug)]
@@ -322,12 +324,15 @@ impl GameManager {
     }
 
     /// Verify integrity of game files
-    pub async fn run_integrity_pool(
+    pub async fn run_integrity_pool_with_runner(
         &self,
         api_client: &ApiClient,
         repair: bool,
         source_roots: &[PathBuf],
         allow_copy_fallback: bool,
+        prefer_reuse: bool,
+        extra_tasks: Vec<Task>,
+        task_pool_runner: Option<&mut TaskPoolRunner>,
         progress_callback: Option<impl Fn(usize, usize, &str)>,
     ) -> Result<IntegrityRunSummary> {
         let install_path = self.install_path().context("Game not installed")?;
@@ -350,7 +355,12 @@ impl GameManager {
             .await?;
         let files_base_url = pkg.file_path.trim_end_matches("/game_files");
 
-        let tasks = entries
+        let tracked_paths = entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<HashSet<_>>();
+
+        let mut tasks = entries
             .iter()
             .map(|entry| {
                 if repair {
@@ -366,6 +376,7 @@ impl GameManager {
                         source_candidates,
                         download_url: Some(format!("{}/{}", files_base_url, entry.path)),
                         allow_copy_fallback,
+                        prefer_reuse,
                         retry_count: 0,
                     }
                 } else {
@@ -379,6 +390,7 @@ impl GameManager {
                 }
             })
             .collect::<Vec<_>>();
+        tasks.extend(extra_tasks);
         let total = tasks.len();
         let mut issues = Vec::new();
         let mut finished = 0usize;
@@ -387,6 +399,9 @@ impl GameManager {
 
         let mut on_event = |event: &ProgressEvent| match event {
             ProgressEvent::Verified { path, issue, .. } => {
+                if !tracked_paths.contains(path) {
+                    return;
+                }
                 if let Some(ref cb) = progress_callback {
                     cb(finished, total, path);
                 }
@@ -396,18 +411,31 @@ impl GameManager {
                 }
             }
             ProgressEvent::Downloaded { path, .. } => {
+                if !tracked_paths.contains(path) {
+                    return;
+                }
                 downloaded_paths.insert(path.clone());
             }
             ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {
-                reused_paths.insert(path.clone());
+                let as_str = path.to_string_lossy();
+                if tracked_paths.iter().any(|p| as_str.ends_with(p)) {
+                    reused_paths.insert(path.clone());
+                }
             }
             ProgressEvent::Failed { path, reason } => {
-                tracing::warn!("verify failed for {}: {}", path, reason);
+                if tracked_paths.contains(path) {
+                    tracing::warn!("verify failed for {}: {}", path, reason);
+                }
             }
             _ => {}
         };
 
-        let _ = run_tasks_with_progress(tasks, TaskPoolConfig::default(), Some(&mut on_event))?;
+        if let Some(runner) = task_pool_runner {
+            let _ = runner.run_batch_with_progress(tasks, Some(&mut on_event))?;
+        } else {
+            let _ =
+                run_tasks_with_progress(tasks, TaskPoolConfig::default(), Some(&mut on_event))?;
+        }
 
         Ok(IntegrityRunSummary {
             issues,
@@ -418,13 +446,36 @@ impl GameManager {
     }
 
     /// Verify integrity of game files
+    pub async fn run_integrity_pool(
+        &self,
+        api_client: &ApiClient,
+        repair: bool,
+        source_roots: &[PathBuf],
+        allow_copy_fallback: bool,
+        prefer_reuse: bool,
+        progress_callback: Option<impl Fn(usize, usize, &str)>,
+    ) -> Result<IntegrityRunSummary> {
+        self.run_integrity_pool_with_runner(
+            api_client,
+            repair,
+            source_roots,
+            allow_copy_fallback,
+            prefer_reuse,
+            Vec::new(),
+            None,
+            progress_callback,
+        )
+        .await
+    }
+
+    /// Verify integrity of game files
     pub async fn verify_integrity(
         &self,
         api_client: &ApiClient,
         progress_callback: Option<impl Fn(usize, usize, &str)>,
     ) -> Result<Vec<FileIssue>> {
         Ok(self
-            .run_integrity_pool(api_client, false, &[], false, progress_callback)
+            .run_integrity_pool(api_client, false, &[], false, false, progress_callback)
             .await?
             .issues)
     }

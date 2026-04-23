@@ -146,6 +146,14 @@ enum Commands {
         /// Allow copying reused files if hardlinks fail
         #[arg(long)]
         force_copy: bool,
+
+        /// Prefer relinking from reuse sources even when local files already verify
+        #[arg(long)]
+        relink_reuse: bool,
+
+        /// Skip VFS resource sync during repair
+        #[arg(long)]
+        skip_vfs: bool,
     },
 
     /// Print local metadata from config.ini and optionally the matching remote state
@@ -479,12 +487,23 @@ async fn main() -> Result<()> {
             repair,
             reuse_from,
             force_copy,
+            relink_reuse,
+            skip_vfs,
         } => {
             opts.verbose(format!(
-                "Verify path: {:?}, repair={}, reuse_from={:?}, force_copy={}",
-                path, repair, reuse_from, force_copy
+                "Verify path: {:?}, repair={}, reuse_from={:?}, force_copy={}, relink_reuse={}, skip_vfs={}",
+                path, repair, reuse_from, force_copy, relink_reuse, skip_vfs
             ));
-            commands::verify(path, repair, reuse_from, force_copy, opts).await?;
+            commands::verify(
+                path,
+                repair,
+                reuse_from,
+                force_copy,
+                relink_reuse,
+                skip_vfs,
+                opts,
+            )
+            .await?;
         }
 
         Commands::Info { target } => {

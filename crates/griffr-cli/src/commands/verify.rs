@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
+use griffr_common::game::task_pool::{TaskPoolConfig, TaskPoolRunner};
+use griffr_common::game::{plan_vfs_tasks, VfsMaterializeConfig, VfsTaskPlan};
 use serde_json::json;
 
 use super::local::detect_local_install;
@@ -22,8 +24,17 @@ pub async fn verify(
     repair: bool,
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
+    relink_reuse: bool,
+    skip_vfs: bool,
     opts: GlobalOptions,
 ) -> Result<()> {
+    if relink_reuse && !repair {
+        anyhow::bail!("--relink-reuse requires --repair");
+    }
+    if relink_reuse && reuse_paths.is_empty() {
+        anyhow::bail!("--relink-reuse requires at least one --reuse-from source");
+    }
+
     let local = detect_local_install(&path).await?;
     let game_id = local.require_known_game()?;
     let server_id = local.require_known_server()?;
@@ -76,12 +87,58 @@ pub async fn verify(
         }
     }
 
+    let extra_tasks = if repair && !skip_vfs {
+        let version_info = api_client
+            .get_latest_game(game_id, server_id, Some(&installed_version))
+            .await
+            .context("Failed to fetch version information for VFS planning")?;
+        let rand_str = version_info.rand_str();
+        if rand_str.is_empty() {
+            Vec::new()
+        } else {
+            let streaming_assets = local
+                .install_path
+                .join(game_id.streaming_assets_subdir())
+                .join("StreamingAssets");
+            let source_streaming_assets = source_roots
+                .iter()
+                .map(|path| {
+                    path.join(game_id.streaming_assets_subdir())
+                        .join("StreamingAssets")
+                })
+                .collect::<Vec<_>>();
+            let VfsTaskPlan { tasks, .. } = plan_vfs_tasks(
+                &api_client,
+                game_id,
+                server_id,
+                &version_info.version,
+                &rand_str,
+                &streaming_assets,
+                &VfsMaterializeConfig {
+                    source_streaming_assets,
+                    allow_copy_fallback: force_copy,
+                },
+            )
+            .await
+            .context("Failed to plan VFS tasks for verify+repair")?;
+            tasks
+        }
+    } else {
+        Vec::new()
+    };
+
+    let mut pool_cfg = TaskPoolConfig::default();
+    pool_cfg.max_retries = 3;
+    let mut pool_runner = TaskPoolRunner::new(pool_cfg)?;
     let summary = manager
-        .run_integrity_pool(
+        .run_integrity_pool_with_runner(
             &api_client,
             repair,
             &source_roots,
             force_copy,
+            relink_reuse,
+            extra_tasks,
+            Some(&mut pool_runner),
             progress_cb.as_ref().map(|(_, cb)| cb),
         )
         .await

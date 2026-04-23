@@ -15,7 +15,7 @@ use crate::api::types::GameFileEntry;
 use crate::api::ApiClient;
 use crate::config::{GameId, ServerId};
 use crate::game::task_pool::{
-    run_tasks, run_tasks_with_progress, ProgressEvent, Task, TaskPoolConfig,
+    run_tasks, run_tasks_with_progress, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
 use crate::game::FileIssue;
 
@@ -480,6 +480,7 @@ pub async fn apply_file_reuse_flow(
         file_path,
         game_files_md5,
         config,
+        None,
         None::<fn(usize, usize, &str)>,
     )
     .await?;
@@ -502,6 +503,7 @@ pub async fn materialize_game_files_with_pool(
     file_path: &str,
     game_files_md5: Option<&str>,
     config: &FileReuseConfig,
+    task_pool_runner: Option<&mut TaskPoolRunner>,
     progress_callback: Option<impl Fn(usize, usize, &str)>,
 ) -> Result<MaterializeSummary> {
     // 1. Fetch target manifest
@@ -582,6 +584,7 @@ pub async fn materialize_game_files_with_pool(
                 source_candidates: candidates,
                 download_url: Some(format!("{}/{}", files_base_url, entry.path)),
                 allow_copy_fallback: config.allow_copy_fallback,
+                prefer_reuse: false,
                 retry_count: 0,
             }
         })
@@ -600,11 +603,6 @@ pub async fn materialize_game_files_with_pool(
     }
 
     let total = tasks.len();
-    let mut pool_cfg = TaskPoolConfig::default();
-    pool_cfg.io_slots = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .clamp(4, 24);
     let mut finished_stream = 0usize;
     let mut progress_event_cb = |event: &ProgressEvent| {
         if let ProgressEvent::Verified { path, .. } = event {
@@ -614,8 +612,19 @@ pub async fn materialize_game_files_with_pool(
             finished_stream = finished_stream.saturating_add(1);
         }
     };
-    let result = run_tasks_with_progress(tasks, pool_cfg, Some(&mut progress_event_cb))
-        .context("File materialization pool failed")?;
+    let result = if let Some(runner) = task_pool_runner {
+        runner
+            .run_batch_with_progress(tasks, Some(&mut progress_event_cb))
+            .context("File materialization pool failed")?
+    } else {
+        let mut pool_cfg = TaskPoolConfig::default();
+        pool_cfg.io_slots = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(4, 24);
+        run_tasks_with_progress(tasks, pool_cfg, Some(&mut progress_event_cb))
+            .context("File materialization pool failed")?
+    };
 
     let mut issues = Vec::new();
     let mut reused = std::collections::HashSet::new();

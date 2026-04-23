@@ -13,13 +13,24 @@
 //! Reference: `ref/ak-endfield-api-archive-main/src/cmds/archive.ts`
 
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::api::client::ApiClient;
 use crate::api::crypto::RES_INDEX_KEY;
-use crate::api::types::*;
 use crate::config::{GameId, ServerId};
+use crate::game::task_pool::{
+    ProgressEvent, Task, TaskPoolRunner,
+};
+
+#[derive(Debug, Clone, Default)]
+pub struct VfsMaterializeConfig {
+    /// Candidate StreamingAssets roots from other installs for VFS file reuse.
+    pub source_streaming_assets: Vec<std::path::PathBuf>,
+    /// Allow copy fallback when hardlinking from source installs fails.
+    pub allow_copy_fallback: bool,
+}
 
 /// Result of a VFS resource check/download operation
 #[derive(Debug, Clone)]
@@ -36,6 +47,89 @@ pub struct VfsUpdateResult {
     pub res_version: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct VfsTaskPlan {
+    pub tasks: Vec<Task>,
+    pub total_files: usize,
+    pub total_bytes: u64,
+    pub res_version: String,
+}
+
+pub async fn plan_vfs_tasks(
+    api_client: &ApiClient,
+    game_id: GameId,
+    server_id: ServerId,
+    game_version: &str,
+    rand_str: &str,
+    streaming_assets_path: &Path,
+    materialize: &VfsMaterializeConfig,
+) -> Result<VfsTaskPlan> {
+    let resources = api_client
+        .get_latest_resources(game_id, server_id, game_version, rand_str, "Windows")
+        .await
+        .context("Failed to get latest VFS resources")?;
+
+    let mut tasks = Vec::new();
+    let mut total_files = 0usize;
+    let mut total_bytes = 0u64;
+
+    for resource in &resources.resources {
+        let index_url = format!("{}/index_{}.json", resource.path, resource.name);
+        let index = api_client
+            .fetch_res_index(&index_url, RES_INDEX_KEY)
+            .await
+            .with_context(|| format!("Failed to fetch resource index for {}", resource.name))?;
+
+        for file in &index.files {
+            if file.name.is_empty() {
+                warn!(
+                    "Skipping VFS file with empty name in index {}",
+                    resource.name
+                );
+                continue;
+            }
+            let expected_md5 = file
+                .md5
+                .as_deref()
+                .or(file.hash.as_deref())
+                .unwrap_or("")
+                .to_string();
+            if expected_md5.is_empty() {
+                warn!(
+                    "Skipping VFS file without checksum in index {}: {}",
+                    resource.name, file.name
+                );
+                continue;
+            }
+            let source_candidates = materialize
+                .source_streaming_assets
+                .iter()
+                .map(|root| root.join(&file.name))
+                .collect::<Vec<_>>();
+            total_files += 1;
+            total_bytes = total_bytes.saturating_add(file.size);
+            tasks.push(Task::EnsureFile {
+                dest: streaming_assets_path.join(&file.name),
+                logical_path: file.name.clone(),
+                expected_md5,
+                expected_size: file.size,
+                source_candidates,
+                download_url: Some(format!("{}/{}", resource.path, file.name)),
+                allow_copy_fallback: materialize.allow_copy_fallback,
+                prefer_reuse: false,
+                retry_count: 0,
+            });
+        }
+    }
+
+    Ok(VfsTaskPlan {
+        tasks,
+        total_files,
+        total_bytes,
+        res_version: resources.res_version,
+    })
+}
+
 /// Check and download VFS game resources after a game update/install
 ///
 /// This should be called after the main game packs are extracted. It:
@@ -47,6 +141,8 @@ pub struct VfsUpdateResult {
 /// (e.g., `{install_path}/Endfield_Data/StreamingAssets` for Endfield).
 ///
 /// Returns a summary of what was downloaded.
+/// Check/download VFS resources using task-pool EnsureFile flow with optional
+/// hardlink/copy reuse from source installs.
 pub async fn download_vfs_resources(
     api_client: &ApiClient,
     game_id: GameId,
@@ -54,64 +150,64 @@ pub async fn download_vfs_resources(
     game_version: &str,
     rand_str: &str,
     streaming_assets_path: &Path,
+    materialize: &VfsMaterializeConfig,
+    task_pool_runner: &mut TaskPoolRunner,
     progress_callback: Option<&dyn Fn(u64, u64)>,
 ) -> Result<VfsUpdateResult> {
-    // Step 1: Get latest resource metadata
-    let resources = api_client
-        .get_latest_resources(game_id, server_id, game_version, rand_str, "Windows")
-        .await
-        .context("Failed to get latest VFS resources")?;
+    let plan = plan_vfs_tasks(
+        api_client,
+        game_id,
+        server_id,
+        game_version,
+        rand_str,
+        streaming_assets_path,
+        materialize,
+    )
+    .await?;
 
-    info!(
-        "VFS resource version: {} ({} resource groups)",
-        resources.res_version,
-        resources.resources.len()
-    );
+    info!("VFS resource version: {}", plan.res_version);
 
     let mut total_result = VfsUpdateResult {
-        total_files: 0,
+        total_files: plan.total_files,
         downloaded_files: 0,
         downloaded_bytes: 0,
         skipped_files: 0,
-        res_version: resources.res_version.clone(),
+        res_version: plan.res_version.clone(),
     };
 
-    // Step 2: Process each resource group (main, initial)
-    for resource in &resources.resources {
-        info!(
-            "Processing VFS resource group: {} (version {})",
-            resource.name, resource.version
-        );
+    let mut downloaded_paths = HashSet::<String>::new();
+    let mut verified_paths = HashSet::<String>::new();
+    let mut failed_paths = Vec::<String>::new();
+    let mut downloaded_bytes = 0u64;
+    let mut on_event = |event: &ProgressEvent| match event {
+        ProgressEvent::Downloaded { path, bytes } => {
+            downloaded_paths.insert(path.clone());
+            downloaded_bytes = downloaded_bytes.saturating_add(*bytes);
+        }
+        ProgressEvent::Verified { path, ok, .. } => {
+            if *ok {
+                verified_paths.insert(path.clone());
+            }
+            if let Some(cb) = progress_callback {
+                cb(downloaded_bytes, plan.total_bytes);
+            }
+        }
+        ProgressEvent::Failed { path, reason } => {
+            warn!("Failed to materialize VFS file {}: {}", path, reason);
+            failed_paths.push(path.clone());
+        }
+        _ => {}
+    };
+    let _ = task_pool_runner
+        .run_batch_with_progress(plan.tasks, Some(&mut on_event))
+        .context("Failed to materialize VFS files")?;
 
-        // Fetch and decrypt the resource index
-        let index_url = format!("{}/index_{}.json", resource.path, resource.name);
-        let index = api_client
-            .fetch_res_index(&index_url, RES_INDEX_KEY)
-            .await
-            .with_context(|| format!("Failed to fetch resource index for {}", resource.name))?;
+    total_result.downloaded_files = downloaded_paths.len();
+    total_result.downloaded_bytes = downloaded_bytes;
+    total_result.skipped_files = verified_paths.len().saturating_sub(downloaded_paths.len());
 
-        info!(
-            "  VFS index: {} files ({} groups)",
-            index.files.len(),
-            resource.name
-        );
-
-        total_result.total_files += index.files.len();
-
-        // Step 3: Download missing files
-        let download_result = download_vfs_files(
-            api_client,
-            &index.files,
-            streaming_assets_path,
-            &resource.path,
-            progress_callback,
-        )
-        .await
-        .with_context(|| format!("Failed to download VFS files for {}", resource.name))?;
-
-        total_result.downloaded_files += download_result.downloaded_files;
-        total_result.downloaded_bytes += download_result.downloaded_bytes;
-        total_result.skipped_files += download_result.skipped_files;
+    if !failed_paths.is_empty() {
+        warn!("VFS sync had {} failed file(s)", failed_paths.len());
     }
 
     // Step 4: Print summary
@@ -130,124 +226,6 @@ pub async fn download_vfs_resources(
     }
 
     Ok(total_result)
-}
-
-/// Download VFS files that are missing or have wrong size.
-///
-/// For performance, uses a size-only check for existing files. This avoids
-/// reading tens of GB of VFS data just to compute MD5 hashes — size mismatches
-/// are extremely rare for correctly extracted VFS files, and the download itself
-/// verifies MD5 on completion.
-async fn download_vfs_files(
-    api_client: &ApiClient,
-    files: &[ResIndexFile],
-    vfs_dir: &Path,
-    base_url: &str,
-    progress_callback: Option<&dyn Fn(u64, u64)>,
-) -> Result<VfsUpdateResult> {
-    let mut result = VfsUpdateResult {
-        total_files: files.len(),
-        downloaded_files: 0,
-        downloaded_bytes: 0,
-        skipped_files: 0,
-        res_version: String::new(),
-    };
-
-    // Collect files that need downloading
-    let mut files_to_download = Vec::new();
-
-    for file in files {
-        let local_path = vfs_dir.join(&file.name);
-
-        // Quick check: file must exist with correct size.
-        // We skip the full MD5 read for performance — size is a very reliable
-        // indicator for VFS files, and the download verifies MD5 anyway.
-        let needs_download = match compio::fs::metadata(&local_path).await {
-            Ok(metadata) => metadata.len() != file.size,
-            Err(_) => true, // File doesn't exist
-        };
-
-        if needs_download {
-            files_to_download.push(file);
-        } else {
-            result.skipped_files += 1;
-        }
-    }
-
-    if files_to_download.is_empty() {
-        return Ok(result);
-    }
-
-    // Calculate total download size
-    let total_size: u64 = files_to_download.iter().map(|f| f.size).sum();
-    info!(
-        "  Downloading {} VFS files ({:.2} GB)...",
-        files_to_download.len(),
-        total_size as f64 / 1024.0 / 1024.0 / 1024.0
-    );
-
-    // Download files (using sequential downloads for VFS to avoid overwhelming CDN)
-    let mut downloaded_bytes: u64 = 0;
-    for (i, file) in files_to_download.iter().enumerate() {
-        let download_url = format!("{}/{}", base_url, file.name);
-        let local_path = vfs_dir.join(&file.name);
-
-        // Create parent directory
-        if let Some(parent) = local_path.parent() {
-            compio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("Failed to create {}", parent.display()))?;
-        }
-
-        // Download with retry
-        match api_client
-            .download_file_with_verify(&download_url, &local_path, &file.md5)
-            .await
-        {
-            Ok(()) => {
-                downloaded_bytes += file.size;
-                result.downloaded_files += 1;
-            }
-            Err(e) => {
-                // Log error but continue with other files
-                warn!("Failed to download VFS file {}: {}", file.name, e);
-                // Try without MD5 verification as fallback
-                match api_client
-                    .download_file(&download_url, &local_path, false)
-                    .await
-                {
-                    Ok(_) => {
-                        downloaded_bytes += file.size;
-                        result.downloaded_files += 1;
-                    }
-                    Err(e2) => {
-                        warn!(
-                            "Failed to download VFS file {} (no verify): {}",
-                            file.name, e2
-                        );
-                    }
-                }
-            }
-        }
-
-        // Progress callback
-        if let Some(cb) = progress_callback {
-            cb(downloaded_bytes, total_size);
-        }
-
-        // Emit progress periodically.
-        if (i + 1) % 50 == 0 || i + 1 == files_to_download.len() {
-            debug!(
-                "VFS progress: {}/{} files ({:.1}%)",
-                i + 1,
-                files_to_download.len(),
-                (i + 1) as f64 / files_to_download.len() as f64 * 100.0
-            );
-        }
-    }
-
-    result.downloaded_bytes = downloaded_bytes;
-    Ok(result)
 }
 
 /// Get VFS resource info without downloading (for dry-run / planning)

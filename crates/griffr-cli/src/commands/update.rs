@@ -7,11 +7,12 @@ use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::GameId;
 use griffr_common::game::task_pool::{
-    run_tasks_with_progress, ArchivePart, ProgressEvent, Task, TaskPoolConfig,
+    ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
 use griffr_common::game::{
-    download_vfs_resources, materialize_game_files_with_pool, FileReuseConfig, GameManager,
+    materialize_game_files_with_pool, plan_vfs_tasks, FileReuseConfig, GameManager,
     SourceInstallInput,
+    VfsMaterializeConfig, VfsTaskPlan,
 };
 
 use super::local::detect_local_install;
@@ -199,8 +200,15 @@ async fn verify_updated_install(
     target_version: &str,
     install_path: &Path,
     skip_verify: bool,
+    extra_tasks: Vec<Task>,
+    task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<()> {
     if skip_verify {
+        if !extra_tasks.is_empty() {
+            let _ = task_pool_runner
+                .run_batch_with_progress(extra_tasks, None)
+                .context("Failed to execute extra DAG tasks during skip-verify")?;
+        }
         ui::print_info("Skipping post-update integrity verification (--skip-verify)");
         manager.set_version(target_version.to_string());
         manager
@@ -211,7 +219,16 @@ async fn verify_updated_install(
     }
 
     let summary = manager
-        .run_integrity_pool(api_client, true, &[], false, None::<fn(usize, usize, &str)>)
+        .run_integrity_pool_with_runner(
+            api_client,
+            true,
+            &[],
+            false,
+            false,
+            extra_tasks,
+            Some(task_pool_runner),
+            None::<fn(usize, usize, &str)>,
+        )
         .await?;
     ui::print_info(format!(
         "Verification summary: issues={} repaired_downloads={}",
@@ -246,11 +263,11 @@ async fn verify_updated_install(
 async fn update_via_reuse(
     api_client: &ApiClient,
     local: &super::local::LocalInstall,
-    manager: &mut GameManager,
     version_info: &griffr_common::api::types::GetLatestGameResponse,
     reuse_paths: &[PathBuf],
     force_copy: bool,
     opts: &GlobalOptions,
+    task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<()> {
     let game_id = local.require_known_game()?;
     let target_server_id = local.require_known_server()?;
@@ -307,6 +324,7 @@ async fn update_via_reuse(
             dry_run: opts.is_dry_run(),
             source_installs,
         },
+        Some(task_pool_runner),
         Some(|current: usize, total: usize, file: &str| {
             materialize_bar_cb.update(current, total, file);
         }),
@@ -324,14 +342,6 @@ async fn update_via_reuse(
             materialized.issues.len()
         );
     }
-    verify_updated_install(
-        api_client,
-        manager,
-        &version_info.version,
-        &local.install_path,
-        opts.skip_verify,
-    )
-    .await?;
     Ok(())
 }
 
@@ -340,6 +350,7 @@ async fn download_and_extract_archives(
     install_path: &Path,
     label: &str,
     opts: &GlobalOptions,
+    task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<()> {
     let total_size: u64 = archives.iter().map(|p| p.size()).sum();
     ui::print_phase(format!(
@@ -395,12 +406,8 @@ async fn download_and_extract_archives(
     ));
     let archive_bar_cb = archive_bar.clone();
     let mut archive_done = 0usize;
-    let mut cfg = TaskPoolConfig::default();
-    cfg.io_slots = 4;
-    cfg.max_retries = 3;
-    let result = run_tasks_with_progress(
+    let result = task_pool_runner.run_batch_with_progress(
         tasks,
-        cfg,
         Some(&mut |event: &ProgressEvent| {
             if let ProgressEvent::Extracted { path } = event {
                 archive_bar_cb.update(
@@ -460,6 +467,9 @@ pub async fn update(
     let current_version = local.require_config_ini_version()?.to_string();
     let mut manager = local.as_manager()?;
     let api_client = ApiClient::new()?;
+    let mut task_pool_cfg = TaskPoolConfig::default();
+    task_pool_cfg.max_retries = 3;
+    let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
 
     let version_info = api_client
         .get_latest_game(game_id, server_id, Some(&current_version))
@@ -520,90 +530,92 @@ pub async fn update(
         update_via_reuse(
             &api_client,
             &local,
-            &mut manager,
             &version_info,
             &reuse_paths,
             force_copy,
             &opts,
+            &mut task_pool_runner,
         )
         .await?;
-
-        if !opts.skip_vfs {
-            ui::print_phase("Syncing VFS resources");
-            let streaming_assets = local
-                .install_path
-                .join(game_id.streaming_assets_subdir())
-                .join("StreamingAssets");
-            let rand_str = version_info.rand_str();
-            let _ = download_vfs_resources(
-                &api_client,
-                game_id,
-                server_id,
-                &version_info.version,
-                &rand_str,
-                &streaming_assets,
-                None,
-            )
-            .await;
-        }
-
-        ui::print_success("Update complete");
-        return Ok(());
     }
 
-    match package_kind {
-        UpdatePackageKind::Patch => {
-            validate_patch_target(game_id, &local.install_path).await?;
-            let patch = version_info
-                .patch
-                .as_ref()
-                .context("No patch package information available")?;
-            download_and_extract_archives(&patch.patches, &local.install_path, "patch", &opts)
+    if reuse_paths.is_empty() {
+        match package_kind {
+            UpdatePackageKind::Patch => {
+                validate_patch_target(game_id, &local.install_path).await?;
+                let patch = version_info
+                    .patch
+                    .as_ref()
+                    .context("No patch package information available")?;
+                download_and_extract_archives(
+                    &patch.patches,
+                    &local.install_path,
+                    "patch",
+                    &opts,
+                    &mut task_pool_runner,
+                )
                 .await?;
-            verify_updated_install(
-                &api_client,
-                &mut manager,
-                &version_info.version,
-                &local.install_path,
-                opts.skip_verify,
-            )
-            .await?;
-        }
-        UpdatePackageKind::Full => {
-            let pkg = version_info
-                .pkg
-                .as_ref()
-                .context("No full package information available")?;
-            download_and_extract_archives(&pkg.packs, &local.install_path, "full", &opts).await?;
-            verify_updated_install(
-                &api_client,
-                &mut manager,
-                &version_info.version,
-                &local.install_path,
-                opts.skip_verify,
-            )
-            .await?;
+            }
+            UpdatePackageKind::Full => {
+                let pkg = version_info
+                    .pkg
+                    .as_ref()
+                    .context("No full package information available")?;
+                download_and_extract_archives(
+                    &pkg.packs,
+                    &local.install_path,
+                    "full",
+                    &opts,
+                    &mut task_pool_runner,
+                )
+                .await?;
+            }
         }
     }
 
-    if !opts.skip_vfs {
-        ui::print_phase("Syncing VFS resources");
+    let extra_tasks = if !opts.skip_vfs {
+        ui::print_phase("Verifying update + syncing VFS resources (single DAG batch)");
         let streaming_assets = local
             .install_path
             .join(game_id.streaming_assets_subdir())
             .join("StreamingAssets");
+        let source_streaming_assets = reuse_paths
+            .iter()
+            .filter(|path| **path != local.install_path)
+            .map(|path| {
+                path.join(game_id.streaming_assets_subdir())
+                    .join("StreamingAssets")
+            })
+            .collect::<Vec<_>>();
         let rand_str = version_info.rand_str();
-        let _ = download_vfs_resources(
+        let VfsTaskPlan { tasks: vfs_tasks, .. } = plan_vfs_tasks(
             &api_client,
             game_id,
             server_id,
             &version_info.version,
             &rand_str,
             &streaming_assets,
-            None,
+            &VfsMaterializeConfig {
+                source_streaming_assets,
+                allow_copy_fallback: force_copy,
+            },
         )
-        .await;
-    }
+        .await
+        .context("Failed to plan VFS tasks")?;
+        vfs_tasks
+    } else {
+        Vec::new()
+    };
+    verify_updated_install(
+        &api_client,
+        &mut manager,
+        &version_info.version,
+        &local.install_path,
+        opts.skip_verify,
+        extra_tasks,
+        &mut task_pool_runner,
+    )
+    .await?;
 
     ui::print_success("Update complete");
     Ok(())
@@ -1091,7 +1103,17 @@ mod tests {
             output: crate::OutputFormat::Text,
         };
 
-        let result = download_and_extract_archives(&archives, &install_path, "patch", &opts).await;
+        let mut pool_cfg = TaskPoolConfig::default();
+        pool_cfg.max_retries = 3;
+        let mut pool_runner = TaskPoolRunner::new(pool_cfg).unwrap();
+        let result = download_and_extract_archives(
+            &archives,
+            &install_path,
+            "patch",
+            &opts,
+            &mut pool_runner,
+        )
+        .await;
         stop.store(true, Ordering::Release);
         result.unwrap();
 
