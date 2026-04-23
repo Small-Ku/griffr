@@ -222,6 +222,66 @@ impl ApiClient {
         Ok(media)
     }
 
+    /// Get raw media batch response JSON as returned by the launcher web batch API.
+    pub async fn get_media_raw(
+        &self,
+        game: GameId,
+        server: ServerId,
+        language: &str,
+    ) -> Result<serde_json::Value> {
+        let (game_type, region) = match game {
+            GameId::Arknights => (Game::Arknights, Region::CN),
+            GameId::Endfield => (Game::Endfield, Self::region_for_server(server)),
+        };
+
+        let channel = ChannelConfig::for_game_server(game, server);
+        let app_code = game_type.app_code(region).to_string();
+        let common_req =
+            CommonRequest::new(app_code, language, channel.channel, channel.sub_channel);
+
+        let request = BatchRequest {
+            seq: "1".to_string(),
+            requests: vec![
+                ProxyRequest::GetBanner {
+                    req: common_req.clone(),
+                },
+                ProxyRequest::GetAnnouncement {
+                    req: common_req.clone(),
+                },
+                ProxyRequest::GetMainBgImage {
+                    req: common_req.clone(),
+                },
+                ProxyRequest::GetSidebar { req: common_req },
+            ],
+        };
+
+        let url = self.web_batch_url(game_type, region);
+        let response = self
+            .client
+            .post(&url)
+            .context("Failed to build media batch request")?
+            .header("User-Agent", &self.user_agent)
+            .context("Failed to set User-Agent header")?
+            .header("Content-Type", "application/json")
+            .context("Failed to set Content-Type header")?
+            .json(&request)
+            .context("Failed to serialize media batch request body")?
+            .send()
+            .await
+            .with_context(|| format!("Failed to send media batch request to {}", url))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Media API returned error {}: {}", status, body);
+        }
+
+        response
+            .json::<serde_json::Value>()
+            .await
+            .context("Failed to parse media batch response JSON")
+    }
+
     /// Get latest game resources (VFS files) via the direct API endpoint
     ///
     /// This is a separate GET endpoint from the batch proxy API.

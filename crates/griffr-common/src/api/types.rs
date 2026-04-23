@@ -289,7 +289,7 @@ pub enum ProxyResponse {
 }
 
 /// Get latest game response
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetLatestGameResponse {
     /// Action code reported by the launcher API.
     ///
@@ -375,7 +375,7 @@ impl GetLatestGameResponse {
 }
 
 /// Package information for full installs
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageInfo {
     /// List of pack files to download
     pub packs: Vec<PackFile>,
@@ -394,7 +394,7 @@ pub struct PackageInfo {
 }
 
 /// Individual pack file
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackFile {
     /// Download URL
     pub url: String,
@@ -420,7 +420,7 @@ impl PackFile {
 }
 
 /// Patch information for delta updates
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatchInfo {
     /// Base patch archive URL when the server exposes a single-file view
     pub url: String,
@@ -637,7 +637,7 @@ pub struct ResIndexFile {
 }
 
 /// Response from /game/get_latest_resources API
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetLatestResourcesResponse {
     /// Available resource groups (main, initial)
     pub resources: Vec<GameResource>,
@@ -658,7 +658,7 @@ pub struct GetLatestResourcesResponse {
 }
 
 /// A resource group in the get_latest_resources response
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameResource {
     /// Resource group name ("main" or "initial")
     pub name: String,

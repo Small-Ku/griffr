@@ -229,33 +229,92 @@ pub enum OutputFormat {
 #[derive(Subcommand)]
 enum DebugCommands {
     /// Detect known game/server/version from encrypted config.ini
-    Detect {
+    DetectConfigIni {
         #[arg(long)]
         path: std::path::PathBuf,
     },
     /// Print decrypted config.ini contents
-    ConfigIni {
+    DecryptConfigIni {
         #[arg(long)]
         path: std::path::PathBuf,
     },
     /// Print decrypted local game_files contents
-    GameFiles {
+    DecryptGameFiles {
         #[arg(long)]
         path: std::path::PathBuf,
     },
-    /// Fetch and print the remote game_files manifest
-    FetchGameFiles {
+    /// Call get_latest_game and print raw response JSON
+    GetRawLatestGame {
         #[command(flatten)]
         remote: RemoteTarget,
 
         #[arg(long)]
         version: Option<String>,
 
-        #[arg(long, id = "fetch_game_files_output")]
+        #[arg(long, id = "api_get_latest_game_output")]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Call get_latest_resources and print raw response JSON
+    GetRawLatestResources {
+        #[command(flatten)]
+        remote: RemoteTarget,
+
+        /// Version passed to get_latest_game for version/rand resolution
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Full version used for get_latest_resources (defaults to resolved latest version)
+        #[arg(long = "resource-version")]
+        resource_version: Option<String>,
+
+        /// rand_str for get_latest_resources (defaults to resolved latest rand_str)
+        #[arg(long = "rand-str")]
+        rand_str: Option<String>,
+
+        /// Platform for get_latest_resources
+        #[arg(long, default_value = "Windows")]
+        platform: String,
+
+        #[arg(long = "output-file", id = "api_get_latest_resources_output")]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Fetch and print the remote game_files manifest
+    ListGameFiles {
+        #[command(flatten)]
+        remote: RemoteTarget,
+
+        #[arg(long)]
+        version: Option<String>,
+
+        #[arg(long, id = "api_get_game_files_output")]
+        output: Option<std::path::PathBuf>,
+    },
+    /// List files from latest resource indexes (index_main/index_initial)
+    ListResourceFiles {
+        #[command(flatten)]
+        remote: RemoteTarget,
+
+        /// Version passed to get_latest_game for version/rand resolution
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Full version used for get_latest_resources (defaults to resolved latest version)
+        #[arg(long = "resource-version")]
+        resource_version: Option<String>,
+
+        /// rand_str for get_latest_resources (defaults to resolved latest rand_str)
+        #[arg(long = "rand-str")]
+        rand_str: Option<String>,
+
+        /// Platform for get_latest_resources
+        #[arg(long, default_value = "Windows")]
+        platform: String,
+
+        #[arg(long = "output-file", id = "list_resource_files_output")]
         output: Option<std::path::PathBuf>,
     },
     /// Fetch one file referenced by the latest remote game_files manifest
-    FetchFile {
+    GetFile {
         #[command(flatten)]
         remote: RemoteTarget,
 
@@ -265,11 +324,24 @@ enum DebugCommands {
         #[arg(long)]
         file: String,
 
-        #[arg(long, id = "fetch_file_output")]
+        #[arg(long, id = "api_get_file_output")]
         output: std::path::PathBuf,
     },
     /// Fetch raw media/news payload as JSON
-    FetchMedia {
+    GetRawMedia {
+        #[command(flatten)]
+        remote: RemoteTarget,
+
+        /// Launcher language
+        #[arg(long, default_value = "zh-cn")]
+        language: String,
+
+        /// Optional output file path for JSON payload
+        #[arg(long = "output-file", id = "api_get_media_output")]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Fetch normalized media/news payload as JSON
+    GetMedia {
         #[command(flatten)]
         remote: RemoteTarget,
 
@@ -526,10 +598,44 @@ async fn main() -> Result<()> {
         }
 
         Commands::Debug { command } => match command {
-            DebugCommands::Detect { path } => commands::debug_detect(path, opts).await?,
-            DebugCommands::ConfigIni { path } => commands::debug_config_ini(path, opts).await?,
-            DebugCommands::GameFiles { path } => commands::debug_game_files(path, opts).await?,
-            DebugCommands::FetchGameFiles {
+            DebugCommands::DetectConfigIni { path } => commands::debug_detect(path, opts).await?,
+            DebugCommands::DecryptConfigIni { path } => {
+                commands::debug_config_ini(path, opts).await?
+            }
+            DebugCommands::DecryptGameFiles { path } => commands::debug_game_files(path, opts).await?,
+            DebugCommands::GetRawLatestGame {
+                remote,
+                version,
+                output,
+            } => {
+                let game_id = remote.game.parse::<GameId>()?;
+                let server_id = remote.server.parse::<ServerId>()?;
+                commands::debug_api_get_latest_game(game_id, server_id, version, output, opts)
+                    .await?;
+            }
+            DebugCommands::GetRawLatestResources {
+                remote,
+                version,
+                resource_version,
+                rand_str,
+                platform,
+                output,
+            } => {
+                let game_id = remote.game.parse::<GameId>()?;
+                let server_id = remote.server.parse::<ServerId>()?;
+                commands::debug_api_get_latest_resources(
+                    game_id,
+                    server_id,
+                    version,
+                    resource_version,
+                    rand_str,
+                    platform,
+                    output,
+                    opts,
+                )
+                .await?;
+            }
+            DebugCommands::ListGameFiles {
                 remote,
                 version,
                 output,
@@ -538,7 +644,29 @@ async fn main() -> Result<()> {
                 let server_id = remote.server.parse::<ServerId>()?;
                 commands::debug_fetch_game_files(game_id, server_id, version, output, opts).await?;
             }
-            DebugCommands::FetchFile {
+            DebugCommands::ListResourceFiles {
+                remote,
+                version,
+                resource_version,
+                rand_str,
+                platform,
+                output,
+            } => {
+                let game_id = remote.game.parse::<GameId>()?;
+                let server_id = remote.server.parse::<ServerId>()?;
+                commands::debug_list_resource_files(
+                    game_id,
+                    server_id,
+                    version,
+                    resource_version,
+                    rand_str,
+                    platform,
+                    output,
+                    opts,
+                )
+                .await?;
+            }
+            DebugCommands::GetFile {
                 remote,
                 version,
                 file,
@@ -548,7 +676,16 @@ async fn main() -> Result<()> {
                 let server_id = remote.server.parse::<ServerId>()?;
                 commands::debug_fetch_file(game_id, server_id, version, file, output, opts).await?;
             }
-            DebugCommands::FetchMedia {
+            DebugCommands::GetRawMedia {
+                remote,
+                language,
+                output,
+            } => {
+                let game_id = remote.game.parse::<GameId>()?;
+                let server_id = remote.server.parse::<ServerId>()?;
+                commands::debug_api_get_media(game_id, server_id, language, output, opts).await?;
+            }
+            DebugCommands::GetMedia {
                 remote,
                 language,
                 output,
