@@ -442,6 +442,7 @@ fn execute_task(
             ctx.config.max_retries,
             io_dispatcher,
             &ctx.config.user_agent,
+            spawned,
             events,
         ),
         Task::Verify {
@@ -534,6 +535,7 @@ fn execute_install_archive(
     max_retries: u32,
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
+    spawned: &mut Vec<Task>,
     events: &mut Vec<ProgressEvent>,
 ) {
     for part in parts {
@@ -645,7 +647,12 @@ fn execute_install_archive(
         }
     }
 
-    execute_extract_archive(source_dir, base_name, dest, cleanup, events);
+    spawned.push(Task::Extract {
+        source_dir,
+        base_name,
+        dest,
+        cleanup,
+    });
 }
 
 fn execute_extract_archive(

@@ -148,6 +148,11 @@ pub async fn install(
             server_id,
             install_path.display()
         ));
+        if opts.keep_pack_archives {
+            opts.dry_run("Would keep downloaded package archives after extraction.");
+        } else {
+            opts.dry_run("Would delete package archives after successful extraction.");
+        }
         if !reuse_paths.is_empty() {
             opts.dry_run(format!(
                 "Would reuse files from: {}",
@@ -245,7 +250,7 @@ pub async fn install(
                 source_dir: download_dir.clone(),
                 base_name,
                 dest: install_path.clone(),
-                cleanup: true,
+                cleanup: !opts.keep_pack_archives,
                 parts,
             });
         }

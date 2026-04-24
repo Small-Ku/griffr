@@ -74,6 +74,10 @@ enum Commands {
         /// Skip VFS resource download
         #[arg(long)]
         skip_vfs: bool,
+
+        /// Keep downloaded package archives after successful extraction
+        #[arg(long)]
+        keep_pack_archives: bool,
     },
 
     /// Delete a local install path
@@ -116,6 +120,10 @@ enum Commands {
         /// Skip VFS resource download
         #[arg(long)]
         skip_vfs: bool,
+
+        /// Keep downloaded package archives after successful extraction
+        #[arg(long)]
+        keep_pack_archives: bool,
     },
 
     /// Launch a local install path
@@ -434,6 +442,7 @@ pub struct GlobalOptions {
     pub skip_verify: bool,
     pub force_full_package: bool,
     pub skip_vfs: bool,
+    pub keep_pack_archives: bool,
     pub output: OutputFormat,
 }
 
@@ -482,6 +491,7 @@ async fn main() -> Result<()> {
         skip_verify: false,
         force_full_package: false,
         skip_vfs: false,
+        keep_pack_archives: false,
         output: cli.output,
     };
 
@@ -500,15 +510,20 @@ async fn main() -> Result<()> {
             reuse_from,
             force_copy,
             skip_vfs,
+            keep_pack_archives,
         } => {
             let game_id = game.parse::<GameId>()?;
             let server_id = server.parse::<ServerId>()?;
 
-            let opts = GlobalOptions { skip_vfs, ..opts };
+            let opts = GlobalOptions {
+                skip_vfs,
+                keep_pack_archives,
+                ..opts
+            };
 
             opts.verbose(format!(
-                "Install command: game={:?}, server={:?}, path={:?}, reuse_from={:?}, force_copy={}, skip_vfs={}",
-                game_id, server_id, path, reuse_from, force_copy, skip_vfs
+                "Install command: game={:?}, server={:?}, path={:?}, reuse_from={:?}, force_copy={}, skip_vfs={}, keep_pack_archives={}",
+                game_id, server_id, path, reuse_from, force_copy, skip_vfs, keep_pack_archives
             ));
             commands::install(
                 game_id, server_id, path, force, reuse_from, force_copy, opts,
@@ -535,11 +550,13 @@ async fn main() -> Result<()> {
             skip_verify,
             full_package,
             skip_vfs,
+            keep_pack_archives,
         } => {
             let opts = GlobalOptions {
                 skip_verify,
                 force_full_package: full_package,
                 skip_vfs,
+                keep_pack_archives,
                 ..opts
             };
             opts.verbose(format!(

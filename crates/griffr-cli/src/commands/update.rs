@@ -141,6 +141,7 @@ fn build_update_dry_run_plan(
     reuse_paths: &[PathBuf],
     skip_verify: bool,
     skip_vfs: bool,
+    keep_pack_archives: bool,
     force_full_package: bool,
 ) -> Vec<String> {
     let mut lines = Vec::new();
@@ -174,6 +175,11 @@ fn build_update_dry_run_plan(
             "Would download {label} archive parts: {archive_count} ({})",
             ui::format_bytes(total_size)
         ));
+        if keep_pack_archives {
+            lines.push("Would keep downloaded package archives after extraction.".to_string());
+        } else {
+            lines.push("Would delete package archives after successful extraction.".to_string());
+        }
     } else {
         lines.push("Would download update archives based on API response.".to_string());
     }
@@ -348,6 +354,7 @@ async fn download_and_extract_archives(
     archives: &[griffr_common::api::types::PackFile],
     install_path: &Path,
     label: &str,
+    keep_pack_archives: bool,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<()> {
@@ -393,7 +400,7 @@ async fn download_and_extract_archives(
             source_dir: download_dir.clone(),
             base_name,
             dest: install_path.to_path_buf(),
-            cleanup: true,
+            cleanup: !keep_pack_archives,
             parts,
         });
     }
@@ -517,6 +524,7 @@ pub async fn update(
             &reuse_paths,
             opts.skip_verify,
             opts.skip_vfs,
+            opts.keep_pack_archives,
             opts.force_full_package,
         ) {
             opts.dry_run(line);
@@ -550,6 +558,7 @@ pub async fn update(
                     &patch.patches,
                     &local.install_path,
                     "patch",
+                    opts.keep_pack_archives,
                     &opts,
                     &mut task_pool_runner,
                 )
@@ -564,6 +573,7 @@ pub async fn update(
                     &pkg.packs,
                     &local.install_path,
                     "full",
+                    opts.keep_pack_archives,
                     &opts,
                     &mut task_pool_runner,
                 )
@@ -968,6 +978,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
 
         assert!(lines
@@ -1102,6 +1113,7 @@ mod tests {
             skip_verify: false,
             force_full_package: false,
             skip_vfs: true,
+            keep_pack_archives: false,
             output: crate::OutputFormat::Text,
         };
 
@@ -1112,6 +1124,7 @@ mod tests {
             &archives,
             &install_path,
             "patch",
+            false,
             &opts,
             &mut pool_runner,
         )
