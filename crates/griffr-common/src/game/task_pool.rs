@@ -12,7 +12,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use compio::buf::BufResult;
 use compio::dispatcher::Dispatcher;
+use compio::io::AsyncWriteAtExt;
 use flume::{Receiver, RecvTimeoutError, Sender};
 use futures_util::StreamExt;
 use md5::{Digest, Md5};
@@ -1074,12 +1076,14 @@ fn do_download(
 
         let resume_effective = resume_from.filter(|o| *o > 0).is_some() && status.as_u16() == 206;
         let resume_offset = resume_from.unwrap_or(0);
-        let mut out = std::fs::OpenOptions::new()
+        let mut open_options = compio::fs::OpenOptions::new();
+        open_options
             .create(true)
             .write(true)
-            .append(resume_effective)
-            .truncate(!resume_effective)
+            .truncate(!resume_effective);
+        let mut out = open_options
             .open(&part_path_for_write)
+            .await
             .with_context(|| {
                 format!(
                     "Failed to open partial download file {}",
@@ -1094,6 +1098,7 @@ fn do_download(
 
         let mut stream = response.bytes_stream();
         let mut total_written = if resume_effective { resume_offset } else { 0 };
+        let mut write_offset = total_written;
         loop {
             let next = compio::time::timeout(body_timeout, stream.next())
                 .await
@@ -1108,19 +1113,22 @@ fn do_download(
                 break;
             };
             let chunk = chunk.context("Failed to read response body chunk")?;
-            std::io::Write::write_all(&mut out, chunk.as_ref()).with_context(|| {
+            hasher.update(chunk.as_ref());
+            let chunk_len = chunk.len() as u64;
+            let BufResult(write_result, _) = out.write_all_at(chunk, write_offset).await;
+            write_result.with_context(|| {
                 format!(
                     "Failed to append chunk to partial file {}",
                     part_path_for_write.display()
                 )
             })?;
-            hasher.update(chunk.as_ref());
-            total_written = total_written.saturating_add(chunk.len() as u64);
+            write_offset = write_offset.saturating_add(chunk_len);
+            total_written = total_written.saturating_add(chunk_len);
         }
 
-        std::io::Write::flush(&mut out).with_context(|| {
+        out.sync_data().await.with_context(|| {
             format!(
-                "Failed to flush partial download file {}",
+                "Failed to sync partial download file {}",
                 part_path_for_write.display()
             )
         })?;
@@ -1768,12 +1776,7 @@ mod tests {
     fn start_range_http_server(
         path: &'static str,
         body: Vec<u8>,
-    ) -> (
-        String,
-        Arc<AtomicUsize>,
-        Arc<AtomicUsize>,
-        Arc<AtomicBool>,
-    ) {
+    ) -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<AtomicBool>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         listener
             .set_nonblocking(true)
@@ -1828,7 +1831,12 @@ mod tests {
                             range_hits_thread.fetch_add(1, Ordering::AcqRel);
                             let start = start.min(body.len());
                             let resp = &body[start..];
-                            let content_range = format!("bytes {}-{}/{}", start, body.len().saturating_sub(1), body.len());
+                            let content_range = format!(
+                                "bytes {}-{}/{}",
+                                start,
+                                body.len().saturating_sub(1),
+                                body.len()
+                            );
                             let header = format!(
                                 "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: {}\r\nConnection: close\r\n\r\n",
                                 resp.len(),
@@ -1871,7 +1879,8 @@ mod tests {
         let cut = 1_048_576usize;
         std::fs::write(&part, &payload[..cut]).unwrap();
 
-        let (base, range_hits, total_hits, stop) = start_range_http_server("/blob", payload.clone());
+        let (base, range_hits, total_hits, stop) =
+            start_range_http_server("/blob", payload.clone());
         let url = format!("{}/blob", base);
 
         let dispatcher = Dispatcher::builder()
