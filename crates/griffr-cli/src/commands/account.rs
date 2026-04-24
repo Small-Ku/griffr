@@ -272,7 +272,9 @@ fn local_low_roots_for_hint(
         }
         let vendor = match server {
             ServerId::CnOfficial | ServerId::CnBilibili => "Hypergryph",
-            ServerId::GlobalOfficial | ServerId::GlobalEpic => "Gryphline",
+            ServerId::GlobalOfficial | ServerId::GlobalEpic | ServerId::GlobalGoogleplay => {
+                "Gryphline"
+            }
         };
         return Ok(vec![base.join(vendor).join(game_dir)]);
     }

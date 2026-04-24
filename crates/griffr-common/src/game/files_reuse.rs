@@ -1315,6 +1315,7 @@ mod tests {
             ServerId::CnBilibili,
             ServerId::GlobalOfficial,
             ServerId::GlobalEpic,
+            ServerId::GlobalGoogleplay,
         ];
 
         // This is more of a compile-time check that

@@ -1464,9 +1464,14 @@ mod tests {
             "expected hardlink event when prefer_reuse is enabled"
         );
         assert!(
-            result.events.iter().any(
-                |e| matches!(e, ProgressEvent::Verified { ok: true, issue: None, .. })
-            ),
+            result.events.iter().any(|e| matches!(
+                e,
+                ProgressEvent::Verified {
+                    ok: true,
+                    issue: None,
+                    ..
+                }
+            )),
             "expected verify success after relink"
         );
     }

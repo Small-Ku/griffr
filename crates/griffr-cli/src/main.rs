@@ -51,7 +51,7 @@ enum Commands {
         /// Known server id
         #[arg(
             long,
-            value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic"]
+            value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic", "global_googleplay"]
         )]
         server: String,
 
@@ -198,7 +198,7 @@ struct QueryTarget {
     /// Known server id for remote lookup when no local path is provided
     #[arg(
         long,
-        value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic"]
+        value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic", "global_googleplay"]
     )]
     server: Option<String>,
 
@@ -214,7 +214,7 @@ struct RemoteTarget {
 
     #[arg(
         long,
-        value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic"]
+        value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic", "global_googleplay"]
     )]
     server: String,
 }
@@ -366,7 +366,7 @@ enum AccountCommands {
         /// Optional server hint to narrow default sdk_data discovery roots
         #[arg(
             long,
-            value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic"]
+            value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic", "global_googleplay"]
         )]
         server_hint: Option<String>,
 
@@ -400,7 +400,7 @@ enum AccountCommands {
         /// Optional server hint to narrow default sdk_data discovery roots
         #[arg(
             long,
-            value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic"]
+            value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic", "global_googleplay"]
         )]
         server_hint: Option<String>,
 
@@ -602,7 +602,9 @@ async fn main() -> Result<()> {
             DebugCommands::DecryptConfigIni { path } => {
                 commands::debug_config_ini(path, opts).await?
             }
-            DebugCommands::DecryptGameFiles { path } => commands::debug_game_files(path, opts).await?,
+            DebugCommands::DecryptGameFiles { path } => {
+                commands::debug_game_files(path, opts).await?
+            }
             DebugCommands::GetRawLatestGame {
                 remote,
                 version,

@@ -76,7 +76,9 @@ impl ApiClient {
     fn region_for_server(server: ServerId) -> Region {
         match server {
             ServerId::CnOfficial | ServerId::CnBilibili => Region::CN,
-            ServerId::GlobalOfficial | ServerId::GlobalEpic => Region::OS,
+            ServerId::GlobalOfficial | ServerId::GlobalEpic | ServerId::GlobalGoogleplay => {
+                Region::OS
+            }
         }
     }
 

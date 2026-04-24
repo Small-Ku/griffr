@@ -233,6 +233,7 @@ pub enum ServerId {
     CnBilibili,
     GlobalOfficial,
     GlobalEpic,
+    GlobalGoogleplay,
 }
 
 impl std::fmt::Display for ServerId {
@@ -242,6 +243,7 @@ impl std::fmt::Display for ServerId {
             ServerId::CnBilibili => write!(f, "cn_bilibili"),
             ServerId::GlobalOfficial => write!(f, "global_official"),
             ServerId::GlobalEpic => write!(f, "global_epic"),
+            ServerId::GlobalGoogleplay => write!(f, "global_googleplay"),
         }
     }
 }
@@ -255,6 +257,7 @@ impl std::str::FromStr for ServerId {
             "cn_bilibili" => Ok(ServerId::CnBilibili),
             "global_official" => Ok(ServerId::GlobalOfficial),
             "global_epic" => Ok(ServerId::GlobalEpic),
+            "global_googleplay" => Ok(ServerId::GlobalGoogleplay),
             _ => Err(anyhow::anyhow!("Unknown server: {}", s)),
         }
     }
@@ -270,6 +273,7 @@ impl ServerId {
                 ServerId::CnBilibili,
                 ServerId::GlobalOfficial,
                 ServerId::GlobalEpic,
+                ServerId::GlobalGoogleplay,
             ],
         }
     }
@@ -450,6 +454,10 @@ mod tests {
             "global_epic".parse::<ServerId>().unwrap(),
             ServerId::GlobalEpic
         );
+        assert_eq!(
+            "global_googleplay".parse::<ServerId>().unwrap(),
+            ServerId::GlobalGoogleplay
+        );
         // Case insensitive
         assert_eq!(
             "CN_OFFICIAL".parse::<ServerId>().unwrap(),
@@ -464,6 +472,7 @@ mod tests {
         assert_eq!(ServerId::CnBilibili.to_string(), "cn_bilibili");
         assert_eq!(ServerId::GlobalOfficial.to_string(), "global_official");
         assert_eq!(ServerId::GlobalEpic.to_string(), "global_epic");
+        assert_eq!(ServerId::GlobalGoogleplay.to_string(), "global_googleplay");
     }
 
     #[test]
@@ -486,8 +495,9 @@ mod tests {
         assert!(ark_servers.contains(&ServerId::CnBilibili));
 
         let ef_servers = ServerId::available_for(GameId::Endfield);
-        assert_eq!(ef_servers.len(), 4);
+        assert_eq!(ef_servers.len(), 5);
         assert!(ef_servers.contains(&ServerId::GlobalEpic));
+        assert!(ef_servers.contains(&ServerId::GlobalGoogleplay));
     }
 
     #[test]

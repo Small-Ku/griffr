@@ -115,6 +115,11 @@ impl ChannelConfig {
         sub_channel: "801",
     };
 
+    const GLOBAL_GOOGLEPLAY: Self = Self {
+        channel: "6",
+        sub_channel: "802",
+    };
+
     /// Get channel configuration for a game/server pair.
     pub fn for_game_server(game: crate::config::GameId, server: crate::config::ServerId) -> Self {
         let _ = game;
@@ -124,6 +129,7 @@ impl ChannelConfig {
             ServerId::CnBilibili => Self::CN_BILIBILI,
             ServerId::GlobalOfficial => Self::GLOBAL_OFFICIAL,
             ServerId::GlobalEpic => Self::GLOBAL_EPIC,
+            ServerId::GlobalGoogleplay => Self::GLOBAL_GOOGLEPLAY,
         }
     }
 }
@@ -776,6 +782,11 @@ mod tests {
         let epic = ChannelConfig::for_game_server(GameId::Endfield, ServerId::GlobalEpic);
         assert_eq!(epic.channel, "6");
         assert_eq!(epic.sub_channel, "801");
+
+        let googleplay =
+            ChannelConfig::for_game_server(GameId::Endfield, ServerId::GlobalGoogleplay);
+        assert_eq!(googleplay.channel, "6");
+        assert_eq!(googleplay.sub_channel, "802");
     }
 
     #[test]

@@ -11,8 +11,7 @@ use griffr_common::game::task_pool::{
 };
 use griffr_common::game::{
     materialize_game_files_with_pool, plan_vfs_tasks, FileReuseConfig, GameManager,
-    SourceInstallInput,
-    VfsMaterializeConfig, VfsTaskPlan,
+    SourceInstallInput, VfsMaterializeConfig, VfsTaskPlan,
 };
 
 use super::local::detect_local_install;

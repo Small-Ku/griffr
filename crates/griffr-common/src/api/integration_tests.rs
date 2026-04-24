@@ -66,7 +66,9 @@ fn assert_latest_payload_shape(info: &GetLatestGameResponse) {
 fn expected_cdn_fragment(server: ServerId) -> &'static str {
     match server {
         ServerId::CnOfficial | ServerId::CnBilibili => ".hycdn.cn",
-        ServerId::GlobalOfficial | ServerId::GlobalEpic => ".hg-cdn.com",
+        ServerId::GlobalOfficial | ServerId::GlobalEpic | ServerId::GlobalGoogleplay => {
+            ".hg-cdn.com"
+        }
     }
 }
 
@@ -279,10 +281,11 @@ async fn test_real_api_latest_matrix() {
         (GameId::Endfield, ServerId::CnBilibili),
         (GameId::Endfield, ServerId::GlobalOfficial),
         (GameId::Endfield, ServerId::GlobalEpic),
+        (GameId::Endfield, ServerId::GlobalGoogleplay),
     ];
     assert_eq!(
         matrix.len(),
-        6,
+        7,
         "latest matrix should cover all requested CN/OS combinations"
     );
 
@@ -303,10 +306,11 @@ async fn test_real_api_media_matrix() {
         (GameId::Endfield, ServerId::CnBilibili, "zh-cn"),
         (GameId::Endfield, ServerId::GlobalOfficial, "en-us"),
         (GameId::Endfield, ServerId::GlobalEpic, "en-us"),
+        (GameId::Endfield, ServerId::GlobalGoogleplay, "en-us"),
     ];
     assert_eq!(
         matrix.len(),
-        6,
+        7,
         "media matrix should cover all requested CN/OS combinations"
     );
 
@@ -327,10 +331,11 @@ async fn test_real_api_game_files_matrix() {
         (GameId::Endfield, ServerId::CnBilibili),
         (GameId::Endfield, ServerId::GlobalOfficial),
         (GameId::Endfield, ServerId::GlobalEpic),
+        (GameId::Endfield, ServerId::GlobalGoogleplay),
     ];
     assert_eq!(
         matrix.len(),
-        6,
+        7,
         "game_files matrix should cover all requested CN/OS combinations"
     );
 

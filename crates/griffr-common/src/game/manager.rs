@@ -231,9 +231,10 @@ impl GameManager {
             (GameId::Endfield, ServerId::CnOfficial | ServerId::CnBilibili) => {
                 (Game::Endfield, Region::CN, "cn")
             }
-            (GameId::Endfield, ServerId::GlobalOfficial | ServerId::GlobalEpic) => {
-                (Game::Endfield, Region::OS, "sg")
-            }
+            (
+                GameId::Endfield,
+                ServerId::GlobalOfficial | ServerId::GlobalEpic | ServerId::GlobalGoogleplay,
+            ) => (Game::Endfield, Region::OS, "sg"),
         }
     }
 
@@ -433,8 +434,7 @@ impl GameManager {
         if let Some(runner) = task_pool_runner {
             let _ = runner.run_batch_with_progress(tasks, Some(&mut on_event))?;
         } else {
-            let _ =
-                run_tasks_with_progress(tasks, TaskPoolConfig::default(), Some(&mut on_event))?;
+            let _ = run_tasks_with_progress(tasks, TaskPoolConfig::default(), Some(&mut on_event))?;
         }
 
         Ok(IntegrityRunSummary {

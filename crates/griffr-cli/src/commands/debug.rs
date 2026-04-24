@@ -266,11 +266,7 @@ pub async fn list_resource_files(
                 )
             })?;
         for file in index.files {
-            let checksum = file
-                .md5
-                .clone()
-                .or(file.hash.clone())
-                .unwrap_or_default();
+            let checksum = file.md5.clone().or(file.hash.clone()).unwrap_or_default();
             total_bytes = total_bytes.saturating_add(file.size);
             files.push(json!({
                 "resource_name": resource.name,
@@ -398,7 +394,9 @@ pub async fn api_get_media(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let payload = api_client.get_media_raw(game_id, server_id, &language).await?;
+    let payload = api_client
+        .get_media_raw(game_id, server_id, &language)
+        .await?;
     emit_json(output, payload).await
 }
 

@@ -219,6 +219,7 @@ fn detect_server_id(config_ini: &ParsedConfigIni) -> Option<ServerId> {
         (Some("2"), Some("2")) => Some(ServerId::CnBilibili),
         (Some("6"), Some("6")) => Some(ServerId::GlobalOfficial),
         (Some("6"), Some("801")) => Some(ServerId::GlobalEpic),
+        (Some("6"), Some("802")) => Some(ServerId::GlobalGoogleplay),
         _ => None,
     }
 }
@@ -254,6 +255,12 @@ mod tests {
     fn detect_server_maps_global_epic_tuple() {
         let parsed = parsed_with_channel("6", "801");
         assert_eq!(detect_server_id(&parsed), Some(ServerId::GlobalEpic));
+    }
+
+    #[test]
+    fn detect_server_maps_global_googleplay_tuple() {
+        let parsed = parsed_with_channel("6", "802");
+        assert_eq!(detect_server_id(&parsed), Some(ServerId::GlobalGoogleplay));
     }
 
     #[test]

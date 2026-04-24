@@ -20,9 +20,7 @@ use tracing::{info, warn};
 use crate::api::client::ApiClient;
 use crate::api::crypto::RES_INDEX_KEY;
 use crate::config::{GameId, ServerId};
-use crate::game::task_pool::{
-    ProgressEvent, Task, TaskPoolRunner,
-};
+use crate::game::task_pool::{ProgressEvent, Task, TaskPoolRunner};
 
 #[derive(Debug, Clone, Default)]
 pub struct VfsMaterializeConfig {
