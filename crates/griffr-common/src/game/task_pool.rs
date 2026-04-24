@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use compio::dispatcher::Dispatcher;
 use flume::{Receiver, RecvTimeoutError, Sender};
+use futures_util::StreamExt;
 use md5::{Digest, Md5};
 use tracing::debug;
 #[cfg(windows)]
@@ -23,9 +24,18 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 use crate::game::{FileIssue, FileIssueKind};
 
-const DOWNLOAD_SEND_TIMEOUT: Duration = Duration::from_secs(60);
-const DOWNLOAD_BODY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DEFAULT_DOWNLOAD_SEND_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_DOWNLOAD_BODY_TIMEOUT_SECS: u64 = 15 * 60;
 const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+fn duration_from_env_secs(var: &str, default_secs: u64) -> Duration {
+    let secs = std::env::var(var)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(default_secs);
+    Duration::from_secs(secs)
+}
 
 #[derive(Debug, Clone)]
 pub enum Task {
@@ -550,6 +560,7 @@ fn execute_install_archive(
                 &part.url,
                 &part.dest,
                 &part.expected_md5,
+                Some(part.expected_size),
             ) {
                 Ok(bytes) => {
                     events.push(ProgressEvent::Downloaded {
@@ -752,6 +763,7 @@ fn execute_download(
         &input.url,
         &input.dest,
         &input.expected_md5,
+        input.expected_size,
     );
 
     match result {
@@ -913,6 +925,7 @@ fn execute_ensure_file(
             download_url,
             &input.dest,
             &input.expected_md5,
+            Some(input.expected_size),
         ) {
             Ok(bytes) => {
                 events.push(ProgressEvent::Downloaded {
@@ -998,18 +1011,53 @@ fn do_download(
     url: &str,
     dest: &Path,
     expected_md5: &str,
+    expected_size: Option<u64>,
 ) -> Result<u64> {
+    let send_timeout = duration_from_env_secs(
+        "GRIFFR_DOWNLOAD_SEND_TIMEOUT_SECS",
+        DEFAULT_DOWNLOAD_SEND_TIMEOUT_SECS,
+    );
+    let body_timeout = duration_from_env_secs(
+        "GRIFFR_DOWNLOAD_BODY_TIMEOUT_SECS",
+        DEFAULT_DOWNLOAD_BODY_TIMEOUT_SECS,
+    );
+    let part_path = make_partial_download_path(dest)?;
+    let part_path_for_resume = part_path.clone();
+    let resume_from = dispatch_io(io_dispatcher, move || async move {
+        match compio::fs::metadata(&part_path_for_resume).await {
+            Ok(metadata) => Ok::<Option<u64>, anyhow::Error>(match expected_size {
+                Some(size) if metadata.len() < size => Some(metadata.len()),
+                Some(_) => Some(0),
+                None => Some(metadata.len()),
+            }),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err).with_context(|| {
+                format!(
+                    "Failed to stat partial download file {}",
+                    part_path_for_resume.display()
+                )
+            }),
+        }
+    })?;
+
     let url_owned = url.to_string();
     let user_agent_owned = user_agent.to_string();
-    let bytes = dispatch_io(io_dispatcher, move || async move {
+    let part_path_for_write = part_path.clone();
+    let written = dispatch_io(io_dispatcher, move || async move {
         let client = cyper::Client::new();
-        let request = client
+        let mut request = client
             .get(&url_owned)
             .with_context(|| format!("Failed to build request for {}", url_owned))?;
-        let request = request
+        request = request
             .header("User-Agent", user_agent_owned)
             .context("Failed to attach User-Agent header")?;
-        let response = compio::time::timeout(DOWNLOAD_SEND_TIMEOUT, request.send())
+        if let Some(offset) = resume_from.filter(|o| *o > 0) {
+            request = request
+                .header("Range", format!("bytes={}-", offset))
+                .context("Failed to set Range header for resume")?;
+            debug!("resuming download from byte {} for {}", offset, url_owned);
+        }
+        let response = compio::time::timeout(send_timeout, request.send())
             .await
             .with_context(|| format!("Timed out waiting for response from {}", url_owned))?
             .with_context(|| format!("Failed to download {}", url_owned))?;
@@ -1017,13 +1065,78 @@ fn do_download(
         if !status.is_success() {
             anyhow::bail!("HTTP error {}", status);
         }
-        let bytes = compio::time::timeout(DOWNLOAD_BODY_TIMEOUT, response.bytes())
-            .await
-            .with_context(|| format!("Timed out reading response body from {}", url_owned))?
-            .context("Failed to read downloaded bytes")?;
-        Ok::<Vec<u8>, anyhow::Error>(bytes.to_vec())
+
+        if let Some(parent) = part_path_for_write.parent() {
+            compio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+
+        let resume_effective = resume_from.filter(|o| *o > 0).is_some() && status.as_u16() == 206;
+        let mut out = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(resume_effective)
+            .truncate(!resume_effective)
+            .open(&part_path_for_write)
+            .with_context(|| {
+                format!(
+                    "Failed to open partial download file {}",
+                    part_path_for_write.display()
+                )
+            })?;
+
+        let mut stream = response.bytes_stream();
+        let mut total_written = if resume_effective {
+            resume_from.unwrap_or(0)
+        } else {
+            0
+        };
+        loop {
+            let next = compio::time::timeout(body_timeout, stream.next())
+                .await
+                .with_context(|| {
+                    format!(
+                        "Timed out reading response body from {} (timeout={}s)",
+                        url_owned,
+                        body_timeout.as_secs()
+                    )
+                })?;
+            let Some(chunk) = next else {
+                break;
+            };
+            let chunk = chunk.context("Failed to read response body chunk")?;
+            std::io::Write::write_all(&mut out, chunk.as_ref()).with_context(|| {
+                format!(
+                    "Failed to append chunk to partial file {}",
+                    part_path_for_write.display()
+                )
+            })?;
+            total_written = total_written.saturating_add(chunk.len() as u64);
+        }
+
+        std::io::Write::flush(&mut out).with_context(|| {
+            format!(
+                "Failed to flush partial download file {}",
+                part_path_for_write.display()
+            )
+        })?;
+
+        if let Some(expected) = expected_size {
+            if total_written != expected {
+                anyhow::bail!(
+                    "Downloaded size mismatch for {}: expected {}, got {}",
+                    url_owned,
+                    expected,
+                    total_written
+                );
+            }
+        }
+
+        Ok::<u64, anyhow::Error>(total_written)
     })?;
-    let actual_md5 = format!("{:x}", Md5::digest(&bytes));
+
+    let actual_md5 = file_md5(&part_path)?;
     if actual_md5 != expected_md5.to_lowercase() {
         anyhow::bail!(
             "MD5 mismatch: expected {}, got {}",
@@ -1032,7 +1145,7 @@ fn do_download(
         );
     }
 
-    write_file(io_dispatcher, dest, bytes)?;
+    commit_partial_download(io_dispatcher, &part_path, dest)?;
     let dest_owned = dest.to_path_buf();
     let metadata = dispatch_io(io_dispatcher, move || async move {
         compio::fs::metadata(&dest_owned)
@@ -1040,9 +1153,79 @@ fn do_download(
             .with_context(|| format!("Failed to stat {}", dest_owned.display()))
     })?;
     let len = metadata.len();
+    if len != written {
+        debug!(
+            "download committed with metadata size {} differing from streamed size {} for {}",
+            len, written, url
+        );
+    }
     Ok(len)
 }
 
+fn make_partial_download_path(path: &Path) -> Result<PathBuf> {
+    let parent = path.parent().context("Destination path has no parent")?;
+    let file_name = path
+        .file_name()
+        .context("Destination path has no file name")?
+        .to_string_lossy();
+    let part_name = format!(".{}.griffr.part", file_name);
+
+    Ok(parent.join(part_name))
+}
+
+fn commit_partial_download(
+    io_dispatcher: Option<&Dispatcher>,
+    part_path: &Path,
+    dest_path: &Path,
+) -> Result<()> {
+    let part_owned = part_path.to_path_buf();
+    let dest_owned = dest_path.to_path_buf();
+    dispatch_io(io_dispatcher, move || async move {
+        match compio::fs::metadata(&part_owned).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                anyhow::bail!("Missing partial download file {}", part_owned.display())
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("Failed to stat {}", part_owned.display()))
+            }
+        }
+
+        if let Some(parent) = dest_owned.parent() {
+            compio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+
+        match compio::fs::metadata(&dest_owned).await {
+            Ok(_) => {
+                compio::fs::remove_file(&dest_owned)
+                    .await
+                    .with_context(|| format!("Failed to replace {}", dest_owned.display()))?;
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("Failed to stat {}", dest_owned.display()))
+            }
+        }
+
+        compio::fs::rename(&part_owned, &dest_owned)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to move {} to {}",
+                    part_owned.display(),
+                    dest_owned.display()
+                )
+            })?;
+
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+#[cfg(test)]
 fn write_file(io_dispatcher: Option<&Dispatcher>, path: &Path, bytes: Vec<u8>) -> Result<()> {
     let path_owned = path.to_path_buf();
     dispatch_io(io_dispatcher, move || async move {
@@ -1083,6 +1266,7 @@ fn write_file(io_dispatcher: Option<&Dispatcher>, path: &Path, bytes: Vec<u8>) -
     Ok(())
 }
 
+#[cfg(test)]
 fn make_temp_write_path(path: &Path) -> Result<PathBuf> {
     static TEMP_WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
