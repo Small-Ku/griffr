@@ -416,6 +416,9 @@ impl GameManager {
                     return;
                 }
                 downloaded_paths.insert(path.clone());
+                if let Some(ref cb) = progress_callback {
+                    cb(finished, total, path);
+                }
             }
             ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {
                 let as_str = path.to_string_lossy();
@@ -423,9 +426,19 @@ impl GameManager {
                     reused_paths.insert(path.clone());
                 }
             }
+            ProgressEvent::Retried { path, reason } => {
+                // Surface retries for both core game files and VFS tasks; these are
+                // critical breadcrumbs when long-running batches appear stalled.
+                tracing::debug!("retrying {}: {}", path, reason);
+                if let Some(ref cb) = progress_callback {
+                    cb(finished, total, path);
+                }
+            }
             ProgressEvent::Failed { path, reason } => {
                 if tracked_paths.contains(path) {
                     tracing::warn!("verify failed for {}: {}", path, reason);
+                } else {
+                    tracing::debug!("verify/vfs task failed for {}: {}", path, reason);
                 }
             }
             _ => {}

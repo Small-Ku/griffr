@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use compio::dispatcher::Dispatcher;
 use flume::{Receiver, RecvTimeoutError, Sender};
 use md5::{Digest, Md5};
+use tracing::debug;
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -24,6 +25,7 @@ use crate::game::{FileIssue, FileIssueKind};
 
 const DOWNLOAD_SEND_TIMEOUT: Duration = Duration::from_secs(60);
 const DOWNLOAD_BODY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub enum Task {
@@ -203,6 +205,7 @@ impl TaskPoolRunner {
         }
 
         let mut events = Vec::new();
+        let mut last_heartbeat_at = Instant::now();
         let (lock, cv) = &*self.ctx.done_pair;
         let mut guard = lock.lock().unwrap();
         loop {
@@ -211,10 +214,20 @@ impl TaskPoolRunner {
                     cb(&event);
                 }
                 events.push(event);
+                last_heartbeat_at = Instant::now();
             }
 
-            if self.ctx.pending.load(Ordering::Acquire) == 0 {
+            let pending = self.ctx.pending.load(Ordering::Acquire);
+            if pending == 0 {
                 break;
+            }
+            if last_heartbeat_at.elapsed() >= PROGRESS_HEARTBEAT_INTERVAL {
+                debug!(
+                    "task pool still running: pending_tasks={} (last progress event >={}s ago)",
+                    pending,
+                    PROGRESS_HEARTBEAT_INTERVAL.as_secs()
+                );
+                last_heartbeat_at = Instant::now();
             }
 
             let (new_guard, _) = cv.wait_timeout(guard, Duration::from_millis(100)).unwrap();
