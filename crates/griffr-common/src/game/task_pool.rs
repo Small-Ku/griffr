@@ -1043,7 +1043,7 @@ fn do_download(
     let url_owned = url.to_string();
     let user_agent_owned = user_agent.to_string();
     let part_path_for_write = part_path.clone();
-    let written = dispatch_io(io_dispatcher, move || async move {
+    let (written, actual_md5) = dispatch_io(io_dispatcher, move || async move {
         let client = cyper::Client::new();
         let mut request = client
             .get(&url_owned)
@@ -1073,6 +1073,7 @@ fn do_download(
         }
 
         let resume_effective = resume_from.filter(|o| *o > 0).is_some() && status.as_u16() == 206;
+        let resume_offset = resume_from.unwrap_or(0);
         let mut out = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -1086,12 +1087,13 @@ fn do_download(
                 )
             })?;
 
+        let mut hasher = Md5::new();
+        if resume_effective {
+            hash_file_prefix_into_hasher(&part_path_for_write, resume_offset, &mut hasher)?;
+        }
+
         let mut stream = response.bytes_stream();
-        let mut total_written = if resume_effective {
-            resume_from.unwrap_or(0)
-        } else {
-            0
-        };
+        let mut total_written = if resume_effective { resume_offset } else { 0 };
         loop {
             let next = compio::time::timeout(body_timeout, stream.next())
                 .await
@@ -1112,6 +1114,7 @@ fn do_download(
                     part_path_for_write.display()
                 )
             })?;
+            hasher.update(chunk.as_ref());
             total_written = total_written.saturating_add(chunk.len() as u64);
         }
 
@@ -1133,10 +1136,10 @@ fn do_download(
             }
         }
 
-        Ok::<u64, anyhow::Error>(total_written)
+        let actual_md5 = format!("{:x}", hasher.finalize());
+        Ok::<(u64, String), anyhow::Error>((total_written, actual_md5))
     })?;
 
-    let actual_md5 = file_md5(&part_path)?;
     if actual_md5 != expected_md5.to_lowercase() {
         anyhow::bail!(
             "MD5 mismatch: expected {}, got {}",
@@ -1171,6 +1174,32 @@ fn make_partial_download_path(path: &Path) -> Result<PathBuf> {
     let part_name = format!(".{}.griffr.part", file_name);
 
     Ok(parent.join(part_name))
+}
+
+fn hash_file_prefix_into_hasher(path: &Path, prefix_len: u64, hasher: &mut Md5) -> Result<()> {
+    if prefix_len == 0 {
+        return Ok(());
+    }
+
+    let mut file =
+        File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut remaining = prefix_len;
+    let mut buf = vec![0u8; 1024 * 1024];
+    while remaining > 0 {
+        let to_read = remaining.min(buf.len() as u64) as usize;
+        let n = file.read(&mut buf[..to_read])?;
+        if n == 0 {
+            anyhow::bail!(
+                "Partial file shorter than expected prefix: {} < {} for {}",
+                prefix_len - remaining,
+                prefix_len,
+                path.display()
+            );
+        }
+        hasher.update(&buf[..n]);
+        remaining -= n as u64;
+    }
+    Ok(())
 }
 
 fn commit_partial_download(
@@ -1591,7 +1620,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::num::NonZeroUsize;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
@@ -1734,6 +1763,147 @@ mod tests {
         });
 
         (format!("http://{}", addr), hits, stop)
+    }
+
+    fn start_range_http_server(
+        path: &'static str,
+        body: Vec<u8>,
+    ) -> (
+        String,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<AtomicBool>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        listener
+            .set_nonblocking(true)
+            .expect("set nonblocking test server");
+        let addr = listener.local_addr().expect("server addr");
+        let range_hits = Arc::new(AtomicUsize::new(0));
+        let total_hits = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let range_hits_thread = Arc::clone(&range_hits);
+        let total_hits_thread = Arc::clone(&total_hits);
+        let stop_thread = Arc::clone(&stop);
+
+        thread::spawn(move || {
+            while !stop_thread.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 8192];
+                        let read = stream.read(&mut buf).unwrap_or(0);
+                        if read == 0 {
+                            continue;
+                        }
+                        total_hits_thread.fetch_add(1, Ordering::AcqRel);
+                        let req = String::from_utf8_lossy(&buf[..read]);
+                        let mut lines = req.lines();
+                        let first_line = lines.next().unwrap_or_default();
+                        let req_path = first_line.split_whitespace().nth(1).unwrap_or("/");
+                        if req_path != path {
+                            let body = b"not found";
+                            let header = format!(
+                                "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(header.as_bytes());
+                            let _ = stream.write_all(body);
+                            continue;
+                        }
+
+                        let mut range_start = None::<usize>;
+                        for line in lines {
+                            let lower = line.to_ascii_lowercase();
+                            if let Some(rest) = lower.strip_prefix("range: bytes=") {
+                                if let Some((start, _end)) = rest.split_once('-') {
+                                    if let Ok(parsed) = start.trim().parse::<usize>() {
+                                        range_start = Some(parsed);
+                                    }
+                                }
+                                break;
+                            }
+                        }
+
+                        if let Some(start) = range_start {
+                            range_hits_thread.fetch_add(1, Ordering::AcqRel);
+                            let start = start.min(body.len());
+                            let resp = &body[start..];
+                            let content_range = format!("bytes {}-{}/{}", start, body.len().saturating_sub(1), body.len());
+                            let header = format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: {}\r\nConnection: close\r\n\r\n",
+                                resp.len(),
+                                content_range
+                            );
+                            let _ = stream.write_all(header.as_bytes());
+                            let _ = stream.write_all(resp);
+                        } else {
+                            let header = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(header.as_bytes());
+                            let _ = stream.write_all(&body);
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        (format!("http://{}", addr), range_hits, total_hits, stop)
+    }
+
+    #[test]
+    fn do_download_resume_incremental_md5_produces_correct_result() {
+        let tmp = tempdir().unwrap();
+        let dest = tmp.path().join("asset.chk");
+        let part = make_partial_download_path(&dest).unwrap();
+
+        let mut payload = Vec::with_capacity(2 * 1024 * 1024 + 333);
+        for i in 0..(2 * 1024 * 1024 + 333) {
+            payload.push((i % 251) as u8);
+        }
+        let expected_md5 = format!("{:x}", Md5::digest(&payload));
+
+        let cut = 1_048_576usize;
+        std::fs::write(&part, &payload[..cut]).unwrap();
+
+        let (base, range_hits, total_hits, stop) = start_range_http_server("/blob", payload.clone());
+        let url = format!("{}/blob", base);
+
+        let dispatcher = Dispatcher::builder()
+            .worker_threads(NonZeroUsize::new(2).unwrap())
+            .build()
+            .expect("dispatcher should build");
+        let len = do_download(
+            Some(&dispatcher),
+            "Mozilla/5.0",
+            &url,
+            &dest,
+            &expected_md5,
+            Some(payload.len() as u64),
+        )
+        .unwrap();
+
+        stop.store(true, Ordering::Release);
+
+        assert_eq!(len, payload.len() as u64);
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        assert!(
+            !part.exists(),
+            "partial file should be promoted and removed after successful commit"
+        );
+        assert!(
+            total_hits.load(Ordering::Acquire) >= 1,
+            "expected at least one request"
+        );
+        assert!(
+            range_hits.load(Ordering::Acquire) >= 1,
+            "expected resume request with Range header"
+        );
     }
 
     #[test]
