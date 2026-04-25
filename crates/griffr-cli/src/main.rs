@@ -163,6 +163,36 @@ enum Commands {
         #[arg(long)]
         skip_vfs: bool,
     },
+    /// Bootstrap Persistent VFS state from StreamingAssets with launcher-parity scopes
+    Bootstrap {
+        /// Install root or config.ini path
+        #[arg(long)]
+        path: std::path::PathBuf,
+
+        /// Bootstrap scope for Persistent materialization
+        #[arg(long, value_enum, default_value_t = BootstrapScope::Initial)]
+        scope: BootstrapScope,
+
+        /// Additional install roots used as StreamingAssets reuse sources
+        #[arg(long = "reuse-from")]
+        reuse_from: Vec<std::path::PathBuf>,
+
+        /// Allow copying reused files if hardlinks fail
+        #[arg(long)]
+        force_copy: bool,
+
+        /// Allow downloading missing files from CDN when not found in source roots
+        #[arg(long)]
+        allow_download: bool,
+
+        /// Prefer relinking from source roots even when target files already verify
+        #[arg(long)]
+        relink_reuse: bool,
+
+        /// Keep files outside the selected bootstrap scope (do not prune Persistent/VFS extras)
+        #[arg(long)]
+        no_prune: bool,
+    },
 
     /// Print local metadata from config.ini and optionally the matching remote state
     Info {
@@ -240,6 +270,19 @@ pub enum VfsDiffAgainst {
     Streamingassets,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum BootstrapScope {
+    Initial,
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum SnapshotHashScope {
+    None,
+    Persistent,
+    All,
+}
+
 #[derive(Subcommand)]
 enum DebugCommands {
     /// Detect known game/server/version from encrypted config.ini
@@ -282,6 +325,34 @@ enum DebugCommands {
         key: Option<String>,
 
         /// Max entries printed for missing/extra lists
+        #[arg(long, default_value_t = 20)]
+        show_limit: usize,
+    },
+    /// Capture local resource state snapshot for Persistent and StreamingAssets
+    SnapshotResourceState {
+        /// Install root, Endfield_Data root, or direct path containing Persistent/StreamingAssets
+        #[arg(long)]
+        path: std::path::PathBuf,
+
+        /// Optional output file path for snapshot JSON payload
+        #[arg(long = "output-file", id = "snapshot_resource_state_output")]
+        output: Option<std::path::PathBuf>,
+
+        /// Hash check scope: none, persistent-only, or both persistent+streamingassets
+        #[arg(long, value_enum, default_value_t = SnapshotHashScope::Persistent)]
+        hash_check: SnapshotHashScope,
+    },
+    /// Compare two resource state snapshots and summarize differences
+    DiffResourceSnapshots {
+        /// Baseline snapshot file
+        #[arg(long)]
+        before: std::path::PathBuf,
+
+        /// Newer snapshot file
+        #[arg(long)]
+        after: std::path::PathBuf,
+
+        /// Max entries printed for changed lists
         #[arg(long, default_value_t = 20)]
         show_limit: usize,
     },
@@ -628,6 +699,31 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Commands::Bootstrap {
+            path,
+            scope,
+            reuse_from,
+            force_copy,
+            allow_download,
+            relink_reuse,
+            no_prune,
+        } => {
+            opts.verbose(format!(
+                "Bootstrap path={:?}, scope={:?}, reuse_from={:?}, force_copy={}, allow_download={}, relink_reuse={}, no_prune={}",
+                path, scope, reuse_from, force_copy, allow_download, relink_reuse, no_prune
+            ));
+            commands::bootstrap(
+                path,
+                scope,
+                reuse_from,
+                force_copy,
+                allow_download,
+                relink_reuse,
+                !no_prune,
+                opts,
+            )
+            .await?;
+        }
 
         Commands::Info { target } => {
             opts.verbose("Info query");
@@ -665,6 +761,16 @@ async fn main() -> Result<()> {
                 key,
                 show_limit,
             } => commands::debug_vfs_diff(path, against, key, show_limit, opts).await?,
+            DebugCommands::SnapshotResourceState {
+                path,
+                output,
+                hash_check,
+            } => commands::debug_snapshot_resource_state(path, output, hash_check, opts).await?,
+            DebugCommands::DiffResourceSnapshots {
+                before,
+                after,
+                show_limit,
+            } => commands::debug_diff_resource_snapshots(before, after, show_limit, opts).await?,
             DebugCommands::GetRawLatestGame {
                 remote,
                 version,

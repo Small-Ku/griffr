@@ -584,6 +584,9 @@ pub async fn update(
 
     let extra_tasks = if !opts.skip_vfs {
         ui::print_phase("Verifying update + syncing VFS resources (single DAG batch)");
+        ui::print_info(
+            "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
+        );
         let streaming_assets = local
             .install_path
             .join(game_id.streaming_assets_subdir())

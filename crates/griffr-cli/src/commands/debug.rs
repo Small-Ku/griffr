@@ -5,10 +5,12 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::api::crypto;
 use griffr_common::api::types::ResIndex;
 use griffr_common::config::{GameId, ServerId};
+use md5::{Digest, Md5};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::local::{decrypt_config_ini, detect_local_install, resolve_named_path};
-use crate::{GlobalOptions, VfsDiffAgainst};
+use crate::{GlobalOptions, SnapshotHashScope, VfsDiffAgainst};
 
 async fn emit_json(output: Option<PathBuf>, payload: Value) -> Result<()> {
     let body = serde_json::to_vec_pretty(&payload)?;
@@ -100,7 +102,7 @@ pub async fn res_index(path: PathBuf, key: Option<String>, _opts: GlobalOptions)
     Ok(())
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct LocalResManifests {
     index_initial: Option<ResIndex>,
     index_main: Option<ResIndex>,
@@ -108,10 +110,60 @@ struct LocalResManifests {
     pref_main: Option<ResIndex>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct VfsExpectedSet {
     scope: &'static str,
     entries: std::collections::BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VfsExpectedMap {
+    scope: &'static str,
+    entries: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManifestFileCounts {
+    index_initial: Option<usize>,
+    index_main: Option<usize>,
+    pref_initial: Option<usize>,
+    pref_main: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VfsHashMismatch {
+    path: String,
+    expected_md5: String,
+    actual_md5: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResourceRootSnapshot {
+    root_path: String,
+    present: bool,
+    manifest_counts: ManifestFileCounts,
+    scope: Option<String>,
+    expected_files: usize,
+    actual_files: usize,
+    missing_files: usize,
+    extra_files: usize,
+    hash_mismatch_files: usize,
+    hash_checked: bool,
+    actual_paths: Vec<String>,
+    missing_paths: Vec<String>,
+    extra_paths: Vec<String>,
+    hash_mismatches: Vec<VfsHashMismatch>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResourceStateSnapshot {
+    schema_version: u32,
+    captured_at_utc: String,
+    source_path: String,
+    endfield_data_path: String,
+    persistent: ResourceRootSnapshot,
+    streamingassets: ResourceRootSnapshot,
 }
 
 fn normalize_vfs_rel_path(path: &str) -> String {
@@ -133,6 +185,46 @@ fn merge_entries(
             }
             let normalized = normalize_vfs_rel_path(&file.name);
             if !normalized.is_empty() && target.insert(normalized) {
+                added += 1;
+            }
+        }
+        added
+    } else {
+        0
+    }
+}
+
+fn normalize_checksum(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_ascii_lowercase())
+}
+
+fn merge_entries_with_checksums(
+    target: &mut std::collections::BTreeMap<String, String>,
+    index: &Option<ResIndex>,
+) -> usize {
+    if let Some(index) = index {
+        let mut added = 0usize;
+        for file in &index.files {
+            if file.name.is_empty() {
+                continue;
+            }
+            let Some(expected_md5) = file
+                .md5
+                .as_deref()
+                .and_then(normalize_checksum)
+                .or_else(|| file.hash.as_deref().and_then(normalize_checksum))
+            else {
+                continue;
+            };
+            let normalized = normalize_vfs_rel_path(&file.name);
+            if normalized.is_empty() {
+                continue;
+            }
+            if target.insert(normalized, expected_md5).is_none() {
                 added += 1;
             }
         }
@@ -179,6 +271,51 @@ fn select_expected_vfs_set(
                     );
                 }
                 Ok(VfsExpectedSet {
+                    scope: "index-full-fallback",
+                    entries,
+                })
+            }
+        }
+    }
+}
+
+fn select_expected_vfs_map(
+    against: VfsDiffAgainst,
+    manifests: &LocalResManifests,
+) -> Result<VfsExpectedMap> {
+    let mut entries = std::collections::BTreeMap::new();
+    match against {
+        VfsDiffAgainst::Streamingassets => {
+            merge_entries_with_checksums(&mut entries, &manifests.index_initial);
+            merge_entries_with_checksums(&mut entries, &manifests.index_main);
+            if entries.is_empty() {
+                anyhow::bail!(
+                    "No index files with checksum fields found. Expected index_initial.json and/or index_main.json."
+                );
+            }
+            Ok(VfsExpectedMap {
+                scope: "index-full",
+                entries,
+            })
+        }
+        VfsDiffAgainst::Persistent => {
+            let has_pref = manifests.pref_initial.is_some() || manifests.pref_main.is_some();
+            if has_pref {
+                merge_entries_with_checksums(&mut entries, &manifests.pref_initial);
+                merge_entries_with_checksums(&mut entries, &manifests.pref_main);
+                Ok(VfsExpectedMap {
+                    scope: "pref-only",
+                    entries,
+                })
+            } else {
+                merge_entries_with_checksums(&mut entries, &manifests.index_initial);
+                merge_entries_with_checksums(&mut entries, &manifests.index_main);
+                if entries.is_empty() {
+                    anyhow::bail!(
+                        "No pref files found and no index files with checksum fields found."
+                    );
+                }
+                Ok(VfsExpectedMap {
                     scope: "index-full-fallback",
                     entries,
                 })
@@ -259,6 +396,253 @@ fn collect_actual_vfs_files(root: &std::path::Path) -> Result<std::collections::
     Ok(files)
 }
 
+fn file_md5(path: &std::path::Path) -> Result<String> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut hasher = Md5::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        use std::io::Read;
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn resolve_endfield_data_root(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let mut candidate = if path.is_file() {
+        path.parent()
+            .context("Input file path has no parent directory")?
+            .to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+
+    if candidate
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("Endfield_Data"))
+    {
+        return Ok(candidate);
+    }
+    if candidate.join("Endfield_Data").is_dir() {
+        return Ok(candidate.join("Endfield_Data"));
+    }
+    if candidate.join("Persistent").is_dir() && candidate.join("StreamingAssets").is_dir() {
+        return Ok(candidate);
+    }
+    if candidate.join("config.ini").is_file() {
+        return Ok(candidate.join("Endfield_Data"));
+    }
+    if candidate
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| {
+            n.eq_ignore_ascii_case("Persistent") || n.eq_ignore_ascii_case("StreamingAssets")
+        })
+    {
+        candidate = candidate
+            .parent()
+            .context("Persistent/StreamingAssets path has no parent")?
+            .to_path_buf();
+        if candidate.join("Persistent").is_dir() && candidate.join("StreamingAssets").is_dir() {
+            return Ok(candidate);
+        }
+    }
+    anyhow::bail!(
+        "Could not resolve Endfield_Data root from {}. Expected install root, Endfield_Data, or directory containing Persistent and StreamingAssets.",
+        path.display()
+    );
+}
+
+fn manifest_file_counts(manifests: &LocalResManifests) -> ManifestFileCounts {
+    ManifestFileCounts {
+        index_initial: manifests.index_initial.as_ref().map(|m| m.files.len()),
+        index_main: manifests.index_main.as_ref().map(|m| m.files.len()),
+        pref_initial: manifests.pref_initial.as_ref().map(|m| m.files.len()),
+        pref_main: manifests.pref_main.as_ref().map(|m| m.files.len()),
+    }
+}
+
+fn collect_hash_mismatches(
+    root: &std::path::Path,
+    expected_checksums: &std::collections::BTreeMap<String, String>,
+) -> Vec<VfsHashMismatch> {
+    let mut mismatches = Vec::new();
+    for (rel_path, expected_md5) in expected_checksums {
+        let file_path = root.join(rel_path.replace('/', "\\"));
+        if !file_path.is_file() {
+            continue;
+        }
+        let Ok(actual_md5) = file_md5(&file_path) else {
+            continue;
+        };
+        if actual_md5 != *expected_md5 {
+            mismatches.push(VfsHashMismatch {
+                path: rel_path.clone(),
+                expected_md5: expected_md5.clone(),
+                actual_md5,
+            });
+        }
+    }
+    mismatches
+}
+
+async fn snapshot_root_state(
+    root: std::path::PathBuf,
+    against: VfsDiffAgainst,
+    key: &str,
+    hash_check: bool,
+) -> ResourceRootSnapshot {
+    if !root.is_dir() {
+        return ResourceRootSnapshot {
+            root_path: root.display().to_string(),
+            present: false,
+            manifest_counts: ManifestFileCounts {
+                index_initial: None,
+                index_main: None,
+                pref_initial: None,
+                pref_main: None,
+            },
+            scope: None,
+            expected_files: 0,
+            actual_files: 0,
+            missing_files: 0,
+            extra_files: 0,
+            hash_mismatch_files: 0,
+            hash_checked: false,
+            actual_paths: Vec::new(),
+            missing_paths: Vec::new(),
+            extra_paths: Vec::new(),
+            hash_mismatches: Vec::new(),
+            error: Some(format!("Missing root directory {}", root.display())),
+        };
+    }
+
+    let manifests = match async {
+        Ok::<LocalResManifests, anyhow::Error>(LocalResManifests {
+            index_initial: try_read_local_res_index(&root.join("index_initial.json"), key).await?,
+            index_main: try_read_local_res_index(&root.join("index_main.json"), key).await?,
+            pref_initial: try_read_local_res_index(&root.join("pref_initial.json"), key).await?,
+            pref_main: try_read_local_res_index(&root.join("pref_main.json"), key).await?,
+        })
+    }
+    .await
+    {
+        Ok(value) => value,
+        Err(err) => {
+            return ResourceRootSnapshot {
+                root_path: root.display().to_string(),
+                present: true,
+                manifest_counts: ManifestFileCounts {
+                    index_initial: None,
+                    index_main: None,
+                    pref_initial: None,
+                    pref_main: None,
+                },
+                scope: None,
+                expected_files: 0,
+                actual_files: 0,
+                missing_files: 0,
+                extra_files: 0,
+                hash_mismatch_files: 0,
+                hash_checked: false,
+                actual_paths: Vec::new(),
+                missing_paths: Vec::new(),
+                extra_paths: Vec::new(),
+                hash_mismatches: Vec::new(),
+                error: Some(err.to_string()),
+            };
+        }
+    };
+
+    let manifest_counts = manifest_file_counts(&manifests);
+    let expected = match select_expected_vfs_set(against, &manifests) {
+        Ok(v) => v,
+        Err(err) => {
+            return ResourceRootSnapshot {
+                root_path: root.display().to_string(),
+                present: true,
+                manifest_counts,
+                scope: None,
+                expected_files: 0,
+                actual_files: 0,
+                missing_files: 0,
+                extra_files: 0,
+                hash_mismatch_files: 0,
+                hash_checked: false,
+                actual_paths: Vec::new(),
+                missing_paths: Vec::new(),
+                extra_paths: Vec::new(),
+                hash_mismatches: Vec::new(),
+                error: Some(err.to_string()),
+            };
+        }
+    };
+    let expected_with_checksums = select_expected_vfs_map(against, &manifests).ok();
+    let actual = match collect_actual_vfs_files(&root) {
+        Ok(v) => v,
+        Err(err) => {
+            return ResourceRootSnapshot {
+                root_path: root.display().to_string(),
+                present: true,
+                manifest_counts,
+                scope: Some(expected.scope.to_string()),
+                expected_files: expected.entries.len(),
+                actual_files: 0,
+                missing_files: expected.entries.len(),
+                extra_files: 0,
+                hash_mismatch_files: 0,
+                hash_checked: false,
+                actual_paths: Vec::new(),
+                missing_paths: expected.entries.into_iter().collect(),
+                extra_paths: Vec::new(),
+                hash_mismatches: Vec::new(),
+                error: Some(err.to_string()),
+            };
+        }
+    };
+
+    let missing = expected
+        .entries
+        .difference(&actual)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let extra = actual
+        .difference(&expected.entries)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let hash_mismatches = if hash_check {
+        expected_with_checksums
+            .as_ref()
+            .map(|map| collect_hash_mismatches(&root, &map.entries))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    ResourceRootSnapshot {
+        root_path: root.display().to_string(),
+        present: true,
+        manifest_counts,
+        scope: Some(expected.scope.to_string()),
+        expected_files: expected.entries.len(),
+        actual_files: actual.len(),
+        missing_files: missing.len(),
+        extra_files: extra.len(),
+        hash_mismatch_files: hash_mismatches.len(),
+        hash_checked: hash_check,
+        actual_paths: actual.into_iter().collect(),
+        missing_paths: missing.into_iter().collect(),
+        extra_paths: extra.into_iter().collect(),
+        hash_mismatches,
+        error: None,
+    }
+}
+
 fn print_sample(label: &str, set: &std::collections::BTreeSet<String>, limit: usize) {
     println!("{}={}", label, set.len());
     if limit == 0 || set.is_empty() {
@@ -329,6 +713,194 @@ pub async fn vfs_diff(
 
     print_sample("missing", &missing, show_limit);
     print_sample("extra", &extra, show_limit);
+
+    Ok(())
+}
+
+pub async fn snapshot_resource_state(
+    path: PathBuf,
+    output: Option<PathBuf>,
+    hash_check: SnapshotHashScope,
+    _opts: GlobalOptions,
+) -> Result<()> {
+    let source_path = if path.is_absolute() {
+        path.clone()
+    } else {
+        std::env::current_dir()?.join(path.clone())
+    };
+    let endfield_data_root = resolve_endfield_data_root(&source_path)?;
+    let key = crypto::RES_INDEX_KEY;
+
+    let persistent = snapshot_root_state(
+        endfield_data_root.join("Persistent"),
+        VfsDiffAgainst::Persistent,
+        key,
+        matches!(
+            hash_check,
+            SnapshotHashScope::Persistent | SnapshotHashScope::All
+        ),
+    )
+    .await;
+    let streamingassets = snapshot_root_state(
+        endfield_data_root.join("StreamingAssets"),
+        VfsDiffAgainst::Streamingassets,
+        key,
+        matches!(hash_check, SnapshotHashScope::All),
+    )
+    .await;
+
+    let snapshot = ResourceStateSnapshot {
+        schema_version: 1,
+        captured_at_utc: chrono::Utc::now().to_rfc3339(),
+        source_path: source_path.display().to_string(),
+        endfield_data_path: endfield_data_root.display().to_string(),
+        persistent,
+        streamingassets,
+    };
+    let payload = serde_json::to_value(&snapshot)?;
+    emit_json(output, payload).await?;
+    Ok(())
+}
+
+fn sorted_difference(left: &[String], right: &[String]) -> std::collections::BTreeSet<String> {
+    let right_set = right
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    left.iter()
+        .filter(|v| !right_set.contains(*v))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+}
+
+fn print_changed_sample(label: &str, set: &std::collections::BTreeSet<String>, limit: usize) {
+    println!("{}={}", label, set.len());
+    if limit == 0 || set.is_empty() {
+        return;
+    }
+    let mut shown = 0usize;
+    for item in set {
+        println!("{}: {}", label, item);
+        shown += 1;
+        if shown >= limit {
+            break;
+        }
+    }
+    if set.len() > shown {
+        println!("{}: ... ({} more)", label, set.len() - shown);
+    }
+}
+
+fn diff_root_snapshots(
+    name: &str,
+    before: &ResourceRootSnapshot,
+    after: &ResourceRootSnapshot,
+    show_limit: usize,
+) {
+    println!("[{}]", name);
+    println!(
+        "scope={} -> {}",
+        before.scope.as_deref().unwrap_or("<none>"),
+        after.scope.as_deref().unwrap_or("<none>")
+    );
+    println!(
+        "expected_files={} -> {}",
+        before.expected_files, after.expected_files
+    );
+    println!(
+        "actual_files={} -> {}",
+        before.actual_files, after.actual_files
+    );
+    println!(
+        "missing_files={} -> {}",
+        before.missing_files, after.missing_files
+    );
+    println!(
+        "extra_files={} -> {}",
+        before.extra_files, after.extra_files
+    );
+    println!(
+        "hash_mismatch_files={} -> {}",
+        before.hash_mismatch_files, after.hash_mismatch_files
+    );
+    println!(
+        "hash_checked={} -> {}",
+        before.hash_checked, after.hash_checked
+    );
+    if let Some(err) = &before.error {
+        println!("before_error={}", err);
+    }
+    if let Some(err) = &after.error {
+        println!("after_error={}", err);
+    }
+
+    let actual_added = sorted_difference(&after.actual_paths, &before.actual_paths);
+    let actual_removed = sorted_difference(&before.actual_paths, &after.actual_paths);
+    let now_missing = sorted_difference(&after.missing_paths, &before.missing_paths);
+    let resolved_missing = sorted_difference(&before.missing_paths, &after.missing_paths);
+
+    let before_mismatch_paths = before
+        .hash_mismatches
+        .iter()
+        .map(|m| m.path.clone())
+        .collect::<Vec<_>>();
+    let after_mismatch_paths = after
+        .hash_mismatches
+        .iter()
+        .map(|m| m.path.clone())
+        .collect::<Vec<_>>();
+    let new_mismatches = sorted_difference(&after_mismatch_paths, &before_mismatch_paths);
+    let resolved_mismatches = sorted_difference(&before_mismatch_paths, &after_mismatch_paths);
+
+    print_changed_sample("actual_added", &actual_added, show_limit);
+    print_changed_sample("actual_removed", &actual_removed, show_limit);
+    print_changed_sample("missing_added", &now_missing, show_limit);
+    print_changed_sample("missing_resolved", &resolved_missing, show_limit);
+    print_changed_sample("mismatch_added", &new_mismatches, show_limit);
+    print_changed_sample("mismatch_resolved", &resolved_mismatches, show_limit);
+}
+
+pub async fn diff_resource_snapshots(
+    before: PathBuf,
+    after: PathBuf,
+    show_limit: usize,
+    _opts: GlobalOptions,
+) -> Result<()> {
+    let before_body = compio::fs::read(&before)
+        .await
+        .with_context(|| format!("Failed to read {}", before.display()))?;
+    let after_body = compio::fs::read(&after)
+        .await
+        .with_context(|| format!("Failed to read {}", after.display()))?;
+
+    let before_snapshot: ResourceStateSnapshot = serde_json::from_slice(&before_body)
+        .with_context(|| format!("Failed to parse {}", before.display()))?;
+    let after_snapshot: ResourceStateSnapshot = serde_json::from_slice(&after_body)
+        .with_context(|| format!("Failed to parse {}", after.display()))?;
+
+    println!("before={}", before.display());
+    println!("after={}", after.display());
+    println!(
+        "captured_at={} -> {}",
+        before_snapshot.captured_at_utc, after_snapshot.captured_at_utc
+    );
+    println!(
+        "endfield_data={} -> {}",
+        before_snapshot.endfield_data_path, after_snapshot.endfield_data_path
+    );
+
+    diff_root_snapshots(
+        "persistent",
+        &before_snapshot.persistent,
+        &after_snapshot.persistent,
+        show_limit,
+    );
+    diff_root_snapshots(
+        "streamingassets",
+        &before_snapshot.streamingassets,
+        &after_snapshot.streamingassets,
+        show_limit,
+    );
 
     Ok(())
 }
@@ -696,7 +1268,10 @@ pub async fn fetch_media(
 
 #[cfg(test)]
 mod tests {
-    use super::{select_expected_vfs_set, LocalResManifests, ResIndex, VfsDiffAgainst};
+    use super::{
+        select_expected_vfs_map, select_expected_vfs_set, sorted_difference, LocalResManifests,
+        ResIndex, VfsDiffAgainst,
+    };
     use griffr_common::api::types::ResIndexFile;
 
     fn make_index(paths: &[&str]) -> ResIndex {
@@ -762,5 +1337,29 @@ mod tests {
         assert_eq!(selected.entries.len(), 2);
         assert!(selected.entries.contains("vfs/a/a.chk"));
         assert!(selected.entries.contains("vfs/b/b.chk"));
+    }
+
+    #[test]
+    fn expected_vfs_map_uses_pref_checksums_for_persistent() {
+        let manifests = LocalResManifests {
+            index_initial: Some(make_index(&["VFS/A/a.chk"])),
+            index_main: None,
+            pref_initial: Some(make_index(&["VFS/P/p.chk"])),
+            pref_main: None,
+        };
+        let selected = select_expected_vfs_map(VfsDiffAgainst::Persistent, &manifests).unwrap();
+        assert_eq!(selected.scope, "pref-only");
+        assert_eq!(selected.entries.len(), 1);
+        assert!(selected.entries.contains_key("vfs/p/p.chk"));
+    }
+
+    #[test]
+    fn sorted_difference_returns_only_left_unique_values() {
+        let left = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let right = vec!["b".to_string(), "d".to_string()];
+        let diff = sorted_difference(&left, &right);
+        assert_eq!(diff.len(), 2);
+        assert!(diff.contains("a"));
+        assert!(diff.contains("c"));
     }
 }

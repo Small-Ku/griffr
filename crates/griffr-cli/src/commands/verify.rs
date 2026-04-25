@@ -88,6 +88,11 @@ pub async fn verify(
     }
 
     let extra_tasks = if repair && !skip_vfs {
+        if opts.output != OutputFormat::Json {
+            ui::print_info(
+                "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
+            );
+        }
         let version_info = api_client
             .get_latest_game(game_id, server_id, Some(&installed_version))
             .await
