@@ -19,6 +19,7 @@ pub use debug::{
     fetch_file as debug_fetch_file, fetch_game_files as debug_fetch_game_files,
     fetch_media as debug_fetch_media, game_files as debug_game_files,
     list_resource_files as debug_list_resource_files, res_index as debug_res_index,
+    vfs_diff as debug_vfs_diff,
 };
 pub use info::show as info_show;
 pub use install::install;

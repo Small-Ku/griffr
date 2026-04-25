@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::crypto;
+use griffr_common::api::types::ResIndex;
 use griffr_common::config::{GameId, ServerId};
 use serde_json::{json, Value};
 
 use super::local::{decrypt_config_ini, detect_local_install, resolve_named_path};
-use crate::GlobalOptions;
+use crate::{GlobalOptions, VfsDiffAgainst};
 
 async fn emit_json(output: Option<PathBuf>, payload: Value) -> Result<()> {
     let body = serde_json::to_vec_pretty(&payload)?;
@@ -95,6 +96,239 @@ pub async fn res_index(path: PathBuf, key: Option<String>, _opts: GlobalOptions)
             println!();
         }
     }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default)]
+struct LocalResManifests {
+    index_initial: Option<ResIndex>,
+    index_main: Option<ResIndex>,
+    pref_initial: Option<ResIndex>,
+    pref_main: Option<ResIndex>,
+}
+
+#[derive(Debug, Clone)]
+struct VfsExpectedSet {
+    scope: &'static str,
+    entries: std::collections::BTreeSet<String>,
+}
+
+fn normalize_vfs_rel_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_ascii_lowercase()
+}
+
+fn merge_entries(
+    target: &mut std::collections::BTreeSet<String>,
+    index: &Option<ResIndex>,
+) -> usize {
+    if let Some(index) = index {
+        let mut added = 0usize;
+        for file in &index.files {
+            if file.name.is_empty() {
+                continue;
+            }
+            let normalized = normalize_vfs_rel_path(&file.name);
+            if !normalized.is_empty() && target.insert(normalized) {
+                added += 1;
+            }
+        }
+        added
+    } else {
+        0
+    }
+}
+
+fn select_expected_vfs_set(
+    against: VfsDiffAgainst,
+    manifests: &LocalResManifests,
+) -> Result<VfsExpectedSet> {
+    let mut entries = std::collections::BTreeSet::new();
+    match against {
+        VfsDiffAgainst::Streamingassets => {
+            merge_entries(&mut entries, &manifests.index_initial);
+            merge_entries(&mut entries, &manifests.index_main);
+            if entries.is_empty() {
+                anyhow::bail!(
+                    "No index files found or index files were empty. Expected index_initial.json and/or index_main.json."
+                );
+            }
+            Ok(VfsExpectedSet {
+                scope: "index-full",
+                entries,
+            })
+        }
+        VfsDiffAgainst::Persistent => {
+            let has_pref = manifests.pref_initial.is_some() || manifests.pref_main.is_some();
+            if has_pref {
+                merge_entries(&mut entries, &manifests.pref_initial);
+                merge_entries(&mut entries, &manifests.pref_main);
+                Ok(VfsExpectedSet {
+                    scope: "pref-only",
+                    entries,
+                })
+            } else {
+                merge_entries(&mut entries, &manifests.index_initial);
+                merge_entries(&mut entries, &manifests.index_main);
+                if entries.is_empty() {
+                    anyhow::bail!(
+                        "No pref files found and no index files found. Expected pref_*.json or index_*.json."
+                    );
+                }
+                Ok(VfsExpectedSet {
+                    scope: "index-full-fallback",
+                    entries,
+                })
+            }
+        }
+    }
+}
+
+fn resolve_vfs_root(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    let direct_vfs = path.join("VFS");
+    if direct_vfs.is_dir() {
+        return Ok(path.to_path_buf());
+    }
+    if path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("VFS"))
+    {
+        let parent = path
+            .parent()
+            .context("VFS path has no parent directory")?
+            .to_path_buf();
+        if parent.join("VFS").is_dir() {
+            return Ok(parent);
+        }
+    }
+    anyhow::bail!(
+        "Path {} is not a VFS root. Expected a directory containing VFS/.",
+        path.display()
+    );
+}
+
+async fn try_read_local_res_index(path: &std::path::Path, key: &str) -> Result<Option<ResIndex>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let encrypted_b64 = compio::fs::read(path)
+        .await
+        .with_context(|| format!("Failed to read {}", path.display()))
+        .and_then(|bytes| {
+            String::from_utf8(bytes)
+                .with_context(|| format!("{} is not valid UTF-8 text", path.display()))
+        })?;
+    let decrypted = crypto::decrypt_res_index(encrypted_b64.trim(), key)
+        .with_context(|| format!("Failed to decrypt {}", path.display()))?;
+    let index: ResIndex = serde_json::from_str(&decrypted)
+        .with_context(|| format!("Failed to parse decrypted JSON from {}", path.display()))?;
+    Ok(Some(index))
+}
+
+fn collect_actual_vfs_files(root: &std::path::Path) -> Result<std::collections::BTreeSet<String>> {
+    let vfs_root = root.join("VFS");
+    if !vfs_root.is_dir() {
+        anyhow::bail!("Missing VFS directory at {}", vfs_root.display());
+    }
+
+    let mut files = std::collections::BTreeSet::new();
+    let mut stack = vec![vfs_root];
+    while let Some(dir) = stack.pop() {
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("Failed to read {}", dir.display()))?
+        {
+            let entry = entry.with_context(|| format!("Failed to read {}", dir.display()))?;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !path.is_file() {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .with_context(|| format!("Failed to strip prefix {}", root.display()))?;
+            files.insert(normalize_vfs_rel_path(&rel.to_string_lossy()));
+        }
+    }
+    Ok(files)
+}
+
+fn print_sample(label: &str, set: &std::collections::BTreeSet<String>, limit: usize) {
+    println!("{}={}", label, set.len());
+    if limit == 0 || set.is_empty() {
+        return;
+    }
+    let mut shown = 0usize;
+    for item in set {
+        println!("{}: {}", label, item);
+        shown += 1;
+        if shown >= limit {
+            break;
+        }
+    }
+    if set.len() > shown {
+        println!("{}: ... ({} more)", label, set.len() - shown);
+    }
+}
+
+pub async fn vfs_diff(
+    path: PathBuf,
+    against: VfsDiffAgainst,
+    key: Option<String>,
+    show_limit: usize,
+    _opts: GlobalOptions,
+) -> Result<()> {
+    let root = resolve_vfs_root(&path)?;
+    let key = key.unwrap_or_else(|| crypto::RES_INDEX_KEY.to_string());
+
+    let manifests = LocalResManifests {
+        index_initial: try_read_local_res_index(&root.join("index_initial.json"), &key).await?,
+        index_main: try_read_local_res_index(&root.join("index_main.json"), &key).await?,
+        pref_initial: try_read_local_res_index(&root.join("pref_initial.json"), &key).await?,
+        pref_main: try_read_local_res_index(&root.join("pref_main.json"), &key).await?,
+    };
+    let expected = select_expected_vfs_set(against, &manifests)?;
+    let actual = collect_actual_vfs_files(&root)?;
+
+    let missing = expected
+        .entries
+        .difference(&actual)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let extra = actual
+        .difference(&expected.entries)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+
+    println!("root={}", root.display());
+    println!(
+        "against={}",
+        match against {
+            VfsDiffAgainst::Persistent => "persistent",
+            VfsDiffAgainst::Streamingassets => "streamingassets",
+        }
+    );
+    println!("scope={}", expected.scope);
+    println!(
+        "manifests=index_initial:{} index_main:{} pref_initial:{} pref_main:{}",
+        manifests.index_initial.is_some(),
+        manifests.index_main.is_some(),
+        manifests.pref_initial.is_some(),
+        manifests.pref_main.is_some()
+    );
+    println!("expected_files={}", expected.entries.len());
+    println!("actual_files={}", actual.len());
+    println!("missing_files={}", missing.len());
+    println!("extra_files={}", extra.len());
+
+    print_sample("missing", &missing, show_limit);
+    print_sample("extra", &extra, show_limit);
 
     Ok(())
 }
@@ -458,4 +692,75 @@ pub async fn fetch_media(
     let media = api_client.get_media(game_id, server_id, &language).await?;
     let payload = media_to_json(game_id, server_id, &language, &media);
     emit_json(output, payload).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{select_expected_vfs_set, LocalResManifests, ResIndex, VfsDiffAgainst};
+    use griffr_common::api::types::ResIndexFile;
+
+    fn make_index(paths: &[&str]) -> ResIndex {
+        ResIndex {
+            version: "test".to_string(),
+            path: String::new(),
+            files: paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| ResIndexFile {
+                    index: i as u64,
+                    name: (*p).to_string(),
+                    hash: None,
+                    size: 1,
+                    r#type: 0,
+                    md5: Some(format!("{:032x}", i + 1)),
+                    manifest: 0,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn persistent_pref_only_when_pref_exists() {
+        let manifests = LocalResManifests {
+            index_initial: Some(make_index(&["VFS/A/a.chk"])),
+            index_main: Some(make_index(&["VFS/B/b.chk"])),
+            pref_initial: Some(make_index(&["VFS/P/p.chk"])),
+            pref_main: None,
+        };
+        let selected = select_expected_vfs_set(VfsDiffAgainst::Persistent, &manifests).unwrap();
+        assert_eq!(selected.scope, "pref-only");
+        assert_eq!(selected.entries.len(), 1);
+        assert!(selected.entries.contains("vfs/p/p.chk"));
+    }
+
+    #[test]
+    fn persistent_falls_back_to_index_when_no_pref() {
+        let manifests = LocalResManifests {
+            index_initial: Some(make_index(&["VFS/A/a.chk"])),
+            index_main: Some(make_index(&["VFS/B/b.chk"])),
+            pref_initial: None,
+            pref_main: None,
+        };
+        let selected = select_expected_vfs_set(VfsDiffAgainst::Persistent, &manifests).unwrap();
+        assert_eq!(selected.scope, "index-full-fallback");
+        assert_eq!(selected.entries.len(), 2);
+        assert!(selected.entries.contains("vfs/a/a.chk"));
+        assert!(selected.entries.contains("vfs/b/b.chk"));
+    }
+
+    #[test]
+    fn streamingassets_uses_index_full_even_if_pref_exists() {
+        let manifests = LocalResManifests {
+            index_initial: Some(make_index(&["VFS/A/a.chk"])),
+            index_main: Some(make_index(&["VFS/B/b.chk"])),
+            pref_initial: Some(make_index(&["VFS/P/p.chk"])),
+            pref_main: Some(make_index(&["VFS/Q/q.chk"])),
+        };
+        let selected =
+            select_expected_vfs_set(VfsDiffAgainst::Streamingassets, &manifests).unwrap();
+        assert_eq!(selected.scope, "index-full");
+        assert_eq!(selected.entries.len(), 2);
+        assert!(selected.entries.contains("vfs/a/a.chk"));
+        assert!(selected.entries.contains("vfs/b/b.chk"));
+    }
 }

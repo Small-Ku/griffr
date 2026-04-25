@@ -234,6 +234,12 @@ pub enum OutputFormat {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum VfsDiffAgainst {
+    Persistent,
+    Streamingassets,
+}
+
 #[derive(Subcommand)]
 enum DebugCommands {
     /// Detect known game/server/version from encrypted config.ini
@@ -260,6 +266,24 @@ enum DebugCommands {
         /// Optional key override (defaults to built-in Endfield RES_INDEX_KEY)
         #[arg(long)]
         key: Option<String>,
+    },
+    /// Compare on-disk VFS files against local index/pref manifests
+    VfsDiff {
+        /// Path to a root containing `VFS/` and `index_*.json` / `pref_*.json` files
+        #[arg(long)]
+        path: std::path::PathBuf,
+
+        /// Comparison mode: `persistent` uses pref-first policy; `streamingassets` uses index-full
+        #[arg(long, value_enum, default_value_t = VfsDiffAgainst::Persistent)]
+        against: VfsDiffAgainst,
+
+        /// Optional key override (defaults to built-in Endfield RES_INDEX_KEY)
+        #[arg(long)]
+        key: Option<String>,
+
+        /// Max entries printed for missing/extra lists
+        #[arg(long, default_value_t = 20)]
+        show_limit: usize,
     },
     /// Call get_latest_game and print raw response JSON
     GetRawLatestGame {
@@ -635,6 +659,12 @@ async fn main() -> Result<()> {
             DebugCommands::DecryptResIndex { path, key } => {
                 commands::debug_res_index(path, key, opts).await?
             }
+            DebugCommands::VfsDiff {
+                path,
+                against,
+                key,
+                show_limit,
+            } => commands::debug_vfs_diff(path, against, key, show_limit, opts).await?,
             DebugCommands::GetRawLatestGame {
                 remote,
                 version,
