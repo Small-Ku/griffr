@@ -251,6 +251,16 @@ enum DebugCommands {
         #[arg(long)]
         path: std::path::PathBuf,
     },
+    /// Decrypt local encrypted resource index/pref JSON files
+    DecryptResIndex {
+        /// Path to an encrypted .json file or a directory containing .json files
+        #[arg(long)]
+        path: std::path::PathBuf,
+
+        /// Optional key override (defaults to built-in Endfield RES_INDEX_KEY)
+        #[arg(long)]
+        key: Option<String>,
+    },
     /// Call get_latest_game and print raw response JSON
     GetRawLatestGame {
         #[command(flatten)]
@@ -621,6 +631,9 @@ async fn main() -> Result<()> {
             }
             DebugCommands::DecryptGameFiles { path } => {
                 commands::debug_game_files(path, opts).await?
+            }
+            DebugCommands::DecryptResIndex { path, key } => {
+                commands::debug_res_index(path, key, opts).await?
             }
             DebugCommands::GetRawLatestGame {
                 remote,

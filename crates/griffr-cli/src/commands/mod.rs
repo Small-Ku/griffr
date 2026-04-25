@@ -18,7 +18,7 @@ pub use debug::{
     api_get_media as debug_api_get_media, config_ini as debug_config_ini, detect as debug_detect,
     fetch_file as debug_fetch_file, fetch_game_files as debug_fetch_game_files,
     fetch_media as debug_fetch_media, game_files as debug_game_files,
-    list_resource_files as debug_list_resource_files,
+    list_resource_files as debug_list_resource_files, res_index as debug_res_index,
 };
 pub use info::show as info_show;
 pub use install::install;

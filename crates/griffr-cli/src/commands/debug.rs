@@ -52,6 +52,53 @@ pub async fn game_files(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
     Ok(())
 }
 
+pub async fn res_index(path: PathBuf, key: Option<String>, _opts: GlobalOptions) -> Result<()> {
+    let key = key.unwrap_or_else(|| crypto::RES_INDEX_KEY.to_string());
+    let mut targets = Vec::new();
+
+    if path.is_dir() {
+        for entry in std::fs::read_dir(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?
+        {
+            let entry = entry.with_context(|| format!("Failed to read {}", path.display()))?;
+            let entry_path = entry.path();
+            if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+                && entry_path.extension().is_some_and(|ext| ext == "json")
+            {
+                targets.push(entry_path);
+            }
+        }
+        targets.sort();
+        if targets.is_empty() {
+            anyhow::bail!("No .json files found under {}", path.display());
+        }
+    } else {
+        targets.push(path);
+    }
+
+    let multi_file = targets.len() > 1;
+    for target in targets {
+        let encrypted_b64 = compio::fs::read(&target)
+            .await
+            .with_context(|| format!("Failed to read {}", target.display()))
+            .and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .with_context(|| format!("{} is not valid UTF-8 text", target.display()))
+            })?;
+        let decrypted = crypto::decrypt_res_index(encrypted_b64.trim(), &key)
+            .with_context(|| format!("Failed to decrypt {}", target.display()))?;
+        if multi_file {
+            println!("=== {} ===", target.display());
+        }
+        print!("{}", decrypted);
+        if !decrypted.ends_with('\n') {
+            println!();
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn fetch_game_files(
     game_id: GameId,
     server_id: ServerId,
