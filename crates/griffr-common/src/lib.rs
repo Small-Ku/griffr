@@ -6,6 +6,6 @@
 pub mod api;
 pub mod config;
 pub mod download;
-pub mod game;
+pub mod runtime;
 
 pub use config::Config;

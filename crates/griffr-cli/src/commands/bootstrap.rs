@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::game::task_pool::{TaskPoolConfig, TaskPoolRunner};
-use griffr_common::game::{
+use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
+use griffr_common::runtime::{
     bootstrap_persistent_vfs_with_runner, VfsBootstrapConfig, VfsBootstrapScope,
 };
 

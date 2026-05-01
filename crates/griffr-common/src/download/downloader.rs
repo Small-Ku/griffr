@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use crate::api::types::PackFile;
-use crate::game::task_pool::{run_tasks, ProgressEvent, Task, TaskPoolConfig};
+use crate::runtime::task_pool::{run_tasks, ProgressEvent, Task, TaskPoolConfig};
 
 /// Progress callback trait for download updates
 pub trait ProgressCallback: Send + Sync {

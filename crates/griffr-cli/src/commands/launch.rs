@@ -2,8 +2,8 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use griffr_common::game::admin::ensure_admin;
-use griffr_common::game::Launcher;
+use griffr_common::runtime::admin::ensure_admin;
+use griffr_common::runtime::Launcher;
 
 use super::local::detect_local_install;
 use crate::ui;

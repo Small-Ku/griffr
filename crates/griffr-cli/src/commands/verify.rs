@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::game::task_pool::{TaskPoolConfig, TaskPoolRunner};
-use griffr_common::game::{plan_vfs_tasks, VfsMaterializeConfig, VfsTaskPlan};
+use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
+use griffr_common::runtime::{plan_vfs_tasks, VfsMaterializeConfig, VfsTaskPlan};
 use serde_json::json;
 
 use super::local::detect_local_install;

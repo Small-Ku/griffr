@@ -12,7 +12,7 @@ use super::FileIssue;
 use crate::api::types::{ChannelConfig, Game, Region};
 use crate::api::ApiClient;
 use crate::config::{GameConfig, GameId, ServerConfig, ServerId};
-use crate::game::task_pool::{
+use crate::runtime::task_pool::{
     run_tasks_with_progress, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
 

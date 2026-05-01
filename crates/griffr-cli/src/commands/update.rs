@@ -6,19 +6,19 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::GameId;
-use griffr_common::game::task_pool::{
+use griffr_common::runtime::task_pool::{
     ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
-use griffr_common::game::{
+use griffr_common::runtime::{
     materialize_game_files_with_pool, plan_vfs_tasks, FileReuseConfig, GameManager,
     SourceInstallInput, VfsMaterializeConfig, VfsTaskPlan,
 };
 
 use super::local::detect_local_install;
+use super::supports_vfs_sync;
 use crate::progress::StepProgress;
 use crate::ui;
 use crate::GlobalOptions;
-use super::supports_vfs_sync;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpdatePackageKind {

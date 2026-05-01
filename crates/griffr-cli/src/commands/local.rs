@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use griffr_common::api::crypto;
 use griffr_common::config::{GameConfig, GameId, ServerId};
-use griffr_common::game::GameManager;
+use griffr_common::runtime::GameManager;
 
 #[derive(Debug, Clone)]
 pub struct ParsedConfigIni {
