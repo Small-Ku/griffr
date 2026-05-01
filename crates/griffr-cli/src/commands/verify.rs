@@ -8,6 +8,7 @@ use griffr_common::game::{plan_vfs_tasks, VfsMaterializeConfig, VfsTaskPlan};
 use serde_json::json;
 
 use super::local::detect_local_install;
+use super::supports_vfs_sync;
 use crate::progress::StepProgress;
 use crate::ui;
 use crate::{GlobalOptions, OutputFormat};
@@ -87,7 +88,7 @@ pub async fn verify(
         }
     }
 
-    let extra_tasks = if repair && !skip_vfs {
+    let extra_tasks = if repair && !skip_vfs && supports_vfs_sync(game_id) {
         if opts.output != OutputFormat::Json {
             ui::print_info(
                 "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
@@ -130,6 +131,12 @@ pub async fn verify(
             tasks
         }
     } else {
+        if repair && !skip_vfs && !supports_vfs_sync(game_id) && opts.output != OutputFormat::Json {
+            ui::print_info(format!(
+                "Skipping VFS resource sync for {} (VFS sync is Endfield-only).",
+                game_id
+            ));
+        }
         Vec::new()
     };
 

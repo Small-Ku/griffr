@@ -18,6 +18,7 @@ use super::local::detect_local_install;
 use crate::progress::StepProgress;
 use crate::ui;
 use crate::GlobalOptions;
+use super::supports_vfs_sync;
 
 fn is_launcher_metadata_issue(path: &str) -> bool {
     matches!(
@@ -356,7 +357,7 @@ pub async fn install(
         .await
         .context("Failed to sync launcher metadata after install staging")?;
 
-    let extra_tasks = if !opts.skip_vfs {
+    let extra_tasks = if !opts.skip_vfs && supports_vfs_sync(game_id) {
         ui::print_phase("Verifying install integrity + syncing VFS resources (single DAG batch)");
         ui::print_info(
             "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
@@ -390,6 +391,12 @@ pub async fn install(
         .context("Failed to plan VFS tasks")?;
         tasks
     } else {
+        if !opts.skip_vfs && !supports_vfs_sync(game_id) {
+            ui::print_info(format!(
+                "Skipping VFS resource sync for {} (VFS sync is Endfield-only).",
+                game_id
+            ));
+        }
         ui::print_phase("Verifying install integrity");
         Vec::new()
     };

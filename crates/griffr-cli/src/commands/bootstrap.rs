@@ -9,6 +9,7 @@ use griffr_common::game::{
 };
 
 use super::local::detect_local_install;
+use super::supports_vfs_sync;
 use crate::progress::StepProgress;
 use crate::ui;
 use crate::{BootstrapScope, GlobalOptions};
@@ -32,6 +33,12 @@ pub async fn bootstrap(
 ) -> Result<()> {
     let local = detect_local_install(&path).await?;
     let game_id = local.require_known_game()?;
+    if !supports_vfs_sync(game_id) {
+        anyhow::bail!(
+            "Persistent VFS bootstrap is Endfield-only; {} does not use this VFS pipeline",
+            game_id
+        );
+    }
     let server_id = local.require_known_server()?;
     let installed_version = local.require_config_ini_version()?.to_string();
     let api_client = ApiClient::new()?;

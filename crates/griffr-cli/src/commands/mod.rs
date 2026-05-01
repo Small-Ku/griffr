@@ -1,5 +1,7 @@
 //! CLI command implementations
 
+use griffr_common::config::GameId;
+
 pub mod account;
 pub mod bootstrap;
 pub mod debug;
@@ -31,3 +33,7 @@ pub use news::show as news_show;
 pub use uninstall::uninstall;
 pub use update::update;
 pub use verify::verify;
+
+pub(super) fn supports_vfs_sync(game_id: GameId) -> bool {
+    matches!(game_id, GameId::Endfield)
+}

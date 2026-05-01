@@ -18,6 +18,7 @@ use super::local::detect_local_install;
 use crate::progress::StepProgress;
 use crate::ui;
 use crate::GlobalOptions;
+use super::supports_vfs_sync;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpdatePackageKind {
@@ -135,6 +136,7 @@ fn selected_archive_plan(
 
 fn build_update_dry_run_plan(
     install_path: &Path,
+    game_id: GameId,
     current_version: &str,
     version_info: &griffr_common::api::types::GetLatestGameResponse,
     package_kind: UpdatePackageKind,
@@ -192,6 +194,11 @@ fn build_update_dry_run_plan(
 
     if skip_vfs {
         lines.push("Would skip VFS resource sync (--skip-vfs).".to_string());
+    } else if !supports_vfs_sync(game_id) {
+        lines.push(format!(
+            "Would skip VFS resource sync for {} (VFS sync is Endfield-only).",
+            game_id
+        ));
     } else {
         lines.push("Would sync VFS resources after update.".to_string());
     }
@@ -518,6 +525,7 @@ pub async fn update(
     if opts.is_dry_run() {
         for line in build_update_dry_run_plan(
             &local.install_path,
+            game_id,
             &current_version,
             &version_info,
             package_kind,
@@ -582,7 +590,7 @@ pub async fn update(
         }
     }
 
-    let extra_tasks = if !opts.skip_vfs {
+    let extra_tasks = if !opts.skip_vfs && supports_vfs_sync(game_id) {
         ui::print_phase("Verifying update + syncing VFS resources (single DAG batch)");
         ui::print_info(
             "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
@@ -619,6 +627,12 @@ pub async fn update(
         .context("Failed to plan VFS tasks")?;
         vfs_tasks
     } else {
+        if !opts.skip_vfs && !supports_vfs_sync(game_id) {
+            ui::print_info(format!(
+                "Skipping VFS resource sync for {} (VFS sync is Endfield-only).",
+                game_id
+            ));
+        }
         Vec::new()
     };
     verify_updated_install(
@@ -974,6 +988,7 @@ mod tests {
 
         let lines = build_update_dry_run_plan(
             Path::new("C:\\Games\\Endfield"),
+            GameId::Endfield,
             "1.0.13",
             &response,
             UpdatePackageKind::Full,
