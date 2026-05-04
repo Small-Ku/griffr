@@ -1,4 +1,3 @@
-use griffr_gui::ui::UiEvent;
 use griffr_gui::widget_tree;
 use winio::prelude::*;
 
@@ -51,8 +50,8 @@ impl Component for MainModel {
                 WindowEvent::Resize | WindowEvent::Move => MainMessage::Redraw,
             },
             self.ui_component => {
-                UiEvent::Redraw => MainMessage::Redraw,
-                UiEvent::Target(_) => MainMessage::Noop,
+                MainUiComponentEvent::Redraw => MainMessage::Redraw,
+                MainUiComponentEvent::Target(_) => MainMessage::Noop,
             }
         }
     }
