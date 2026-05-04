@@ -1,5 +1,8 @@
 # Agent Workflow
 
+Still in active development.
+ALWAYS introduce breaking changes for performance and maintainability.
+
 ## Scope
 - Workspace crates:
   - `crates/griffr-common` (shared library)
@@ -12,10 +15,11 @@
   - `ref/`
 
 ## Required Lifecycle
-1. Pick next actionable item from `docs/TODO.md`.
-2. Implement minimal, focused changes.
-3. Verify empirically (command runs and/or tests).
-4. Update `docs/TODO.md` only after successful verification, including a short verification note.
+1. Write down all actionable items into `docs/TODO.md`.
+2. Pick next actionable item from `docs/TODO.md`.
+3. Implement minimal, focused changes.
+4. Verify empirically (command runs and/or tests).
+5. Update `docs/TODO.md` only after successful verification, including a short verification note.
 
 ## Verification Baseline
 - Run relevant tests (`cargo test`, plus targeted crate/command checks as needed).
