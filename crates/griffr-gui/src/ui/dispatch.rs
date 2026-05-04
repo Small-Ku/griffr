@@ -32,7 +32,7 @@ pub fn route_event(plan: &CompiledPlan, event: RoutedEvent) -> Option<WidgetId> 
     best.map(|(_, id)| id)
 }
 
-pub fn map_canvas_event(event: CanvasEvent, x: f64, y: f64) -> Option<RoutedEvent> {
+pub fn map_canvas_event(event: &CanvasEvent, x: f64, y: f64) -> Option<RoutedEvent> {
     match event {
         CanvasEvent::MouseMove(_) => Some(RoutedEvent::MouseMove { x, y }),
         CanvasEvent::MouseDown(_) => Some(RoutedEvent::MouseDown { x, y }),

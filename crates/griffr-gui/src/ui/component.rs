@@ -1,6 +1,10 @@
 use winio::prelude::*;
 
+use crate::ui::widget::{Banner, Button, Container, TileSlot, Widget};
 use crate::ui::{CanvasEvent, UiRuntime, WidgetId};
+
+const COMPONENT_OVERDRAW_PX: f64 = 0.5;
+const TILE_OVERLAP_PX: f64 = 0.5;
 
 pub struct UiComponent {
     root: Child<View>,
@@ -14,6 +18,7 @@ pub struct UiComponent {
     tile7: Child<Canvas>,
     tile8: Child<Canvas>,
     runtime: UiRuntime,
+    widgets: Vec<(WidgetId, Box<dyn Widget>)>,
     pointers: [Point; 9],
 }
 
@@ -52,7 +57,7 @@ impl Component for UiComponent {
         }
         let size = window.client_size()?;
         root.set_loc(Point::new(0.0, 0.0))?;
-        root.set_size(size)?;
+        root.set_size(expand_size(size))?;
         Ok(Self {
             root,
             tile0,
@@ -64,6 +69,7 @@ impl Component for UiComponent {
             tile6,
             tile7,
             tile8,
+            widgets: Self::build_widgets(&runtime)?,
             runtime,
             pointers: [Point::new(0.0, 0.0); 9],
         })
@@ -104,18 +110,21 @@ impl Component for UiComponent {
 
     async fn update_children(&mut self) -> Result<bool> {
         update_children!(
-            self.root,
-            self.tile0, self.tile1, self.tile2, self.tile3, self.tile4,
-            self.tile5, self.tile6, self.tile7, self.tile8
+            self.root, self.tile0, self.tile1, self.tile2, self.tile3, self.tile4, self.tile5,
+            self.tile6, self.tile7, self.tile8
         )
     }
 
-    async fn update(&mut self, message: Self::Message, sender: &ComponentSender<Self>) -> Result<bool> {
+    async fn update(
+        &mut self,
+        message: Self::Message,
+        sender: &ComponentSender<Self>,
+    ) -> Result<bool> {
         match message {
             UiMessage::Noop => Ok(false),
             UiMessage::Resize(size) => {
                 self.root.set_loc(Point::new(0.0, 0.0))?;
-                self.root.set_size(size)?;
+                self.root.set_size(expand_size(size))?;
                 Ok(true)
             }
             UiMessage::Canvas(idx, ev) => {
@@ -127,8 +136,18 @@ impl Component for UiComponent {
                     }
                     _ => {}
                 }
-                let p = self.pointers.get(idx).copied().unwrap_or(Point::new(0.0, 0.0));
-                let hit = self.runtime.dispatch_with_pointer(ev, p.x, p.y);
+                let p = self
+                    .pointers
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(Point::new(0.0, 0.0));
+                let hit = self.runtime.dispatch_with_pointer(&ev, p.x, p.y);
+                if let Some(hit_id) = hit {
+                    if let Some((_, widget)) = self.widgets.iter_mut().find(|(id, _)| *id == hit_id)
+                    {
+                        widget.handle_event(&ev)?;
+                    }
+                }
                 sender.output(UiEvent::Target(hit));
                 sender.output(UiEvent::Redraw);
                 Ok(true)
@@ -139,6 +158,22 @@ impl Component for UiComponent {
     fn render(&mut self, _sender: &ComponentSender<Self>) -> Result<()> {
         let size = self.root.size()?;
         self.runtime.relayout(size);
+        let max_right = self
+            .runtime
+            .plan
+            .tile_plan
+            .tiles
+            .iter()
+            .map(|t| t.bounds.x + t.bounds.w)
+            .fold(0.0f64, f64::max);
+        let max_bottom = self
+            .runtime
+            .plan
+            .tile_plan
+            .tiles
+            .iter()
+            .map(|t| t.bounds.y + t.bounds.h)
+            .fold(0.0f64, f64::max);
         for idx in 0..9 {
             let canvas = match idx {
                 0 => &mut self.tile0,
@@ -152,11 +187,25 @@ impl Component for UiComponent {
                 _ => &mut self.tile8,
             };
             if let Some(tile) = self.runtime.plan.tile_plan.tiles.get(idx) {
+                let mut draw_w = tile.bounds.w;
+                let mut draw_h = tile.bounds.h;
+                // if tile.bounds.x + tile.bounds.w < max_right - 0.001 {
+                draw_w += TILE_OVERLAP_PX;
+                // }
+                // if tile.bounds.y + tile.bounds.h < max_bottom - 0.001 {
+                draw_h += TILE_OVERLAP_PX;
+                // }
                 canvas.set_visible(true)?;
                 canvas.set_loc(Point::new(tile.bounds.x, tile.bounds.y))?;
-                canvas.set_size(Size::new(tile.bounds.w, tile.bounds.h))?;
-                let mut ctx = canvas.context()?;
-                self.runtime.draw_tile(idx, &mut ctx)?;
+                canvas.set_size(Size::new(draw_w, draw_h))?;
+                if let Some(top_id) = tile.widgets.last().copied() {
+                    if let Some((_, widget)) = self.widgets.iter_mut().find(|(id, _)| *id == top_id)
+                    {
+                        let mut ctx = canvas.context()?;
+                        let local_bounds = crate::ui::Rect::new(0.0, 0.0, draw_w, draw_h);
+                        widget.draw(&mut ctx, local_bounds, tile.clipped)?;
+                    }
+                }
             } else {
                 canvas.set_visible(false)?;
             }
@@ -179,6 +228,35 @@ impl Component for UiComponent {
 }
 
 impl UiComponent {
+    fn build_widgets(runtime: &UiRuntime) -> Result<Vec<(WidgetId, Box<dyn Widget>)>> {
+        let mut out = Vec::<(WidgetId, Box<dyn Widget>)>::new();
+        for node in &runtime.plan.widgets {
+            let bounds = runtime
+                .plan
+                .bounds
+                .iter()
+                .find(|(id, _)| *id == node.id)
+                .map(|(_, b)| *b)
+                .unwrap_or(crate::ui::Rect::new(0.0, 0.0, 0.0, 0.0));
+            let clipped = runtime
+                .plan
+                .tile_plan
+                .tiles
+                .iter()
+                .find(|tile| tile.widgets.iter().any(|id| *id == node.id))
+                .map(|t| t.clipped)
+                .unwrap_or(false);
+            let slot = TileSlot { bounds, clipped };
+            let widget: Box<dyn Widget> = match node.widget_type {
+                "Button" => Box::new(Button::init(slot)?),
+                "Banner" => Box::new(Banner::init(slot)?),
+                _ => Box::new(Container::init(slot)?),
+            };
+            out.push((node.id, widget));
+        }
+        Ok(out)
+    }
+
     fn local_to_global(&self, idx: usize, p: Point) -> Point {
         if let Some(tile) = self.runtime.plan.tile_plan.tiles.get(idx) {
             Point::new(p.x + tile.bounds.x, p.y + tile.bounds.y)
@@ -186,4 +264,11 @@ impl UiComponent {
             p
         }
     }
+}
+
+fn expand_size(size: Size) -> Size {
+    Size::new(
+        size.width + COMPONENT_OVERDRAW_PX,
+        size.height + COMPONENT_OVERDRAW_PX,
+    )
 }
