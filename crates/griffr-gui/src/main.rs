@@ -1,11 +1,22 @@
+use griffr_gui::ui::UiEvent;
+use griffr_gui::widget_tree;
 use winio::prelude::*;
 
+#[widget_tree(
+    Container(flex_direction = Column, flex_grow = 1.0, flex_basis = 600.0, padding = 10.0) {
+        Button(flex_grow = 1.0, flex_basis = 280.0, margin = 6.0, label = "OK"),
+        Banner(flex_grow = 2.0, flex_basis = 320.0, margin = 6.0, clip = ForceClip)
+    }
+)]
+struct MainUi;
+
 fn main() -> Result<()> {
-    App::new("rs.compio.winio.example")?.run::<MainModel>(())
+    App::new("rs.compio.griffr.gui")?.run::<MainModel>(())
 }
 
 struct MainModel {
     window: Child<Window>,
+    ui_component: Child<MainUiComponent>,
 }
 
 enum MainMessage {
@@ -21,32 +32,33 @@ impl Component for MainModel {
     type Message = MainMessage;
 
     async fn init(_init: Self::Init<'_>, _sender: &ComponentSender<Self>) -> Result<Self> {
-        // create & initialize the window
         init! {
             window: Window = (()) => {
-                text: "Example",
-                size: Size::new(800.0, 600.0),
+                text: "Griffr GUI",
+                size: Size::new(900.0, 640.0),
             }
         }
+        let ui_component = Child::<MainUiComponent>::init(&window).await?;
         window.show()?;
-        Ok(Self { window })
+        Ok(Self { window, ui_component })
     }
 
     async fn start(&mut self, sender: &ComponentSender<Self>) -> ! {
-        // listen to events
         start! {
             sender, default: MainMessage::Noop,
             self.window => {
                 WindowEvent::Close => MainMessage::Close,
-                WindowEvent::Move => MainMessage::Redraw,
-                WindowEvent::Resize => MainMessage::Redraw,
+                WindowEvent::Resize | WindowEvent::Move => MainMessage::Redraw,
+            },
+            self.ui_component => {
+                UiEvent::Redraw => MainMessage::Redraw,
+                UiEvent::Target(_) => MainMessage::Noop,
             }
         }
     }
 
     async fn update_children(&mut self) -> Result<bool> {
-        // update the window
-        update_children!(self.window)
+        update_children!(self.window, self.ui_component)
     }
 
     async fn update(
@@ -54,26 +66,27 @@ impl Component for MainModel {
         message: Self::Message,
         sender: &ComponentSender<Self>,
     ) -> Result<bool> {
-        // deal with custom messages
         match message {
             MainMessage::Noop => Ok(false),
             MainMessage::Close => {
-                // the root component output stops the application
                 sender.output(());
-                // need not to call `render`
                 Ok(false)
             }
-            MainMessage::Redraw => Ok(true),
+            MainMessage::Redraw => {
+                let _ = self.window.client_size()?;
+                Ok(true)
+            }
         }
     }
 
     fn render(&mut self, _sender: &ComponentSender<Self>) -> Result<()> {
         let csize = self.window.client_size()?;
-        // adjust layout and draw widgets here
+        self.ui_component.post(MainUiComponentMessage::Resize(csize));
         Ok(())
     }
 
     fn render_children(&mut self) -> Result<()> {
+        self.ui_component.render()?;
         self.window.render()
     }
 }

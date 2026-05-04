@@ -1,5 +1,5 @@
 [package]
-name = "griffr-gui"
+name = "griffr-gui-macros"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+proc-macro = true
+
 [dependencies]
-winio = { version = "0.11.0", features = ["win32"], default-features = false }
-griffr-gui-macros = { path = "../griffr-gui-macros" }
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }

@@ -1137,7 +1137,17 @@ dependencies = [
 name = "griffr-gui"
 version = "0.0.1"
 dependencies = [
+ "griffr-gui-macros",
  "winio",
+]
+
+[[package]]
+name = "griffr-gui-macros"
+version = "0.0.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
