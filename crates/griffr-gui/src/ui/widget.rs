@@ -14,7 +14,12 @@ pub trait Widget {
         Self: Sized;
     fn bounds(&self) -> Rect;
     fn capabilities(&self) -> WidgetCapabilities;
-    fn draw(&mut self, _ctx: &mut DrawingContext<'_>, _local_bounds: Rect, _clipped: bool) -> Result<()> {
+    fn draw(
+        &mut self,
+        _ctx: &mut DrawingContext<'_>,
+        _local_bounds: Rect,
+        _clipped: bool,
+    ) -> Result<()> {
         Ok(())
     }
     fn handle_event(&mut self, _event: &CanvasEvent, _is_target: bool) -> Result<()> {
@@ -39,7 +44,12 @@ impl Widget for Container {
         WidgetCapabilities::new(false, false, false)
     }
 
-    fn draw(&mut self, ctx: &mut DrawingContext<'_>, local_bounds: Rect, _clipped: bool) -> Result<()> {
+    fn draw(
+        &mut self,
+        ctx: &mut DrawingContext<'_>,
+        local_bounds: Rect,
+        _clipped: bool,
+    ) -> Result<()> {
         let size = Size::new(local_bounds.w, local_bounds.h);
         let brush = SolidColorBrush::new(Color::new(0x1E, 0x22, 0x2B, 0xFF));
         ctx.fill_rect(
@@ -75,7 +85,12 @@ impl Widget for Button {
         WidgetCapabilities::new(true, true, false)
     }
 
-    fn draw(&mut self, ctx: &mut DrawingContext<'_>, local_bounds: Rect, _clipped: bool) -> Result<()> {
+    fn draw(
+        &mut self,
+        ctx: &mut DrawingContext<'_>,
+        local_bounds: Rect,
+        _clipped: bool,
+    ) -> Result<()> {
         let size = Size::new(local_bounds.w, local_bounds.h);
         let color = if self.pressed {
             Color::new(0x1F, 0x4B, 0x91, 0xFF)
@@ -118,7 +133,9 @@ impl Widget for Button {
 pub struct Banner {
     tile: TileSlot,
     hovered: bool,
-    scroll_ticks: i32,
+    h: f32,
+    s: f32,
+    v: f32,
 }
 
 impl Widget for Banner {
@@ -126,7 +143,9 @@ impl Widget for Banner {
         Ok(Self {
             tile,
             hovered: false,
-            scroll_ticks: 0,
+            h: 0.0,
+            s: 44.0 / 90.0,
+            v: 90.0 / 255.0,
         })
     }
 
@@ -138,18 +157,42 @@ impl Widget for Banner {
         WidgetCapabilities::new(true, false, true)
     }
 
-    fn draw(&mut self, ctx: &mut DrawingContext<'_>, local_bounds: Rect, clipped: bool) -> Result<()> {
+    fn draw(
+        &mut self,
+        ctx: &mut DrawingContext<'_>,
+        local_bounds: Rect,
+        _clipped: bool,
+    ) -> Result<()> {
         let size = Size::new(local_bounds.w, local_bounds.h);
-        let color = if clipped {
-            if self.hovered {
-                Color::new(0x71, 0x3B, 0x3B, 0xFF)
-            } else {
-                Color::new(0x5A, 0x2E, 0x2E, 0xFF)
-            }
+        
+        let mut current_v = self.v;
+        if self.hovered {
+            current_v = (current_v + 0.1).min(1.0);
+        }
+
+        let c = self.s * current_v;
+        let x = c * (1.0 - ((self.h / 60.0) % 2.0 - 1.0).abs());
+        let m = current_v - c;
+
+        let (r1, g1, b1) = if self.h < 60.0 {
+            (c, x, 0.0)
+        } else if self.h < 120.0 {
+            (x, c, 0.0)
+        } else if self.h < 180.0 {
+            (0.0, c, x)
+        } else if self.h < 240.0 {
+            (0.0, x, c)
+        } else if self.h < 300.0 {
+            (x, 0.0, c)
         } else {
-            Color::new(0x2E, 0x5A, 0x43, 0xFF)
+            (c, 0.0, x)
         };
-        let brush = SolidColorBrush::new(color);
+
+        let r = ((r1 + m) * 255.0).round() as u8;
+        let g = ((g1 + m) * 255.0).round() as u8;
+        let b = ((b1 + m) * 255.0).round() as u8;
+
+        let brush = SolidColorBrush::new(Color::new(r, g, b, 0xFF));
         ctx.fill_rect(
             &brush,
             winio::prelude::Rect::new(Point::new(local_bounds.x, local_bounds.y), size),
@@ -164,7 +207,7 @@ impl Widget for Banner {
             }
             CanvasEvent::MouseWheel(_) => {
                 if is_target {
-                    self.scroll_ticks = self.scroll_ticks.saturating_add(1);
+                    self.h = (self.h + 15.0) % 360.0;
                 }
             }
             _ => {}
