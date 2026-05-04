@@ -134,3 +134,9 @@ pub struct CompiledPlan {
     pub tile_plan: TilePlan,
     pub size: Size,
 }
+
+#[derive(Clone, Debug)]
+pub struct StaticPlan {
+    pub widgets: Vec<WidgetNode>,
+    pub merged_tile_count: usize,
+}

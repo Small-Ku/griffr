@@ -1,26 +1,30 @@
 use winio::prelude::Size;
 
 use crate::ui::dispatch::{map_canvas_event, route_event, RoutedEvent};
-use crate::ui::tile_plan::compile::compile;
-use crate::ui::{CanvasEvent, CompiledPlan, WidgetDecl, WidgetId};
+use crate::ui::tile_plan::compile::compile_dynamic;
+use crate::ui::{CanvasEvent, CompiledPlan, StaticPlan, WidgetId};
 
 pub struct UiRuntime {
-    decls: &'static [WidgetDecl],
+    static_plan: StaticPlan,
     pub plan: CompiledPlan,
     pub hovered: Option<WidgetId>,
 }
 
 impl UiRuntime {
-    pub fn new(decls: &'static [WidgetDecl], size: Size) -> Self {
+    pub fn from_static(static_plan: StaticPlan, size: Size) -> Self {
         Self {
-            decls,
-            plan: compile(decls, size),
+            plan: compile_dynamic(&static_plan, size),
+            static_plan,
             hovered: None,
         }
     }
 
     pub fn relayout(&mut self, size: Size) {
-        self.plan = compile(self.decls, size);
+        self.plan = compile_dynamic(&self.static_plan, size);
+    }
+
+    pub fn canvas_count(&self) -> usize {
+        self.static_plan.merged_tile_count.max(1)
     }
 
     pub fn dispatch_with_pointer(&mut self, event: &CanvasEvent, x: f64, y: f64) -> Option<WidgetId> {

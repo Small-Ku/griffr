@@ -3,11 +3,36 @@ use winio::prelude::Size;
 use crate::ui::layout::compute_layout;
 use crate::ui::tile_plan::merge::merge_adjacent_non_clipped;
 use crate::ui::{
-    ClipPolicy, CompiledPlan, LayoutDirection, LayoutSpec, Rect, TileId, TilePlan, TileSpec,
-    WidgetCapabilities, WidgetDecl, WidgetId, WidgetNode,
+    ClipPolicy, CompiledPlan, LayoutDirection, LayoutSpec, Rect, StaticPlan, TileId, TilePlan,
+    TileSpec, WidgetCapabilities, WidgetDecl, WidgetId, WidgetNode,
 };
 
 pub fn compile(decls: &'static [WidgetDecl], size: Size) -> CompiledPlan {
+    let static_plan = StaticPlan {
+        widgets: build_widgets(decls),
+        merged_tile_count: 0,
+    };
+    compile_dynamic(&static_plan, size)
+}
+
+pub fn compile_dynamic(static_plan: &StaticPlan, size: Size) -> CompiledPlan {
+    let widgets = static_plan.widgets.clone();
+    let bounds = compute_layout(&widgets, size);
+    let mut tiles = partition_non_overlapping_tiles(&widgets, &bounds);
+    tiles = merge_adjacent_non_clipped(tiles, &bounds, &widgets);
+    for (idx, t) in tiles.iter_mut().enumerate() {
+        t.id = TileId(idx as u16);
+    }
+
+    CompiledPlan {
+        widgets,
+        bounds,
+        tile_plan: TilePlan { tiles },
+        size,
+    }
+}
+
+fn build_widgets(decls: &'static [WidgetDecl]) -> Vec<WidgetNode> {
     let mut widgets: Vec<WidgetNode> = decls
         .iter()
         .map(|d| WidgetNode {
@@ -36,21 +61,7 @@ pub fn compile(decls: &'static [WidgetDecl], size: Size) -> CompiledPlan {
         })
         .collect();
     widgets.sort_by_key(|w| (w.z_order, w.id));
-
-    let bounds = compute_layout(&widgets, size);
-    let mut tiles = partition_non_overlapping_tiles(&widgets, &bounds);
-
-    tiles = merge_adjacent_non_clipped(tiles, &bounds, &widgets);
-    for (idx, t) in tiles.iter_mut().enumerate() {
-        t.id = TileId(idx as u16);
-    }
-
-    CompiledPlan {
-        widgets,
-        bounds,
-        tile_plan: TilePlan { tiles },
-        size,
-    }
+    widgets
 }
 
 pub fn partition_non_overlapping_tiles(
