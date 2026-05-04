@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/griffr-common", "crates/griffr-cli"]
+members = ["crates/griffr-common", "crates/griffr-cli", "crates/griffr-gui"]
 resolver = "2"
 
 [workspace.package]
