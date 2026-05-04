@@ -10,7 +10,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
     let comp_ident = Ident::new(&format!("{}Component", ident), ident.span());
     let msg_ident = Ident::new(&format!("{}ComponentMessage", ident), ident.span());
     let event_ident = Ident::new(&format!("{}ComponentEvent", ident), ident.span());
-    let canvas_count = merged_tile_count_for_flat(&flat).max(1);
+    let canvas_count = merged_tile_count_for_flat(&flat);
     let last_canvas_idx = canvas_count.saturating_sub(1);
     let last_canvas_field = Ident::new(&format!("tile{}", last_canvas_idx), ident.span());
 
