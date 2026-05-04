@@ -142,11 +142,8 @@ impl Component for UiComponent {
                     .copied()
                     .unwrap_or(Point::new(0.0, 0.0));
                 let hit = self.runtime.dispatch_with_pointer(&ev, p.x, p.y);
-                if let Some(hit_id) = hit {
-                    if let Some((_, widget)) = self.widgets.iter_mut().find(|(id, _)| *id == hit_id)
-                    {
-                        widget.handle_event(&ev)?;
-                    }
+                for (id, widget) in &mut self.widgets {
+                    widget.handle_event(&ev, hit.is_some_and(|hit_id| hit_id == *id))?;
                 }
                 sender.output(UiEvent::Target(hit));
                 sender.output(UiEvent::Redraw);
@@ -158,22 +155,6 @@ impl Component for UiComponent {
     fn render(&mut self, _sender: &ComponentSender<Self>) -> Result<()> {
         let size = self.root.size()?;
         self.runtime.relayout(size);
-        let max_right = self
-            .runtime
-            .plan
-            .tile_plan
-            .tiles
-            .iter()
-            .map(|t| t.bounds.x + t.bounds.w)
-            .fold(0.0f64, f64::max);
-        let max_bottom = self
-            .runtime
-            .plan
-            .tile_plan
-            .tiles
-            .iter()
-            .map(|t| t.bounds.y + t.bounds.h)
-            .fold(0.0f64, f64::max);
         for idx in 0..9 {
             let canvas = match idx {
                 0 => &mut self.tile0,
@@ -189,12 +170,8 @@ impl Component for UiComponent {
             if let Some(tile) = self.runtime.plan.tile_plan.tiles.get(idx) {
                 let mut draw_w = tile.bounds.w;
                 let mut draw_h = tile.bounds.h;
-                // if tile.bounds.x + tile.bounds.w < max_right - 0.001 {
                 draw_w += TILE_OVERLAP_PX;
-                // }
-                // if tile.bounds.y + tile.bounds.h < max_bottom - 0.001 {
                 draw_h += TILE_OVERLAP_PX;
-                // }
                 canvas.set_visible(true)?;
                 canvas.set_loc(Point::new(tile.bounds.x, tile.bounds.y))?;
                 canvas.set_size(Size::new(draw_w, draw_h))?;
