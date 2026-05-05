@@ -9,6 +9,14 @@ use winio::prelude::*;
 )]
 struct MainUi;
 
+#[widget_tree(
+    griffr_gui::widget::Container(flex_direction = Column, flex_grow = 0.0, flex_basis = 60.0, padding = 10.0) {
+        griffr_gui::widget::Button(flex_grow = 0.0, flex_basis = 40.0, margin = 0.0),
+        griffr_gui::widget::Button(flex_grow = 0.0, flex_basis = 40.0, margin = 0.0)
+    }
+)]
+struct SidebarUi;
+
 fn main() -> Result<()> {
     App::new("rs.compio.griffr.gui")?.run::<MainModel>(())
 }
@@ -16,6 +24,7 @@ fn main() -> Result<()> {
 struct MainModel {
     window: Child<Window>,
     ui_component: Child<MainUiComponent>,
+    sidebar: Child<SidebarUiComponent>,
 }
 
 enum MainMessage {
@@ -38,8 +47,9 @@ impl Component for MainModel {
             }
         }
         let ui_component = Child::<MainUiComponent>::init(&window).await?;
+        let sidebar = Child::<SidebarUiComponent>::init(&window).await?;
         window.show()?;
-        Ok(Self { window, ui_component })
+        Ok(Self { window, ui_component, sidebar })
     }
 
     async fn start(&mut self, sender: &ComponentSender<Self>) -> ! {
@@ -52,12 +62,16 @@ impl Component for MainModel {
             self.ui_component => {
                 MainUiComponentEvent::Redraw => MainMessage::Redraw,
                 MainUiComponentEvent::Target(_) => MainMessage::Noop,
+            },
+            self.sidebar => {
+                SidebarUiComponentEvent::Redraw => MainMessage::Redraw,
+                SidebarUiComponentEvent::Target(_) => MainMessage::Noop,
             }
         }
     }
 
     async fn update_children(&mut self) -> Result<bool> {
-        update_children!(self.window, self.ui_component)
+        update_children!(self.window, self.ui_component, self.sidebar)
     }
 
     async fn update(
@@ -80,11 +94,17 @@ impl Component for MainModel {
 
     fn render(&mut self, _sender: &ComponentSender<Self>) -> Result<()> {
         let csize = self.window.client_size()?;
-        self.ui_component.post(MainUiComponentMessage::Resize(csize));
+        let mut root = layout! {
+            Grid::from_str("60,1*", "1*").unwrap(),
+            self.sidebar => { column: 0, row: 0 },
+            self.ui_component => { column: 1, row: 0 },
+        };
+        root.set_size(csize).unwrap();
         Ok(())
     }
 
     fn render_children(&mut self) -> Result<()> {
+        self.sidebar.render()?;
         self.ui_component.render()?;
         self.window.render()
     }

@@ -160,10 +160,13 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             runtime: ::griffr_gui::ui::UiRuntime,
             widgets: Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>,
             pointers: [::winio::prelude::Point; #canvas_count],
+            halign: ::winio::prelude::HAlign,
+            valign: ::winio::prelude::VAlign,
+            margin: ::winio::prelude::Margin,
         }
 
         #[derive(Debug)]
-        pub enum #msg_ident { Noop, Resize(::winio::prelude::Size), Canvas(usize, ::winio::prelude::CanvasEvent), }
+        pub enum #msg_ident { Noop, Layout(::winio::prelude::Rect), Canvas(usize, ::winio::prelude::CanvasEvent), }
 
         impl ::winio::prelude::Component for #comp_ident {
             type Error = ::winio::prelude::Error;
@@ -185,7 +188,13 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                         node.opaque = w.opaque();
                     }
                 }
-                Ok(Self { root, #(#canvas_struct_inits)* widgets, runtime, pointers: [::winio::prelude::Point::new(0.0, 0.0); #canvas_count] })
+                Ok(Self { 
+                    root, #(#canvas_struct_inits)* widgets, runtime, 
+                    pointers: [::winio::prelude::Point::new(0.0, 0.0); #canvas_count],
+                    halign: ::winio::prelude::HAlign::Stretch,
+                    valign: ::winio::prelude::VAlign::Stretch,
+                    margin: ::winio::prelude::Margin::default(),
+                })
             }
             async fn start(&mut self, sender: &::winio::prelude::ComponentSender<Self>) -> ! {
                 ::winio::prelude::start! { sender, default: #msg_ident::Noop, #(#start_arms)* }
@@ -196,7 +205,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             async fn update(&mut self, message: Self::Message, sender: &::winio::prelude::ComponentSender<Self>) -> ::winio::prelude::Result<bool> {
                 match message {
                     #msg_ident::Noop => Ok(false),
-                    #msg_ident::Resize(size) => { self.root.set_loc(::winio::prelude::Point::new(0.0, 0.0))?; self.root.set_size(Self::expand_size(size))?; Ok(true) }
+                    #msg_ident::Layout(rect) => { self.root.set_loc(rect.origin)?; self.root.set_size(Self::expand_size(rect.size))?; Ok(true) }
                     #msg_ident::Canvas(idx, ev) => {
                         let p_local = match &ev {
                             ::winio::prelude::CanvasEvent::MouseMove(p) => Some(*p),
@@ -252,7 +261,47 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             fn render_children(&mut self) -> ::winio::prelude::Result<()> { #(#render_children_stmts)* self.root.render() }
         }
 
+        impl ::winio::prelude::Layoutable for #comp_ident {
+            fn loc(&self) -> ::winio::prelude::Result<::winio::prelude::Point> {
+                self.root.loc()
+            }
+            fn set_loc(&mut self, p: ::winio::prelude::Point) -> ::winio::prelude::Result<()> {
+                self.root.set_loc(p)
+            }
+            fn size(&self) -> ::winio::prelude::Result<::winio::prelude::Size> {
+                self.root.size().map(Self::shrink_size)
+            }
+            fn set_size(&mut self, s: ::winio::prelude::Size) -> ::winio::prelude::Result<()> {
+                self.root.set_size(Self::expand_size(s))
+            }
+        }
+
+        impl ::winio::prelude::Failable for #comp_ident {
+            type Error = ::winio::prelude::Error;
+        }
+
         impl #comp_ident {
+            pub fn set_halign(&mut self, halign: ::winio::prelude::HAlign) {
+                self.halign = halign;
+            }
+            pub fn set_valign(&mut self, valign: ::winio::prelude::VAlign) {
+                self.valign = valign;
+            }
+            pub fn set_margin(&mut self, margin: ::winio::prelude::Margin) {
+                self.margin = margin;
+            }
+            pub fn halign(&self) -> ::winio::prelude::HAlign {
+                self.halign
+            }
+            pub fn valign(&self) -> ::winio::prelude::VAlign {
+                self.valign
+            }
+            pub fn margin(&self) -> ::winio::prelude::Margin {
+                self.margin
+            }
+            pub fn set_visible(&mut self, visible: bool) -> ::winio::prelude::Result<()> {
+                self.root.set_visible(visible)
+            }
             fn sync_widgets_routing(&mut self) {
                 for (id, w) in &self.widgets {
                     let h = w.hoverable();
@@ -301,6 +350,10 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             fn expand_size(size: ::winio::prelude::Size) -> ::winio::prelude::Size {
                 const COMPONENT_OVERDRAW_PX: f64 = 0.5;
                 ::winio::prelude::Size::new(size.width + COMPONENT_OVERDRAW_PX, size.height + COMPONENT_OVERDRAW_PX)
+            }
+            fn shrink_size(size: ::winio::prelude::Size) -> ::winio::prelude::Size {
+                const COMPONENT_OVERDRAW_PX: f64 = 0.5;
+                ::winio::prelude::Size::new(size.width - COMPONENT_OVERDRAW_PX, size.height - COMPONENT_OVERDRAW_PX)
             }
         }
     }
