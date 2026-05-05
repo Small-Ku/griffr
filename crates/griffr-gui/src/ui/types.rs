@@ -1,4 +1,4 @@
-use winio::prelude::Size;
+use winio::primitive::{Rect, Size};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct WidgetId(pub u16);
@@ -34,32 +34,6 @@ pub enum ClipPolicy {
 pub enum LayoutDirection {
     Row,
     Column,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-}
-
-impl Rect {
-    pub const fn new(x: f64, y: f64, w: f64, h: f64) -> Self {
-        Self { x, y, w, h }
-    }
-
-    pub fn contains(&self, x: f64, y: f64) -> bool {
-        x >= self.x && y >= self.y && x < self.x + self.w && y < self.y + self.h
-    }
-
-    pub fn right(&self) -> f64 {
-        self.x + self.w
-    }
-
-    pub fn bottom(&self) -> f64 {
-        self.y + self.h
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -1,5 +1,6 @@
-use winio::prelude::CanvasEvent;
 use crate::ui::{CompiledPlan, WidgetId};
+use winio::primitive::Point;
+use winio::widgets::CanvasEvent;
 
 #[derive(Clone, Copy, Debug)]
 pub enum RoutedEvent {
@@ -17,7 +18,7 @@ pub fn route_event(plan: &CompiledPlan, event: RoutedEvent) -> Option<WidgetId> 
     };
     let mut best: Option<(i32, WidgetId)> = None;
     for (id, bounds) in &plan.bounds {
-        if !bounds.contains(x, y) {
+        if !bounds.contains(Point::new(x, y)) {
             continue;
         }
         if let Some(node) = plan.widgets.iter().find(|n| n.id == *id) {
@@ -53,8 +54,38 @@ mod tests {
     #[test]
     fn topmost_clickable_wins() {
         let decls = &[
-            WidgetDecl { id: 0, parent: -1, widget_type: "Button", hoverable: false, clickable: true, scrollable: false, clip: 0, z: 1, direction: 1, flex_grow: 0.0, flex_shrink: 1.0, flex_basis: 50.0, margin: 0.0, padding: 0.0 },
-            WidgetDecl { id: 1, parent: -1, widget_type: "Button", hoverable: false, clickable: true, scrollable: false, clip: 0, z: 2, direction: 1, flex_grow: 0.0, flex_shrink: 1.0, flex_basis: 50.0, margin: 0.0, padding: 0.0 },
+            WidgetDecl {
+                id: 0,
+                parent: -1,
+                widget_type: "Button",
+                hoverable: false,
+                clickable: true,
+                scrollable: false,
+                clip: 0,
+                z: 1,
+                direction: 1,
+                flex_grow: 0.0,
+                flex_shrink: 1.0,
+                flex_basis: 50.0,
+                margin: 0.0,
+                padding: 0.0,
+            },
+            WidgetDecl {
+                id: 1,
+                parent: -1,
+                widget_type: "Button",
+                hoverable: false,
+                clickable: true,
+                scrollable: false,
+                clip: 0,
+                z: 2,
+                direction: 1,
+                flex_grow: 0.0,
+                flex_shrink: 1.0,
+                flex_basis: 50.0,
+                margin: 0.0,
+                padding: 0.0,
+            },
         ];
         let mut plan = compile(decls, Size::new(100.0, 100.0));
         let b0 = plan.bounds[0].1;

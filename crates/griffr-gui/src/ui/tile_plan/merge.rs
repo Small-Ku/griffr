@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use winio::primitive::{Point, Rect, Size};
 
-use crate::ui::{Rect, TileSpec, WidgetId, WidgetNode};
+use crate::ui::{TileSpec, WidgetId, WidgetNode};
 
 pub fn merge_adjacent_non_clipped(
     mut tiles: Vec<TileSpec>,
@@ -14,7 +15,8 @@ pub fn merge_adjacent_non_clipped(
         'outer: for i in 0..tiles.len() {
             for j in (i + 1)..tiles.len() {
                 if let Some(candidate) = merged_tile(&tiles[i], &tiles[j]) {
-                    let mut others: Vec<TileSpec> = Vec::with_capacity(tiles.len().saturating_sub(2));
+                    let mut others: Vec<TileSpec> =
+                        Vec::with_capacity(tiles.len().saturating_sub(2));
                     for (idx, t) in tiles.iter().enumerate() {
                         if idx != i && idx != j {
                             others.push(t.clone());
@@ -39,9 +41,10 @@ pub fn merge_adjacent_non_clipped(
     }
     tiles.sort_by(|a, b| {
         a.bounds
+            .origin
             .y
-            .total_cmp(&b.bounds.y)
-            .then(a.bounds.x.total_cmp(&b.bounds.x))
+            .total_cmp(&b.bounds.origin.y)
+            .then(a.bounds.origin.x.total_cmp(&b.bounds.origin.x))
     });
     tiles
 }
@@ -50,18 +53,22 @@ fn merged_tile(a: &TileSpec, b: &TileSpec) -> Option<TileSpec> {
     if a.clipped || b.clipped || a.widgets != b.widgets {
         return None;
     }
-    let horizontal = a.bounds.right() == b.bounds.x && a.bounds.y == b.bounds.y && a.bounds.h == b.bounds.h;
-    let vertical = a.bounds.bottom() == b.bounds.y && a.bounds.x == b.bounds.x && a.bounds.w == b.bounds.w;
+    let horizontal = a.bounds.max_x() == b.bounds.origin.x
+        && a.bounds.origin.y == b.bounds.origin.y
+        && a.bounds.size.height == b.bounds.size.height;
+    let vertical = a.bounds.max_y() == b.bounds.origin.y
+        && a.bounds.origin.x == b.bounds.origin.x
+        && a.bounds.size.width == b.bounds.size.width;
     if !(horizontal || vertical) {
         return None;
     }
-    let x = a.bounds.x.min(b.bounds.x);
-    let y = a.bounds.y.min(b.bounds.y);
-    let right = a.bounds.right().max(b.bounds.right());
-    let bottom = a.bounds.bottom().max(b.bounds.bottom());
+    let x = a.bounds.origin.x.min(b.bounds.origin.x);
+    let y = a.bounds.origin.y.min(b.bounds.origin.y);
+    let right = a.bounds.max_x().max(b.bounds.max_x());
+    let bottom = a.bounds.max_y().max(b.bounds.max_y());
     Some(TileSpec {
         id: a.id,
-        bounds: Rect::new(x, y, right - x, bottom - y),
+        bounds: Rect::new(Point::new(x, y), Size::new(right - x, bottom - y)),
         clipped: false,
         widgets: a.widgets.clone(),
     })
@@ -72,14 +79,17 @@ fn widgets_fit(tile: &TileSpec, bounds_by_widget: &HashMap<WidgetId, Rect>) -> b
         return false;
     };
     bounds_by_widget.get(wid).is_some_and(|b| {
-        tile.bounds.x >= b.x
-            && tile.bounds.y >= b.y
-            && tile.bounds.right() <= b.right()
-            && tile.bounds.bottom() <= b.bottom()
+        tile.bounds.origin.x >= b.origin.x
+            && tile.bounds.origin.y >= b.origin.y
+            && tile.bounds.max_x() <= b.max_x()
+            && tile.bounds.max_y() <= b.max_y()
     })
 }
 
-fn no_scroll_or_clip_violation(tile: &TileSpec, widget_by_id: &HashMap<WidgetId, WidgetNode>) -> bool {
+fn no_scroll_or_clip_violation(
+    tile: &TileSpec,
+    widget_by_id: &HashMap<WidgetId, WidgetNode>,
+) -> bool {
     let Some(wid) = tile.widgets.last() else {
         return false;
     };
@@ -93,27 +103,52 @@ fn overlaps_others(candidate: &Rect, others: &[TileSpec]) -> bool {
 }
 
 fn rects_overlap(a: &Rect, b: &Rect) -> bool {
-    a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
+    a.origin.x < b.max_x()
+        && a.max_x() > b.origin.x
+        && a.origin.y < b.max_y()
+        && a.max_y() > b.origin.y
 }
 
 #[cfg(test)]
 mod tests {
+    use winio::primitive::{Point, Rect, Size};
+
     use crate::ui::tile_plan::merge::merge_adjacent_non_clipped;
-    use crate::ui::{ClipPolicy, LayoutDirection, LayoutSpec, Rect, TileId, TileSpec, WidgetCapabilities, WidgetId, WidgetNode};
+    use crate::ui::{
+        ClipPolicy, LayoutDirection, LayoutSpec, TileId, TileSpec, WidgetCapabilities, WidgetId,
+        WidgetNode,
+    };
 
     #[test]
     fn merges_adjacent_unclipped() {
         let tiles = vec![
-            TileSpec { id: TileId(0), bounds: Rect::new(0.0, 0.0, 50.0, 50.0), clipped: false, widgets: vec![WidgetId(1)] },
-            TileSpec { id: TileId(1), bounds: Rect::new(50.0, 0.0, 50.0, 50.0), clipped: false, widgets: vec![WidgetId(1)] },
+            TileSpec {
+                id: TileId(0),
+                bounds: Rect::from_size(Size::new(50.0, 50.0)),
+                clipped: false,
+                widgets: vec![WidgetId(1)],
+            },
+            TileSpec {
+                id: TileId(1),
+                bounds: Rect::new(Point::new(50.0, 0.0), Size::new(50.0, 50.0)),
+                clipped: false,
+                widgets: vec![WidgetId(1)],
+            },
         ];
-        let wb = vec![(WidgetId(1), Rect::new(0.0, 0.0, 100.0, 50.0))];
+        let wb = vec![(WidgetId(1), Rect::from_size(Size::new(100.0, 50.0)))];
         let wn = vec![WidgetNode {
             id: WidgetId(1),
             parent: None,
             capabilities: WidgetCapabilities::new(false, false, false),
             clip: ClipPolicy::InferFromCapabilities,
-            layout: LayoutSpec { direction: LayoutDirection::Row, flex_grow: 1.0, flex_shrink: 1.0, flex_basis: 100.0, margin: 0.0, padding: 0.0 },
+            layout: LayoutSpec {
+                direction: LayoutDirection::Row,
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                flex_basis: 100.0,
+                margin: 0.0,
+                padding: 0.0,
+            },
             z_order: 0,
             widget_type: "Container",
         }];

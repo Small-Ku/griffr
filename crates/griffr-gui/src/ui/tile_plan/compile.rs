@@ -1,10 +1,10 @@
-use winio::prelude::Size;
+use winio::primitive::{Point, Rect, Size};
 
 use crate::ui::layout::compute_layout;
 use crate::ui::tile_plan::merge::merge_adjacent_non_clipped;
 use crate::ui::{
-    ClipPolicy, CompiledPlan, LayoutDirection, LayoutSpec, Rect, StaticPlan, TileId, TilePlan,
-    TileSpec, WidgetCapabilities, WidgetDecl, WidgetId, WidgetNode,
+    ClipPolicy, CompiledPlan, LayoutDirection, LayoutSpec, StaticPlan, TileId, TilePlan, TileSpec,
+    WidgetCapabilities, WidgetDecl, WidgetId, WidgetNode,
 };
 
 pub fn compile(decls: &'static [WidgetDecl], size: Size) -> CompiledPlan {
@@ -71,10 +71,10 @@ pub fn partition_non_overlapping_tiles(
     let mut xs: Vec<f64> = Vec::new();
     let mut ys: Vec<f64> = Vec::new();
     for (_, r) in bounds {
-        xs.push(r.x);
-        xs.push(r.right());
-        ys.push(r.y);
-        ys.push(r.bottom());
+        xs.push(r.origin.x);
+        xs.push(r.max_x());
+        ys.push(r.origin.y);
+        ys.push(r.max_y());
     }
     xs.sort_by(|a, b| a.total_cmp(b));
     ys.sort_by(|a, b| a.total_cmp(b));
@@ -95,7 +95,7 @@ pub fn partition_non_overlapping_tiles(
             let cy = (y0 + y1) * 0.5;
             let mut covering: Vec<(i32, WidgetId, bool)> = Vec::new();
             for (wid, rect) in bounds {
-                if rect.contains(cx, cy) {
+                if rect.contains(Point::new(cx, cy)) {
                     if let Some(node) = widgets.iter().find(|w| w.id == *wid) {
                         let clipped = match node.clip {
                             ClipPolicy::InferFromCapabilities => node.capabilities.scrollable,
@@ -113,7 +113,7 @@ pub fn partition_non_overlapping_tiles(
             let (_, top_id, top_clipped) = *covering.last().expect("non-empty covering");
             out.push(TileSpec {
                 id: TileId(out.len() as u16),
-                bounds: Rect::new(x0, y0, x1 - x0, y1 - y0),
+                bounds: Rect::new(Point::new(x0, y0), Size::new(x1 - x0, y1 - y0)),
                 clipped: top_clipped,
                 widgets: vec![top_id],
             });
@@ -124,10 +124,10 @@ pub fn partition_non_overlapping_tiles(
 
 #[cfg(test)]
 mod tests {
-    use winio::prelude::Size;
+    use winio::prelude::{Rect, Size};
 
     use crate::ui::tile_plan::compile::{compile, partition_non_overlapping_tiles};
-    use crate::ui::{Rect, WidgetDecl, WidgetId};
+    use crate::ui::{WidgetDecl, WidgetId};
 
     #[test]
     fn clip_inference_scrollable() {
@@ -189,16 +189,16 @@ mod tests {
         ];
         let mut plan = compile(decls, Size::new(300.0, 300.0));
         if let Some((_, r)) = plan.bounds.iter_mut().find(|(id, _)| id.0 == 0) {
-            *r = Rect::new(0.0, 0.0, 300.0, 300.0);
+            *r = Rect::from_size(Size::new(300.0, 300.0));
         }
         if let Some((_, r)) = plan.bounds.iter_mut().find(|(id, _)| id.0 == 1) {
-            *r = Rect::new(100.0, 100.0, 100.0, 100.0);
+            *r = Rect::new(Point::new(100.0, 100.0), Size::new(100.0, 100.0));
         }
         let pre = partition_non_overlapping_tiles(&plan.widgets, &plan.bounds);
         assert_eq!(pre.len(), 9);
         let center = pre
             .iter()
-            .find(|t| t.bounds.x == 100.0 && t.bounds.y == 100.0)
+            .find(|t| t.bounds.origin.x == 100.0 && t.bounds.origin.y == 100.0)
             .expect("center tile required");
         assert!(center.clipped);
         assert!(center.widgets.contains(&WidgetId(1)));
@@ -325,7 +325,10 @@ mod tests {
             for j in (i + 1)..tiles.len() {
                 let a = tiles[i].bounds;
                 let b = tiles[j].bounds;
-                let overlap = a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y;
+                let overlap = a.origin.x < b.max_x()
+                    && a.max_x() > b.origin.x
+                    && a.origin.y < b.max_y()
+                    && a.max_y() > b.origin.y;
                 assert!(!overlap, "tiles {i} and {j} overlap");
             }
         }

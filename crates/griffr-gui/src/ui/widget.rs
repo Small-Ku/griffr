@@ -1,6 +1,9 @@
-use winio::prelude::{CanvasEvent, Color, DrawingContext, Point, Result, Size, SolidColorBrush};
+use winio::prelude::Result;
+use winio::primitive::{Color, Rect, Size, SolidColorBrush};
+use winio::ui::DrawingContext;
+use winio::widgets::CanvasEvent;
 
-use crate::ui::{Rect, WidgetCapabilities};
+use crate::ui::WidgetCapabilities;
 
 #[derive(Clone, Debug)]
 pub struct TileSlot {
@@ -14,12 +17,7 @@ pub trait Widget {
         Self: Sized;
     fn bounds(&self) -> Rect;
     fn capabilities(&self) -> WidgetCapabilities;
-    fn draw(
-        &mut self,
-        _ctx: &mut DrawingContext<'_>,
-        _local_bounds: Rect,
-        _clipped: bool,
-    ) -> Result<()> {
+    fn draw(&mut self, _ctx: &mut DrawingContext<'_>, _size: Size, _clipped: bool) -> Result<()> {
         Ok(())
     }
     fn handle_event(&mut self, _event: &CanvasEvent, _is_target: bool) -> Result<()> {
@@ -44,18 +42,9 @@ impl Widget for Container {
         WidgetCapabilities::new(false, false, false)
     }
 
-    fn draw(
-        &mut self,
-        ctx: &mut DrawingContext<'_>,
-        local_bounds: Rect,
-        _clipped: bool,
-    ) -> Result<()> {
-        let size = Size::new(local_bounds.w, local_bounds.h);
+    fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {
         let brush = SolidColorBrush::new(Color::new(0x1E, 0x22, 0x2B, 0xFF));
-        ctx.fill_rect(
-            &brush,
-            winio::prelude::Rect::new(Point::new(local_bounds.x, local_bounds.y), size),
-        )?;
+        ctx.fill_rect(&brush, winio::prelude::Rect::from_size(size))?;
         Ok(())
     }
 }
@@ -85,13 +74,7 @@ impl Widget for Button {
         WidgetCapabilities::new(true, true, false)
     }
 
-    fn draw(
-        &mut self,
-        ctx: &mut DrawingContext<'_>,
-        local_bounds: Rect,
-        _clipped: bool,
-    ) -> Result<()> {
-        let size = Size::new(local_bounds.w, local_bounds.h);
+    fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {
         let color = if self.pressed {
             Color::new(0x1F, 0x4B, 0x91, 0xFF)
         } else if self.hovered {
@@ -100,10 +83,7 @@ impl Widget for Button {
             Color::new(0x3A, 0x67, 0xB3, 0xFF)
         };
         let brush = SolidColorBrush::new(color);
-        ctx.fill_rect(
-            &brush,
-            winio::prelude::Rect::new(Point::new(local_bounds.x, local_bounds.y), size),
-        )?;
+        ctx.fill_rect(&brush, winio::prelude::Rect::from_size(size))?;
         Ok(())
     }
 
@@ -157,14 +137,7 @@ impl Widget for Banner {
         WidgetCapabilities::new(true, false, true)
     }
 
-    fn draw(
-        &mut self,
-        ctx: &mut DrawingContext<'_>,
-        local_bounds: Rect,
-        _clipped: bool,
-    ) -> Result<()> {
-        let size = Size::new(local_bounds.w, local_bounds.h);
-        
+    fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {
         let mut current_v = self.v;
         if self.hovered {
             current_v = (current_v + 0.1).min(1.0);
@@ -193,10 +166,7 @@ impl Widget for Banner {
         let b = ((b1 + m) * 255.0).round() as u8;
 
         let brush = SolidColorBrush::new(Color::new(r, g, b, 0xFF));
-        ctx.fill_rect(
-            &brush,
-            winio::prelude::Rect::new(Point::new(local_bounds.x, local_bounds.y), size),
-        )?;
+        ctx.fill_rect(&brush, winio::prelude::Rect::from_size(size))?;
         Ok(())
     }
 

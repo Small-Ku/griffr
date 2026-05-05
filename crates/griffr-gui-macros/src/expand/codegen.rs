@@ -214,19 +214,19 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 for idx in 0..#canvas_count {
                     let canvas = match idx { #(#render_match_arms)* _ => &mut self.#last_canvas_field, };
                     if let Some(tile) = self.runtime.plan.tile_plan.tiles.get(idx) {
-                        let draw_w = tile.bounds.w + TILE_OVERLAP_PX;
-                        let draw_h = tile.bounds.h + TILE_OVERLAP_PX;
+                        let draw_w = tile.bounds.size.width + TILE_OVERLAP_PX;
+                        let draw_h = tile.bounds.size.height + TILE_OVERLAP_PX;
                         canvas.set_visible(true)?;
-                        canvas.set_loc(::winio::prelude::Point::new(tile.bounds.x, tile.bounds.y))?;
+                        canvas.set_loc(::winio::prelude::Point::new(tile.bounds.origin.x, tile.bounds.origin.y))?;
                         canvas.set_size(::winio::prelude::Size::new(draw_w, draw_h))?;
                         if let Some(top_id) = tile.widgets.last().copied() {
                             if let Some((_, widget)) = self.widgets.iter_mut().find(|(id, _)| *id == top_id) {
                                 let mut ctx = canvas.context()?;
                                 if let Some((_, widget_bounds)) = self.runtime.plan.bounds.iter().find(|(id, _)| *id == top_id) {
-                                    let tx = widget_bounds.x - tile.bounds.x;
-                                    let ty = widget_bounds.y - tile.bounds.y;
+                                    let tx = widget_bounds.origin.x - tile.bounds.origin.x;
+                                    let ty = widget_bounds.origin.y - tile.bounds.origin.y;
                                     ctx.set_transform(::winio::prelude::Transform::translation(tx, ty))?;
-                                    widget.draw(&mut ctx, ::griffr_gui::ui::Rect::new(0.0, 0.0, widget_bounds.w, widget_bounds.h), tile.clipped)?;
+                                    widget.draw(&mut ctx, ::winio::prelude::Size::new(widget_bounds.size.width, widget_bounds.size.height), tile.clipped)?;
                                 }
                             }
                         }
@@ -243,7 +243,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             fn build_widgets(runtime: &::griffr_gui::ui::UiRuntime) -> ::winio::prelude::Result<Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::widget::Widget>)>> {
                 let mut out = Vec::<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::widget::Widget>)>::new();
                 for node in &runtime.plan.widgets {
-                    let bounds = runtime.plan.bounds.iter().find(|(id, _)| *id == node.id).map(|(_, b)| *b).unwrap_or(::griffr_gui::ui::Rect::new(0.0, 0.0, 0.0, 0.0));
+                    let bounds = runtime.plan.bounds.iter().find(|(id, _)| *id == node.id).map(|(_, b)| *b).unwrap_or(::winio::primitive::Rect::from_size(::winio::prelude::Size::new(0.0, 0.0)));
                     let clipped = runtime.plan.tile_plan.tiles.iter().find(|tile| tile.widgets.iter().any(|id| *id == node.id)).map(|t| t.clipped).unwrap_or(false);
                     let slot = ::griffr_gui::ui::widget::TileSlot { bounds, clipped };
                     let widget: Box<dyn ::griffr_gui::ui::widget::Widget> = match node.widget_type {
@@ -255,7 +255,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 Ok(out)
             }
             fn local_to_global(&self, idx: usize, p: ::winio::prelude::Point) -> ::winio::prelude::Point {
-                self.runtime.plan.tile_plan.tiles.get(idx).map(|t| ::winio::prelude::Point::new(p.x + t.bounds.x, p.y + t.bounds.y)).unwrap_or(p)
+                self.runtime.plan.tile_plan.tiles.get(idx).map(|t| ::winio::prelude::Point::new(p.x + t.bounds.origin.x, p.y + t.bounds.origin.y)).unwrap_or(p)
             }
             fn expand_size(size: ::winio::prelude::Size) -> ::winio::prelude::Size {
                 const COMPONENT_OVERDRAW_PX: f64 = 0.5;

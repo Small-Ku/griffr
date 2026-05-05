@@ -1,4 +1,5 @@
-use winio::prelude::{CanvasEvent, Size};
+use winio::primitive::Size;
+use winio::widgets::CanvasEvent;
 
 use crate::ui::dispatch::{map_canvas_event, route_event, RoutedEvent};
 use crate::ui::tile_plan::compile::compile_dynamic;
@@ -27,7 +28,12 @@ impl UiRuntime {
         self.static_plan.merged_tile_count.max(1)
     }
 
-    pub fn dispatch_with_pointer(&mut self, event: &CanvasEvent, x: f64, y: f64) -> Option<WidgetId> {
+    pub fn dispatch_with_pointer(
+        &mut self,
+        event: &CanvasEvent,
+        x: f64,
+        y: f64,
+    ) -> Option<WidgetId> {
         let routed: Option<RoutedEvent> = map_canvas_event(event, x, y);
         self.hovered = routed.and_then(|e| route_event(&self.plan, e));
         self.hovered
