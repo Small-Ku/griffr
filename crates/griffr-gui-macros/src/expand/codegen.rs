@@ -11,39 +11,11 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
     let comp_ident = Ident::new(&format!("{}Component", ident), ident.span());
     let msg_ident = Ident::new(&format!("{}ComponentMessage", ident), ident.span());
     let event_ident = Ident::new(&format!("{}ComponentEvent", ident), ident.span());
+    let routed_ident = Ident::new(&format!("{}RoutedEvent", ident), ident.span());
     let canvas_count = merged_tile_count_for_flat(&flat);
     let last_canvas_idx = canvas_count.saturating_sub(1);
     let last_canvas_field = Ident::new(&format!("tile{}", last_canvas_idx), ident.span());
 
-    let decls = flat.iter().map(|n| {
-        let id = n.id;
-        let parent = n.parent;
-        let widget_type = &n.kind;
-        let hoverable = n.hoverable;
-        let clickable = n.clickable;
-        let scrollable = n.scrollable;
-        let opaque = n.opaque;
-        let clip = n.clip;
-        let z = n.z;
-        let direction = n.direction;
-        let sizing_mode = n.sizing_mode;
-        let sizing_f1 = n.sizing_f1;
-        let sizing_f2 = n.sizing_f2;
-        let sizing_f3 = n.sizing_f3;
-        let margin = n.margin;
-        let padding = n.padding;
-        quote! {
-            ::griffr_gui::ui::WidgetDecl {
-                id: #id, parent: #parent, widget_type: #widget_type,
-                hoverable: #hoverable, clickable: #clickable, scrollable: #scrollable, opaque: #opaque,
-                clip: #clip, z: #z, direction: #direction, margin: #margin, padding: #padding,
-                sizing_mode: #sizing_mode,
-                sizing_f1: #sizing_f1,
-                sizing_f2: #sizing_f2,
-                sizing_f3: #sizing_f3,
-            }
-        }
-    });
     let topology = flat.iter().map(|n| {
         let id = n.id;
         let parent = n.parent;
@@ -148,17 +120,13 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
     quote! {
         #root
         impl #ident {
-            pub const DECLS: &'static [::griffr_gui::ui::WidgetDecl] = &[#(#decls),*];
             pub const TOPOLOGY: &'static [(u16, i16)] = &[#(#topology),*];
             pub const CAPABILITIES: &'static [(u16, bool, bool, bool, bool)] = &[#(#capabilities),*];
             pub const CANVAS_COUNT: usize = #canvas_count;
-            pub fn build_static_plan() -> ::griffr_gui::ui::StaticPlan {
+            pub fn initial_widget_nodes() -> Vec<::griffr_gui::ui::WidgetNode> {
                 let mut widgets = vec![#(#static_widgets),*];
                 widgets.sort_by_key(|w| (w.z_order, w.id));
-                ::griffr_gui::ui::StaticPlan { widgets, merged_tile_count: Self::CANVAS_COUNT }
-            }
-            pub fn build_runtime(size: ::winio::prelude::Size) -> ::griffr_gui::ui::UiRuntime {
-                ::griffr_gui::ui::UiRuntime::from_static(Self::build_static_plan(), size)
+                widgets
             }
         }
 
@@ -168,7 +136,9 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         pub struct #comp_ident {
             root: ::winio::prelude::Child<::winio::widgets::View>,
             #(#canvas_fields)*
-            runtime: ::griffr_gui::ui::UiRuntime,
+            widget_nodes: Vec<::griffr_gui::ui::WidgetNode>,
+            plan: ::griffr_gui::ui::CompiledPlan,
+            hovered: Option<::griffr_gui::ui::WidgetId>,
             widgets: Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>,
             pointers: [::winio::prelude::Point; #canvas_count],
             next_tick_seq: u64,
@@ -186,28 +156,38 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             AnimationTick(u64, ::std::time::Instant),
         }
 
+        #[derive(Clone, Copy, Debug)]
+        enum #routed_ident {
+            MouseMove { x: f64, y: f64 },
+            MouseDown { x: f64, y: f64 },
+            MouseUp { x: f64, y: f64 },
+            MouseWheel { x: f64, y: f64 },
+        }
+
         impl ::winio::prelude::Component for #comp_ident {
             type Error = ::winio::prelude::Error;
             type Event = #event_ident;
             type Init<'a> = &'a ::winio::prelude::Child<::winio::widgets::Window>;
             type Message = #msg_ident;
             async fn init(init: Self::Init<'_>, _sender: &::winio::prelude::ComponentSender<Self>) -> ::winio::prelude::Result<Self> {
-                let mut runtime = #ident::build_runtime(init.client_size()?);
+                let mut widget_nodes = #ident::initial_widget_nodes();
                 ::winio::prelude::init! { root: ::winio::widgets::View = (init), #(#canvas_inits)* }
                 let size = init.client_size()?;
                 root.set_loc(::winio::prelude::Point::new(0.0, 0.0))?;
                 root.set_size(Self::expand_size(size))?;
-                let widgets = Self::build_widgets(&runtime)?;
+                let mut plan = Self::compile_plan(&widget_nodes, size);
+                let widgets = Self::build_widgets(&plan)?;
                 for (id, w) in &widgets {
-                    if let Some(node) = runtime.static_plan.widgets.iter_mut().find(|n| n.id == *id) {
+                    if let Some(node) = widget_nodes.iter_mut().find(|n| n.id == *id) {
                         node.hoverable = w.hoverable();
                         node.clickable = w.clickable();
                         node.scrollable = w.scrollable();
                         node.opaque = w.opaque();
                     }
                 }
+                plan = Self::compile_plan(&widget_nodes, size);
                 let mut this = Self {
-                    root, #(#canvas_struct_inits)* widgets, runtime,
+                    root, #(#canvas_struct_inits)* widgets, widget_nodes, plan, hovered: None,
                     pointers: [::winio::prelude::Point::new(0.0, 0.0); #canvas_count],
                     next_tick_seq: 0,
                     scheduled_tick: None,
@@ -240,7 +220,9 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                         }
                         let p = self.pointers.get(idx).copied().unwrap_or(::winio::prelude::Point::new(0.0, 0.0));
                         self.sync_widgets_routing(); // Sync before dispatch
-                        let hit = self.runtime.dispatch_with_pointer(&ev, p.x, p.y);
+                        let routed = Self::map_canvas_event(&ev, p.x, p.y);
+                        self.hovered = routed.and_then(|e| Self::route_event(&self.plan, e));
+                        let hit = self.hovered;
                         for (id, widget) in &mut self.widgets { widget.handle_event(&ev, hit.is_some_and(|hit_id| hit_id == *id))?; }
                         self.reschedule_if_needed(sender);
                         sender.output(#event_ident::Target(hit));
@@ -268,10 +250,10 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 const TILE_OVERLAP_PX: f64 = 0.5;
                 let size = self.root.size()?;
                 self.sync_widgets_rendering(); // Sync before relayout
-                self.runtime.relayout(size);
+                self.plan = Self::compile_plan(&self.widget_nodes, size);
                 for idx in 0..#canvas_count {
                     let canvas = match idx { #(#render_match_arms)* _ => &mut self.#last_canvas_field, };
-                    if let Some(tile) = self.runtime.plan.tile_plan.tiles.get(idx) {
+                    if let Some(tile) = self.plan.tile_plan.tiles.get(idx) {
                         let draw_w = tile.bounds.size.width + TILE_OVERLAP_PX;
                         let draw_h = tile.bounds.size.height + TILE_OVERLAP_PX;
                         canvas.set_visible(true)?;
@@ -281,7 +263,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                             let mut ctx = canvas.context()?;
                             for &id in &tile.widgets {
                                 if let Some((_, widget)) = self.widgets.iter_mut().find(|(w_id, _)| *w_id == id) {
-                                    if let Some((_, widget_bounds)) = self.runtime.plan.bounds.iter().find(|(b_id, _)| *b_id == id) {
+                                    if let Some((_, widget_bounds)) = self.plan.bounds.iter().find(|(b_id, _)| *b_id == id) {
                                         let tx = widget_bounds.origin.x - tile.bounds.origin.x;
                                         let ty = widget_bounds.origin.y - tile.bounds.origin.y;
                                         ctx.set_transform(::winio::prelude::Transform::translation(tx, ty))?;
@@ -346,13 +328,12 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                     let h = w.hoverable();
                     let c = w.clickable();
                     let s = w.scrollable();
-                    if let Some(node) = self.runtime.plan.widgets.iter_mut().find(|n| n.id == *id) {
+                    if let Some(node) = self.plan.widgets.iter_mut().find(|n| n.id == *id) {
                         node.hoverable = h;
                         node.clickable = c;
                         node.scrollable = s;
                     }
-                    // Also keep static_plan in sync for next relayout
-                    if let Some(node) = self.runtime.static_plan.widgets.iter_mut().find(|n| n.id == *id) {
+                    if let Some(node) = self.widget_nodes.iter_mut().find(|n| n.id == *id) {
                         node.hoverable = h;
                         node.clickable = c;
                         node.scrollable = s;
@@ -364,18 +345,18 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                     let o = w.opaque();
                     let s = w.scrollable();
                     let sz = w.sizing_policy();
-                    if let Some(node) = self.runtime.static_plan.widgets.iter_mut().find(|n| n.id == *id) {
+                    if let Some(node) = self.widget_nodes.iter_mut().find(|n| n.id == *id) {
                         node.opaque = o;
                         node.scrollable = s;
                         node.layout.sizing = sz;
                     }
                 }
             }
-            fn build_widgets(runtime: &::griffr_gui::ui::UiRuntime) -> ::winio::prelude::Result<Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>> {
+            fn build_widgets(plan: &::griffr_gui::ui::CompiledPlan) -> ::winio::prelude::Result<Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>> {
                 let mut out = Vec::<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>::new();
-                for node in &runtime.plan.widgets {
-                    let bounds = runtime.plan.bounds.iter().find(|(id, _)| *id == node.id).map(|(_, b)| *b).unwrap_or(::winio::primitive::Rect::from_size(::winio::prelude::Size::new(0.0, 0.0)));
-                    let clipped = runtime.plan.tile_plan.tiles.iter().find(|tile| tile.widgets.iter().any(|id| *id == node.id)).map(|t| t.clipped).unwrap_or(false);
+                for node in &plan.widgets {
+                    let bounds = plan.bounds.iter().find(|(id, _)| *id == node.id).map(|(_, b)| *b).unwrap_or(::winio::primitive::Rect::from_size(::winio::prelude::Size::new(0.0, 0.0)));
+                    let clipped = plan.tile_plan.tiles.iter().find(|tile| tile.widgets.iter().any(|id| *id == node.id)).map(|t| t.clipped).unwrap_or(false);
                     let slot = ::griffr_gui::ui::TileSlot { bounds, clipped, sizing: node.layout.sizing };
                     let widget: Box<dyn ::griffr_gui::ui::Widget> = match node.widget_type {
                         #(#widget_ctor_arms)*
@@ -386,7 +367,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 Ok(out)
             }
             fn local_to_global(&self, idx: usize, p: ::winio::prelude::Point) -> ::winio::prelude::Point {
-                self.runtime.plan.tile_plan.tiles.get(idx).map(|t| ::winio::prelude::Point::new(p.x + t.bounds.origin.x, p.y + t.bounds.origin.y)).unwrap_or(p)
+                self.plan.tile_plan.tiles.get(idx).map(|t| ::winio::prelude::Point::new(p.x + t.bounds.origin.x, p.y + t.bounds.origin.y)).unwrap_or(p)
             }
             fn expand_size(size: ::winio::prelude::Size) -> ::winio::prelude::Size {
                 const COMPONENT_OVERDRAW_PX: f64 = 0.5;
@@ -395,6 +376,62 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             fn shrink_size(size: ::winio::prelude::Size) -> ::winio::prelude::Size {
                 const COMPONENT_OVERDRAW_PX: f64 = 0.5;
                 ::winio::prelude::Size::new(size.width - COMPONENT_OVERDRAW_PX, size.height - COMPONENT_OVERDRAW_PX)
+            }
+            fn compile_plan(
+                widget_nodes: &[::griffr_gui::ui::WidgetNode],
+                size: ::winio::prelude::Size,
+            ) -> ::griffr_gui::ui::CompiledPlan {
+                let widgets = widget_nodes.to_vec();
+                let bounds = ::griffr_gui::ui::layout::compute_layout(&widgets, size);
+                let mut tiles = ::griffr_gui::ui::tile_plan::compile::partition_non_overlapping_tiles(&widgets, &bounds);
+                tiles = ::griffr_gui::ui::tile_plan::merge::merge_adjacent_non_clipped(tiles, &bounds, &widgets);
+                for (idx, t) in tiles.iter_mut().enumerate() {
+                    t.id = ::griffr_gui::ui::TileId(idx as u16);
+                }
+                ::griffr_gui::ui::CompiledPlan {
+                    widgets,
+                    bounds,
+                    tile_plan: ::griffr_gui::ui::TilePlan { tiles },
+                    size,
+                }
+            }
+            fn route_event(
+                plan: &::griffr_gui::ui::CompiledPlan,
+                event: #routed_ident,
+            ) -> Option<::griffr_gui::ui::WidgetId> {
+                let (x, y, predicate): (f64, f64, fn(bool, bool, bool) -> bool) = match event {
+                    #routed_ident::MouseMove { x, y } => (x, y, |h, _, _| h),
+                    #routed_ident::MouseDown { x, y } | #routed_ident::MouseUp { x, y } => (x, y, |_, c, _| c),
+                    #routed_ident::MouseWheel { x, y } => (x, y, |_, _, s| s),
+                };
+                let mut best: Option<(i32, ::griffr_gui::ui::WidgetId)> = None;
+                for (id, bounds) in &plan.bounds {
+                    if !bounds.contains(::winio::prelude::Point::new(x, y)) {
+                        continue;
+                    }
+                    if let Some(node) = plan.widgets.iter().find(|n| n.id == *id) {
+                        if predicate(node.hoverable, node.clickable, node.scrollable) {
+                            match best {
+                                Some((z, _)) if z >= node.z_order => {}
+                                _ => best = Some((node.z_order, node.id)),
+                            }
+                        }
+                    }
+                }
+                best.map(|(_, id)| id)
+            }
+            fn map_canvas_event(
+                event: &::winio::prelude::CanvasEvent,
+                x: f64,
+                y: f64,
+            ) -> Option<#routed_ident> {
+                match event {
+                    ::winio::prelude::CanvasEvent::MouseMove(_) => Some(#routed_ident::MouseMove { x, y }),
+                    ::winio::prelude::CanvasEvent::MouseDown(_) => Some(#routed_ident::MouseDown { x, y }),
+                    ::winio::prelude::CanvasEvent::MouseUp(_) => Some(#routed_ident::MouseUp { x, y }),
+                    ::winio::prelude::CanvasEvent::MouseWheel(_) => Some(#routed_ident::MouseWheel { x, y }),
+                    _ => None,
+                }
             }
             fn next_deadline(&self) -> Option<::std::time::Instant> {
                 self.widgets.iter().filter_map(|(_, w)| w.next_redraw_at()).min()

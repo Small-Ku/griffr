@@ -103,26 +103,6 @@ impl Default for LayoutSpec {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct WidgetDecl {
-    pub id: u16,
-    pub parent: i16,
-    pub widget_type: &'static str,
-    pub hoverable: bool,
-    pub clickable: bool,
-    pub scrollable: bool,
-    pub opaque: bool,
-    pub clip: i8,
-    pub z: i32,
-    pub direction: i8,
-    pub margin: f64,
-    pub padding: f64,
-    pub sizing_mode: i8,
-    pub sizing_f1: f64,
-    pub sizing_f2: f64,
-    pub sizing_f3: f64,
-}
-
 #[derive(Clone, Debug)]
 pub struct WidgetNode {
     pub id: WidgetId,
@@ -143,12 +123,6 @@ pub struct TileSpec {
     pub bounds: Rect,
     pub clipped: bool,
     pub widgets: Vec<WidgetId>,
-}
-
-#[derive(Clone, Debug)]
-pub struct StaticPlan {
-    pub widgets: Vec<WidgetNode>,
-    pub merged_tile_count: usize,
 }
 
 pub struct TilePlan {
