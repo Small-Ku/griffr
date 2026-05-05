@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use winio::prelude::Result;
 use winio::primitive::{Rect, Size};
 use winio::ui::DrawingContext;
@@ -37,6 +39,12 @@ pub trait Widget {
     }
     fn handle_event(&mut self, _event: &CanvasEvent, _is_target: bool) -> Result<()> {
         Ok(())
+    }
+    fn next_redraw_at(&self) -> Option<Instant> {
+        None
+    }
+    fn on_animation_frame(&mut self, _now: Instant) -> bool {
+        false
     }
     fn sizing_policy(&self) -> SizingPolicy {
         SizingPolicy::default()

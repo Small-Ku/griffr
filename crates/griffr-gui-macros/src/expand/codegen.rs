@@ -171,13 +171,20 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             runtime: ::griffr_gui::ui::UiRuntime,
             widgets: Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>,
             pointers: [::winio::prelude::Point; #canvas_count],
+            next_tick_seq: u64,
+            scheduled_tick: Option<(u64, ::std::time::Instant)>,
             halign: ::winio::prelude::HAlign,
             valign: ::winio::prelude::VAlign,
             margin: ::winio::prelude::Margin,
         }
 
         #[derive(Debug)]
-        pub enum #msg_ident { Noop, Layout(::winio::prelude::Rect), Canvas(usize, ::winio::prelude::CanvasEvent), }
+        pub enum #msg_ident {
+            Noop,
+            Layout(::winio::prelude::Rect),
+            Canvas(usize, ::winio::prelude::CanvasEvent),
+            AnimationTick(u64, ::std::time::Instant),
+        }
 
         impl ::winio::prelude::Component for #comp_ident {
             type Error = ::winio::prelude::Error;
@@ -199,13 +206,17 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                         node.opaque = w.opaque();
                     }
                 }
-                Ok(Self { 
-                    root, #(#canvas_struct_inits)* widgets, runtime, 
+                let mut this = Self {
+                    root, #(#canvas_struct_inits)* widgets, runtime,
                     pointers: [::winio::prelude::Point::new(0.0, 0.0); #canvas_count],
+                    next_tick_seq: 0,
+                    scheduled_tick: None,
                     halign: ::winio::prelude::HAlign::Stretch,
                     valign: ::winio::prelude::VAlign::Stretch,
                     margin: ::winio::prelude::Margin::default(),
-                })
+                };
+                this.reschedule_if_needed(_sender);
+                Ok(this)
             }
             async fn start(&mut self, sender: &::winio::prelude::ComponentSender<Self>) -> ! {
                 ::winio::prelude::start! { sender, default: #msg_ident::Noop, #(#start_arms)* }
@@ -231,9 +242,25 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                         self.sync_widgets_routing(); // Sync before dispatch
                         let hit = self.runtime.dispatch_with_pointer(&ev, p.x, p.y);
                         for (id, widget) in &mut self.widgets { widget.handle_event(&ev, hit.is_some_and(|hit_id| hit_id == *id))?; }
+                        self.reschedule_if_needed(sender);
                         sender.output(#event_ident::Target(hit));
                         sender.output(#event_ident::Redraw);
                         Ok(true)
+                    }
+                    #msg_ident::AnimationTick(seq, now) => {
+                        if self.scheduled_tick.map(|(scheduled_seq, _)| scheduled_seq != seq).unwrap_or(true) {
+                            return Ok(false);
+                        }
+                        self.scheduled_tick = None;
+                        let mut needs_redraw = false;
+                        for (_, widget) in &mut self.widgets {
+                            needs_redraw |= widget.on_animation_frame(now);
+                        }
+                        self.reschedule_if_needed(sender);
+                        if needs_redraw {
+                            sender.output(#event_ident::Redraw);
+                        }
+                        Ok(needs_redraw)
                     }
                 }
             }
@@ -267,6 +294,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                         canvas.set_visible(false)?;
                     }
                 }
+                self.reschedule_if_needed(_sender);
                 Ok(())
             }
             fn render_children(&mut self) -> ::winio::prelude::Result<()> { #(#render_children_stmts)* self.root.render() }
@@ -367,6 +395,35 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             fn shrink_size(size: ::winio::prelude::Size) -> ::winio::prelude::Size {
                 const COMPONENT_OVERDRAW_PX: f64 = 0.5;
                 ::winio::prelude::Size::new(size.width - COMPONENT_OVERDRAW_PX, size.height - COMPONENT_OVERDRAW_PX)
+            }
+            fn next_deadline(&self) -> Option<::std::time::Instant> {
+                self.widgets.iter().filter_map(|(_, w)| w.next_redraw_at()).min()
+            }
+            fn post_deadline_tick(
+                sender: ::winio::prelude::ComponentSender<Self>,
+                seq: u64,
+                deadline: ::std::time::Instant,
+            ) {
+                ::std::thread::spawn(move || {
+                    let now = ::std::time::Instant::now();
+                    if deadline > now {
+                        ::std::thread::sleep(deadline.duration_since(now));
+                    }
+                    sender.post(#msg_ident::AnimationTick(seq, ::std::time::Instant::now()));
+                });
+            }
+            fn reschedule_if_needed(&mut self, sender: &::winio::prelude::ComponentSender<Self>) {
+                let next = self.next_deadline();
+                if self.scheduled_tick.map(|(_, deadline)| deadline) == next {
+                    return;
+                }
+                self.scheduled_tick = None;
+                if let Some(deadline) = next {
+                    self.next_tick_seq = self.next_tick_seq.wrapping_add(1);
+                    let seq = self.next_tick_seq;
+                    self.scheduled_tick = Some((seq, deadline));
+                    Self::post_deadline_tick(sender.clone(), seq, deadline);
+                }
             }
         }
     }

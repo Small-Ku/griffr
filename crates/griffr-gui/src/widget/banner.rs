@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use crate::ui::{TileSlot, Widget};
 use winio::prelude::{CanvasEvent, Color, DrawingContext, Rect, Result, Size, SolidColorBrush};
 
@@ -7,6 +9,7 @@ pub struct Banner {
     h: f32,
     s: f32,
     v: f32,
+    next_frame_at: Option<Instant>,
 }
 
 impl Widget for Banner {
@@ -17,6 +20,7 @@ impl Widget for Banner {
             h: 0.0,
             s: 44.0 / 90.0,
             v: 90.0 / 255.0,
+            next_frame_at: None,
         })
     }
 
@@ -74,14 +78,35 @@ impl Widget for Banner {
         match event {
             CanvasEvent::MouseMove(_) => {
                 self.hovered = is_target;
+                self.next_frame_at = self
+                    .hovered
+                    .then_some(Instant::now() + Duration::from_millis(16));
             }
             CanvasEvent::MouseWheel(_) => {
                 if is_target {
                     self.h = (self.h + 15.0) % 360.0;
+                    self.next_frame_at = Some(Instant::now() + Duration::from_millis(16));
                 }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    fn next_redraw_at(&self) -> Option<Instant> {
+        self.next_frame_at
+    }
+
+    fn on_animation_frame(&mut self, now: Instant) -> bool {
+        if !self.hovered && self.next_frame_at.is_none() {
+            return false;
+        }
+        self.h = (self.h + 1.2) % 360.0;
+        if self.hovered {
+            self.next_frame_at = Some(now + Duration::from_millis(16));
+        } else {
+            self.next_frame_at = None;
+        }
+        true
     }
 }
