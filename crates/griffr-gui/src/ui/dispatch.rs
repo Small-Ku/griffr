@@ -22,8 +22,7 @@ pub fn route_event(plan: &CompiledPlan, event: RoutedEvent) -> Option<WidgetId> 
             continue;
         }
         if let Some(node) = plan.widgets.iter().find(|n| n.id == *id) {
-            let caps = node.capabilities;
-            if predicate(caps.hoverable, caps.clickable, caps.scrollable) {
+            if predicate(node.hoverable, node.clickable, node.scrollable) {
                 match best {
                     Some((z, _)) if z >= node.z_order => {}
                     _ => best = Some((node.z_order, node.id)),

@@ -73,7 +73,10 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             ::griffr_gui::ui::WidgetNode {
                 id: ::griffr_gui::ui::WidgetId(#id),
                 parent: (#parent >= 0).then_some(::griffr_gui::ui::WidgetId(#parent as u16)),
-                capabilities: ::griffr_gui::ui::WidgetCapabilities::new(#hoverable, #clickable, #scrollable, #opaque),
+                hoverable: #hoverable,
+                clickable: #clickable,
+                scrollable: #scrollable,
+                opaque: #opaque,
                 clip: match #clip {
                     1 => ::griffr_gui::ui::ClipPolicy::ForceClip,
                     -1 => ::griffr_gui::ui::ClipPolicy::ForceNoClip,
@@ -176,7 +179,10 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 let widgets = Self::build_widgets(&runtime)?;
                 for (id, w) in &widgets {
                     if let Some(node) = runtime.static_plan.widgets.iter_mut().find(|n| n.id == *id) {
-                        node.capabilities = w.capabilities();
+                        node.hoverable = w.hoverable();
+                        node.clickable = w.clickable();
+                        node.scrollable = w.scrollable();
+                        node.opaque = w.opaque();
                     }
                 }
                 Ok(Self { root, #(#canvas_struct_inits)* widgets, runtime, pointers: [::winio::prelude::Point::new(0.0, 0.0); #canvas_count] })
@@ -202,6 +208,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                             }
                         }
                         let p = self.pointers.get(idx).copied().unwrap_or(::winio::prelude::Point::new(0.0, 0.0));
+                        self.sync_widgets_routing(); // Sync before dispatch
                         let hit = self.runtime.dispatch_with_pointer(&ev, p.x, p.y);
                         for (id, widget) in &mut self.widgets { widget.handle_event(&ev, hit.is_some_and(|hit_id| hit_id == *id))?; }
                         sender.output(#event_ident::Target(hit));
@@ -213,6 +220,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             fn render(&mut self, _sender: &::winio::prelude::ComponentSender<Self>) -> ::winio::prelude::Result<()> {
                 const TILE_OVERLAP_PX: f64 = 0.5;
                 let size = self.root.size()?;
+                self.sync_widgets_rendering(); // Sync before relayout
                 self.runtime.relayout(size);
                 for idx in 0..#canvas_count {
                     let canvas = match idx { #(#render_match_arms)* _ => &mut self.#last_canvas_field, };
@@ -245,6 +253,34 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         }
 
         impl #comp_ident {
+            fn sync_widgets_routing(&mut self) {
+                for (id, w) in &self.widgets {
+                    let h = w.hoverable();
+                    let c = w.clickable();
+                    let s = w.scrollable();
+                    if let Some(node) = self.runtime.plan.widgets.iter_mut().find(|n| n.id == *id) {
+                        node.hoverable = h;
+                        node.clickable = c;
+                        node.scrollable = s;
+                    }
+                    // Also keep static_plan in sync for next relayout
+                    if let Some(node) = self.runtime.static_plan.widgets.iter_mut().find(|n| n.id == *id) {
+                        node.hoverable = h;
+                        node.clickable = c;
+                        node.scrollable = s;
+                    }
+                }
+            }
+            fn sync_widgets_rendering(&mut self) {
+                for (id, w) in &self.widgets {
+                    let o = w.opaque();
+                    let s = w.scrollable();
+                    if let Some(node) = self.runtime.static_plan.widgets.iter_mut().find(|n| n.id == *id) {
+                        node.opaque = o;
+                        node.scrollable = s;
+                    }
+                }
+            }
             fn build_widgets(runtime: &::griffr_gui::ui::UiRuntime) -> ::winio::prelude::Result<Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::widget::Widget>)>> {
                 let mut out = Vec::<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::widget::Widget>)>::new();
                 for node in &runtime.plan.widgets {

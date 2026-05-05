@@ -93,9 +93,9 @@ fn no_scroll_or_clip_violation(
     let Some(wid) = tile.widgets.last() else {
         return false;
     };
-    widget_by_id.get(wid).is_some_and(|w| {
-        !w.capabilities.scrollable && !matches!(w.clip, crate::ui::ClipPolicy::ForceClip)
-    })
+    widget_by_id
+        .get(wid)
+        .is_some_and(|w| !w.scrollable && !matches!(w.clip, crate::ui::ClipPolicy::ForceClip))
 }
 
 fn overlaps_others(candidate: &Rect, others: &[TileSpec]) -> bool {
@@ -115,8 +115,7 @@ mod tests {
 
     use crate::ui::tile_plan::merge::merge_adjacent_non_clipped;
     use crate::ui::{
-        ClipPolicy, LayoutDirection, LayoutSpec, TileId, TileSpec, WidgetCapabilities, WidgetId,
-        WidgetNode,
+        ClipPolicy, LayoutDirection, LayoutSpec, TileId, TileSpec, WidgetId, WidgetNode,
     };
 
     #[test]
@@ -139,7 +138,10 @@ mod tests {
         let wn = vec![WidgetNode {
             id: WidgetId(1),
             parent: None,
-            capabilities: WidgetCapabilities::new(false, false, false, true),
+            hoverable: false,
+            clickable: false,
+            scrollable: false,
+            opaque: true,
             clip: ClipPolicy::InferFromCapabilities,
             layout: LayoutSpec {
                 direction: LayoutDirection::Row,

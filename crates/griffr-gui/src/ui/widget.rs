@@ -3,8 +3,6 @@ use winio::primitive::{Color, Rect, Size, SolidColorBrush};
 use winio::ui::DrawingContext;
 use winio::widgets::CanvasEvent;
 
-use crate::ui::WidgetCapabilities;
-
 #[derive(Clone, Debug)]
 pub struct TileSlot {
     pub bounds: Rect,
@@ -16,7 +14,23 @@ pub trait Widget {
     where
         Self: Sized;
     fn bounds(&self) -> Rect;
-    fn capabilities(&self) -> WidgetCapabilities;
+
+    // Routing capabilities
+    fn hoverable(&self) -> bool {
+        false
+    }
+    fn clickable(&self) -> bool {
+        false
+    }
+    fn scrollable(&self) -> bool {
+        false
+    }
+
+    // Rendering properties
+    fn opaque(&self) -> bool {
+        false
+    }
+
     fn draw(&mut self, _ctx: &mut DrawingContext<'_>, _size: Size, _clipped: bool) -> Result<()> {
         Ok(())
     }
@@ -38,8 +52,8 @@ impl Widget for Container {
         self.tile.bounds
     }
 
-    fn capabilities(&self) -> WidgetCapabilities {
-        WidgetCapabilities::new(false, false, false, true)
+    fn opaque(&self) -> bool {
+        true
     }
 
     fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {
@@ -70,8 +84,14 @@ impl Widget for Button {
         self.tile.bounds
     }
 
-    fn capabilities(&self) -> WidgetCapabilities {
-        WidgetCapabilities::new(true, true, false, true)
+    fn hoverable(&self) -> bool {
+        true
+    }
+    fn clickable(&self) -> bool {
+        true
+    }
+    fn opaque(&self) -> bool {
+        true
     }
 
     fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {
@@ -133,8 +153,14 @@ impl Widget for Banner {
         self.tile.bounds
     }
 
-    fn capabilities(&self) -> WidgetCapabilities {
-        WidgetCapabilities::new(true, false, true, true)
+    fn hoverable(&self) -> bool {
+        true
+    }
+    fn scrollable(&self) -> bool {
+        true
+    }
+    fn opaque(&self) -> bool {
+        true
     }
 
     fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {

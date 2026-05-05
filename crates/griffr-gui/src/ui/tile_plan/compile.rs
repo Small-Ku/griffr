@@ -4,7 +4,7 @@ use crate::ui::layout::compute_layout;
 use crate::ui::tile_plan::merge::merge_adjacent_non_clipped;
 use crate::ui::{
     ClipPolicy, CompiledPlan, LayoutDirection, LayoutSpec, StaticPlan, TileId, TilePlan, TileSpec,
-    WidgetCapabilities, WidgetDecl, WidgetId, WidgetNode,
+    WidgetDecl, WidgetId, WidgetNode,
 };
 
 pub fn compile(decls: &'static [WidgetDecl], size: Size) -> CompiledPlan {
@@ -38,7 +38,10 @@ fn build_widgets(decls: &'static [WidgetDecl]) -> Vec<WidgetNode> {
         .map(|d| WidgetNode {
             id: WidgetId(d.id),
             parent: (d.parent >= 0).then_some(WidgetId(d.parent as u16)),
-            capabilities: WidgetCapabilities::new(d.hoverable, d.clickable, d.scrollable, d.opaque),
+            hoverable: d.hoverable,
+            clickable: d.clickable,
+            scrollable: d.scrollable,
+            opaque: d.opaque,
             clip: match d.clip {
                 1 => ClipPolicy::ForceClip,
                 -1 => ClipPolicy::ForceNoClip,
@@ -98,7 +101,7 @@ pub fn partition_non_overlapping_tiles(
                 if rect.contains(Point::new(cx, cy)) {
                     if let Some(node) = widgets.iter().find(|w| w.id == *wid) {
                         let clipped = match node.clip {
-                            ClipPolicy::InferFromCapabilities => node.capabilities.scrollable,
+                            ClipPolicy::InferFromCapabilities => node.scrollable,
                             ClipPolicy::ForceClip => true,
                             ClipPolicy::ForceNoClip => false,
                         };
@@ -117,7 +120,7 @@ pub fn partition_non_overlapping_tiles(
             for (_, id, _) in covering.iter().rev() {
                 widget_ids.push(*id);
                 if let Some(node) = widgets.iter().find(|w| w.id == *id) {
-                    if node.capabilities.opaque {
+                    if node.opaque {
                         break;
                     }
                 }

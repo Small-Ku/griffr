@@ -6,25 +6,6 @@ pub struct WidgetId(pub u16);
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct TileId(pub u16);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
-pub struct WidgetCapabilities {
-    pub hoverable: bool,
-    pub clickable: bool,
-    pub scrollable: bool,
-    pub opaque: bool,
-}
-
-impl WidgetCapabilities {
-    pub const fn new(hoverable: bool, clickable: bool, scrollable: bool, opaque: bool) -> Self {
-        Self {
-            hoverable,
-            clickable,
-            scrollable,
-            opaque,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClipPolicy {
     InferFromCapabilities,
@@ -84,7 +65,10 @@ pub struct WidgetDecl {
 pub struct WidgetNode {
     pub id: WidgetId,
     pub parent: Option<WidgetId>,
-    pub capabilities: WidgetCapabilities,
+    pub hoverable: bool,
+    pub clickable: bool,
+    pub scrollable: bool,
+    pub opaque: bool,
     pub clip: ClipPolicy,
     pub layout: LayoutSpec,
     pub z_order: i32,
@@ -99,21 +83,19 @@ pub struct TileSpec {
     pub widgets: Vec<WidgetId>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
+pub struct StaticPlan {
+    pub widgets: Vec<WidgetNode>,
+    pub merged_tile_count: usize,
+}
+
 pub struct TilePlan {
     pub tiles: Vec<TileSpec>,
 }
 
-#[derive(Clone, Debug)]
 pub struct CompiledPlan {
     pub widgets: Vec<WidgetNode>,
     pub bounds: Vec<(WidgetId, Rect)>,
     pub tile_plan: TilePlan,
     pub size: Size,
-}
-
-#[derive(Clone, Debug)]
-pub struct StaticPlan {
-    pub widgets: Vec<WidgetNode>,
-    pub merged_tile_count: usize,
 }
