@@ -89,7 +89,7 @@ fn layout_node_children(
                 let r = Rect::new(
                     Point::new(cursor_x + margin, content.origin.y + margin),
                     Size::new(
-                        (primary - margin * 2.0).max(1.0),
+                        primary.max(1.0),
                         (content.size.height - margin * 2.0).max(1.0),
                     ),
                 );
@@ -101,7 +101,7 @@ fn layout_node_children(
                     Point::new(content.origin.x + margin, cursor_y + margin),
                     Size::new(
                         (content.size.width - margin * 2.0).max(1.0),
-                        (primary - margin * 2.0).max(1.0),
+                        primary.max(1.0),
                     ),
                 );
                 cursor_y += primary + margin * 2.0;
@@ -110,5 +110,92 @@ fn layout_node_children(
         };
         out.push((child.id, child_bounds));
         layout_node_children(child.id, child_bounds, by_parent, by_id, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::{LayoutSpec, WidgetId, WidgetNode};
+    use winio::primitive::Size;
+
+    #[test]
+    fn test_margin_padding_gaps() {
+        let nodes = vec![
+            WidgetNode {
+                id: WidgetId(0),
+                parent: None,
+                hoverable: false,
+                clickable: false,
+                scrollable: false,
+                opaque: true,
+                clip: crate::ui::ClipPolicy::InferFromCapabilities,
+                layout: LayoutSpec {
+                    direction: LayoutDirection::Column,
+                    flex_grow: 1.0,
+                    flex_shrink: 1.0,
+                    flex_basis: 600.0,
+                    margin: 0.0,
+                    padding: 10.0,
+                },
+                z_order: 0,
+                widget_type: "GradientContainer",
+            },
+            WidgetNode {
+                id: WidgetId(1),
+                parent: Some(WidgetId(0)),
+                hoverable: true,
+                clickable: true,
+                scrollable: false,
+                opaque: true,
+                clip: crate::ui::ClipPolicy::InferFromCapabilities,
+                layout: LayoutSpec {
+                    direction: LayoutDirection::Row,
+                    flex_grow: 1.0,
+                    flex_basis: 280.0,
+                    margin: 6.0,
+                    padding: 0.0,
+                    flex_shrink: 1.0,
+                },
+                z_order: 1,
+                widget_type: "CounterWidget",
+            },
+            WidgetNode {
+                id: WidgetId(2),
+                parent: Some(WidgetId(0)),
+                hoverable: true,
+                clickable: true,
+                scrollable: false,
+                opaque: true,
+                clip: crate::ui::ClipPolicy::InferFromCapabilities,
+                layout: LayoutSpec {
+                    direction: LayoutDirection::Row,
+                    flex_grow: 2.0,
+                    flex_basis: 320.0,
+                    margin: 6.0,
+                    padding: 0.0,
+                    flex_shrink: 1.0,
+                },
+                z_order: 2,
+                widget_type: "Banner",
+            },
+        ];
+
+        let size = Size::new(900.0, 640.0);
+        let layout = compute_layout(&nodes, size);
+
+        let r1 = layout.iter().find(|(id, _)| id.0 == 1).unwrap().1;
+        let r2 = layout.iter().find(|(id, _)| id.0 == 2).unwrap().1;
+
+        // Container start is 0. Padding 10 + Margin 6 = 16.
+        assert_eq!(r1.origin.y, 16.0, "Top gap should be 16");
+
+        // Gap between widgets: r2.top - r1.bottom
+        let gap_between = r2.origin.y - r1.max_y();
+        assert_eq!(gap_between, 12.0, "Middle gap should be 12 (6+6)");
+
+        // Bottom gap: Window height (640) - r2.bottom
+        let gap_bottom = 640.0 - r2.max_y();
+        assert_eq!(gap_bottom, 16.0, "Bottom gap should be 16 (6+10)");
     }
 }
