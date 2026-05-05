@@ -222,7 +222,12 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                         if let Some(top_id) = tile.widgets.last().copied() {
                             if let Some((_, widget)) = self.widgets.iter_mut().find(|(id, _)| *id == top_id) {
                                 let mut ctx = canvas.context()?;
-                                widget.draw(&mut ctx, ::griffr_gui::ui::Rect::new(0.0, 0.0, draw_w, draw_h), tile.clipped)?;
+                                if let Some((_, widget_bounds)) = self.runtime.plan.bounds.iter().find(|(id, _)| *id == top_id) {
+                                    let tx = widget_bounds.x - tile.bounds.x;
+                                    let ty = widget_bounds.y - tile.bounds.y;
+                                    ctx.set_transform(::winio::prelude::Transform::translation(tx, ty))?;
+                                    widget.draw(&mut ctx, ::griffr_gui::ui::Rect::new(0.0, 0.0, widget_bounds.w, widget_bounds.h), tile.clipped)?;
+                                }
                             }
                         }
                     } else {
