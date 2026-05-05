@@ -39,7 +39,7 @@ impl Widget for Container {
     }
 
     fn capabilities(&self) -> WidgetCapabilities {
-        WidgetCapabilities::new(false, false, false)
+        WidgetCapabilities::new(false, false, false, true)
     }
 
     fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {
@@ -71,7 +71,7 @@ impl Widget for Button {
     }
 
     fn capabilities(&self) -> WidgetCapabilities {
-        WidgetCapabilities::new(true, true, false)
+        WidgetCapabilities::new(true, true, false, true)
     }
 
     fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {
@@ -134,7 +134,7 @@ impl Widget for Banner {
     }
 
     fn capabilities(&self) -> WidgetCapabilities {
-        WidgetCapabilities::new(true, false, true)
+        WidgetCapabilities::new(true, false, true, true)
     }
 
     fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {

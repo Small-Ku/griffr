@@ -11,6 +11,7 @@ pub(crate) struct NodeProps {
     pub(crate) hoverable: Option<bool>,
     pub(crate) clickable: Option<bool>,
     pub(crate) scrollable: Option<bool>,
+    pub(crate) opaque: Option<bool>,
     pub(crate) clip: Option<i8>,
     pub(crate) z: Option<i32>,
 }
@@ -34,6 +35,7 @@ pub(crate) struct FlatNode {
     pub(crate) hoverable: bool,
     pub(crate) clickable: bool,
     pub(crate) scrollable: bool,
+    pub(crate) opaque: bool,
     pub(crate) clip: i8,
     pub(crate) z: i32,
     pub(crate) direction: i8,

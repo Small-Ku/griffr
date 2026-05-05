@@ -26,6 +26,7 @@ impl Parse for NodeInput {
                     "hoverable" => props.hoverable = Some(content.parse::<LitBool>()?.value),
                     "clickable" => props.clickable = Some(content.parse::<LitBool>()?.value),
                     "scrollable" => props.scrollable = Some(content.parse::<LitBool>()?.value),
+                    "opaque" => props.opaque = Some(content.parse::<LitBool>()?.value),
                     "clip" => {
                         let v: Ident = content.parse()?;
                         props.clip = Some(match v.to_string().as_str() {

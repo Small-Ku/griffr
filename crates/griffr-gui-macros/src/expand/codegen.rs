@@ -22,6 +22,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         let hoverable = n.hoverable;
         let clickable = n.clickable;
         let scrollable = n.scrollable;
+        let opaque = n.opaque;
         let clip = n.clip;
         let z = n.z;
         let direction = n.direction;
@@ -33,7 +34,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         quote! {
             ::griffr_gui::ui::WidgetDecl {
                 id: #id, parent: #parent, widget_type: #widget_type,
-                hoverable: #hoverable, clickable: #clickable, scrollable: #scrollable,
+                hoverable: #hoverable, clickable: #clickable, scrollable: #scrollable, opaque: #opaque,
                 clip: #clip, z: #z, direction: #direction, flex_grow: #flex_grow,
                 flex_shrink: #flex_shrink, flex_basis: #flex_basis, margin: #margin, padding: #padding,
             }
@@ -49,7 +50,8 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         let h = n.hoverable;
         let c = n.clickable;
         let s = n.scrollable;
-        quote! { (#id, #h, #c, #s) }
+        let o = n.opaque;
+        quote! { (#id, #h, #c, #s, #o) }
     });
     let static_widgets = flat.iter().map(|n| {
         let id = n.id;
@@ -57,6 +59,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         let hoverable = n.hoverable;
         let clickable = n.clickable;
         let scrollable = n.scrollable;
+        let opaque = n.opaque;
         let clip = n.clip;
         let z = n.z;
         let kind = &n.kind;
@@ -70,7 +73,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             ::griffr_gui::ui::WidgetNode {
                 id: ::griffr_gui::ui::WidgetId(#id),
                 parent: (#parent >= 0).then_some(::griffr_gui::ui::WidgetId(#parent as u16)),
-                capabilities: ::griffr_gui::ui::WidgetCapabilities::new(#hoverable, #clickable, #scrollable),
+                capabilities: ::griffr_gui::ui::WidgetCapabilities::new(#hoverable, #clickable, #scrollable, #opaque),
                 clip: match #clip {
                     1 => ::griffr_gui::ui::ClipPolicy::ForceClip,
                     -1 => ::griffr_gui::ui::ClipPolicy::ForceNoClip,
@@ -133,7 +136,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         impl #ident {
             pub const DECLS: &'static [::griffr_gui::ui::WidgetDecl] = &[#(#decls),*];
             pub const TOPOLOGY: &'static [(u16, i16)] = &[#(#topology),*];
-            pub const CAPABILITIES: &'static [(u16, bool, bool, bool)] = &[#(#capabilities),*];
+            pub const CAPABILITIES: &'static [(u16, bool, bool, bool, bool)] = &[#(#capabilities),*];
             pub const CANVAS_COUNT: usize = #canvas_count;
             pub fn build_static_plan() -> ::griffr_gui::ui::StaticPlan {
                 let mut widgets = vec![#(#static_widgets),*];

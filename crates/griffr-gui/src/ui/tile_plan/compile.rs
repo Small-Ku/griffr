@@ -38,7 +38,7 @@ fn build_widgets(decls: &'static [WidgetDecl]) -> Vec<WidgetNode> {
         .map(|d| WidgetNode {
             id: WidgetId(d.id),
             parent: (d.parent >= 0).then_some(WidgetId(d.parent as u16)),
-            capabilities: WidgetCapabilities::new(d.hoverable, d.clickable, d.scrollable),
+            capabilities: WidgetCapabilities::new(d.hoverable, d.clickable, d.scrollable, d.opaque),
             clip: match d.clip {
                 1 => ClipPolicy::ForceClip,
                 -1 => ClipPolicy::ForceNoClip,
@@ -111,7 +111,19 @@ pub fn partition_non_overlapping_tiles(
             }
             covering.sort_by_key(|(z, id, _)| (*z, *id));
             let (_, _, top_clipped) = *covering.last().expect("non-empty covering");
-            let widget_ids: Vec<WidgetId> = covering.into_iter().map(|(_, id, _)| id).collect();
+
+            // Overdraw optimization: find the first opaque widget from the front (backwards in Z-order).
+            let mut widget_ids: Vec<WidgetId> = Vec::new();
+            for (_, id, _) in covering.iter().rev() {
+                widget_ids.push(*id);
+                if let Some(node) = widgets.iter().find(|w| w.id == *id) {
+                    if node.capabilities.opaque {
+                        break;
+                    }
+                }
+            }
+            widget_ids.reverse(); // Drawing order is back-to-front.
+
             out.push(TileSpec {
                 id: TileId(out.len() as u16),
                 bounds: Rect::new(Point::new(x0, y0), Size::new(x1 - x0, y1 - y0)),
@@ -139,6 +151,7 @@ mod tests {
             hoverable: true,
             clickable: true,
             scrollable: true,
+            opaque: true,
             clip: 0,
             z: 0,
             direction: 1,
@@ -162,6 +175,7 @@ mod tests {
                 hoverable: false,
                 clickable: false,
                 scrollable: false,
+                opaque: true,
                 clip: 0,
                 z: 0,
                 direction: 0,
@@ -178,6 +192,7 @@ mod tests {
                 hoverable: true,
                 clickable: true,
                 scrollable: true,
+                opaque: true,
                 clip: 1,
                 z: 10,
                 direction: 1,
@@ -215,6 +230,7 @@ mod tests {
                 hoverable: false,
                 clickable: false,
                 scrollable: false,
+                opaque: true,
                 clip: 0,
                 z: 0,
                 direction: 1,
@@ -231,6 +247,7 @@ mod tests {
                 hoverable: true,
                 clickable: true,
                 scrollable: false,
+                opaque: true,
                 clip: 0,
                 z: 1,
                 direction: 0,
@@ -247,6 +264,7 @@ mod tests {
                 hoverable: true,
                 clickable: false,
                 scrollable: true,
+                opaque: true,
                 clip: 1,
                 z: 2,
                 direction: 0,
@@ -278,6 +296,7 @@ mod tests {
                 hoverable: false,
                 clickable: false,
                 scrollable: false,
+                opaque: true,
                 clip: 0,
                 z: 0,
                 direction: 1,
@@ -294,6 +313,7 @@ mod tests {
                 hoverable: true,
                 clickable: true,
                 scrollable: false,
+                opaque: true,
                 clip: 0,
                 z: 1,
                 direction: 0,
@@ -310,6 +330,7 @@ mod tests {
                 hoverable: true,
                 clickable: false,
                 scrollable: true,
+                opaque: true,
                 clip: 1,
                 z: 2,
                 direction: 0,

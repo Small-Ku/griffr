@@ -11,14 +11,16 @@ pub struct WidgetCapabilities {
     pub hoverable: bool,
     pub clickable: bool,
     pub scrollable: bool,
+    pub opaque: bool,
 }
 
 impl WidgetCapabilities {
-    pub const fn new(hoverable: bool, clickable: bool, scrollable: bool) -> Self {
+    pub const fn new(hoverable: bool, clickable: bool, scrollable: bool, opaque: bool) -> Self {
         Self {
             hoverable,
             clickable,
             scrollable,
+            opaque,
         }
     }
 }
@@ -67,6 +69,7 @@ pub struct WidgetDecl {
     pub hoverable: bool,
     pub clickable: bool,
     pub scrollable: bool,
+    pub opaque: bool,
     pub clip: i8,
     pub z: i32,
     pub direction: i8,

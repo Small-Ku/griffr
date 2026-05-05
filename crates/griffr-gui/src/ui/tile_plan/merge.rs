@@ -139,7 +139,7 @@ mod tests {
         let wn = vec![WidgetNode {
             id: WidgetId(1),
             parent: None,
-            capabilities: WidgetCapabilities::new(false, false, false),
+            capabilities: WidgetCapabilities::new(false, false, false, true),
             clip: ClipPolicy::InferFromCapabilities,
             layout: LayoutSpec {
                 direction: LayoutDirection::Row,
