@@ -31,6 +31,9 @@ impl Widget for Button {
     fn opaque(&self) -> bool {
         true
     }
+    fn sizing_policy(&self) -> crate::ui::SizingPolicy {
+        self.tile.sizing
+    }
 
     fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {
         let color = if self.pressed {

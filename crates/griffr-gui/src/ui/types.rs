@@ -7,6 +7,7 @@ use winio::widgets::CanvasEvent;
 pub struct TileSlot {
     pub bounds: Rect,
     pub clipped: bool,
+    pub sizing: SizingPolicy,
 }
 
 pub trait Widget {
@@ -37,6 +38,22 @@ pub trait Widget {
     fn handle_event(&mut self, _event: &CanvasEvent, _is_target: bool) -> Result<()> {
         Ok(())
     }
+    fn sizing_policy(&self) -> SizingPolicy {
+        SizingPolicy::default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SizingPolicy {
+    Flex { grow: f64, shrink: f64, basis: f64 },
+    AspectRatio(f64),
+    Fixed(Size),
+}
+
+impl Default for SizingPolicy {
+    fn default() -> Self {
+        Self::Flex { grow: 0.0, shrink: 1.0, basis: 100.0 }
+    }
 }
 
 
@@ -62,22 +79,18 @@ pub enum LayoutDirection {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LayoutSpec {
     pub direction: LayoutDirection,
-    pub flex_grow: f64,
-    pub flex_shrink: f64,
-    pub flex_basis: f64,
     pub margin: f64,
     pub padding: f64,
+    pub sizing: SizingPolicy,
 }
 
 impl Default for LayoutSpec {
     fn default() -> Self {
         Self {
             direction: LayoutDirection::Column,
-            flex_grow: 0.0,
-            flex_shrink: 1.0,
-            flex_basis: 100.0,
             margin: 0.0,
             padding: 0.0,
+            sizing: SizingPolicy::default(),
         }
     }
 }
@@ -94,14 +107,15 @@ pub struct WidgetDecl {
     pub clip: i8,
     pub z: i32,
     pub direction: i8,
-    pub flex_grow: f64,
-    pub flex_shrink: f64,
-    pub flex_basis: f64,
     pub margin: f64,
     pub padding: f64,
+    pub sizing_mode: i8,
+    pub sizing_f1: f64,
+    pub sizing_f2: f64,
+    pub sizing_f3: f64,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct WidgetNode {
     pub id: WidgetId,
     pub parent: Option<WidgetId>,

@@ -17,6 +17,9 @@ impl Widget for Container {
     fn opaque(&self) -> bool {
         true
     }
+    fn sizing_policy(&self) -> crate::ui::SizingPolicy {
+        self.tile.sizing
+    }
 
     fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {
         let brush = SolidColorBrush::new(Color::new(0x1E, 0x22, 0x2B, 0xFF));

@@ -5,16 +5,16 @@ use crate::ui::{TileSpec, WidgetId, WidgetNode};
 
 pub fn merge_adjacent_non_clipped(
     mut tiles: Vec<TileSpec>,
-    widget_bounds: &[(WidgetId, Rect)],
+    _widget_bounds: &[(WidgetId, Rect)],
     widgets: &[WidgetNode],
 ) -> Vec<TileSpec> {
-    let bounds_by_widget: HashMap<WidgetId, Rect> = widget_bounds.iter().copied().collect();
-    let widget_by_id: HashMap<WidgetId, WidgetNode> = widgets.iter().map(|w| (w.id, *w)).collect();
+    let widget_by_id: HashMap<WidgetId, WidgetNode> =
+        widgets.iter().map(|w| (w.id, w.clone())).collect();
     loop {
         let mut changed = false;
         'outer: for i in 0..tiles.len() {
             for j in (i + 1)..tiles.len() {
-                if let Some(candidate) = merged_tile(&tiles[i], &tiles[j]) {
+                if let Some(candidate) = merged_tile(&tiles[i], &tiles[j], &widget_by_id) {
                     let mut others: Vec<TileSpec> =
                         Vec::with_capacity(tiles.len().saturating_sub(2));
                     for (idx, t) in tiles.iter().enumerate() {
@@ -22,9 +22,7 @@ pub fn merge_adjacent_non_clipped(
                             others.push(t.clone());
                         }
                     }
-                    let safe = widgets_fit(&candidate, &bounds_by_widget)
-                        && no_scroll_or_clip_violation(&candidate, &widget_by_id)
-                        && !overlaps_others(&candidate.bounds, &others);
+                    let safe = !overlaps_others(&candidate.bounds, &others);
                     if safe {
                         let mut next = others;
                         next.push(candidate);
@@ -39,18 +37,15 @@ pub fn merge_adjacent_non_clipped(
             break;
         }
     }
-    tiles.sort_by(|a, b| {
-        a.bounds
-            .origin
-            .y
-            .total_cmp(&b.bounds.origin.y)
-            .then(a.bounds.origin.x.total_cmp(&b.bounds.origin.x))
-    });
     tiles
 }
 
-fn merged_tile(a: &TileSpec, b: &TileSpec) -> Option<TileSpec> {
-    if a.clipped || b.clipped || a.widgets != b.widgets {
+fn merged_tile(
+    a: &TileSpec,
+    b: &TileSpec,
+    widget_by_id: &HashMap<WidgetId, WidgetNode>,
+) -> Option<TileSpec> {
+    if a.clipped || b.clipped {
         return None;
     }
     let horizontal = a.bounds.max_x() == b.bounds.origin.x
@@ -66,36 +61,27 @@ fn merged_tile(a: &TileSpec, b: &TileSpec) -> Option<TileSpec> {
     let y = a.bounds.origin.y.min(b.bounds.origin.y);
     let right = a.bounds.max_x().max(b.bounds.max_x());
     let bottom = a.bounds.max_y().max(b.bounds.max_y());
+
+    let mut widgets = a.widgets.clone();
+    for &w in &b.widgets {
+        if !widgets.contains(&w) {
+            widgets.push(w);
+        }
+    }
+    // Sort by Z-order to ensure correct drawing order in the merged canvas.
+    widgets.sort_by_key(|id| {
+        widget_by_id
+            .get(id)
+            .map(|w| (w.z_order, w.id))
+            .unwrap_or((0, *id))
+    });
+
     Some(TileSpec {
         id: a.id,
         bounds: Rect::new(Point::new(x, y), Size::new(right - x, bottom - y)),
         clipped: false,
-        widgets: a.widgets.clone(),
+        widgets,
     })
-}
-
-fn widgets_fit(tile: &TileSpec, bounds_by_widget: &HashMap<WidgetId, Rect>) -> bool {
-    let Some(wid) = tile.widgets.last() else {
-        return false;
-    };
-    bounds_by_widget.get(wid).is_some_and(|b| {
-        tile.bounds.origin.x >= b.origin.x
-            && tile.bounds.origin.y >= b.origin.y
-            && tile.bounds.max_x() <= b.max_x()
-            && tile.bounds.max_y() <= b.max_y()
-    })
-}
-
-fn no_scroll_or_clip_violation(
-    tile: &TileSpec,
-    widget_by_id: &HashMap<WidgetId, WidgetNode>,
-) -> bool {
-    let Some(wid) = tile.widgets.last() else {
-        return false;
-    };
-    widget_by_id
-        .get(wid)
-        .is_some_and(|w| !w.scrollable && !matches!(w.clip, crate::ui::ClipPolicy::ForceClip))
 }
 
 fn overlaps_others(candidate: &Rect, others: &[TileSpec]) -> bool {
@@ -111,11 +97,12 @@ fn rects_overlap(a: &Rect, b: &Rect) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use winio::primitive::{Point, Rect, Size};
 
     use crate::ui::tile_plan::merge::merge_adjacent_non_clipped;
     use crate::ui::{
-        ClipPolicy, LayoutDirection, LayoutSpec, TileId, TileSpec, WidgetId, WidgetNode,
+        ClipPolicy, LayoutDirection, LayoutSpec, SizingPolicy, TileId, TileSpec, WidgetId, WidgetNode,
     };
 
     #[test]
@@ -145,16 +132,20 @@ mod tests {
             clip: ClipPolicy::InferFromCapabilities,
             layout: LayoutSpec {
                 direction: LayoutDirection::Row,
-                flex_grow: 1.0,
-                flex_shrink: 1.0,
-                flex_basis: 100.0,
                 margin: 0.0,
                 padding: 0.0,
+                sizing: SizingPolicy::Flex {
+                    grow: 1.0,
+                    shrink: 1.0,
+                    basis: 100.0,
+                },
             },
             z_order: 0,
             widget_type: "Container",
         }];
-        let merged = merge_adjacent_non_clipped(tiles, &wb, &wn);
+        let wn: HashMap<WidgetId, WidgetNode> =
+            wn.iter().map(|w| (w.id, w.clone())).collect();
+        let merged = merge_adjacent_non_clipped(tiles, &wb, &wn.values().cloned().collect::<Vec<_>>());
         assert_eq!(merged.len(), 1);
     }
 }

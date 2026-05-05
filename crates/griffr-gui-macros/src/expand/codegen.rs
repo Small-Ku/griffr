@@ -26,17 +26,21 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         let clip = n.clip;
         let z = n.z;
         let direction = n.direction;
-        let flex_grow = n.flex_grow;
-        let flex_shrink = n.flex_shrink;
-        let flex_basis = n.flex_basis;
+        let sizing_mode = n.sizing_mode;
+        let sizing_f1 = n.sizing_f1;
+        let sizing_f2 = n.sizing_f2;
+        let sizing_f3 = n.sizing_f3;
         let margin = n.margin;
         let padding = n.padding;
         quote! {
             ::griffr_gui::ui::WidgetDecl {
                 id: #id, parent: #parent, widget_type: #widget_type,
                 hoverable: #hoverable, clickable: #clickable, scrollable: #scrollable, opaque: #opaque,
-                clip: #clip, z: #z, direction: #direction, flex_grow: #flex_grow,
-                flex_shrink: #flex_shrink, flex_basis: #flex_basis, margin: #margin, padding: #padding,
+                clip: #clip, z: #z, direction: #direction, margin: #margin, padding: #padding,
+                sizing_mode: #sizing_mode,
+                sizing_f1: #sizing_f1,
+                sizing_f2: #sizing_f2,
+                sizing_f3: #sizing_f3,
             }
         }
     });
@@ -64,9 +68,10 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         let z = n.z;
         let kind = &n.kind;
         let direction = n.direction;
-        let flex_grow = n.flex_grow;
-        let flex_shrink = n.flex_shrink;
-        let flex_basis = n.flex_basis;
+        let sizing_mode = n.sizing_mode;
+        let sizing_f1 = n.sizing_f1;
+        let sizing_f2 = n.sizing_f2;
+        let sizing_f3 = n.sizing_f3;
         let margin = n.margin;
         let padding = n.padding;
         quote! {
@@ -84,7 +89,13 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 },
                 layout: ::griffr_gui::ui::LayoutSpec {
                     direction: if #direction == 0 { ::griffr_gui::ui::LayoutDirection::Row } else { ::griffr_gui::ui::LayoutDirection::Column },
-                    flex_grow: #flex_grow, flex_shrink: #flex_shrink, flex_basis: #flex_basis, margin: #margin, padding: #padding,
+                    margin: #margin,
+                    padding: #padding,
+                    sizing: match #sizing_mode {
+                        1 => ::griffr_gui::ui::SizingPolicy::AspectRatio(#sizing_f1),
+                        2 => ::griffr_gui::ui::SizingPolicy::Fixed(::winio::prelude::Size::new(#sizing_f1, #sizing_f2)),
+                        _ => ::griffr_gui::ui::SizingPolicy::Flex { grow: #sizing_f1, shrink: #sizing_f2, basis: #sizing_f3 },
+                    },
                 },
                 z_order: #z,
                 widget_type: #kind,
@@ -324,9 +335,11 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 for (id, w) in &self.widgets {
                     let o = w.opaque();
                     let s = w.scrollable();
+                    let sz = w.sizing_policy();
                     if let Some(node) = self.runtime.static_plan.widgets.iter_mut().find(|n| n.id == *id) {
                         node.opaque = o;
                         node.scrollable = s;
+                        node.layout.sizing = sz;
                     }
                 }
             }
@@ -335,7 +348,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 for node in &runtime.plan.widgets {
                     let bounds = runtime.plan.bounds.iter().find(|(id, _)| *id == node.id).map(|(_, b)| *b).unwrap_or(::winio::primitive::Rect::from_size(::winio::prelude::Size::new(0.0, 0.0)));
                     let clipped = runtime.plan.tile_plan.tiles.iter().find(|tile| tile.widgets.iter().any(|id| *id == node.id)).map(|t| t.clipped).unwrap_or(false);
-                    let slot = ::griffr_gui::ui::TileSlot { bounds, clipped };
+                    let slot = ::griffr_gui::ui::TileSlot { bounds, clipped, sizing: node.layout.sizing };
                     let widget: Box<dyn ::griffr_gui::ui::Widget> = match node.widget_type {
                         #(#widget_ctor_arms)*
                         _ => unreachable!("widget_tree generated unknown widget kind"),

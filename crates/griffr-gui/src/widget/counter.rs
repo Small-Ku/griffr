@@ -25,6 +25,10 @@ impl Widget for CounterWidget {
         self.tile.bounds
     }
 
+    fn sizing_policy(&self) -> crate::ui::SizingPolicy {
+        self.tile.sizing
+    }
+
     fn hoverable(&self) -> bool {
         true
     }

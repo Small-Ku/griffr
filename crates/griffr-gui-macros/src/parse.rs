@@ -36,6 +36,7 @@ impl Parse for NodeInput {
                         });
                     }
                     "z" => props.z = Some(content.parse::<LitInt>()?.base10_parse::<i32>()?),
+                    "aspect_ratio" => props.aspect_ratio = Some(parse_num(&content)?),
                     "label" => {
                         let _ = content.parse::<Expr>()?;
                     }

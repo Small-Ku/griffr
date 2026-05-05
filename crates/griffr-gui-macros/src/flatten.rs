@@ -15,6 +15,13 @@ fn flatten(node: &NodeInput, parent: i16, next_id: &mut u16, out: &mut Vec<FlatN
     let kind = node.kind.to_token_stream().to_string().replace(' ', "");
     let defaults = defaults_for_kind(&kind);
     let z = node.props.z.unwrap_or(id as i32);
+    let flex_grow = node.props.flex_grow.unwrap_or(0.0);
+    let flex_shrink = node.props.flex_shrink.unwrap_or(1.0);
+    let flex_basis = node.props.flex_basis.unwrap_or(100.0);
+    let (sizing_mode, sizing_f1, sizing_f2, sizing_f3) = match node.props.aspect_ratio {
+        Some(aspect_ratio) if aspect_ratio > 0.0 => (1, aspect_ratio, 0.0, 0.0),
+        _ => (0, flex_grow, flex_shrink, flex_basis),
+    };
     out.push(FlatNode {
         id,
         parent,
@@ -26,9 +33,10 @@ fn flatten(node: &NodeInput, parent: i16, next_id: &mut u16, out: &mut Vec<FlatN
         clip: node.props.clip.unwrap_or(if defaults.2 { 1 } else { 0 }),
         z,
         direction: node.props.direction.unwrap_or(1),
-        flex_grow: node.props.flex_grow.unwrap_or(0.0),
-        flex_shrink: node.props.flex_shrink.unwrap_or(1.0),
-        flex_basis: node.props.flex_basis.unwrap_or(100.0),
+        sizing_mode,
+        sizing_f1,
+        sizing_f2,
+        sizing_f3,
         margin: node.props.margin.unwrap_or(0.0),
         padding: node.props.padding.unwrap_or(0.0),
     });

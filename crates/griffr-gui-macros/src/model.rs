@@ -14,6 +14,7 @@ pub(crate) struct NodeProps {
     pub(crate) opaque: Option<bool>,
     pub(crate) clip: Option<i8>,
     pub(crate) z: Option<i32>,
+    pub(crate) aspect_ratio: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -39,9 +40,10 @@ pub(crate) struct FlatNode {
     pub(crate) clip: i8,
     pub(crate) z: i32,
     pub(crate) direction: i8,
-    pub(crate) flex_grow: f64,
-    pub(crate) flex_shrink: f64,
-    pub(crate) flex_basis: f64,
+    pub(crate) sizing_mode: i8,
+    pub(crate) sizing_f1: f64,
+    pub(crate) sizing_f2: f64,
+    pub(crate) sizing_f3: f64,
     pub(crate) margin: f64,
     pub(crate) padding: f64,
 }

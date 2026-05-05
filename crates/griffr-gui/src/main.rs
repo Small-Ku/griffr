@@ -11,8 +11,8 @@ struct MainUi;
 
 #[widget_tree(
     griffr_gui::widget::Container(flex_direction = Column, flex_grow = 0.0, flex_basis = 60.0, padding = 10.0) {
-        griffr_gui::widget::Button(flex_grow = 0.0, flex_basis = 40.0, margin = 0.0),
-        griffr_gui::widget::Button(flex_grow = 0.0, flex_basis = 40.0, margin = 0.0)
+        griffr_gui::widget::Button(flex_grow = 0.0, aspect_ratio = 1.0, margin = 5.0),
+        griffr_gui::widget::Button(flex_grow = 0.0, aspect_ratio = 1.0, margin = 5.0)
     }
 )]
 struct SidebarUi;

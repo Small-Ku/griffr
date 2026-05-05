@@ -316,9 +316,10 @@ mod tests {
                 clip: 0,
                 z: 0,
                 direction: 1,
-                flex_grow: 1.0,
-                flex_shrink: 1.0,
-                flex_basis: 600.0,
+                sizing_mode: 0,
+                sizing_f1: 1.0,
+                sizing_f2: 1.0,
+                sizing_f3: 600.0,
                 margin: 0.0,
                 padding: 10.0,
             },
@@ -333,9 +334,10 @@ mod tests {
                 clip: 0,
                 z: 1,
                 direction: 0,
-                flex_grow: 1.0,
-                flex_shrink: 1.0,
-                flex_basis: 280.0,
+                sizing_mode: 0,
+                sizing_f1: 1.0,
+                sizing_f2: 1.0,
+                sizing_f3: 280.0,
                 margin: 6.0,
                 padding: 0.0,
             },
@@ -350,9 +352,10 @@ mod tests {
                 clip: 1,
                 z: 2,
                 direction: 0,
-                flex_grow: 2.0,
-                flex_shrink: 1.0,
-                flex_basis: 320.0,
+                sizing_mode: 0,
+                sizing_f1: 2.0,
+                sizing_f2: 1.0,
+                sizing_f3: 320.0,
                 margin: 6.0,
                 padding: 0.0,
             },
@@ -362,18 +365,24 @@ mod tests {
     fn to_sim_nodes(flat: &[FlatNode]) -> Vec<SimNode> {
         let mut nodes: Vec<SimNode> = flat
             .iter()
-            .map(|n| SimNode {
-                id: n.id,
-                parent: (n.parent >= 0).then_some(n.parent as u16),
-                direction: n.direction,
-                flex_grow: n.flex_grow,
-                flex_shrink: n.flex_shrink,
-                flex_basis: n.flex_basis,
-                margin: n.margin,
-                padding: n.padding,
-                z: n.z,
-                scrollable: n.scrollable,
-                clip: n.clip,
+            .map(|n| {
+                let (flex_grow, flex_shrink, flex_basis) = match n.sizing_mode {
+                    0 => (n.sizing_f1, n.sizing_f2, n.sizing_f3),
+                    _ => (0.0, 1.0, 100.0),
+                };
+                SimNode {
+                    id: n.id,
+                    parent: (n.parent >= 0).then_some(n.parent as u16),
+                    direction: n.direction,
+                    flex_grow,
+                    flex_shrink,
+                    flex_basis,
+                    margin: n.margin,
+                    padding: n.padding,
+                    z: n.z,
+                    scrollable: n.scrollable,
+                    clip: n.clip,
+                }
             })
             .collect();
         nodes.sort_by_key(|n| (n.z, n.id));

@@ -2,14 +2,14 @@ use std::collections::HashMap;
 
 use winio::primitive::{Point, Rect, Size};
 
-use crate::ui::{LayoutDirection, WidgetId, WidgetNode};
+use crate::ui::{LayoutDirection, SizingPolicy, WidgetId, WidgetNode};
 
 pub fn compute_layout(nodes: &[WidgetNode], size: Size) -> Vec<(WidgetId, Rect)> {
     let mut by_parent: HashMap<Option<WidgetId>, Vec<WidgetNode>> = HashMap::new();
     let mut by_id: HashMap<WidgetId, WidgetNode> = HashMap::new();
     for n in nodes {
-        by_parent.entry(n.parent).or_default().push(*n);
-        by_id.insert(n.id, *n);
+        by_parent.entry(n.parent).or_default().push(n.clone());
+        by_id.insert(n.id, n.clone());
     }
     for children in by_parent.values_mut() {
         children.sort_by_key(|n| (n.z_order, n.id));
@@ -36,11 +36,13 @@ fn layout_node_children(
     let Some(children) = by_parent.get(&Some(parent)) else {
         return;
     };
-    let parent_node = by_id.get(&parent).copied();
+    let parent_node = by_id.get(&parent).cloned();
     let parent_dir = parent_node
+        .as_ref()
         .map(|n| n.layout.direction)
         .unwrap_or(LayoutDirection::Column);
     let parent_padding = parent_node
+        .as_ref()
         .map(|n| n.layout.padding)
         .unwrap_or(0.0)
         .max(0.0);
@@ -58,10 +60,16 @@ fn layout_node_children(
 
     let total_basis: f64 = children
         .iter()
-        .map(|n| n.layout.flex_basis.max(1.0) + n.layout.margin.max(0.0) * 2.0)
+        .map(|n| flex_components(&n.layout.sizing).2.max(1.0) + n.layout.margin.max(0.0) * 2.0)
         .sum();
-    let total_grow: f64 = children.iter().map(|n| n.layout.flex_grow.max(0.0)).sum();
-    let total_shrink: f64 = children.iter().map(|n| n.layout.flex_shrink.max(0.0)).sum();
+    let total_grow: f64 = children
+        .iter()
+        .map(|n| flex_components(&n.layout.sizing).0.max(0.0))
+        .sum();
+    let total_shrink: f64 = children
+        .iter()
+        .map(|n| flex_components(&n.layout.sizing).1.max(0.0))
+        .sum();
     let axis = match parent_dir {
         LayoutDirection::Row => content.size.width,
         LayoutDirection::Column => content.size.height,
@@ -73,43 +81,73 @@ fn layout_node_children(
     let mut cursor_y = content.origin.y;
     for child in children {
         let margin = child.layout.margin.max(0.0);
+        let (flex_grow, flex_shrink, flex_basis) = flex_components(&child.layout.sizing);
         let grow_share = if total_grow > 0.0 {
-            positive_remainder * (child.layout.flex_grow.max(0.0) / total_grow)
+            positive_remainder * (flex_grow.max(0.0) / total_grow)
         } else {
             0.0
         };
         let shrink_share = if overflow > 0.0 && total_shrink > 0.0 {
-            overflow * (child.layout.flex_shrink.max(0.0) / total_shrink)
+            overflow * (flex_shrink.max(0.0) / total_shrink)
         } else {
             0.0
         };
-        let primary = (child.layout.flex_basis.max(1.0) + grow_share - shrink_share).max(1.0);
-        let child_bounds = match parent_dir {
+        let primary = (flex_basis.max(1.0) + grow_share - shrink_share).max(1.0);
+        let mut child_bounds = match parent_dir {
+            LayoutDirection::Row => Rect::new(
+                Point::new(cursor_x + margin, content.origin.y + margin),
+                Size::new(
+                    primary.max(1.0),
+                    (content.size.height - margin * 2.0).max(1.0),
+                ),
+            ),
+            LayoutDirection::Column => Rect::new(
+                Point::new(content.origin.x + margin, cursor_y + margin),
+                Size::new(
+                    (content.size.width - margin * 2.0).max(1.0),
+                    primary.max(1.0),
+                ),
+            ),
+        };
+
+        match child.layout.sizing {
+            SizingPolicy::Flex { .. } => {}
+            SizingPolicy::AspectRatio(ratio) => {
+                if ratio > 0.0 {
+                    match parent_dir {
+                        LayoutDirection::Row => {
+                            child_bounds.size.height = (child_bounds.size.width / ratio)
+                                .min(content.size.height - margin * 2.0);
+                        }
+                        LayoutDirection::Column => {
+                            child_bounds.size.height = child_bounds.size.width / ratio;
+                        }
+                    }
+                }
+            }
+            SizingPolicy::Fixed(size) => {
+                child_bounds.size = size;
+            }
+        }
+
+        match parent_dir {
             LayoutDirection::Row => {
-                let r = Rect::new(
-                    Point::new(cursor_x + margin, content.origin.y + margin),
-                    Size::new(
-                        primary.max(1.0),
-                        (content.size.height - margin * 2.0).max(1.0),
-                    ),
-                );
-                cursor_x += primary + margin * 2.0;
-                r
+                cursor_x += child_bounds.size.width + margin * 2.0;
             }
             LayoutDirection::Column => {
-                let r = Rect::new(
-                    Point::new(content.origin.x + margin, cursor_y + margin),
-                    Size::new(
-                        (content.size.width - margin * 2.0).max(1.0),
-                        primary.max(1.0),
-                    ),
-                );
-                cursor_y += primary + margin * 2.0;
-                r
+                cursor_y += child_bounds.size.height + margin * 2.0;
             }
-        };
+        }
+
         out.push((child.id, child_bounds));
         layout_node_children(child.id, child_bounds, by_parent, by_id, out);
+    }
+}
+
+fn flex_components(sizing: &SizingPolicy) -> (f64, f64, f64) {
+    match sizing {
+        SizingPolicy::Flex { grow, shrink, basis } => (*grow, *shrink, *basis),
+        _ => (0.0, 1.0, 100.0),
     }
 }
 
@@ -132,11 +170,13 @@ mod tests {
                 clip: crate::ui::ClipPolicy::InferFromCapabilities,
                 layout: LayoutSpec {
                     direction: LayoutDirection::Column,
-                    flex_grow: 1.0,
-                    flex_shrink: 1.0,
-                    flex_basis: 600.0,
                     margin: 0.0,
                     padding: 10.0,
+                    sizing: SizingPolicy::Flex {
+                        grow: 1.0,
+                        shrink: 1.0,
+                        basis: 600.0,
+                    },
                 },
                 z_order: 0,
                 widget_type: "GradientContainer",
@@ -151,11 +191,13 @@ mod tests {
                 clip: crate::ui::ClipPolicy::InferFromCapabilities,
                 layout: LayoutSpec {
                     direction: LayoutDirection::Row,
-                    flex_grow: 1.0,
-                    flex_basis: 280.0,
                     margin: 6.0,
                     padding: 0.0,
-                    flex_shrink: 1.0,
+                    sizing: SizingPolicy::Flex {
+                        grow: 1.0,
+                        shrink: 1.0,
+                        basis: 280.0,
+                    },
                 },
                 z_order: 1,
                 widget_type: "CounterWidget",
@@ -170,11 +212,13 @@ mod tests {
                 clip: crate::ui::ClipPolicy::InferFromCapabilities,
                 layout: LayoutSpec {
                     direction: LayoutDirection::Row,
-                    flex_grow: 2.0,
-                    flex_basis: 320.0,
                     margin: 6.0,
                     padding: 0.0,
-                    flex_shrink: 1.0,
+                    sizing: SizingPolicy::Flex {
+                        grow: 2.0,
+                        shrink: 1.0,
+                        basis: 320.0,
+                    },
                 },
                 z_order: 2,
                 widget_type: "Banner",
