@@ -110,12 +110,13 @@ pub fn partition_non_overlapping_tiles(
                 continue;
             }
             covering.sort_by_key(|(z, id, _)| (*z, *id));
-            let (_, top_id, top_clipped) = *covering.last().expect("non-empty covering");
+            let (_, _, top_clipped) = *covering.last().expect("non-empty covering");
+            let widget_ids: Vec<WidgetId> = covering.into_iter().map(|(_, id, _)| id).collect();
             out.push(TileSpec {
                 id: TileId(out.len() as u16),
                 bounds: Rect::new(Point::new(x0, y0), Size::new(x1 - x0, y1 - y0)),
                 clipped: top_clipped,
-                widgets: vec![top_id],
+                widgets: widget_ids,
             });
         }
     }
@@ -124,7 +125,7 @@ pub fn partition_non_overlapping_tiles(
 
 #[cfg(test)]
 mod tests {
-    use winio::prelude::{Rect, Size};
+    use winio::prelude::{Point, Rect, Size};
 
     use crate::ui::tile_plan::compile::{compile, partition_non_overlapping_tiles};
     use crate::ui::{WidgetDecl, WidgetId};

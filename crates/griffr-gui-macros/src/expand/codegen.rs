@@ -219,14 +219,16 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                         canvas.set_visible(true)?;
                         canvas.set_loc(::winio::prelude::Point::new(tile.bounds.origin.x, tile.bounds.origin.y))?;
                         canvas.set_size(::winio::prelude::Size::new(draw_w, draw_h))?;
-                        if let Some(top_id) = tile.widgets.last().copied() {
-                            if let Some((_, widget)) = self.widgets.iter_mut().find(|(id, _)| *id == top_id) {
-                                let mut ctx = canvas.context()?;
-                                if let Some((_, widget_bounds)) = self.runtime.plan.bounds.iter().find(|(id, _)| *id == top_id) {
-                                    let tx = widget_bounds.origin.x - tile.bounds.origin.x;
-                                    let ty = widget_bounds.origin.y - tile.bounds.origin.y;
-                                    ctx.set_transform(::winio::prelude::Transform::translation(tx, ty))?;
-                                    widget.draw(&mut ctx, ::winio::prelude::Size::new(widget_bounds.size.width, widget_bounds.size.height), tile.clipped)?;
+                        if !tile.widgets.is_empty() {
+                            let mut ctx = canvas.context()?;
+                            for &id in &tile.widgets {
+                                if let Some((_, widget)) = self.widgets.iter_mut().find(|(w_id, _)| *w_id == id) {
+                                    if let Some((_, widget_bounds)) = self.runtime.plan.bounds.iter().find(|(b_id, _)| *b_id == id) {
+                                        let tx = widget_bounds.origin.x - tile.bounds.origin.x;
+                                        let ty = widget_bounds.origin.y - tile.bounds.origin.y;
+                                        ctx.set_transform(::winio::prelude::Transform::translation(tx, ty))?;
+                                        widget.draw(&mut ctx, ::winio::prelude::Size::new(widget_bounds.size.width, widget_bounds.size.height), tile.clipped)?;
+                                    }
                                 }
                             }
                         }
