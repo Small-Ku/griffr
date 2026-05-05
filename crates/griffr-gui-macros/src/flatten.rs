@@ -1,3 +1,5 @@
+use quote::ToTokens;
+
 use crate::model::{FlatNode, NodeInput};
 
 pub(crate) fn flatten_tree(root: &NodeInput) -> Vec<FlatNode> {
@@ -10,7 +12,7 @@ pub(crate) fn flatten_tree(root: &NodeInput) -> Vec<FlatNode> {
 fn flatten(node: &NodeInput, parent: i16, next_id: &mut u16, out: &mut Vec<FlatNode>) {
     let id = *next_id;
     *next_id += 1;
-    let kind = node.kind.to_string();
+    let kind = node.kind.to_token_stream().to_string().replace(' ', "");
     let defaults = defaults_for_kind(&kind);
     let z = node.props.z.unwrap_or(id as i32);
     out.push(FlatNode {
@@ -35,7 +37,8 @@ fn flatten(node: &NodeInput, parent: i16, next_id: &mut u16, out: &mut Vec<FlatN
 }
 
 fn defaults_for_kind(kind: &str) -> (bool, bool, bool) {
-    match kind {
+    let leaf = kind.rsplit("::").next().unwrap_or(kind).trim();
+    match leaf {
         "Button" => (true, true, false),
         "Banner" => (true, false, true),
         _ => (false, false, false),

@@ -1,6 +1,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Ident, ItemStruct};
+use std::collections::BTreeSet;
+use syn::{Ident, ItemStruct, Type};
 
 use crate::expand::sim::merged_tile_count_for_flat;
 use crate::model::FlatNode;
@@ -113,6 +114,19 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         let field = Ident::new(&format!("tile{}", idx), ident.span());
         quote! { self.#field.render()?; }
     });
+    let widget_kinds: BTreeSet<String> = flat.iter().map(|n| n.kind.clone()).collect();
+    let widget_ctor_arms = widget_kinds.iter().map(|kind| {
+        let widget_ty: Type = if kind.contains("::") {
+            syn::parse_str(kind)
+                .unwrap_or_else(|_| panic!("widget_tree: invalid widget type path `{kind}`"))
+        } else {
+            let base = Ident::new(kind, ident.span());
+            syn::parse_quote!(::griffr_gui::ui::widget::#base)
+        };
+        quote! {
+            #kind => Box::new(<#widget_ty as ::griffr_gui::ui::widget::Widget>::init(slot)?),
+        }
+    });
 
     quote! {
         #root
@@ -214,9 +228,8 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                     let clipped = runtime.plan.tile_plan.tiles.iter().find(|tile| tile.widgets.iter().any(|id| *id == node.id)).map(|t| t.clipped).unwrap_or(false);
                     let slot = ::griffr_gui::ui::widget::TileSlot { bounds, clipped };
                     let widget: Box<dyn ::griffr_gui::ui::widget::Widget> = match node.widget_type {
-                        "Button" => Box::new(<::griffr_gui::ui::widget::Button as ::griffr_gui::ui::widget::Widget>::init(slot)?),
-                        "Banner" => Box::new(<::griffr_gui::ui::widget::Banner as ::griffr_gui::ui::widget::Widget>::init(slot)?),
-                        _ => Box::new(<::griffr_gui::ui::widget::Container as ::griffr_gui::ui::widget::Widget>::init(slot)?),
+                        #(#widget_ctor_arms)*
+                        _ => unreachable!("widget_tree generated unknown widget kind"),
                     };
                     out.push((node.id, widget));
                 }

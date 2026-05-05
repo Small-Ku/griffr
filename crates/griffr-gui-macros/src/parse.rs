@@ -1,11 +1,11 @@
 use syn::parse::{Parse, ParseStream};
-use syn::{braced, parenthesized, Expr, Ident, LitBool, LitFloat, LitInt, Result, Token};
+use syn::{braced, parenthesized, Expr, Ident, LitBool, LitFloat, LitInt, Path, Result, Token};
 
 use crate::model::{NodeInput, NodeProps, TreeInput};
 
 impl Parse for NodeInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        let kind: Ident = input.parse()?;
+        let kind: Path = input.parse()?;
         let mut props = NodeProps::default();
         if input.peek(syn::token::Paren) {
             let content;

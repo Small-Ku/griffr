@@ -1,4 +1,4 @@
-use syn::Ident;
+use syn::Path;
 
 #[derive(Clone, Default)]
 pub(crate) struct NodeProps {
@@ -17,7 +17,7 @@ pub(crate) struct NodeProps {
 
 #[derive(Clone)]
 pub(crate) struct NodeInput {
-    pub(crate) kind: Ident,
+    pub(crate) kind: Path,
     pub(crate) props: NodeProps,
     pub(crate) children: Vec<NodeInput>,
 }
