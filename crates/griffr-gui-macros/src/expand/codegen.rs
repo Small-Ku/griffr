@@ -127,10 +127,10 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 .unwrap_or_else(|_| panic!("widget_tree: invalid widget type path `{kind}`"))
         } else {
             let base = Ident::new(kind, ident.span());
-            syn::parse_quote!(::griffr_gui::ui::widget::#base)
+            syn::parse_quote!(::griffr_gui::widget::#base)
         };
         quote! {
-            #kind => Box::new(<#widget_ty as ::griffr_gui::ui::widget::Widget>::init(slot)?),
+            #kind => Box::new(<#widget_ty as ::griffr_gui::ui::Widget>::init(slot)?),
         }
     });
 
@@ -158,7 +158,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             root: ::winio::prelude::Child<::winio::widgets::View>,
             #(#canvas_fields)*
             runtime: ::griffr_gui::ui::UiRuntime,
-            widgets: Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::widget::Widget>)>,
+            widgets: Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>,
             pointers: [::winio::prelude::Point; #canvas_count],
         }
 
@@ -281,13 +281,13 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                     }
                 }
             }
-            fn build_widgets(runtime: &::griffr_gui::ui::UiRuntime) -> ::winio::prelude::Result<Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::widget::Widget>)>> {
-                let mut out = Vec::<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::widget::Widget>)>::new();
+            fn build_widgets(runtime: &::griffr_gui::ui::UiRuntime) -> ::winio::prelude::Result<Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>> {
+                let mut out = Vec::<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>::new();
                 for node in &runtime.plan.widgets {
                     let bounds = runtime.plan.bounds.iter().find(|(id, _)| *id == node.id).map(|(_, b)| *b).unwrap_or(::winio::primitive::Rect::from_size(::winio::prelude::Size::new(0.0, 0.0)));
                     let clipped = runtime.plan.tile_plan.tiles.iter().find(|tile| tile.widgets.iter().any(|id| *id == node.id)).map(|t| t.clipped).unwrap_or(false);
-                    let slot = ::griffr_gui::ui::widget::TileSlot { bounds, clipped };
-                    let widget: Box<dyn ::griffr_gui::ui::widget::Widget> = match node.widget_type {
+                    let slot = ::griffr_gui::ui::TileSlot { bounds, clipped };
+                    let widget: Box<dyn ::griffr_gui::ui::Widget> = match node.widget_type {
                         #(#widget_ctor_arms)*
                         _ => unreachable!("widget_tree generated unknown widget kind"),
                     };

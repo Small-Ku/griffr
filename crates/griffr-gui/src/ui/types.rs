@@ -1,4 +1,44 @@
+use winio::prelude::Result;
 use winio::primitive::{Rect, Size};
+use winio::ui::DrawingContext;
+use winio::widgets::CanvasEvent;
+
+#[derive(Clone, Debug)]
+pub struct TileSlot {
+    pub bounds: Rect,
+    pub clipped: bool,
+}
+
+pub trait Widget {
+    fn init(tile: TileSlot) -> Result<Self>
+    where
+        Self: Sized;
+    fn bounds(&self) -> Rect;
+
+    // Routing capabilities
+    fn hoverable(&self) -> bool {
+        false
+    }
+    fn clickable(&self) -> bool {
+        false
+    }
+    fn scrollable(&self) -> bool {
+        false
+    }
+
+    // Rendering properties
+    fn opaque(&self) -> bool {
+        false
+    }
+
+    fn draw(&mut self, _ctx: &mut DrawingContext<'_>, _size: Size, _clipped: bool) -> Result<()> {
+        Ok(())
+    }
+    fn handle_event(&mut self, _event: &CanvasEvent, _is_target: bool) -> Result<()> {
+        Ok(())
+    }
+}
+
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct WidgetId(pub u16);

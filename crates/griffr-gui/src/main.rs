@@ -2,9 +2,9 @@ use griffr_gui::widget_tree;
 use winio::prelude::*;
 
 #[widget_tree(
-    Container(flex_direction = Column, flex_grow = 1.0, flex_basis = 600.0, padding = 10.0) {
-        Button(flex_grow = 1.0, flex_basis = 280.0, margin = 6.0, label = "OK"),
-        Banner(flex_grow = 2.0, flex_basis = 320.0, margin = 6.0, clip = ForceClip)
+    griffr_gui::widget::GradientContainer(flex_direction = Column, flex_grow = 1.0, flex_basis = 600.0, padding = 10.0) {
+        griffr_gui::widget::CounterWidget(flex_grow = 1.0, flex_basis = 280.0, margin = 6.0),
+        griffr_gui::widget::Banner(flex_grow = 2.0, flex_basis = 320.0, margin = 6.0, clip = ForceClip)
     }
 )]
 struct MainUi;
