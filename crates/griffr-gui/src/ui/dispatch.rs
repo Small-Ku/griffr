@@ -1,4 +1,5 @@
-use crate::ui::{CanvasEvent, CompiledPlan, WidgetId};
+use winio::prelude::CanvasEvent;
+use crate::ui::{CompiledPlan, WidgetId};
 
 #[derive(Clone, Copy, Debug)]
 pub enum RoutedEvent {

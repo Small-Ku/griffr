@@ -1,11 +1,11 @@
-use winio::prelude::Size;
+use winio::prelude::{CanvasEvent, Size};
 
 use crate::ui::dispatch::{map_canvas_event, route_event, RoutedEvent};
 use crate::ui::tile_plan::compile::compile_dynamic;
-use crate::ui::{CanvasEvent, CompiledPlan, StaticPlan, WidgetId};
+use crate::ui::{CompiledPlan, StaticPlan, WidgetId};
 
 pub struct UiRuntime {
-    static_plan: StaticPlan,
+    pub static_plan: StaticPlan,
     pub plan: CompiledPlan,
     pub hovered: Option<WidgetId>,
 }

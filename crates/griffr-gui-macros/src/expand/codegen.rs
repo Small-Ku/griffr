@@ -157,7 +157,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         }
 
         #[derive(Debug)]
-        pub enum #msg_ident { Noop, Resize(::winio::prelude::Size), Canvas(usize, ::griffr_gui::ui::CanvasEvent), }
+        pub enum #msg_ident { Noop, Resize(::winio::prelude::Size), Canvas(usize, ::winio::prelude::CanvasEvent), }
 
         impl ::winio::prelude::Component for #comp_ident {
             type Error = ::winio::prelude::Error;
@@ -165,12 +165,18 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             type Init<'a> = &'a ::winio::prelude::Child<::winio::widgets::Window>;
             type Message = #msg_ident;
             async fn init(init: Self::Init<'_>, _sender: &::winio::prelude::ComponentSender<Self>) -> ::winio::prelude::Result<Self> {
-                let runtime = #ident::build_runtime(init.client_size()?);
+                let mut runtime = #ident::build_runtime(init.client_size()?);
                 ::winio::prelude::init! { root: ::winio::widgets::View = (init), #(#canvas_inits)* }
                 let size = init.client_size()?;
                 root.set_loc(::winio::prelude::Point::new(0.0, 0.0))?;
                 root.set_size(Self::expand_size(size))?;
-                Ok(Self { root, #(#canvas_struct_inits)* widgets: Self::build_widgets(&runtime)?, runtime, pointers: [::winio::prelude::Point::new(0.0, 0.0); #canvas_count] })
+                let widgets = Self::build_widgets(&runtime)?;
+                for (id, w) in &widgets {
+                    if let Some(node) = runtime.static_plan.widgets.iter_mut().find(|n| n.id == *id) {
+                        node.capabilities = w.capabilities();
+                    }
+                }
+                Ok(Self { root, #(#canvas_struct_inits)* widgets, runtime, pointers: [::winio::prelude::Point::new(0.0, 0.0); #canvas_count] })
             }
             async fn start(&mut self, sender: &::winio::prelude::ComponentSender<Self>) -> ! {
                 ::winio::prelude::start! { sender, default: #msg_ident::Noop, #(#start_arms)* }
@@ -183,7 +189,15 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                     #msg_ident::Noop => Ok(false),
                     #msg_ident::Resize(size) => { self.root.set_loc(::winio::prelude::Point::new(0.0, 0.0))?; self.root.set_size(Self::expand_size(size))?; Ok(true) }
                     #msg_ident::Canvas(idx, ev) => {
-                        if let ::griffr_gui::ui::CanvasEvent::MouseMove(p) = &ev { if idx < self.pointers.len() { self.pointers[idx] = self.local_to_global(idx, *p); } }
+                        let p_local = match &ev {
+                            ::winio::prelude::CanvasEvent::MouseMove(p) => Some(*p),
+                            _ => None,
+                        };
+                        if let Some(p) = p_local {
+                            if idx < self.pointers.len() {
+                                self.pointers[idx] = self.local_to_global(idx, p);
+                            }
+                        }
                         let p = self.pointers.get(idx).copied().unwrap_or(::winio::prelude::Point::new(0.0, 0.0));
                         let hit = self.runtime.dispatch_with_pointer(&ev, p.x, p.y);
                         for (id, widget) in &mut self.widgets { widget.handle_event(&ev, hit.is_some_and(|hit_id| hit_id == *id))?; }

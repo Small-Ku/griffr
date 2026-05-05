@@ -1,6 +1,6 @@
-use winio::prelude::{Color, DrawingContext, Point, Result, Size, SolidColorBrush};
+use winio::prelude::{CanvasEvent, Color, DrawingContext, Point, Result, Size, SolidColorBrush};
 
-use crate::ui::{CanvasEvent, Rect, WidgetCapabilities};
+use crate::ui::{Rect, WidgetCapabilities};
 
 #[derive(Clone, Debug)]
 pub struct TileSlot {
