@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{HumanBytes, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 /// Lightweight per-step progress bar (verify/repair/materialize).
 #[derive(Clone)]
@@ -59,6 +59,37 @@ impl StepProgress {
             self.bar.set_message(self.label.clone());
         }
         self.bar.set_position(current as u64);
+    }
+
+    pub fn update_bytes(&self, downloaded: u64, total: u64, file: &str) {
+        let total = total.max(1);
+        if !self.started.swap(true, Ordering::AcqRel) {
+            self.bar
+                .set_draw_target(ProgressDrawTarget::stderr_with_hz(20));
+            self.bar.enable_steady_tick(Duration::from_millis(120));
+        }
+        if self.bar.length() != Some(total) {
+            self.bar.set_length(total);
+        }
+
+        let clamped = downloaded.min(total);
+        if self.verbose {
+            self.bar.set_message(format!(
+                "{} {} ({}/{})",
+                self.label,
+                file,
+                HumanBytes(clamped),
+                HumanBytes(total)
+            ));
+        } else {
+            self.bar.set_message(format!(
+                "{} {}/{}",
+                self.label,
+                HumanBytes(clamped),
+                HumanBytes(total)
+            ));
+        }
+        self.bar.set_position(clamped);
     }
 
     pub fn finish(&self) {

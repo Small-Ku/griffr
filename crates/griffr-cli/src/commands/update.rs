@@ -240,6 +240,7 @@ async fn verify_updated_install(
             extra_tasks,
             Some(task_pool_runner),
             None::<fn(usize, usize, &str)>,
+            None::<fn(u64, u64, &str)>,
         )
         .await?;
     ui::print_info(format!(
@@ -340,6 +341,9 @@ async fn update_via_reuse(
         Some(|current: usize, total: usize, file: &str| {
             materialize_bar_cb.update(current, total, file);
         }),
+        Some(|downloaded: u64, total: u64, file: &str| {
+            materialize_bar_cb.update_bytes(downloaded, total, file);
+        }),
     )
     .await?;
     materialize_bar.finish();
@@ -412,25 +416,48 @@ async fn download_and_extract_archives(
         });
     }
 
-    let archive_total = tasks.len();
     let archive_bar = Arc::new(StepProgress::new(
-        format!("update.{}.archives", label),
+        format!("update.{}.archive-pipeline", label),
         opts.verbose,
     ));
     let archive_bar_cb = archive_bar.clone();
-    let mut archive_done = 0usize;
+    let mut downloaded_archive_bytes = 0u64;
+    let mut extracted_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
+    let mut extract_total_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
     let result = task_pool_runner.run_batch_with_progress(
         tasks,
         Some(&mut |event: &ProgressEvent| {
-            if let ProgressEvent::Extracted { path } = event {
-                archive_bar_cb.update(
-                    archive_done,
-                    archive_total,
-                    path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("archive"),
-                );
-                archive_done += 1;
+            match event {
+                ProgressEvent::Downloaded { path, bytes } => {
+                    downloaded_archive_bytes = downloaded_archive_bytes.saturating_add(*bytes);
+                    let extract_total_bytes =
+                        extract_total_bytes_by_archive.values().copied().sum::<u64>();
+                    let extracted_bytes =
+                        extracted_bytes_by_archive.values().copied().sum::<u64>();
+                    archive_bar_cb.update_bytes(
+                        downloaded_archive_bytes.saturating_add(extracted_bytes),
+                        total_size.saturating_add(extract_total_bytes),
+                        path,
+                    );
+                }
+                ProgressEvent::ExtractedBytes {
+                    path,
+                    bytes,
+                    total_bytes,
+                } => {
+                    extracted_bytes_by_archive.insert(path.clone(), *bytes);
+                    extract_total_bytes_by_archive.insert(path.clone(), *total_bytes);
+                    let extracted_bytes =
+                        extracted_bytes_by_archive.values().copied().sum::<u64>();
+                    let extract_total_bytes =
+                        extract_total_bytes_by_archive.values().copied().sum::<u64>();
+                    archive_bar_cb.update_bytes(
+                        downloaded_archive_bytes.saturating_add(extracted_bytes),
+                        total_size.saturating_add(extract_total_bytes),
+                        path,
+                    );
+                }
+                _ => {}
             }
         }),
     )?;
@@ -482,6 +509,7 @@ pub async fn update(
     let api_client = ApiClient::new()?;
     let mut task_pool_cfg = TaskPoolConfig::default();
     task_pool_cfg.max_retries = 3;
+    task_pool_cfg.extraction_progress_buffer_bytes = opts.extraction_progress_buffer_bytes;
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
 
     let version_info = api_client
@@ -1132,6 +1160,7 @@ mod tests {
             force_full_package: false,
             skip_vfs: true,
             keep_pack_archives: false,
+            extraction_progress_buffer_bytes: 256 * 1024,
             output: crate::OutputFormat::Text,
         };
 

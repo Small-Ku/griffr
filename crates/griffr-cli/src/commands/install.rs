@@ -214,6 +214,7 @@ pub async fn install(
     let manager = GameManager::new(game_id, game_config);
     let mut task_pool_cfg = TaskPoolConfig::default();
     task_pool_cfg.max_retries = 3;
+    task_pool_cfg.extraction_progress_buffer_bytes = opts.extraction_progress_buffer_bytes;
     let mut task_pool = TaskPoolRunner::new(task_pool_cfg)?;
 
     if reuse_paths.is_empty() {
@@ -225,6 +226,7 @@ pub async fn install(
 
         let mut archives: std::collections::HashMap<String, Vec<ArchivePart>> =
             std::collections::HashMap::new();
+        let total_archive_download_bytes: u64 = pkg.packs.iter().map(|p| p.size()).sum();
         for pack in &pkg.packs {
             let filename = pack
                 .filename()
@@ -256,22 +258,45 @@ pub async fn install(
             });
         }
 
-        let archive_total = tasks.len();
-        let archive_bar = Arc::new(StepProgress::new("install.archives", opts.verbose));
+        let archive_bar = Arc::new(StepProgress::new("install.archive-pipeline", opts.verbose));
         let archive_bar_cb = archive_bar.clone();
-        let mut archive_done = 0usize;
+        let mut downloaded_archive_bytes = 0u64;
+        let mut extracted_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
+        let mut extract_total_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
         let result = task_pool.run_batch_with_progress(
             tasks,
             Some(&mut |event: &ProgressEvent| {
-                if let ProgressEvent::Extracted { path } = event {
-                    archive_bar_cb.update(
-                        archive_done,
-                        archive_total,
-                        path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("archive"),
-                    );
-                    archive_done += 1;
+                match event {
+                    ProgressEvent::Downloaded { path, bytes } => {
+                        downloaded_archive_bytes = downloaded_archive_bytes.saturating_add(*bytes);
+                        let extract_total_bytes =
+                            extract_total_bytes_by_archive.values().copied().sum::<u64>();
+                        let extracted_bytes =
+                            extracted_bytes_by_archive.values().copied().sum::<u64>();
+                        archive_bar_cb.update_bytes(
+                            downloaded_archive_bytes.saturating_add(extracted_bytes),
+                            total_archive_download_bytes.saturating_add(extract_total_bytes),
+                            path,
+                        );
+                    }
+                    ProgressEvent::ExtractedBytes {
+                        path,
+                        bytes,
+                        total_bytes,
+                    } => {
+                        extracted_bytes_by_archive.insert(path.clone(), *bytes);
+                        extract_total_bytes_by_archive.insert(path.clone(), *total_bytes);
+                        let extracted_bytes =
+                            extracted_bytes_by_archive.values().copied().sum::<u64>();
+                        let extract_total_bytes =
+                            extract_total_bytes_by_archive.values().copied().sum::<u64>();
+                        archive_bar_cb.update_bytes(
+                            downloaded_archive_bytes.saturating_add(extracted_bytes),
+                            total_archive_download_bytes.saturating_add(extract_total_bytes),
+                            path,
+                        );
+                    }
+                    _ => {}
                 }
             }),
         )?;
@@ -335,6 +360,9 @@ pub async fn install(
             Some(&mut task_pool),
             Some(|current: usize, total: usize, file: &str| {
                 materialize_bar_cb.update(current, total, file);
+            }),
+            Some(|downloaded: u64, total: u64, file: &str| {
+                materialize_bar_cb.update_bytes(downloaded, total, file);
             }),
         )
         .await
@@ -402,6 +430,7 @@ pub async fn install(
     };
     let verify_bar = Arc::new(StepProgress::new("install.verify+repair", opts.verbose));
     let verify_bar_cb = verify_bar.clone();
+    let verify_download_bar_cb = verify_bar.clone();
     let verify_progress = move |current: usize, total: usize, file: &str| {
         verify_bar_cb.update(current, total, file);
     };
@@ -415,6 +444,9 @@ pub async fn install(
             extra_tasks,
             Some(&mut task_pool),
             Some(verify_progress),
+            Some(|downloaded: u64, total: u64, file: &str| {
+                verify_download_bar_cb.update_bytes(downloaded, total, file);
+            }),
         )
         .await?;
     verify_bar.finish();

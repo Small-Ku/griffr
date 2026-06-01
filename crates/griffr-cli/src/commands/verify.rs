@@ -59,10 +59,14 @@ pub async fn verify(
             opts.verbose,
         ));
         let verify_bar_cb = verify_bar.clone();
+        let verify_download_bar_cb = verify_bar.clone();
         Some((
             verify_bar,
             move |current: usize, total: usize, file: &str| {
                 verify_bar_cb.update(current, total, file);
+            },
+            move |downloaded: u64, total: u64, file: &str| {
+                verify_download_bar_cb.update_bytes(downloaded, total, file);
             },
         ))
     };
@@ -142,6 +146,7 @@ pub async fn verify(
 
     let mut pool_cfg = TaskPoolConfig::default();
     pool_cfg.max_retries = 3;
+    pool_cfg.extraction_progress_buffer_bytes = opts.extraction_progress_buffer_bytes;
     if repair && !extra_tasks.is_empty() {
         // VFS CDN endpoints can become unstable under high parallelism on some routes.
         // Keep a moderate IO fanout for repair+VFS runs to improve success rate.
@@ -164,11 +169,12 @@ pub async fn verify(
             relink_reuse,
             extra_tasks,
             Some(&mut pool_runner),
-            progress_cb.as_ref().map(|(_, cb)| cb),
+            progress_cb.as_ref().map(|(_, cb, _)| cb),
+            progress_cb.as_ref().map(|(_, _, cb)| cb),
         )
         .await
         .context("run_integrity_pool failed")?;
-    if let Some((bar, _)) = progress_cb {
+    if let Some((bar, _, _)) = progress_cb {
         bar.finish();
     }
 

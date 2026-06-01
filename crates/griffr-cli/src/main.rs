@@ -36,6 +36,10 @@ struct Cli {
     )]
     output: OutputFormat,
 
+    /// Extraction progress buffer size in bytes (controls progress update granularity)
+    #[arg(long, global = true, default_value_t = 256 * 1024)]
+    extraction_progress_buffer_bytes: usize,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -548,6 +552,7 @@ pub struct GlobalOptions {
     pub force_full_package: bool,
     pub skip_vfs: bool,
     pub keep_pack_archives: bool,
+    pub extraction_progress_buffer_bytes: usize,
     pub output: OutputFormat,
 }
 
@@ -597,6 +602,7 @@ async fn main() -> Result<()> {
         force_full_package: false,
         skip_vfs: false,
         keep_pack_archives: false,
+        extraction_progress_buffer_bytes: cli.extraction_progress_buffer_bytes,
         output: cli.output,
     };
 

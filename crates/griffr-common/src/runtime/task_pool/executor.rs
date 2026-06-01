@@ -9,6 +9,7 @@ use super::types::{ArchivePart, ProgressEvent, Task};
 pub(crate) fn execute_task(
     task: Task,
     max_retries: u32,
+    extraction_progress_buffer_bytes: usize,
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
     spawned: &mut Vec<Task>,
@@ -60,7 +61,16 @@ pub(crate) fn execute_task(
             Ok(()) => events.push(ProgressEvent::Hardlinked { path: dest }),
             Err(err) => events.push(ProgressEvent::Failed { path: dest.display().to_string(), reason: err.to_string() }),
         },
-        Task::Extract { source_dir, base_name, dest, cleanup } => execute_extract_archive(source_dir, base_name, dest, cleanup, events),
+        Task::Extract { source_dir, base_name, dest, cleanup } => {
+            execute_extract_archive(
+                source_dir,
+                base_name,
+                dest,
+                cleanup,
+                extraction_progress_buffer_bytes,
+                events,
+            )
+        }
     }
 }
 
@@ -122,12 +132,31 @@ fn execute_install_archive(
     spawned.push(Task::Extract { source_dir, base_name, dest, cleanup });
 }
 
-fn execute_extract_archive(source_dir: PathBuf, base_name: String, dest: PathBuf, cleanup: bool, events: &mut Vec<ProgressEvent>) {
+fn execute_extract_archive(
+    source_dir: PathBuf,
+    base_name: String,
+    dest: PathBuf,
+    cleanup: bool,
+    extraction_progress_buffer_bytes: usize,
+    events: &mut Vec<ProgressEvent>,
+) {
+    let extract_progress_events = std::cell::RefCell::new(Vec::<ProgressEvent>::new());
     let result = crate::download::extractor::MultiVolumeExtractor::from_directory(&source_dir, &base_name).and_then(|extractor| {
         let staging_dir = make_extract_staging_dir(&dest, &base_name)?;
         std::fs::create_dir_all(&staging_dir)
             .with_context(|| format!("Failed to create extraction staging dir {}", staging_dir.display()))?;
-        if let Err(err) = extractor.extract_to(&staging_dir) {
+        let progress_path = base_name.clone();
+        if let Err(err) = extractor.extract_to_with_progress(
+            &staging_dir,
+            extraction_progress_buffer_bytes,
+            Some(|bytes, total_bytes| {
+            extract_progress_events.borrow_mut().push(ProgressEvent::ExtractedBytes {
+                path: progress_path.clone(),
+                bytes,
+                total_bytes,
+            });
+            }),
+        ) {
             let _ = std::fs::remove_dir_all(&staging_dir);
             return Err(err);
         }
@@ -140,6 +169,7 @@ fn execute_extract_archive(source_dir: PathBuf, base_name: String, dest: PathBuf
         }
         Ok(())
     });
+    events.extend(extract_progress_events.into_inner());
     match result {
         Ok(()) => events.push(ProgressEvent::Extracted { path: dest }),
         Err(err) => events.push(ProgressEvent::Failed { path: format!("{}/{}", source_dir.display(), base_name), reason: err.to_string() }),

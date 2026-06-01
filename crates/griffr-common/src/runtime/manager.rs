@@ -335,6 +335,7 @@ impl GameManager {
         extra_tasks: Vec<Task>,
         task_pool_runner: Option<&mut TaskPoolRunner>,
         progress_callback: Option<impl Fn(usize, usize, &str)>,
+        download_progress_callback: Option<impl Fn(u64, u64, &str)>,
     ) -> Result<IntegrityRunSummary> {
         let install_path = self.install_path().context("Game not installed")?;
 
@@ -360,6 +361,7 @@ impl GameManager {
             .iter()
             .map(|entry| entry.path.clone())
             .collect::<HashSet<_>>();
+        let tracked_total_bytes: u64 = entries.iter().map(|entry| entry.size).sum();
 
         let mut tasks = entries
             .iter()
@@ -396,6 +398,7 @@ impl GameManager {
         let mut issues = Vec::new();
         let mut finished = 0usize;
         let mut downloaded_paths = HashSet::new();
+        let mut downloaded_bytes = 0u64;
         let mut reused_paths = HashSet::new();
 
         let mut on_event = |event: &ProgressEvent| match event {
@@ -411,13 +414,17 @@ impl GameManager {
                     issues.push(issue);
                 }
             }
-            ProgressEvent::Downloaded { path, .. } => {
+            ProgressEvent::Downloaded { path, bytes } => {
                 if !tracked_paths.contains(path) {
                     return;
                 }
                 downloaded_paths.insert(path.clone());
+                downloaded_bytes = downloaded_bytes.saturating_add(*bytes);
                 if let Some(ref cb) = progress_callback {
                     cb(finished, total, path);
+                }
+                if let Some(ref cb) = download_progress_callback {
+                    cb(downloaded_bytes, tracked_total_bytes, path);
                 }
             }
             ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {
@@ -467,6 +474,7 @@ impl GameManager {
         allow_copy_fallback: bool,
         prefer_reuse: bool,
         progress_callback: Option<impl Fn(usize, usize, &str)>,
+        download_progress_callback: Option<impl Fn(u64, u64, &str)>,
     ) -> Result<IntegrityRunSummary> {
         self.run_integrity_pool_with_runner(
             api_client,
@@ -477,6 +485,7 @@ impl GameManager {
             Vec::new(),
             None,
             progress_callback,
+            download_progress_callback,
         )
         .await
     }
@@ -488,7 +497,15 @@ impl GameManager {
         progress_callback: Option<impl Fn(usize, usize, &str)>,
     ) -> Result<Vec<FileIssue>> {
         Ok(self
-            .run_integrity_pool(api_client, false, &[], false, false, progress_callback)
+            .run_integrity_pool(
+                api_client,
+                false,
+                &[],
+                false,
+                false,
+                progress_callback,
+                None::<fn(u64, u64, &str)>,
+            )
             .await?
             .issues)
     }

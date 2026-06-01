@@ -256,6 +256,15 @@ impl MultiVolumeExtractor {
 
     /// Extract all volumes to the target directory
     pub fn extract_to(&self, target_dir: &Path) -> Result<()> {
+        self.extract_to_with_progress(target_dir, 256 * 1024, None::<fn(u64, u64)>)
+    }
+
+    pub fn extract_to_with_progress(
+        &self,
+        target_dir: &Path,
+        progress_buffer_bytes: usize,
+        mut progress_callback: Option<impl FnMut(u64, u64)>,
+    ) -> Result<()> {
         fn safe_join(target_dir: &Path, name: &str) -> Result<PathBuf> {
             let rel = Path::new(name);
 
@@ -279,6 +288,14 @@ impl MultiVolumeExtractor {
         let stream = MultiVolumeStream::new(self.volumes.clone())?;
         let mut archive =
             zip::ZipArchive::new(stream).context("Failed to open multi-volume zip archive")?;
+        let mut total_extract_bytes = 0u64;
+        for i in 0..archive.len() {
+            let file = archive.by_index(i)?;
+            if !file.is_dir() {
+                total_extract_bytes = total_extract_bytes.saturating_add(file.size());
+            }
+        }
+        let mut extracted_bytes = 0u64;
 
         // Extract all files
         for i in 0..archive.len() {
@@ -302,8 +319,22 @@ impl MultiVolumeExtractor {
             // Extract file (overwrite if exists)
             let mut output = std::fs::File::create(&file_path)
                 .with_context(|| format!("Failed to create file: {}", file_path.display()))?;
-            std::io::copy(&mut file, &mut output)
-                .with_context(|| format!("Failed to extract file: {}", file.name()))?;
+            let buffer_size = progress_buffer_bytes.max(4 * 1024);
+            let mut buf = vec![0u8; buffer_size];
+            loop {
+                let n = file
+                    .read(&mut buf)
+                    .with_context(|| format!("Failed to read archive entry: {}", file.name()))?;
+                if n == 0 {
+                    break;
+                }
+                std::io::Write::write_all(&mut output, &buf[..n])
+                    .with_context(|| format!("Failed to extract file: {}", file.name()))?;
+                extracted_bytes = extracted_bytes.saturating_add(n as u64);
+                if let Some(ref mut cb) = progress_callback {
+                    cb(extracted_bytes, total_extract_bytes);
+                }
+            }
         }
 
         Ok(())

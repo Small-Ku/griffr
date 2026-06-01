@@ -30,6 +30,7 @@ pub async fn apply_file_reuse_flow(
         config,
         None,
         None::<fn(usize, usize, &str)>,
+        None::<fn(u64, u64, &str)>,
     )
     .await?;
     if !summary.issues.is_empty() {
@@ -53,6 +54,7 @@ pub async fn materialize_game_files_with_pool(
     config: &super::models::FileReuseConfig,
     task_pool_runner: Option<&mut crate::runtime::task_pool::TaskPoolRunner>,
     progress_callback: Option<impl Fn(usize, usize, &str)>,
+    download_progress_callback: Option<impl Fn(u64, u64, &str)>,
 ) -> Result<super::models::MaterializeSummary> {
     let manifest = api_client
         .fetch_game_files(file_path, game_files_md5)
@@ -150,13 +152,28 @@ pub async fn materialize_game_files_with_pool(
     }
 
     let total = tasks.len();
+    let total_bytes: u64 = manifest
+        .iter()
+        .filter(|entry| !super::plan::is_launcher_metadata_path(&entry.path))
+        .map(|entry| entry.size)
+        .sum();
     let mut finished_stream = 0usize;
+    let mut downloaded_bytes = 0u64;
     let mut progress_event_cb = |event: &crate::runtime::task_pool::ProgressEvent| {
-        if let crate::runtime::task_pool::ProgressEvent::Verified { path, .. } = event {
-            if let Some(ref cb) = progress_callback {
-                cb(finished_stream, total, path);
+        match event {
+            crate::runtime::task_pool::ProgressEvent::Verified { path, .. } => {
+                if let Some(ref cb) = progress_callback {
+                    cb(finished_stream, total, path);
+                }
+                finished_stream = finished_stream.saturating_add(1);
             }
-            finished_stream = finished_stream.saturating_add(1);
+            crate::runtime::task_pool::ProgressEvent::Downloaded { path, bytes } => {
+                downloaded_bytes = downloaded_bytes.saturating_add(*bytes);
+                if let Some(ref cb) = download_progress_callback {
+                    cb(downloaded_bytes, total_bytes, path);
+                }
+            }
+            _ => {}
         }
     };
     let result = if let Some(runner) = task_pool_runner {

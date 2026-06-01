@@ -130,6 +130,7 @@ pub async fn bootstrap(
 
     let mut pool_cfg = TaskPoolConfig::default();
     pool_cfg.max_retries = 3;
+    pool_cfg.extraction_progress_buffer_bytes = opts.extraction_progress_buffer_bytes;
     let mut task_pool_runner = TaskPoolRunner::new(pool_cfg)?;
 
     let progress = Arc::new(StepProgress::new("bootstrap.persistent-vfs", opts.verbose));
@@ -152,7 +153,7 @@ pub async fn bootstrap(
         },
         &mut task_pool_runner,
         Some(&move |current, total| {
-            progress_cb.update(current as usize, total as usize, "persistent-vfs");
+            progress_cb.update_bytes(current, total, "persistent-vfs");
         }),
     )
     .await

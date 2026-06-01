@@ -76,6 +76,11 @@ pub enum ProgressEvent {
     Extracted {
         path: PathBuf,
     },
+    ExtractedBytes {
+        path: String,
+        bytes: u64,
+        total_bytes: u64,
+    },
     Hardlinked {
         path: PathBuf,
     },
@@ -95,6 +100,7 @@ pub struct TaskPoolConfig {
     pub extract_slots: usize,
     pub max_retries: u32,
     pub user_agent: String,
+    pub extraction_progress_buffer_bytes: usize,
 }
 
 impl Default for TaskPoolConfig {
@@ -108,6 +114,7 @@ impl Default for TaskPoolConfig {
             extract_slots: (cpus / 2).clamp(1, 4),
             max_retries: 3,
             user_agent: "Mozilla/5.0".to_string(),
+            extraction_progress_buffer_bytes: 256 * 1024,
         }
     }
 }

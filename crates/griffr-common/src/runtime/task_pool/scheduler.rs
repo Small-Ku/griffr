@@ -185,6 +185,7 @@ fn spawn_workers(_kind: WorkerKind, count: usize, rx: Receiver<Task>, ctx: Worke
                 execute_task(
                     task,
                     worker_ctx.config.max_retries,
+                    worker_ctx.config.extraction_progress_buffer_bytes,
                     Some(worker_ctx.shared_dispatcher.as_ref()),
                     &worker_ctx.config.user_agent,
                     &mut spawned,
