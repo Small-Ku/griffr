@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use tracing::debug;
 
 use griffr_common::config::{GameId, ServerId};
@@ -44,36 +44,105 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Args)]
+struct PathArg {
+    /// Install root or config.ini path
+    #[arg(long)]
+    path: std::path::PathBuf,
+}
+
+#[derive(Args)]
+struct ReuseSourcesArg {
+    /// Reuse matching files from other local install paths
+    #[arg(long = "reuse-from")]
+    reuse_from: Vec<std::path::PathBuf>,
+
+    /// Allow copying reused files if hardlinks fail
+    #[arg(long)]
+    force_copy: bool,
+}
+
+#[derive(Args)]
+struct GameArg {
+    /// Known game id
+    #[arg(long, value_parser = ["arknights", "endfield"], requires = "server")]
+    game: Option<String>,
+}
+
+#[derive(Args)]
+struct ServerArg {
+    /// Known server id
+    #[arg(
+        long,
+        value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic", "global_googleplay"],
+        requires = "game"
+    )]
+    server: Option<String>,
+}
+
+#[derive(Args)]
+struct GameServerArgs {
+    #[command(flatten)]
+    game: GameArg,
+
+    #[command(flatten)]
+    server: ServerArg,
+}
+
+#[derive(Args)]
+#[command(group(ArgGroup::new("remote_target").required(true).args(["game", "server"])))]
+struct RequiredGameServerArgs {
+    #[command(flatten)]
+    game_server: GameServerArgs,
+}
+
+impl RequiredGameServerArgs {
+    fn into_pair(self) -> (String, String) {
+        (
+            self.game_server.game.game.expect("clap requires --game"),
+            self.game_server
+                .server
+                .server
+                .expect("clap requires --server"),
+        )
+    }
+}
+
+#[derive(Args)]
+#[command(group(
+    ArgGroup::new("target")
+        .required(true)
+        .args(["path", "game"])
+))]
+struct InfoSelectorArgs {
+    /// Install root or config.ini path
+    #[arg(long, conflicts_with_all = ["game", "server"])]
+    path: Option<std::path::PathBuf>,
+
+    #[command(flatten)]
+    game_server: GameServerArgs,
+
+    /// Launcher language
+    #[arg(long, default_value = "zh-cn")]
+    language: String,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Download and install a game to an explicit path
     Install {
-        /// Known game id
-        #[arg(value_parser = ["arknights", "endfield"])]
-        game: String,
+        #[command(flatten)]
+        remote: RequiredGameServerArgs,
 
-        /// Known server id
-        #[arg(
-            long,
-            value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic", "global_googleplay"]
-        )]
-        server: String,
-
-        /// Install root
-        #[arg(long)]
-        path: std::path::PathBuf,
+        #[command(flatten)]
+        path: PathArg,
 
         /// Re-run install into a non-empty path
         #[arg(long)]
         force: bool,
 
-        /// Reuse matching files from other local install paths
-        #[arg(long = "reuse-from")]
-        reuse_from: Vec<std::path::PathBuf>,
-
-        /// Allow copying reused files if hardlinks fail
-        #[arg(long)]
-        force_copy: bool,
+        #[command(flatten)]
+        reuse: ReuseSourcesArg,
 
         /// Skip VFS resource download
         #[arg(long)]
@@ -101,17 +170,11 @@ enum Commands {
 
     /// Update an existing install identified by its encrypted config.ini
     Update {
-        /// Install root or config.ini path
-        #[arg(long)]
-        path: std::path::PathBuf,
+        #[command(flatten)]
+        path: PathArg,
 
-        /// Reuse matching files from another local install path
-        #[arg(long = "reuse-from")]
-        reuse_from: Vec<std::path::PathBuf>,
-
-        /// Allow copying reused files if hardlinks fail
-        #[arg(long)]
-        force_copy: bool,
+        #[command(flatten)]
+        reuse: ReuseSourcesArg,
 
         /// Skip post-update verification
         #[arg(long)]
@@ -143,24 +206,18 @@ enum Commands {
 
     /// Verify a local install against the latest game_files manifest
     Verify {
-        /// Install root or config.ini path
-        #[arg(long)]
-        path: std::path::PathBuf,
+        #[command(flatten)]
+        path: PathArg,
 
         /// Repair corrupt or missing files and resync launcher metadata
         #[arg(short, long)]
         repair: bool,
 
-        /// Reuse matching files from other local install paths during repair
-        #[arg(long = "reuse-from")]
-        reuse_from: Vec<std::path::PathBuf>,
-
-        /// Allow copying reused files if hardlinks fail
-        #[arg(long)]
-        force_copy: bool,
+        #[command(flatten)]
+        reuse: ReuseSourcesArg,
 
         /// Prefer relinking from reuse sources even when local files already verify
-        #[arg(long)]
+        #[arg(long, requires = "repair", requires = "reuse_from")]
         relink_reuse: bool,
 
         /// Skip VFS resource sync during repair
@@ -169,21 +226,15 @@ enum Commands {
     },
     /// Bootstrap Persistent VFS state from StreamingAssets with launcher-parity scopes
     Bootstrap {
-        /// Install root or config.ini path
-        #[arg(long)]
-        path: std::path::PathBuf,
+        #[command(flatten)]
+        path: PathArg,
 
         /// Bootstrap scope for Persistent materialization
         #[arg(long, value_enum, default_value_t = BootstrapScope::Initial)]
         scope: BootstrapScope,
 
-        /// Additional install roots used as StreamingAssets reuse sources
-        #[arg(long = "reuse-from")]
-        reuse_from: Vec<std::path::PathBuf>,
-
-        /// Allow copying reused files if hardlinks fail
-        #[arg(long)]
-        force_copy: bool,
+        #[command(flatten)]
+        reuse: ReuseSourcesArg,
 
         /// Allow downloading missing files from CDN when not found in source roots
         #[arg(long)]
@@ -201,13 +252,13 @@ enum Commands {
     /// Print local metadata from config.ini and optionally the matching remote state
     Info {
         #[command(flatten)]
-        target: QueryTarget,
+        selector: InfoSelectorArgs,
     },
 
     /// Fetch launcher news/media for a known game/server
     News {
         #[command(flatten)]
-        remote: RemoteTarget,
+        remote: RequiredGameServerArgs,
 
         /// Launcher language
         #[arg(long, default_value = "zh-cn")]
@@ -225,40 +276,6 @@ enum Commands {
         #[command(subcommand)]
         command: AccountCommands,
     },
-}
-
-#[derive(Args)]
-struct QueryTarget {
-    /// Install root or config.ini path
-    #[arg(long)]
-    path: Option<std::path::PathBuf>,
-
-    /// Known game id for remote lookup when no local path is provided
-    #[arg(long, value_parser = ["arknights", "endfield"])]
-    game: Option<String>,
-
-    /// Known server id for remote lookup when no local path is provided
-    #[arg(
-        long,
-        value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic", "global_googleplay"]
-    )]
-    server: Option<String>,
-
-    /// Launcher language
-    #[arg(long, default_value = "zh-cn")]
-    language: String,
-}
-
-#[derive(Args)]
-struct RemoteTarget {
-    #[arg(long, value_parser = ["arknights", "endfield"])]
-    game: String,
-
-    #[arg(
-        long,
-        value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic", "global_googleplay"]
-    )]
-    server: String,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
@@ -363,7 +380,7 @@ enum DebugCommands {
     /// Call get_latest_game and print raw response JSON
     GetRawLatestGame {
         #[command(flatten)]
-        remote: RemoteTarget,
+        remote: RequiredGameServerArgs,
 
         #[arg(long)]
         version: Option<String>,
@@ -374,7 +391,7 @@ enum DebugCommands {
     /// Call get_latest_resources and print raw response JSON
     GetRawLatestResources {
         #[command(flatten)]
-        remote: RemoteTarget,
+        remote: RequiredGameServerArgs,
 
         /// Version passed to get_latest_game for version/rand resolution
         #[arg(long)]
@@ -398,7 +415,7 @@ enum DebugCommands {
     /// Fetch and print the remote game_files manifest
     ListGameFiles {
         #[command(flatten)]
-        remote: RemoteTarget,
+        remote: RequiredGameServerArgs,
 
         #[arg(long)]
         version: Option<String>,
@@ -409,7 +426,7 @@ enum DebugCommands {
     /// List files from latest resource indexes (index_main/index_initial)
     ListResourceFiles {
         #[command(flatten)]
-        remote: RemoteTarget,
+        remote: RequiredGameServerArgs,
 
         /// Version passed to get_latest_game for version/rand resolution
         #[arg(long)]
@@ -433,7 +450,7 @@ enum DebugCommands {
     /// Fetch one file referenced by the latest remote game_files manifest
     GetFile {
         #[command(flatten)]
-        remote: RemoteTarget,
+        remote: RequiredGameServerArgs,
 
         #[arg(long)]
         version: Option<String>,
@@ -447,7 +464,7 @@ enum DebugCommands {
     /// Fetch raw media/news payload as JSON
     GetRawMedia {
         #[command(flatten)]
-        remote: RemoteTarget,
+        remote: RequiredGameServerArgs,
 
         /// Launcher language
         #[arg(long, default_value = "zh-cn")]
@@ -460,7 +477,7 @@ enum DebugCommands {
     /// Fetch normalized media/news payload as JSON
     GetMedia {
         #[command(flatten)]
-        remote: RemoteTarget,
+        remote: RequiredGameServerArgs,
 
         /// Launcher language
         #[arg(long, default_value = "zh-cn")]
@@ -500,7 +517,7 @@ enum AccountCommands {
         install_path: Option<std::path::PathBuf>,
 
         /// Include optional install-local mmkv directory in the bundle
-        #[arg(long)]
+        #[arg(long, requires = "install_path")]
         include_install_mmkv: bool,
 
         /// Replace bundle destination if it already exists
@@ -534,7 +551,7 @@ enum AccountCommands {
         install_path: Option<std::path::PathBuf>,
 
         /// Restore optional install-local mmkv directory from the bundle
-        #[arg(long)]
+        #[arg(long, requires = "install_path")]
         include_install_mmkv: bool,
 
         /// Replace target directories if they already exist
@@ -614,17 +631,21 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Install {
-            game,
-            server,
+            remote,
             path,
             force,
-            reuse_from,
-            force_copy,
+            reuse,
             skip_vfs,
             keep_pack_archives,
         } => {
+            let (game, server) = remote.into_pair();
             let game_id = game.parse::<GameId>()?;
             let server_id = server.parse::<ServerId>()?;
+            let PathArg { path } = path;
+            let ReuseSourcesArg {
+                reuse_from,
+                force_copy,
+            } = reuse;
 
             let opts = GlobalOptions {
                 skip_vfs,
@@ -656,13 +677,17 @@ async fn main() -> Result<()> {
 
         Commands::Update {
             path,
-            reuse_from,
-            force_copy,
+            reuse,
             skip_verify,
             full_package,
             skip_vfs,
             keep_pack_archives,
         } => {
+            let PathArg { path } = path;
+            let ReuseSourcesArg {
+                reuse_from,
+                force_copy,
+            } = reuse;
             let opts = GlobalOptions {
                 skip_verify,
                 force_full_package: full_package,
@@ -685,11 +710,15 @@ async fn main() -> Result<()> {
         Commands::Verify {
             path,
             repair,
-            reuse_from,
-            force_copy,
+            reuse,
             relink_reuse,
             skip_vfs,
         } => {
+            let PathArg { path } = path;
+            let ReuseSourcesArg {
+                reuse_from,
+                force_copy,
+            } = reuse;
             opts.verbose(format!(
                 "Verify path: {:?}, repair={}, reuse_from={:?}, force_copy={}, relink_reuse={}, skip_vfs={}",
                 path, repair, reuse_from, force_copy, relink_reuse, skip_vfs
@@ -708,12 +737,16 @@ async fn main() -> Result<()> {
         Commands::Bootstrap {
             path,
             scope,
-            reuse_from,
-            force_copy,
+            reuse,
             allow_download,
             relink_reuse,
             no_prune,
         } => {
+            let PathArg { path } = path;
+            let ReuseSourcesArg {
+                reuse_from,
+                force_copy,
+            } = reuse;
             opts.verbose(format!(
                 "Bootstrap path={:?}, scope={:?}, reuse_from={:?}, force_copy={}, allow_download={}, relink_reuse={}, no_prune={}",
                 path, scope, reuse_from, force_copy, allow_download, relink_reuse, no_prune
@@ -731,21 +764,22 @@ async fn main() -> Result<()> {
             .await?;
         }
 
-        Commands::Info { target } => {
+        Commands::Info { selector } => {
             opts.verbose("Info query");
             commands::info_show(
-                target.path,
-                target.game,
-                target.server,
-                &target.language,
+                selector.path,
+                selector.game_server.game.game,
+                selector.game_server.server.server,
+                &selector.language,
                 opts,
             )
             .await?;
         }
 
         Commands::News { remote, language } => {
-            let game_id = remote.game.parse::<GameId>()?;
-            let server_id = remote.server.parse::<ServerId>()?;
+            let (game, server) = remote.into_pair();
+            let game_id = game.parse::<GameId>()?;
+            let server_id = server.parse::<ServerId>()?;
             opts.verbose(format!("News: {:?} {:?}", game_id, server_id));
             commands::news_show(game_id, server_id, &language, opts).await?;
         }
@@ -782,8 +816,9 @@ async fn main() -> Result<()> {
                 version,
                 output,
             } => {
-                let game_id = remote.game.parse::<GameId>()?;
-                let server_id = remote.server.parse::<ServerId>()?;
+                let (game, server) = remote.into_pair();
+                let game_id = game.parse::<GameId>()?;
+                let server_id = server.parse::<ServerId>()?;
                 commands::debug_api_get_latest_game(game_id, server_id, version, output, opts)
                     .await?;
             }
@@ -795,8 +830,9 @@ async fn main() -> Result<()> {
                 platform,
                 output,
             } => {
-                let game_id = remote.game.parse::<GameId>()?;
-                let server_id = remote.server.parse::<ServerId>()?;
+                let (game, server) = remote.into_pair();
+                let game_id = game.parse::<GameId>()?;
+                let server_id = server.parse::<ServerId>()?;
                 commands::debug_api_get_latest_resources(
                     game_id,
                     server_id,
@@ -814,8 +850,9 @@ async fn main() -> Result<()> {
                 version,
                 output,
             } => {
-                let game_id = remote.game.parse::<GameId>()?;
-                let server_id = remote.server.parse::<ServerId>()?;
+                let (game, server) = remote.into_pair();
+                let game_id = game.parse::<GameId>()?;
+                let server_id = server.parse::<ServerId>()?;
                 commands::debug_fetch_game_files(game_id, server_id, version, output, opts).await?;
             }
             DebugCommands::ListResourceFiles {
@@ -826,8 +863,9 @@ async fn main() -> Result<()> {
                 platform,
                 output,
             } => {
-                let game_id = remote.game.parse::<GameId>()?;
-                let server_id = remote.server.parse::<ServerId>()?;
+                let (game, server) = remote.into_pair();
+                let game_id = game.parse::<GameId>()?;
+                let server_id = server.parse::<ServerId>()?;
                 commands::debug_list_resource_files(
                     game_id,
                     server_id,
@@ -846,8 +884,9 @@ async fn main() -> Result<()> {
                 file,
                 output,
             } => {
-                let game_id = remote.game.parse::<GameId>()?;
-                let server_id = remote.server.parse::<ServerId>()?;
+                let (game, server) = remote.into_pair();
+                let game_id = game.parse::<GameId>()?;
+                let server_id = server.parse::<ServerId>()?;
                 commands::debug_fetch_file(game_id, server_id, version, file, output, opts).await?;
             }
             DebugCommands::GetRawMedia {
@@ -855,8 +894,9 @@ async fn main() -> Result<()> {
                 language,
                 output,
             } => {
-                let game_id = remote.game.parse::<GameId>()?;
-                let server_id = remote.server.parse::<ServerId>()?;
+                let (game, server) = remote.into_pair();
+                let game_id = game.parse::<GameId>()?;
+                let server_id = server.parse::<ServerId>()?;
                 commands::debug_api_get_media(game_id, server_id, language, output, opts).await?;
             }
             DebugCommands::GetMedia {
@@ -864,8 +904,9 @@ async fn main() -> Result<()> {
                 language,
                 output,
             } => {
-                let game_id = remote.game.parse::<GameId>()?;
-                let server_id = remote.server.parse::<ServerId>()?;
+                let (game, server) = remote.into_pair();
+                let game_id = game.parse::<GameId>()?;
+                let server_id = server.parse::<ServerId>()?;
                 commands::debug_fetch_media(game_id, server_id, language, output, opts).await?;
             }
         },
