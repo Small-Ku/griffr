@@ -209,6 +209,9 @@ enum Commands {
         #[command(flatten)]
         path: PathArg,
 
+        #[command(flatten)]
+        remote: GameServerArgs,
+
         /// Repair corrupt or missing files and resync launcher metadata
         #[arg(short, long)]
         repair: bool,
@@ -223,6 +226,10 @@ enum Commands {
         /// Skip VFS resource sync during repair
         #[arg(long)]
         skip_vfs: bool,
+
+        /// Do not read game/server from local install metadata; requires --game and --server
+        #[arg(long, requires = "game", requires = "server")]
+        skip_local_detect: bool,
     },
     /// Bootstrap Persistent VFS state from StreamingAssets with launcher-parity scopes
     Bootstrap {
@@ -709,22 +716,29 @@ async fn main() -> Result<()> {
 
         Commands::Verify {
             path,
+            remote,
             repair,
             reuse,
             relink_reuse,
             skip_vfs,
+            skip_local_detect,
         } => {
             let PathArg { path } = path;
             let ReuseSourcesArg {
                 reuse_from,
                 force_copy,
             } = reuse;
+            let game = remote.game.game.map(|g| g.parse::<GameId>()).transpose()?;
+            let server = remote.server.server.map(|s| s.parse::<ServerId>()).transpose()?;
             opts.verbose(format!(
-                "Verify path: {:?}, repair={}, reuse_from={:?}, force_copy={}, relink_reuse={}, skip_vfs={}",
-                path, repair, reuse_from, force_copy, relink_reuse, skip_vfs
+                "Verify path: {:?}, game={:?}, server={:?}, repair={}, reuse_from={:?}, force_copy={}, relink_reuse={}, skip_vfs={}, skip_local_detect={}",
+                path, game, server, repair, reuse_from, force_copy, relink_reuse, skip_vfs, skip_local_detect
             ));
             commands::verify(
                 path,
+                game,
+                server,
+                skip_local_detect,
                 repair,
                 reuse_from,
                 force_copy,

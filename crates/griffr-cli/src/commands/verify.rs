@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
+use griffr_common::config::{GameId, ServerId};
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
 use griffr_common::runtime::{plan_vfs_tasks, VfsMaterializeConfig, VfsTaskPlan};
 use serde_json::json;
@@ -22,6 +23,9 @@ fn is_launcher_metadata_issue(path: &str) -> bool {
 
 pub async fn verify(
     path: PathBuf,
+    game_override: Option<GameId>,
+    server_override: Option<ServerId>,
+    skip_local_detect: bool,
     repair: bool,
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
@@ -35,13 +39,45 @@ pub async fn verify(
     if relink_reuse && reuse_paths.is_empty() {
         anyhow::bail!("--relink-reuse requires at least one --reuse-from source");
     }
+    if skip_local_detect && (game_override.is_none() || server_override.is_none()) {
+        anyhow::bail!("--skip-local-detect requires both --game and --server");
+    }
 
     let local = detect_local_install(&path).await?;
-    let game_id = local.require_known_game()?;
-    let server_id = local.require_known_server()?;
+    let detected_game = local.game_id;
+    let detected_server = local.server_id;
+    let game_id = if skip_local_detect {
+        game_override.expect("validated above")
+    } else {
+        game_override.unwrap_or(local.require_known_game()?)
+    };
+    let server_id = if skip_local_detect {
+        server_override.expect("validated above")
+    } else {
+        server_override.unwrap_or(local.require_known_server()?)
+    };
     let installed_version = local.require_config_ini_version()?.to_string();
     let manager = local.as_manager()?;
     let api_client = ApiClient::new()?;
+
+    if !skip_local_detect {
+        if let Some(detected_game) = detected_game {
+            if detected_game != game_id && opts.output != OutputFormat::Json {
+                ui::print_warning(format!(
+                    "Overriding detected game {} with CLI --game {}",
+                    detected_game, game_id
+                ));
+            }
+        }
+        if let Some(detected_server) = detected_server {
+            if detected_server != server_id && opts.output != OutputFormat::Json {
+                ui::print_warning(format!(
+                    "Overriding detected server {} with CLI --server {}",
+                    detected_server, server_id
+                ));
+            }
+        }
+    }
 
     ui::print_phase(format!(
         "Verifying {} ({}) at {}",
