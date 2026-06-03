@@ -3,19 +3,37 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::api::types::{PackFile, PrePatchInfo};
+use griffr_common::api::types::{GetLatestGameResponse, PackFile, PrePatchInfo};
 use griffr_common::runtime::task_pool::{ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner};
 
-use super::local::detect_local_install;
+use super::local::{detect_local_install, LocalInstall};
 use crate::progress::StepProgress;
 use crate::ui;
 use crate::GlobalOptions;
 
-fn default_stage_dir(install_path: &Path, request_version: &str, target_version: &str) -> PathBuf {
+pub(crate) fn default_stage_dir(
+    install_path: &Path,
+    request_version: &str,
+    target_version: &str,
+) -> PathBuf {
     install_path
         .join("downloads")
         .join("predownload")
         .join(format!("{}-{}_file", request_version, target_version))
+}
+
+pub(crate) fn stage_dir_for_request(
+    install_path: &Path,
+    version_info: &GetLatestGameResponse,
+    current_version: &str,
+    target_version: &str,
+) -> PathBuf {
+    let request_version = if version_info.request_version.is_empty() {
+        current_version
+    } else {
+        version_info.request_version.as_str()
+    };
+    default_stage_dir(install_path, request_version, target_version)
 }
 
 fn predownload_total_size(pre_patch: &PrePatchInfo) -> u64 {
@@ -54,13 +72,16 @@ fn build_predownload_tasks(stage_dir: &Path, patches: &[PackFile]) -> Result<Vec
     Ok(tasks)
 }
 
-pub async fn predownload(
-    path: PathBuf,
-    check_only: bool,
-    output_dir: Option<PathBuf>,
-    opts: GlobalOptions,
-) -> Result<()> {
-    let local = detect_local_install(&path).await?;
+async fn resolve_predownload_payload(
+    path: &Path,
+) -> Result<(
+    LocalInstall,
+    ApiClient,
+    GetLatestGameResponse,
+    PrePatchInfo,
+    String,
+)> {
+    let local = detect_local_install(path).await?;
     let game_id = local.require_known_game()?;
     let server_id = local.require_known_server()?;
     let current_version = local.require_config_ini_version()?.to_string();
@@ -69,6 +90,30 @@ pub async fn predownload(
     let version_info = api_client
         .get_latest_game(game_id, server_id, Some(&current_version))
         .await?;
+
+    let pre_patch = version_info
+        .pre_patch
+        .as_ref()
+        .filter(|pre_patch| !pre_patch.patches.is_empty())
+        .cloned()
+        .context("No predownload payload is currently available.")?;
+
+    Ok((local, api_client, version_info, pre_patch, current_version))
+}
+
+async fn print_predownload_status(
+    path: &Path,
+) -> Result<(LocalInstall, GetLatestGameResponse, PrePatchInfo, String)> {
+    let (local, _api_client, version_info, pre_patch, current_version) =
+        resolve_predownload_payload(path).await?;
+    let game_id = local.require_known_game()?;
+    let server_id = local.require_known_server()?;
+    let stage_dir = stage_dir_for_request(
+        &local.install_path,
+        &version_info,
+        &current_version,
+        &pre_patch.version,
+    );
 
     ui::print_phase(format!(
         "Checking predownload for {} ({}) at {}",
@@ -80,36 +125,32 @@ pub async fn predownload(
         "Current version (config.ini): {} | Remote version: {}",
         current_version, version_info.version
     ));
-
-    let pre_patch = match version_info.pre_patch.as_ref() {
-        Some(pre_patch) if !pre_patch.patches.is_empty() => pre_patch,
-        _ => {
-            ui::print_info("No predownload payload is currently available.");
-            return Ok(());
-        }
-    };
-
-    let request_version = if version_info.request_version.is_empty() {
-        current_version.as_str()
-    } else {
-        version_info.request_version.as_str()
-    };
-    let stage_dir = output_dir.unwrap_or_else(|| {
-        default_stage_dir(&local.install_path, request_version, &pre_patch.version)
-    });
-    let total_size = predownload_total_size(pre_patch);
-
     ui::print_info(format!(
         "Predownload target: {} | Parts: {} | Size: {}",
         pre_patch.version,
         pre_patch.patches.len(),
-        ui::format_bytes(total_size)
+        ui::format_bytes(predownload_total_size(&pre_patch))
     ));
     ui::print_info(format!("Stage dir: {}", stage_dir.display()));
 
-    if check_only {
-        return Ok(());
-    }
+    Ok((local, version_info, pre_patch, current_version))
+}
+
+pub async fn check(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
+    let _ = print_predownload_status(&path).await?;
+    Ok(())
+}
+
+pub async fn fetch(path: PathBuf, output_dir: Option<PathBuf>, opts: GlobalOptions) -> Result<()> {
+    let (local, version_info, pre_patch, current_version) = print_predownload_status(&path).await?;
+    let stage_dir = output_dir.unwrap_or_else(|| {
+        stage_dir_for_request(
+            &local.install_path,
+            &version_info,
+            &current_version,
+            &pre_patch.version,
+        )
+    });
 
     if opts.is_dry_run() {
         opts.dry_run(format!(
@@ -129,6 +170,7 @@ pub async fn predownload(
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
     let tasks = build_predownload_tasks(&stage_dir, &pre_patch.patches)?;
 
+    let total_size = predownload_total_size(&pre_patch);
     let bar = Arc::new(StepProgress::new("predownload.download", opts.verbose));
     let bar_cb = bar.clone();
     let mut downloaded_bytes = 0u64;
@@ -179,4 +221,14 @@ pub async fn predownload(
     ));
 
     Ok(())
+}
+
+pub async fn apply(path: PathBuf, output_dir: Option<PathBuf>, opts: GlobalOptions) -> Result<()> {
+    if let Some(output_dir) = output_dir.as_ref() {
+        ui::print_info(format!(
+            "Using explicit predownload stage dir: {}",
+            output_dir.display()
+        ));
+    }
+    super::update::apply_staged_predownload(path, output_dir, opts).await
 }

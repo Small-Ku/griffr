@@ -185,6 +185,10 @@ enum Commands {
         #[arg(long)]
         full_package: bool,
 
+        /// Reuse staged predownload patch archives when they match the live update payload
+        #[arg(long)]
+        use_predownload: bool,
+
         /// Skip VFS resource download
         #[arg(long)]
         skip_vfs: bool,
@@ -194,18 +198,10 @@ enum Commands {
         keep_pack_archives: bool,
     },
 
-    /// Check or stage launcher predownload archives without applying them
+    /// Predownload patch archive operations
     Predownload {
-        #[command(flatten)]
-        path: PathArg,
-
-        /// Only check whether a predownload payload is available
-        #[arg(long)]
-        check_only: bool,
-
-        /// Override the staging directory for downloaded predownload archives
-        #[arg(long)]
-        output_dir: Option<std::path::PathBuf>,
+        #[command(subcommand)]
+        command: PredownloadCommands,
     },
 
     /// Launch a local install path
@@ -512,6 +508,45 @@ enum DebugCommands {
 }
 
 #[derive(Subcommand)]
+enum PredownloadCommands {
+    /// Check whether a predownload payload is available
+    Check {
+        #[command(flatten)]
+        path: PathArg,
+    },
+    /// Download and verify staged predownload archives without applying them
+    Fetch {
+        #[command(flatten)]
+        path: PathArg,
+
+        /// Override the staging directory for downloaded predownload archives
+        #[arg(long)]
+        output_dir: Option<std::path::PathBuf>,
+    },
+    /// Apply the live release update using staged predownload archives when possible
+    Apply {
+        #[command(flatten)]
+        path: PathArg,
+
+        /// Override the staging directory used for staged predownload archives
+        #[arg(long)]
+        output_dir: Option<std::path::PathBuf>,
+
+        /// Skip post-update verification
+        #[arg(long)]
+        skip_verify: bool,
+
+        /// Skip VFS resource download
+        #[arg(long)]
+        skip_vfs: bool,
+
+        /// Keep archive files after successful extraction
+        #[arg(long)]
+        keep_pack_archives: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum AccountCommands {
     /// Capture current local account state into a directory bundle
     Capture {
@@ -702,6 +737,7 @@ async fn main() -> Result<()> {
             reuse,
             skip_verify,
             full_package,
+            use_predownload,
             skip_vfs,
             keep_pack_archives,
         } => {
@@ -718,24 +754,47 @@ async fn main() -> Result<()> {
                 ..opts
             };
             opts.verbose(format!(
-                "Update path: {:?}, reuse_from={:?}, force_copy={}",
-                path, reuse_from, force_copy
+                "Update path: {:?}, reuse_from={:?}, force_copy={}, use_predownload={}",
+                path, reuse_from, force_copy, use_predownload
             ));
-            commands::update(path, reuse_from, force_copy, opts).await?;
+            commands::update(path, reuse_from, force_copy, use_predownload, opts).await?;
         }
 
-        Commands::Predownload {
-            path,
-            check_only,
-            output_dir,
-        } => {
-            let PathArg { path } = path;
-            opts.verbose(format!(
-                "Predownload path: {:?}, check_only={}, output_dir={:?}",
-                path, check_only, output_dir
-            ));
-            commands::predownload(path, check_only, output_dir, opts).await?;
-        }
+        Commands::Predownload { command } => match command {
+            PredownloadCommands::Check { path } => {
+                let PathArg { path } = path;
+                opts.verbose(format!("Predownload check path: {:?}", path));
+                commands::predownload_check(path, opts).await?;
+            }
+            PredownloadCommands::Fetch { path, output_dir } => {
+                let PathArg { path } = path;
+                opts.verbose(format!(
+                    "Predownload fetch path: {:?}, output_dir={:?}",
+                    path, output_dir
+                ));
+                commands::predownload_fetch(path, output_dir, opts).await?;
+            }
+            PredownloadCommands::Apply {
+                path,
+                output_dir,
+                skip_verify,
+                skip_vfs,
+                keep_pack_archives,
+            } => {
+                let PathArg { path } = path;
+                let opts = GlobalOptions {
+                    skip_verify,
+                    skip_vfs,
+                    keep_pack_archives,
+                    ..opts
+                };
+                opts.verbose(format!(
+                    "Predownload apply path: {:?}, output_dir={:?}",
+                    path, output_dir
+                ));
+                commands::predownload_apply(path, output_dir, opts).await?;
+            }
+        },
 
         Commands::Launch { path, force } => {
             opts.verbose(format!("Launch path: {:?}, force={}", path, force));

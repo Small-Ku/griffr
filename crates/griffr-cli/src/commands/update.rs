@@ -26,6 +26,12 @@ enum UpdatePackageKind {
     Full,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveAcquireMode {
+    DownloadIfMissing,
+    RequireExisting,
+}
+
 fn strip_url_query(s: &str) -> &str {
     s.split('?').next().unwrap_or(s)
 }
@@ -141,6 +147,8 @@ fn build_update_dry_run_plan(
     version_info: &griffr_common::api::types::GetLatestGameResponse,
     package_kind: UpdatePackageKind,
     reuse_paths: &[PathBuf],
+    use_predownload: bool,
+    predownload_stage_dir: Option<&Path>,
     skip_verify: bool,
     skip_vfs: bool,
     keep_pack_archives: bool,
@@ -177,6 +185,14 @@ fn build_update_dry_run_plan(
             "Would download {label} archive parts: {archive_count} ({})",
             ui::format_bytes(total_size)
         ));
+        if use_predownload && package_kind == UpdatePackageKind::Patch {
+            if let Some(stage_dir) = predownload_stage_dir {
+                lines.push(format!(
+                    "Would reuse matching staged predownload archives from {} before downloading missing patch parts.",
+                    stage_dir.display()
+                ));
+            }
+        }
         if keep_pack_archives {
             lines.push("Would keep downloaded package archives after extraction.".to_string());
         } else {
@@ -361,25 +377,10 @@ async fn update_via_reuse(
     Ok(())
 }
 
-async fn download_and_extract_archives(
+fn group_archives_by_base(
     archives: &[griffr_common::api::types::PackFile],
-    install_path: &Path,
-    label: &str,
-    keep_pack_archives: bool,
-    opts: &GlobalOptions,
-    task_pool_runner: &mut TaskPoolRunner,
-) -> Result<()> {
-    let total_size: u64 = archives.iter().map(|p| p.size()).sum();
-    ui::print_phase(format!(
-        "Downloading {label} package archives ({})",
-        ui::format_bytes(total_size)
-    ));
-
-    let download_dir = install_path.join("downloads");
-    compio::fs::create_dir_all(&download_dir)
-        .await
-        .with_context(|| format!("Failed to create {}", download_dir.display()))?;
-
+    archive_dir: &Path,
+) -> Result<HashMap<String, Vec<ArchivePart>>> {
     let mut grouped: HashMap<String, Vec<ArchivePart>> = HashMap::new();
     for archive in archives {
         let filename = archive
@@ -393,7 +394,7 @@ async fn download_and_extract_archives(
             .context("Could not determine archive base name from pack URL")?;
         grouped.entry(base).or_default().push(ArchivePart {
             url: archive.url.clone(),
-            dest: download_dir.join(&filename),
+            dest: archive_dir.join(&filename),
             logical_path: filename,
             expected_md5: archive.md5.clone(),
             expected_size: archive.size(),
@@ -402,13 +403,128 @@ async fn download_and_extract_archives(
     if grouped.is_empty() {
         anyhow::bail!("No archives to process");
     }
+    Ok(grouped)
+}
+
+async fn download_and_extract_archives_from_dir(
+    archives: &[griffr_common::api::types::PackFile],
+    archive_dir: &Path,
+    install_path: &Path,
+    label: &str,
+    keep_pack_archives: bool,
+    mode: ArchiveAcquireMode,
+    opts: &GlobalOptions,
+    task_pool_runner: &mut TaskPoolRunner,
+) -> Result<()> {
+    let total_size: u64 = archives.iter().map(|p| p.size()).sum();
+    let phase_verb = match mode {
+        ArchiveAcquireMode::DownloadIfMissing => "Downloading",
+        ArchiveAcquireMode::RequireExisting => "Applying",
+    };
+    ui::print_phase(format!(
+        "{phase_verb} {label} package archives ({})",
+        ui::format_bytes(total_size)
+    ));
+
+    compio::fs::create_dir_all(archive_dir)
+        .await
+        .with_context(|| format!("Failed to create {}", archive_dir.display()))?;
+
+    let mut grouped = group_archives_by_base(archives, archive_dir)?;
+    for parts in grouped.values_mut() {
+        parts.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
+    }
+
+    if mode == ArchiveAcquireMode::RequireExisting {
+        let mut verify_tasks = Vec::new();
+        let mut extract_tasks = Vec::new();
+        for (base_name, parts) in &grouped {
+            opts.verbose(format!("queued predownload apply archive {}", base_name));
+            for part in parts {
+                verify_tasks.push(Task::Verify {
+                    path: part.dest.clone(),
+                    logical_path: part.logical_path.clone(),
+                    expected_md5: part.expected_md5.clone(),
+                    expected_size: Some(part.expected_size),
+                    on_fail: None,
+                });
+            }
+            extract_tasks.push(Task::Extract {
+                source_dir: archive_dir.to_path_buf(),
+                base_name: base_name.clone(),
+                dest: install_path.to_path_buf(),
+                cleanup: !keep_pack_archives,
+            });
+        }
+
+        let verify_result = task_pool_runner.run_batch_with_progress(verify_tasks, None)?;
+        let verify_failures = verify_result
+            .events
+            .into_iter()
+            .filter_map(|event| match event {
+                ProgressEvent::Failed { path, reason } => Some(format!("{} ({})", path, reason)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !verify_failures.is_empty() {
+            anyhow::bail!(
+                "Predownload apply requires complete staged archives; missing/mismatched items: {}",
+                verify_failures.join(", ")
+            );
+        }
+
+        let archive_bar = Arc::new(StepProgress::new(
+            format!("update.{}.archive-apply", label),
+            opts.verbose,
+        ));
+        let archive_bar_cb = archive_bar.clone();
+        let mut extracted_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
+        let mut extract_total_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
+        let result = task_pool_runner.run_batch_with_progress(
+            extract_tasks,
+            Some(&mut |event: &ProgressEvent| {
+                if let ProgressEvent::ExtractedBytes {
+                    path,
+                    bytes,
+                    total_bytes,
+                } = event
+                {
+                    extracted_bytes_by_archive.insert(path.clone(), *bytes);
+                    extract_total_bytes_by_archive.insert(path.clone(), *total_bytes);
+                    let extracted_bytes = extracted_bytes_by_archive.values().copied().sum::<u64>();
+                    let extract_total_bytes = extract_total_bytes_by_archive
+                        .values()
+                        .copied()
+                        .sum::<u64>();
+                    archive_bar_cb.update_bytes(extracted_bytes, extract_total_bytes.max(1), path);
+                }
+            }),
+        )?;
+        archive_bar.finish();
+
+        let failures = result
+            .events
+            .into_iter()
+            .filter_map(|event| match event {
+                ProgressEvent::Failed { path, reason } => Some(format!("{} ({})", path, reason)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "Archive apply failed for {} item(s): {}",
+                failures.len(),
+                failures.join(", ")
+            );
+        }
+        return Ok(());
+    }
 
     let mut tasks = Vec::with_capacity(grouped.len());
-    for (base_name, mut parts) in grouped {
-        parts.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
+    for (base_name, parts) in grouped {
         opts.verbose(format!("queued archive state-machine {}", base_name));
         tasks.push(Task::InstallArchive {
-            source_dir: download_dir.clone(),
+            source_dir: archive_dir.to_path_buf(),
             base_name,
             dest: install_path.to_path_buf(),
             cleanup: !keep_pack_archives,
@@ -480,6 +596,28 @@ async fn download_and_extract_archives(
     Ok(())
 }
 
+async fn download_and_extract_archives(
+    archives: &[griffr_common::api::types::PackFile],
+    install_path: &Path,
+    label: &str,
+    keep_pack_archives: bool,
+    opts: &GlobalOptions,
+    task_pool_runner: &mut TaskPoolRunner,
+) -> Result<()> {
+    let download_dir = install_path.join("downloads");
+    download_and_extract_archives_from_dir(
+        archives,
+        &download_dir,
+        install_path,
+        label,
+        keep_pack_archives,
+        ArchiveAcquireMode::DownloadIfMissing,
+        opts,
+        task_pool_runner,
+    )
+    .await
+}
+
 async fn validate_patch_target(game_id: GameId, install_path: &Path) -> Result<()> {
     let expected_exe = install_path.join(match game_id {
         GameId::Arknights => "Arknights.exe",
@@ -495,10 +633,13 @@ async fn validate_patch_target(game_id: GameId, install_path: &Path) -> Result<(
     }
 }
 
-pub async fn update(
+async fn update_internal(
     path: PathBuf,
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
+    use_predownload: bool,
+    predownload_dir_override: Option<PathBuf>,
+    require_staged_predownload: bool,
     opts: GlobalOptions,
 ) -> Result<()> {
     let local = detect_local_install(&path).await?;
@@ -534,6 +675,12 @@ pub async fn update(
     }
 
     if current_version == version_info.version || !version_info.has_update() {
+        if require_staged_predownload {
+            anyhow::bail!(
+                "Predownload apply requires the live release patch to be available; current version {} is still reported as up to date.",
+                current_version
+            );
+        }
         ui::print_success("Already up to date");
         return Ok(());
     }
@@ -543,12 +690,44 @@ pub async fn update(
     } else {
         choose_update_package(&version_info, Some(&current_version))?
     };
+    let predownload_stage_dir = if use_predownload && package_kind == UpdatePackageKind::Patch {
+        Some(predownload_dir_override.unwrap_or_else(|| {
+            super::predownload::stage_dir_for_request(
+                &local.install_path,
+                &version_info,
+                &current_version,
+                &version_info.version,
+            )
+        }))
+    } else {
+        None
+    };
+
     ui::print_info(describe_update_package_selection(
         &version_info,
         Some(&current_version),
         package_kind,
         opts.force_full_package,
     ));
+    if require_staged_predownload && package_kind != UpdatePackageKind::Patch {
+        anyhow::bail!(
+            "Predownload apply requires a live patch update for the installed version; got {:?}",
+            package_kind
+        );
+    }
+    if let Some(stage_dir) = predownload_stage_dir.as_ref() {
+        if use_predownload {
+            ui::print_info(format!(
+                "Predownload stage dir: {}{}",
+                stage_dir.display(),
+                if require_staged_predownload {
+                    " (apply-only mode)"
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
 
     if opts.is_dry_run() {
         for line in build_update_dry_run_plan(
@@ -558,12 +737,17 @@ pub async fn update(
             &version_info,
             package_kind,
             &reuse_paths,
+            use_predownload,
+            predownload_stage_dir.as_deref(),
             opts.skip_verify,
             opts.skip_vfs,
             opts.keep_pack_archives,
             opts.force_full_package,
         ) {
             opts.dry_run(line);
+        }
+        if require_staged_predownload {
+            opts.dry_run("Would fail instead of downloading if staged predownload archives are missing or mismatched.");
         }
         return Ok(());
     }
@@ -590,15 +774,33 @@ pub async fn update(
                     .patch
                     .as_ref()
                     .context("No patch package information available")?;
-                download_and_extract_archives(
-                    &patch.patches,
-                    &local.install_path,
-                    "patch",
-                    opts.keep_pack_archives,
-                    &opts,
-                    &mut task_pool_runner,
-                )
-                .await?;
+                if let Some(stage_dir) = predownload_stage_dir.as_ref() {
+                    download_and_extract_archives_from_dir(
+                        &patch.patches,
+                        stage_dir,
+                        &local.install_path,
+                        "patch",
+                        opts.keep_pack_archives,
+                        if require_staged_predownload {
+                            ArchiveAcquireMode::RequireExisting
+                        } else {
+                            ArchiveAcquireMode::DownloadIfMissing
+                        },
+                        &opts,
+                        &mut task_pool_runner,
+                    )
+                    .await?;
+                } else {
+                    download_and_extract_archives(
+                        &patch.patches,
+                        &local.install_path,
+                        "patch",
+                        opts.keep_pack_archives,
+                        &opts,
+                        &mut task_pool_runner,
+                    )
+                    .await?;
+                }
             }
             UpdatePackageKind::Full => {
                 let pkg = version_info
@@ -676,6 +878,42 @@ pub async fn update(
 
     ui::print_success("Update complete");
     Ok(())
+}
+
+pub async fn update(
+    path: PathBuf,
+    reuse_paths: Vec<PathBuf>,
+    force_copy: bool,
+    use_predownload: bool,
+    opts: GlobalOptions,
+) -> Result<()> {
+    update_internal(
+        path,
+        reuse_paths,
+        force_copy,
+        use_predownload,
+        None,
+        false,
+        opts,
+    )
+    .await
+}
+
+pub(crate) async fn apply_staged_predownload(
+    path: PathBuf,
+    predownload_dir_override: Option<PathBuf>,
+    opts: GlobalOptions,
+) -> Result<()> {
+    update_internal(
+        path,
+        Vec::new(),
+        false,
+        true,
+        predownload_dir_override,
+        true,
+        opts,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1030,6 +1268,8 @@ mod tests {
             &response,
             UpdatePackageKind::Full,
             &[],
+            false,
+            None,
             false,
             false,
             false,
