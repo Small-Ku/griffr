@@ -1,6 +1,6 @@
-mod models;
 pub mod legacy;
 pub mod materialize;
+mod models;
 pub mod plan;
 pub mod types;
 

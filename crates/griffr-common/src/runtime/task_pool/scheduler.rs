@@ -45,7 +45,10 @@ impl TaskPoolRunner {
         let dispatcher_threads = dispatcher_thread_count(&config);
         let shared_dispatcher = Arc::new(
             Dispatcher::builder()
-                .worker_threads(NonZeroUsize::new(dispatcher_threads).context("dispatcher threads must be non-zero")?)
+                .worker_threads(
+                    NonZeroUsize::new(dispatcher_threads)
+                        .context("dispatcher threads must be non-zero")?,
+                )
                 .build()
                 .context("Failed to create task-pool dispatcher")?,
         );
@@ -62,7 +65,12 @@ impl TaskPoolRunner {
         };
         spawn_workers(WorkerKind::Io, ctx.config.io_slots, io_rx, ctx.clone())?;
         spawn_workers(WorkerKind::Cpu, ctx.config.cpu_slots, cpu_rx, ctx.clone())?;
-        spawn_workers(WorkerKind::Extract, ctx.config.extract_slots, extract_rx, ctx.clone())?;
+        spawn_workers(
+            WorkerKind::Extract,
+            ctx.config.extract_slots,
+            extract_rx,
+            ctx.clone(),
+        )?;
         Ok(Self { ctx, event_rx })
     }
 
@@ -93,7 +101,11 @@ impl TaskPoolRunner {
                 break;
             }
             if last_heartbeat_at.elapsed() >= PROGRESS_HEARTBEAT_INTERVAL {
-                debug!("task pool still running: pending_tasks={} (last progress event >={}s ago)", pending, PROGRESS_HEARTBEAT_INTERVAL.as_secs());
+                debug!(
+                    "task pool still running: pending_tasks={} (last progress event >={}s ago)",
+                    pending,
+                    PROGRESS_HEARTBEAT_INTERVAL.as_secs()
+                );
                 last_heartbeat_at = Instant::now();
             }
             let (new_guard, _) = cv.wait_timeout(guard, Duration::from_millis(100)).unwrap();
@@ -160,12 +172,21 @@ pub fn extract_archives_pooled(
         }
     }
     if !failures.is_empty() {
-        anyhow::bail!("Failed to extract {} archive base(s): {}", failures.len(), failures.join(", "));
+        anyhow::bail!(
+            "Failed to extract {} archive base(s): {}",
+            failures.len(),
+            failures.join(", ")
+        );
     }
     Ok(())
 }
 
-fn spawn_workers(_kind: WorkerKind, count: usize, rx: Receiver<Task>, ctx: WorkerContext) -> Result<()> {
+fn spawn_workers(
+    _kind: WorkerKind,
+    count: usize,
+    rx: Receiver<Task>,
+    ctx: WorkerContext,
+) -> Result<()> {
     for _ in 0..count {
         let worker_rx = rx.clone();
         let worker_ctx = ctx.clone();
@@ -217,7 +238,10 @@ fn dispatcher_thread_count(config: &TaskPoolConfig) -> usize {
 pub(crate) fn enqueue_task(ctx: &WorkerContext, task: Task) -> Result<()> {
     ctx.pending.fetch_add(1, Ordering::AcqRel);
     let send_result = match task {
-        Task::InstallArchive { .. } | Task::Download { .. } | Task::Hardlink { .. } | Task::EnsureFile { .. } => ctx.io_tx.send(task),
+        Task::InstallArchive { .. }
+        | Task::Download { .. }
+        | Task::Hardlink { .. }
+        | Task::EnsureFile { .. } => ctx.io_tx.send(task),
         Task::Verify { .. } => ctx.cpu_tx.send(task),
         Task::Extract { .. } => ctx.extract_tx.send(task),
     };

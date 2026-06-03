@@ -102,7 +102,8 @@ mod tests {
 
     use crate::ui::tile_plan::merge::merge_adjacent_non_clipped;
     use crate::ui::{
-        ClipPolicy, LayoutDirection, LayoutSpec, SizingPolicy, TileId, TileSpec, WidgetId, WidgetNode,
+        ClipPolicy, LayoutDirection, LayoutSpec, SizingPolicy, TileId, TileSpec, WidgetId,
+        WidgetNode,
     };
 
     #[test]
@@ -143,9 +144,9 @@ mod tests {
             z_order: 0,
             widget_type: "Container",
         }];
-        let wn: HashMap<WidgetId, WidgetNode> =
-            wn.iter().map(|w| (w.id, w.clone())).collect();
-        let merged = merge_adjacent_non_clipped(tiles, &wb, &wn.values().cloned().collect::<Vec<_>>());
+        let wn: HashMap<WidgetId, WidgetNode> = wn.iter().map(|w| (w.id, w.clone())).collect();
+        let merged =
+            merge_adjacent_non_clipped(tiles, &wb, &wn.values().cloned().collect::<Vec<_>>());
         assert_eq!(merged.len(), 1);
     }
 }

@@ -54,7 +54,7 @@ pub async fn plan_file_reuse(
             Err(_) => continue,
         };
 
-            source_servers.push(super::models::SourceServer {
+        source_servers.push(super::models::SourceServer {
             server_id,
             version: version.clone(),
             install_path: source.install_path.clone(),
@@ -69,7 +69,7 @@ pub async fn plan_file_reuse(
             reusable_files: vec![],
             download_files: target_manifest
                 .iter()
-            .map(|e| super::models::DownloadFile {
+                .map(|e| super::models::DownloadFile {
                     path: e.path.clone(),
                     md5: e.md5.clone(),
                     size: e.size,
@@ -140,7 +140,7 @@ pub async fn plan_file_reuse(
                     continue;
                 }
                 if let Some((md5, size)) = candidate_meta.get(&path) {
-            reusable_files.push(super::models::ReusableFile {
+                    reusable_files.push(super::models::ReusableFile {
                         path: path.clone(),
                         md5: md5.clone(),
                         size: *size,

@@ -106,4 +106,3 @@ pub struct MaterializeSummary {
 #[cfg(test)]
 #[path = "test.rs"]
 mod test;
-

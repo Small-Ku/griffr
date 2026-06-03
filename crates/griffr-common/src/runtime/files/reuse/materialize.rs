@@ -159,22 +159,20 @@ pub async fn materialize_game_files_with_pool(
         .sum();
     let mut finished_stream = 0usize;
     let mut downloaded_bytes = 0u64;
-    let mut progress_event_cb = |event: &crate::runtime::task_pool::ProgressEvent| {
-        match event {
-            crate::runtime::task_pool::ProgressEvent::Verified { path, .. } => {
-                if let Some(ref cb) = progress_callback {
-                    cb(finished_stream, total, path);
-                }
-                finished_stream = finished_stream.saturating_add(1);
+    let mut progress_event_cb = |event: &crate::runtime::task_pool::ProgressEvent| match event {
+        crate::runtime::task_pool::ProgressEvent::Verified { path, .. } => {
+            if let Some(ref cb) = progress_callback {
+                cb(finished_stream, total, path);
             }
-            crate::runtime::task_pool::ProgressEvent::Downloaded { path, bytes } => {
-                downloaded_bytes = downloaded_bytes.saturating_add(*bytes);
-                if let Some(ref cb) = download_progress_callback {
-                    cb(downloaded_bytes, total_bytes, path);
-                }
-            }
-            _ => {}
+            finished_stream = finished_stream.saturating_add(1);
         }
+        crate::runtime::task_pool::ProgressEvent::Downloaded { path, bytes } => {
+            downloaded_bytes = downloaded_bytes.saturating_add(*bytes);
+            if let Some(ref cb) = download_progress_callback {
+                cb(downloaded_bytes, total_bytes, path);
+            }
+        }
+        _ => {}
     };
     let result = if let Some(runner) = task_pool_runner {
         runner

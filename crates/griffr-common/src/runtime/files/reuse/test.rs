@@ -226,7 +226,11 @@ async fn test_execute_reuse_plan_with_hardlinks() {
     };
 
     let result = legacy::execute_reuse_plan(&target_dir, &plan, options).await;
-    assert!(result.is_ok(), "Hardlink creation should succeed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Hardlink creation should succeed: {:?}",
+        result
+    );
 
     let target_file1 = target_dir.join("file1.bin");
     let target_file2 = target_dir.join("subdir/file2.bin");
@@ -539,8 +543,7 @@ fn test_derive_files_base_url_from_files_suffix() {
 fn test_derive_files_base_url_rejects_unknown_shape() {
     let url = "https://cdn.example.com/path";
     let err = plan::derive_files_base_url(url).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("Expected file_path to end with '/game_files' or '/files'")
-    );
+    assert!(err
+        .to_string()
+        .contains("Expected file_path to end with '/game_files' or '/files'"));
 }

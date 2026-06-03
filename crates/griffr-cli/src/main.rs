@@ -194,6 +194,20 @@ enum Commands {
         keep_pack_archives: bool,
     },
 
+    /// Check or stage launcher predownload archives without applying them
+    Predownload {
+        #[command(flatten)]
+        path: PathArg,
+
+        /// Only check whether a predownload payload is available
+        #[arg(long)]
+        check_only: bool,
+
+        /// Override the staging directory for downloaded predownload archives
+        #[arg(long)]
+        output_dir: Option<std::path::PathBuf>,
+    },
+
     /// Launch a local install path
     Launch {
         /// Install root or config.ini path
@@ -710,6 +724,19 @@ async fn main() -> Result<()> {
             commands::update(path, reuse_from, force_copy, opts).await?;
         }
 
+        Commands::Predownload {
+            path,
+            check_only,
+            output_dir,
+        } => {
+            let PathArg { path } = path;
+            opts.verbose(format!(
+                "Predownload path: {:?}, check_only={}, output_dir={:?}",
+                path, check_only, output_dir
+            ));
+            commands::predownload(path, check_only, output_dir, opts).await?;
+        }
+
         Commands::Launch { path, force } => {
             opts.verbose(format!("Launch path: {:?}, force={}", path, force));
             commands::launch(path, force, opts).await?;
@@ -730,7 +757,11 @@ async fn main() -> Result<()> {
                 force_copy,
             } = reuse;
             let game = remote.game.game.map(|g| g.parse::<GameId>()).transpose()?;
-            let server = remote.server.server.map(|s| s.parse::<ServerId>()).transpose()?;
+            let server = remote
+                .server
+                .server
+                .map(|s| s.parse::<ServerId>())
+                .transpose()?;
             opts.verbose(format!(
                 "Verify path: {:?}, game={:?}, server={:?}, repair={}, reuse_from={:?}, force_copy={}, relink_reuse={}, skip_vfs={}, skip_local_detect={}",
                 path, game, server, repair, reuse_from, force_copy, relink_reuse, skip_vfs, skip_local_detect

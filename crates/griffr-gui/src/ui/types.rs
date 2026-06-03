@@ -60,10 +60,13 @@ pub enum SizingPolicy {
 
 impl Default for SizingPolicy {
     fn default() -> Self {
-        Self::Flex { grow: 0.0, shrink: 1.0, basis: 100.0 }
+        Self::Flex {
+            grow: 0.0,
+            shrink: 1.0,
+            basis: 100.0,
+        }
     }
 }
-
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct WidgetId(pub u16);

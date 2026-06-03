@@ -317,6 +317,10 @@ pub struct GetLatestGameResponse {
     /// Patch info for delta updates
     pub patch: Option<PatchInfo>,
 
+    /// Predownload patch info for staged future updates
+    #[serde(rename = "pre_patch")]
+    pub pre_patch: Option<PrePatchInfo>,
+
     /// State code (usually 0)
     pub state: i32,
 
@@ -365,6 +369,13 @@ impl GetLatestGameResponse {
     /// Check if a delta patch payload is available
     pub fn has_patch_package(&self) -> bool {
         self.patch
+            .as_ref()
+            .is_some_and(|patch| !patch.patches.is_empty())
+    }
+
+    /// Check if a predownload patch payload is available
+    pub fn has_pre_patch_package(&self) -> bool {
+        self.pre_patch
             .as_ref()
             .is_some_and(|patch| !patch.patches.is_empty())
     }
@@ -448,6 +459,24 @@ pub struct PatchInfo {
     /// Alternative total size field
     #[serde(rename = "package_size")]
     pub package_size: String,
+}
+
+/// Predownload patch information for staged future updates
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrePatchInfo {
+    /// Target version that the staged patch will update to
+    pub version: String,
+
+    /// List of patch files to stage locally
+    pub patches: Vec<PackFile>,
+
+    /// Total download size in bytes (as string)
+    #[serde(rename = "package_size")]
+    pub package_size: String,
+
+    /// Total installed size in bytes (as string)
+    #[serde(rename = "total_size")]
+    pub total_size: String,
 }
 
 /// Banner response
@@ -811,6 +840,7 @@ mod tests {
             version: "1.0.0".to_string(),
             pkg: None,
             patch: None,
+            pre_patch: None,
             state: 0,
             launcher_action: 0,
         };
@@ -819,6 +849,7 @@ mod tests {
         assert!(!no_update.is_patch());
         assert!(!no_update.has_full_package());
         assert!(!no_update.has_patch_package());
+        assert!(!no_update.has_pre_patch_package());
 
         let full_update = GetLatestGameResponse {
             action: 1,
@@ -835,6 +866,7 @@ mod tests {
                 game_files_md5: None,
             }),
             patch: None,
+            pre_patch: None,
             state: 0,
             launcher_action: 0,
         };
@@ -843,6 +875,7 @@ mod tests {
         assert!(!full_update.is_patch());
         assert!(full_update.has_full_package());
         assert!(!full_update.has_patch_package());
+        assert!(!full_update.has_pre_patch_package());
 
         let patch_update = GetLatestGameResponse {
             action: 2,
@@ -861,6 +894,7 @@ mod tests {
                 total_size: "100".to_string(),
                 package_size: "100".to_string(),
             }),
+            pre_patch: None,
             state: 0,
             launcher_action: 0,
         };
@@ -869,6 +903,51 @@ mod tests {
         assert!(patch_update.is_patch());
         assert!(!patch_update.has_full_package());
         assert!(patch_update.has_patch_package());
+        assert!(!patch_update.has_pre_patch_package());
+    }
+
+    #[test]
+    fn test_pre_patch_response_parsing() {
+        let json = r#"{
+            "action": 0,
+            "version": "1.2.5",
+            "request_version": "1.2.5",
+            "pkg": {
+                "packs": [],
+                "total_size": "0",
+                "file_path": "https://example.com/files",
+                "game_files_md5": "18ba9cd98a55f248db2457c418e1be6d"
+            },
+            "patch": null,
+            "state": 0,
+            "launcher_action": 0,
+            "pre_patch": {
+                "package_size": "6356034359",
+                "total_size": "14368056414",
+                "version": "1.3.3",
+                "patches": [
+                    {
+                        "url": "https://example.com/predownload.zip.001?auth_key=test",
+                        "md5": "6569f21ee3567069f03ba372ffc7e09d",
+                        "package_size": "1073741824"
+                    }
+                ]
+            }
+        }"#;
+
+        let rsp: GetLatestGameResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(rsp.request_version, "1.2.5");
+        assert_eq!(rsp.version, "1.2.5");
+        assert!(rsp.has_pre_patch_package());
+        let pre_patch = rsp.pre_patch.as_ref().unwrap();
+        assert_eq!(pre_patch.version, "1.3.3");
+        assert_eq!(pre_patch.package_size, "6356034359");
+        assert_eq!(pre_patch.total_size, "14368056414");
+        assert_eq!(pre_patch.patches.len(), 1);
+        assert_eq!(
+            pre_patch.patches[0].filename(),
+            Some("predownload.zip.001?auth_key=test")
+        );
     }
 
     #[test]

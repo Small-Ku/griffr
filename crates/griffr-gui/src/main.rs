@@ -49,7 +49,11 @@ impl Component for MainModel {
         let ui_component = Child::<MainUiComponent>::init(&window).await?;
         let sidebar = Child::<SidebarUiComponent>::init(&window).await?;
         window.show()?;
-        Ok(Self { window, ui_component, sidebar })
+        Ok(Self {
+            window,
+            ui_component,
+            sidebar,
+        })
     }
 
     async fn start(&mut self, sender: &ComponentSender<Self>) -> ! {

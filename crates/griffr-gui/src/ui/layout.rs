@@ -146,7 +146,11 @@ fn layout_node_children(
 
 fn flex_components(sizing: &SizingPolicy) -> (f64, f64, f64) {
     match sizing {
-        SizingPolicy::Flex { grow, shrink, basis } => (*grow, *shrink, *basis),
+        SizingPolicy::Flex {
+            grow,
+            shrink,
+            basis,
+        } => (*grow, *shrink, *basis),
         _ => (0.0, 1.0, 100.0),
     }
 }

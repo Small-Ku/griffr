@@ -426,39 +426,39 @@ async fn download_and_extract_archives(
     let mut extract_total_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
     let result = task_pool_runner.run_batch_with_progress(
         tasks,
-        Some(&mut |event: &ProgressEvent| {
-            match event {
-                ProgressEvent::Downloaded { path, bytes } => {
-                    downloaded_archive_bytes = downloaded_archive_bytes.saturating_add(*bytes);
-                    let extract_total_bytes =
-                        extract_total_bytes_by_archive.values().copied().sum::<u64>();
-                    let extracted_bytes =
-                        extracted_bytes_by_archive.values().copied().sum::<u64>();
-                    archive_bar_cb.update_bytes(
-                        downloaded_archive_bytes.saturating_add(extracted_bytes),
-                        total_size.saturating_add(extract_total_bytes),
-                        path,
-                    );
-                }
-                ProgressEvent::ExtractedBytes {
+        Some(&mut |event: &ProgressEvent| match event {
+            ProgressEvent::Downloaded { path, bytes } => {
+                downloaded_archive_bytes = downloaded_archive_bytes.saturating_add(*bytes);
+                let extract_total_bytes = extract_total_bytes_by_archive
+                    .values()
+                    .copied()
+                    .sum::<u64>();
+                let extracted_bytes = extracted_bytes_by_archive.values().copied().sum::<u64>();
+                archive_bar_cb.update_bytes(
+                    downloaded_archive_bytes.saturating_add(extracted_bytes),
+                    total_size.saturating_add(extract_total_bytes),
                     path,
-                    bytes,
-                    total_bytes,
-                } => {
-                    extracted_bytes_by_archive.insert(path.clone(), *bytes);
-                    extract_total_bytes_by_archive.insert(path.clone(), *total_bytes);
-                    let extracted_bytes =
-                        extracted_bytes_by_archive.values().copied().sum::<u64>();
-                    let extract_total_bytes =
-                        extract_total_bytes_by_archive.values().copied().sum::<u64>();
-                    archive_bar_cb.update_bytes(
-                        downloaded_archive_bytes.saturating_add(extracted_bytes),
-                        total_size.saturating_add(extract_total_bytes),
-                        path,
-                    );
-                }
-                _ => {}
+                );
             }
+            ProgressEvent::ExtractedBytes {
+                path,
+                bytes,
+                total_bytes,
+            } => {
+                extracted_bytes_by_archive.insert(path.clone(), *bytes);
+                extract_total_bytes_by_archive.insert(path.clone(), *total_bytes);
+                let extracted_bytes = extracted_bytes_by_archive.values().copied().sum::<u64>();
+                let extract_total_bytes = extract_total_bytes_by_archive
+                    .values()
+                    .copied()
+                    .sum::<u64>();
+                archive_bar_cb.update_bytes(
+                    downloaded_archive_bytes.saturating_add(extracted_bytes),
+                    total_size.saturating_add(extract_total_bytes),
+                    path,
+                );
+            }
+            _ => {}
         }),
     )?;
     archive_bar.finish();
@@ -750,6 +750,7 @@ mod tests {
                 total_size: "1".to_string(),
                 package_size: "1".to_string(),
             }),
+            pre_patch: None,
             state: 0,
             launcher_action: 0,
         };
@@ -777,6 +778,7 @@ mod tests {
                 game_files_md5: Some("def".to_string()),
             }),
             patch: None,
+            pre_patch: None,
             state: 0,
             launcher_action: 0,
         };
@@ -815,6 +817,7 @@ mod tests {
                 total_size: "1".to_string(),
                 package_size: "1".to_string(),
             }),
+            pre_patch: None,
             state: 0,
             launcher_action: 0,
         };
@@ -844,6 +847,7 @@ mod tests {
                 total_size: "1".to_string(),
                 package_size: "1".to_string(),
             }),
+            pre_patch: None,
             state: 0,
             launcher_action: 0,
         };
@@ -876,6 +880,7 @@ mod tests {
                 total_size: "0".to_string(),
                 package_size: "0".to_string(),
             }),
+            pre_patch: None,
             state: 0,
             launcher_action: 0,
         };
@@ -910,6 +915,7 @@ mod tests {
                 total_size: "0".to_string(),
                 package_size: "0".to_string(),
             }),
+            pre_patch: None,
             state: 0,
             launcher_action: 0,
         };
@@ -944,6 +950,7 @@ mod tests {
                 total_size: "0".to_string(),
                 package_size: "0".to_string(),
             }),
+            pre_patch: None,
             state: 0,
             launcher_action: 0,
         };
@@ -983,6 +990,7 @@ mod tests {
                 total_size: "7".to_string(),
                 package_size: "7".to_string(),
             }),
+            pre_patch: None,
             state: 0,
             launcher_action: 0,
         };
@@ -1010,6 +1018,7 @@ mod tests {
                 game_files_md5: Some("def".to_string()),
             }),
             patch: None,
+            pre_patch: None,
             state: 0,
             launcher_action: 0,
         };

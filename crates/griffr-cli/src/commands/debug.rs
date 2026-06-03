@@ -1001,9 +1001,11 @@ pub async fn api_get_latest_game(
             "launcher_action": latest.launcher_action,
             "pkg": latest.pkg,
             "patch": latest.patch,
+            "pre_patch": latest.pre_patch,
             "has_update": latest.has_update(),
             "has_full_package": latest.has_full_package(),
             "has_patch_package": latest.has_patch_package(),
+            "has_pre_patch_package": latest.has_pre_patch_package(),
             "rand_str": latest.rand_str(),
         }
     });

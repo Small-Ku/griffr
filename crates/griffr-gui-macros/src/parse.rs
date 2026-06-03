@@ -69,7 +69,9 @@ impl Parse for NodeInput {
 
 impl Parse for TreeInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        Ok(Self { root: input.parse()? })
+        Ok(Self {
+            root: input.parse()?,
+        })
     }
 }
 
