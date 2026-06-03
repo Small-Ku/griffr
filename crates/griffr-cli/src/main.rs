@@ -90,21 +90,22 @@ struct GameServerArgs {
 }
 
 #[derive(Args)]
-#[command(group(ArgGroup::new("remote_target").required(true).args(["game", "server"])))]
 struct RequiredGameServerArgs {
-    #[command(flatten)]
-    game_server: GameServerArgs,
+    /// Known game id
+    #[arg(long, value_parser = ["arknights", "endfield"])]
+    game: String,
+
+    /// Known server id
+    #[arg(
+        long,
+        value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic", "global_googleplay"]
+    )]
+    server: String,
 }
 
 impl RequiredGameServerArgs {
     fn into_pair(self) -> (String, String) {
-        (
-            self.game_server.game.game.expect("clap requires --game"),
-            self.game_server
-                .server
-                .server
-                .expect("clap requires --server"),
-        )
+        (self.game, self.server)
     }
 }
 
