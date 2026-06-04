@@ -412,6 +412,7 @@ async fn download_and_extract_archives_from_dir(
     install_path: &Path,
     label: &str,
     keep_pack_archives: bool,
+    archive_password: Option<&str>,
     mode: ArchiveAcquireMode,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
@@ -454,6 +455,7 @@ async fn download_and_extract_archives_from_dir(
                 base_name: base_name.clone(),
                 dest: install_path.to_path_buf(),
                 cleanup: !keep_pack_archives,
+                password: archive_password.map(str::to_owned),
             });
         }
 
@@ -528,6 +530,7 @@ async fn download_and_extract_archives_from_dir(
             base_name,
             dest: install_path.to_path_buf(),
             cleanup: !keep_pack_archives,
+            password: archive_password.map(str::to_owned),
             parts,
         });
     }
@@ -601,6 +604,7 @@ async fn download_and_extract_archives(
     install_path: &Path,
     label: &str,
     keep_pack_archives: bool,
+    archive_password: Option<&str>,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<()> {
@@ -611,6 +615,7 @@ async fn download_and_extract_archives(
         install_path,
         label,
         keep_pack_archives,
+        archive_password,
         ArchiveAcquireMode::DownloadIfMissing,
         opts,
         task_pool_runner,
@@ -781,6 +786,7 @@ async fn update_internal(
                         &local.install_path,
                         "patch",
                         opts.keep_pack_archives,
+                        None,
                         if require_staged_predownload {
                             ArchiveAcquireMode::RequireExisting
                         } else {
@@ -796,6 +802,7 @@ async fn update_internal(
                         &local.install_path,
                         "patch",
                         opts.keep_pack_archives,
+                        None,
                         &opts,
                         &mut task_pool_runner,
                     )
@@ -812,6 +819,7 @@ async fn update_internal(
                     &local.install_path,
                     "full",
                     opts.keep_pack_archives,
+                    None,
                     &opts,
                     &mut task_pool_runner,
                 )
@@ -1421,6 +1429,7 @@ mod tests {
             &install_path,
             "patch",
             false,
+            None,
             &opts,
             &mut pool_runner,
         )

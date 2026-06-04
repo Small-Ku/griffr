@@ -336,6 +336,7 @@ fn install_archive_recovers_from_interrupted_partial_part_on_rerun() {
         base_name: "bundle".to_string(),
         dest: install_dir.clone(),
         cleanup: false,
+        password: None,
         parts: vec![
             ArchivePart {
                 url: format!("{}/bundle.zip.001", base_url),

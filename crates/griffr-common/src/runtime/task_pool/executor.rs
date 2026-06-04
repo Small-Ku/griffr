@@ -23,12 +23,14 @@ pub(crate) fn execute_task(
             base_name,
             dest,
             cleanup,
+            password,
             parts,
         } => execute_install_archive(
             source_dir,
             base_name,
             dest,
             cleanup,
+            password,
             parts,
             max_retries,
             io_dispatcher,
@@ -113,11 +115,13 @@ pub(crate) fn execute_task(
             base_name,
             dest,
             cleanup,
+            password,
         } => execute_extract_archive(
             source_dir,
             base_name,
             dest,
             cleanup,
+            password,
             extraction_progress_buffer_bytes,
             events,
         ),
@@ -129,6 +133,7 @@ fn execute_install_archive(
     base_name: String,
     dest: PathBuf,
     cleanup: bool,
+    password: Option<String>,
     parts: Vec<ArchivePart>,
     max_retries: u32,
     io_dispatcher: Option<&Dispatcher>,
@@ -246,6 +251,7 @@ fn execute_install_archive(
         base_name,
         dest,
         cleanup,
+        password,
     });
 }
 
@@ -254,6 +260,7 @@ fn execute_extract_archive(
     base_name: String,
     dest: PathBuf,
     cleanup: bool,
+    password: Option<String>,
     extraction_progress_buffer_bytes: usize,
     events: &mut Vec<ProgressEvent>,
 ) {
@@ -271,6 +278,7 @@ fn execute_extract_archive(
                 let progress_path = base_name.clone();
                 if let Err(err) = extractor.extract_to_with_progress(
                     &staging_dir,
+                    password.as_deref(),
                     extraction_progress_buffer_bytes,
                     Some(|bytes, total_bytes| {
                         extract_progress_events

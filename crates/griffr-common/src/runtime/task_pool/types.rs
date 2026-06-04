@@ -9,6 +9,7 @@ pub enum Task {
         base_name: String,
         dest: PathBuf,
         cleanup: bool,
+        password: Option<String>,
         parts: Vec<ArchivePart>,
     },
     Download {
@@ -42,6 +43,7 @@ pub enum Task {
         base_name: String,
         dest: PathBuf,
         cleanup: bool,
+        password: Option<String>,
     },
     Hardlink {
         src: PathBuf,

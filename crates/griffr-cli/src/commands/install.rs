@@ -254,6 +254,7 @@ pub async fn install(
                 base_name,
                 dest: install_path.clone(),
                 cleanup: !opts.keep_pack_archives,
+                password: None,
                 parts,
             });
         }

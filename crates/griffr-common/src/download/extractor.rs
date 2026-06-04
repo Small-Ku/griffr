@@ -256,15 +256,35 @@ impl MultiVolumeExtractor {
 
     /// Extract all volumes to the target directory
     pub fn extract_to(&self, target_dir: &Path) -> Result<()> {
-        self.extract_to_with_progress(target_dir, 256 * 1024, None::<fn(u64, u64)>)
+        self.extract_to_with_progress(target_dir, None, 256 * 1024, None::<fn(u64, u64)>)
     }
 
     pub fn extract_to_with_progress(
         &self,
         target_dir: &Path,
+        password: Option<&str>,
         progress_buffer_bytes: usize,
         mut progress_callback: Option<impl FnMut(u64, u64)>,
     ) -> Result<()> {
+        fn open_archive_entry<'a, R: Read + Seek>(
+            archive: &'a mut zip::ZipArchive<R>,
+            index: usize,
+            password: Option<&str>,
+        ) -> Result<zip::read::ZipFile<'a>> {
+            match password {
+                Some(password) => archive.by_index_decrypt(index, password.as_bytes()).map_err(
+                    |err| anyhow::anyhow!(
+                        "Failed to decrypt archive entry {index}; archive password may be missing or incorrect: {err}"
+                    ),
+                ),
+                None => archive.by_index(index).map_err(|err| {
+                    anyhow::anyhow!(
+                        "Failed to open archive entry {index}; if the archive is password-protected, pass --archive-password: {err}"
+                    )
+                }),
+            }
+        }
+
         fn safe_join(target_dir: &Path, name: &str) -> Result<PathBuf> {
             let rel = Path::new(name);
 
@@ -290,7 +310,7 @@ impl MultiVolumeExtractor {
             zip::ZipArchive::new(stream).context("Failed to open multi-volume zip archive")?;
         let mut total_extract_bytes = 0u64;
         for i in 0..archive.len() {
-            let file = archive.by_index(i)?;
+            let file = open_archive_entry(&mut archive, i, password)?;
             if !file.is_dir() {
                 total_extract_bytes = total_extract_bytes.saturating_add(file.size());
             }
@@ -299,7 +319,7 @@ impl MultiVolumeExtractor {
 
         // Extract all files
         for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
+            let mut file = open_archive_entry(&mut archive, i, password)?;
             let file_path = safe_join(target_dir, file.name())?;
 
             if file.is_dir() {

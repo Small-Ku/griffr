@@ -160,6 +160,7 @@ pub fn extract_archives_pooled(
             base_name: base.clone(),
             dest: dest.to_path_buf(),
             cleanup,
+            password: None,
         })
         .collect::<Vec<_>>();
     let mut config = TaskPoolConfig::default();
