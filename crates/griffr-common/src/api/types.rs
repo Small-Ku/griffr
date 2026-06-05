@@ -449,6 +449,10 @@ pub struct PatchInfo {
     #[serde(rename = "file_id")]
     pub file_id: String,
 
+    /// Archive password used for encrypted patch ZIP volumes
+    #[serde(default)]
+    pub cd_key: Option<String>,
+
     /// List of patch files to download
     pub patches: Vec<PackFile>,
 
@@ -886,6 +890,7 @@ mod tests {
                 url: "https://example.com/patch.zip".to_string(),
                 md5: "abc123".to_string(),
                 file_id: "1".to_string(),
+                cd_key: None,
                 patches: vec![PackFile {
                     url: "https://example.com/patch.zip.001".to_string(),
                     md5: "abc123".to_string(),
@@ -904,6 +909,39 @@ mod tests {
         assert!(!patch_update.has_full_package());
         assert!(patch_update.has_patch_package());
         assert!(!patch_update.has_pre_patch_package());
+    }
+
+    #[test]
+    fn test_patch_response_parsing_with_cd_key() {
+        let json = r#"{
+            "action": 2,
+            "version": "1.3.3",
+            "request_version": "1.2.5",
+            "pkg": null,
+            "patch": {
+                "url": "https://example.com/patch.zip",
+                "md5": "patch-md5",
+                "package_size": "6252042045",
+                "total_size": "14020404215",
+                "file_id": "1",
+                "cd_key": "test-patch-password",
+                "patches": [
+                    {
+                        "url": "https://example.com/patch.zip.001",
+                        "md5": "part-md5",
+                        "package_size": "1073741824"
+                    }
+                ]
+            },
+            "state": 0,
+            "launcher_action": 0,
+            "pre_patch": null
+        }"#;
+
+        let rsp: GetLatestGameResponse = serde_json::from_str(json).unwrap();
+        let patch = rsp.patch.as_ref().unwrap();
+        assert_eq!(patch.cd_key.as_deref(), Some("test-patch-password"));
+        assert_eq!(patch.patches.len(), 1);
     }
 
     #[test]

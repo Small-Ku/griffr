@@ -779,6 +779,7 @@ async fn update_internal(
                     .patch
                     .as_ref()
                     .context("No patch package information available")?;
+                let patch_password = patch.cd_key.as_deref();
                 if let Some(stage_dir) = predownload_stage_dir.as_ref() {
                     download_and_extract_archives_from_dir(
                         &patch.patches,
@@ -786,7 +787,7 @@ async fn update_internal(
                         &local.install_path,
                         "patch",
                         opts.keep_pack_archives,
-                        None,
+                        patch_password,
                         if require_staged_predownload {
                             ArchiveAcquireMode::RequireExisting
                         } else {
@@ -802,7 +803,7 @@ async fn update_internal(
                         &local.install_path,
                         "patch",
                         opts.keep_pack_archives,
-                        None,
+                        patch_password,
                         &opts,
                         &mut task_pool_runner,
                     )
@@ -988,6 +989,7 @@ mod tests {
                 url: "https://example.com/patch.zip".to_string(),
                 md5: "abc".to_string(),
                 file_id: "1".to_string(),
+                cd_key: None,
                 patches: vec![PackFile {
                     url: "https://example.com/patch.zip.001".to_string(),
                     md5: "abc".to_string(),
@@ -1055,6 +1057,7 @@ mod tests {
                 url: "https://example.com/patch.zip".to_string(),
                 md5: "abc".to_string(),
                 file_id: "1".to_string(),
+                cd_key: None,
                 patches: vec![PackFile {
                     url: "https://example.com/patch.zip.001".to_string(),
                     md5: "abc".to_string(),
@@ -1085,6 +1088,7 @@ mod tests {
                 url: "https://example.com/patch.zip".to_string(),
                 md5: "abc".to_string(),
                 file_id: "1".to_string(),
+                cd_key: None,
                 patches: vec![PackFile {
                     url: "https://example.com/patch.zip.001".to_string(),
                     md5: "abc".to_string(),
@@ -1118,6 +1122,7 @@ mod tests {
                 url: "https://example.com/patch.zip".to_string(),
                 md5: "abc".to_string(),
                 file_id: "1".to_string(),
+                cd_key: None,
                 patches: vec![PackFile {
                     url: "https://example.com/patch.zip.001".to_string(),
                     md5: "abc".to_string(),
@@ -1157,6 +1162,7 @@ mod tests {
                 url: "https://example.com/patch.zip".to_string(),
                 md5: "abc".to_string(),
                 file_id: "1".to_string(),
+                cd_key: None,
                 patches: vec![],
                 total_size: "0".to_string(),
                 package_size: "0".to_string(),
@@ -1192,6 +1198,7 @@ mod tests {
                 url: "https://example.com/patch.zip".to_string(),
                 md5: "abc".to_string(),
                 file_id: "1".to_string(),
+                cd_key: None,
                 patches: vec![],
                 total_size: "0".to_string(),
                 package_size: "0".to_string(),
@@ -1221,6 +1228,7 @@ mod tests {
                 url: "https://example.com/patch.zip".to_string(),
                 md5: "abc".to_string(),
                 file_id: "1".to_string(),
+                cd_key: None,
                 patches: vec![
                     PackFile {
                         url: "https://example.com/patch.zip.001".to_string(),
