@@ -13,8 +13,6 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
     let event_ident = Ident::new(&format!("{}ComponentEvent", ident), ident.span());
     let routed_ident = Ident::new(&format!("{}RoutedEvent", ident), ident.span());
     let canvas_count = merged_tile_count_for_flat(&flat);
-    let last_canvas_idx = canvas_count.saturating_sub(1);
-    let last_canvas_field = Ident::new(&format!("tile{}", last_canvas_idx), ident.span());
 
     let widget_count = flat.len();
     let parents = flat.iter().map(|n| {
@@ -129,14 +127,12 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         let field = Ident::new(&format!("tile{}", idx), ident.span());
         quote! { self.#field, }
     });
-    let render_match_arms = (0..last_canvas_idx).map(|idx| {
-        let field = Ident::new(&format!("tile{}", idx), ident.span());
-        quote! { #idx => &mut self.#field, }
-    });
-    let render_children_stmts = (0..canvas_count).map(|idx| {
-        let field = Ident::new(&format!("tile{}", idx), ident.span());
-        quote! { self.#field.render()?; }
-    });
+    let canvas_match_arms: Vec<_> = (0..canvas_count)
+        .map(|idx| {
+            let field = Ident::new(&format!("tile{}", idx), ident.span());
+            quote! { #idx => &mut self.#field, }
+        })
+        .collect();
     let widget_kinds: BTreeSet<String> = flat.iter().map(|n| n.kind.clone()).collect();
     let widget_ctor_arms = widget_kinds.iter().map(|kind| {
         let widget_ty: Type = if kind.contains("::") {
@@ -187,6 +183,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             #(#canvas_fields)*
             widget_nodes: Vec<::griffr_gui::ui::WidgetNode>,
             plan: ::griffr_gui::ui::CompiledPlan,
+            canvas_pool: ::griffr_gui::ui::CanvasPool,
             draw_resources: ::griffr_gui::ui::DrawResources,
             pending_dirty: ::griffr_gui::ui::DirtyFlags,
             hovered: Option<::griffr_gui::ui::WidgetId>,
@@ -238,7 +235,15 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 }
                 plan = Self::compile_plan(&widget_nodes, size, Some(&plan), ::griffr_gui::ui::DirtyFlags::TILE_PLAN | ::griffr_gui::ui::DirtyFlags::PAINT);
                 let mut this = Self {
-                    root, #(#canvas_struct_inits)* widgets, widget_nodes, plan, draw_resources: ::griffr_gui::ui::DrawResources::default(), pending_dirty: ::griffr_gui::ui::DirtyFlags::empty(), hovered: None,
+                    root,
+                    #(#canvas_struct_inits)*
+                    widgets,
+                    widget_nodes,
+                    plan,
+                    canvas_pool: ::griffr_gui::ui::CanvasPool::new(#canvas_count),
+                    draw_resources: ::griffr_gui::ui::DrawResources::default(),
+                    pending_dirty: ::griffr_gui::ui::DirtyFlags::empty(),
+                    hovered: None,
                     pointers: [::winio::prelude::Point::new(0.0, 0.0); #canvas_count],
                     next_tick_seq: 0,
                     scheduled_tick: None,
@@ -246,6 +251,10 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                     valign: ::winio::prelude::VAlign::Stretch,
                     margin: ::winio::prelude::Margin::default(),
                 };
+                this.canvas_pool.prepare_frame(this.plan.tile_plan.tiles.len());
+                for idx in 0..#canvas_count {
+                    Self::canvas_mut(&mut this, idx).set_visible(false)?;
+                }
                 this.reschedule_if_needed(_sender);
                 Ok(this)
             }
@@ -278,7 +287,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                             }
                         }
                         let p = self.pointers.get(idx).copied().unwrap_or(::winio::prelude::Point::new(0.0, 0.0));
-                        self.sync_widgets_routing(); // Sync before dispatch
+                        self.sync_widgets_routing();
                         let routed = Self::map_canvas_event(&ev, p.x, p.y);
                         self.hovered = routed.and_then(|e| Self::route_event(&self.plan, e));
                         let hit = self.hovered;
@@ -332,33 +341,45 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                     self.draw_resources.clear();
                 }
                 self.plan = Self::compile_plan(&self.widget_nodes, size, Some(&self.plan), self.pending_dirty);
-                for idx in 0..#canvas_count {
-                    let canvas = match idx { #(#render_match_arms)* _ => &mut self.#last_canvas_field, };
-                    if let Some(tile) = self.plan.tile_plan.tiles.get(idx) {
-                        let draw_w = tile.bounds.size.width + TILE_OVERLAP_PX;
-                        let draw_h = tile.bounds.size.height + TILE_OVERLAP_PX;
+                self.canvas_pool.prepare_frame(self.plan.tile_plan.tiles.len());
+                let released_slots = self.canvas_pool.drain_released_slots().collect::<Vec<_>>();
+                for slot_idx in released_slots {
+                    if self.canvas_pool.release_slot(slot_idx).hide {
+                        Self::canvas_mut(self, slot_idx).set_visible(false)?;
+                    }
+                }
+                for tile_idx in 0..self.plan.tile_plan.tiles.len() {
+                    let slot_idx = self.canvas_pool.slot_for_tile(tile_idx);
+                    let tile = &self.plan.tile_plan.tiles[tile_idx];
+                    let placement = ::griffr_gui::ui::CanvasPlacement::from_tile_bounds(tile.bounds, TILE_OVERLAP_PX);
+                    let slot_update = self.canvas_pool.apply_placement(slot_idx, placement);
+                    let canvas = match slot_idx {
+                        #(#canvas_match_arms)*
+                        _ => unreachable!("widget_tree generated invalid canvas slot"),
+                    };
+                    if slot_update.show {
                         canvas.set_visible(true)?;
-                        canvas.set_loc(::winio::prelude::Point::new(tile.bounds.origin.x, tile.bounds.origin.y))?;
-                        canvas.set_size(::winio::prelude::Size::new(draw_w, draw_h))?;
-                        if !tile.widgets.is_empty() {
-                            let mut ctx = canvas.context()?;
-                            for &id in &tile.widgets {
-                                if let Some((_, widget)) = self.widgets.iter_mut().find(|(w_id, _)| *w_id == id) {
-                                    let widget_bounds = &self.plan.bounds[id.0 as usize];
-                                    let tx = widget_bounds.origin.x - tile.bounds.origin.x;
-                                    let ty = widget_bounds.origin.y - tile.bounds.origin.y;
-                                    ctx.set_transform(::winio::prelude::Transform::translation(tx, ty))?;
-                                    widget.draw(
-                                        &mut ctx,
-                                        &mut self.draw_resources,
-                                        ::winio::prelude::Size::new(widget_bounds.size.width, widget_bounds.size.height),
-                                        tile.clipped,
-                                    )?;
-                                }
+                    }
+                    if slot_update.move_or_resize {
+                        canvas.set_loc(placement.loc)?;
+                        canvas.set_size(placement.size)?;
+                    }
+                    if !tile.widgets.is_empty() {
+                        let mut ctx = canvas.context()?;
+                        for &id in &tile.widgets {
+                            if let Some((_, widget)) = self.widgets.iter_mut().find(|(w_id, _)| *w_id == id) {
+                                let widget_bounds = &self.plan.bounds[id.0 as usize];
+                                let tx = widget_bounds.origin.x - tile.bounds.origin.x;
+                                let ty = widget_bounds.origin.y - tile.bounds.origin.y;
+                                ctx.set_transform(::winio::prelude::Transform::translation(tx, ty))?;
+                                widget.draw(
+                                    &mut ctx,
+                                    &mut self.draw_resources,
+                                    ::winio::prelude::Size::new(widget_bounds.size.width, widget_bounds.size.height),
+                                    tile.clipped,
+                                )?;
                             }
                         }
-                    } else {
-                        canvas.set_visible(false)?;
                     }
                 }
                 self.plan.clear_dirty();
@@ -366,7 +387,13 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 self.reschedule_if_needed(_sender);
                 Ok(())
             }
-            fn render_children(&mut self) -> ::winio::prelude::Result<()> { #(#render_children_stmts)* self.root.render() }
+            fn render_children(&mut self) -> ::winio::prelude::Result<()> {
+                for tile_idx in 0..self.canvas_pool.active_count() {
+                    let slot_idx = self.canvas_pool.slot_for_tile(tile_idx);
+                    Self::canvas_mut(self, slot_idx).render()?;
+                }
+                self.root.render()
+            }
         }
 
         impl ::winio::prelude::Layoutable for #comp_ident {
@@ -389,6 +416,12 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         }
 
         impl #comp_ident {
+            fn canvas_mut(&mut self, idx: usize) -> &mut ::winio::prelude::Child<::winio::widgets::Canvas> {
+                match idx {
+                    #(#canvas_match_arms)*
+                    _ => unreachable!("widget_tree generated invalid canvas slot"),
+                }
+            }
             pub fn set_halign(&mut self, halign: ::winio::prelude::HAlign) {
                 self.halign = halign;
             }
@@ -470,7 +503,11 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 Ok(out)
             }
             fn local_to_global(&self, idx: usize, p: ::winio::prelude::Point) -> ::winio::prelude::Point {
-                self.plan.tile_plan.tiles.get(idx).map(|t| ::winio::prelude::Point::new(p.x + t.bounds.origin.x, p.y + t.bounds.origin.y)).unwrap_or(p)
+                self.canvas_pool
+                    .tile_for_slot(idx)
+                    .and_then(|tile_idx| self.plan.tile_plan.tiles.get(tile_idx))
+                    .map(|t| ::winio::prelude::Point::new(p.x + t.bounds.origin.x, p.y + t.bounds.origin.y))
+                    .unwrap_or(p)
             }
             fn expand_size(size: ::winio::prelude::Size) -> ::winio::prelude::Size {
                 const COMPONENT_OVERDRAW_PX: f64 = 0.5;
