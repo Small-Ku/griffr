@@ -5,10 +5,10 @@ use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::PackageInfo;
 use griffr_common::config::{GameConfig, GameId, ServerId};
-use griffr_common::runtime::is_launcher_metadata_path;
 use griffr_common::runtime::task_pool::{
     ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
+use griffr_common::runtime::{directory_has_entries, is_launcher_metadata_path};
 use griffr_common::runtime::{
     materialize_game_files_with_pool, plan_vfs_tasks, FileReuseConfig, GameManager,
     SourceInstallInput, VfsMaterializeConfig, VfsTaskPlan,
@@ -125,9 +125,7 @@ pub async fn install(
     };
 
     if install_path_exists && !force {
-        let mut entries = std::fs::read_dir(&install_path)
-            .with_context(|| format!("Failed to read {}", install_path.display()))?;
-        if entries.next().is_some() {
+        if directory_has_entries(install_path.clone()).await? {
             anyhow::bail!(
                 "Install path is not empty: {} (pass --force to reuse it)",
                 install_path.display()

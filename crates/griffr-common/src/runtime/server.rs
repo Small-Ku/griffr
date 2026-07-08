@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::config::{GameId, ServerId};
+#[cfg(not(windows))]
+use crate::runtime::read_link;
+use crate::runtime::{dir_size, directory_has_entries};
 
 /// Server directory management
 #[derive(Debug)]
@@ -62,11 +65,7 @@ impl Server {
             return false;
         }
 
-        // Check if the directory has any files
-        match std::fs::read_dir(&path) {
-            Ok(mut entries) => matches!(entries.next(), Some(Ok(_))),
-            Err(_) => false,
-        }
+        directory_has_entries(path).await.unwrap_or(false)
     }
 
     /// Check if this server is currently active (symlink points to it)
@@ -79,16 +78,14 @@ impl Server {
             return false;
         }
 
-        // On Windows, check if the active path is a junction/reparse point
-        match std::fs::metadata(&active_path) {
+        let expected_target = self.server_path();
+        compio::runtime::spawn_blocking(move || match std::fs::metadata(&active_path) {
             Ok(metadata) => {
-                // Check if it's a reparse point (junction/symlink)
                 let file_attributes = metadata.file_attributes();
                 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
                 if file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                    // Try to read the junction target
                     if let Ok(target) = std::fs::read_link(&active_path) {
-                        target == self.server_path()
+                        target == expected_target
                     } else {
                         false
                     }
@@ -97,7 +94,9 @@ impl Server {
                 }
             }
             Err(_) => false,
-        }
+        })
+        .await
+        .unwrap_or(false)
     }
 
     #[cfg(not(windows))]
@@ -107,10 +106,11 @@ impl Server {
             return false;
         }
 
-        match std::fs::read_link(&active_path) {
-            Ok(target) => target == self.server_path(),
-            Err(_) => false,
-        }
+        let expected_target = self.server_path();
+        read_link(active_path)
+            .await
+            .map(|target| target == expected_target)
+            .unwrap_or(false)
     }
 
     /// Activate this server by creating a symlink/junction
@@ -209,34 +209,7 @@ impl Server {
             return Ok(0);
         }
 
-        let mut total_size = 0u64;
-        for entry in std::fs::read_dir(&server_path)? {
-            let entry = entry?;
-            let metadata = entry.metadata()?;
-            if metadata.is_file() {
-                total_size += metadata.len();
-            } else if metadata.is_dir() {
-                total_size += self.calculate_dir_size(entry.path())?;
-            }
-        }
-
-        Ok(total_size)
-    }
-
-    /// Recursively calculate directory size
-    fn calculate_dir_size(&self, path: PathBuf) -> Result<u64> {
-        let mut total_size = 0u64;
-        for entry in std::fs::read_dir(&path)? {
-            let entry = entry?;
-            let metadata = entry.metadata()?;
-            if metadata.is_file() {
-                total_size += metadata.len();
-            } else if metadata.is_dir() {
-                total_size += self.calculate_dir_size(entry.path())?;
-            }
-        }
-
-        Ok(total_size)
+        dir_size(server_path).await
     }
 }
 

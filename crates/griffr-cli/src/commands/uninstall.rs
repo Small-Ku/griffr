@@ -2,6 +2,7 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use griffr_common::runtime::remove_dir_all;
 
 use crate::ui;
 use crate::GlobalOptions;
@@ -49,7 +50,7 @@ pub async fn uninstall(
         Err(err) => return Err(anyhow::Error::from(err)),
     };
     if exists {
-        std::fs::remove_dir_all(&target)?;
+        remove_dir_all(target.clone()).await?;
         ui::print_success(format!("Deleted {}", target.display()));
     } else {
         ui::print_info("Target path does not exist; nothing to remove.");

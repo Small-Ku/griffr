@@ -10,7 +10,6 @@ use std::io::ErrorKind;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -206,7 +205,7 @@ impl Launcher {
 
         // 3. Wait 1.5 seconds for handles to release
         debug!("Waiting 1.5s for processes to terminate gracefully...");
-        thread::sleep(Duration::from_millis(1500));
+        compio::time::sleep(Duration::from_millis(1500)).await;
 
         // 4. Second pass: Force kill any remaining processes
         let remaining = self.find_game_processes();
@@ -227,7 +226,7 @@ impl Launcher {
             }
 
             // Wait a bit more and verify
-            thread::sleep(Duration::from_millis(500));
+            compio::time::sleep(Duration::from_millis(500)).await;
             let final_check = self.find_game_processes();
             if !final_check.is_empty() {
                 return Err(anyhow::anyhow!(

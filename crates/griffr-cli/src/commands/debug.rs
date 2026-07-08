@@ -5,7 +5,7 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::api::crypto;
 use griffr_common::api::types::ResIndex;
 use griffr_common::config::{GameId, ServerId};
-use griffr_common::runtime::normalize_logical_path;
+use griffr_common::runtime::{list_files_with_extension, normalize_logical_path};
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -61,18 +61,7 @@ pub async fn res_index(path: PathBuf, key: Option<String>, _opts: GlobalOptions)
     let mut targets = Vec::new();
 
     if path.is_dir() {
-        for entry in std::fs::read_dir(&path)
-            .with_context(|| format!("Failed to read {}", path.display()))?
-        {
-            let entry = entry.with_context(|| format!("Failed to read {}", path.display()))?;
-            let entry_path = entry.path();
-            if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false)
-                && entry_path.extension().is_some_and(|ext| ext == "json")
-            {
-                targets.push(entry_path);
-            }
-        }
-        targets.sort();
+        targets = list_files_with_extension(path.clone(), "json").await?;
         if targets.is_empty() {
             anyhow::bail!("No .json files found under {}", path.display());
         }

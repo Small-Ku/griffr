@@ -1,4 +1,5 @@
 pub mod admin;
+mod compat_fs;
 pub mod files;
 pub mod issues;
 pub mod launcher;
@@ -9,6 +10,10 @@ pub mod server;
 pub mod task_pool;
 
 pub use admin::{ensure_admin, is_running_as_admin, restart_as_admin};
+pub use compat_fs::{
+    collect_files_recursive, copy_dir_recursive, dir_size, directory_has_entries,
+    list_files_with_extension, read_link, remove_dir_all, remove_empty_dirs_recursive, CopyStats,
+};
 pub use files::reuse::{
     apply_file_reuse_flow, derive_files_base_url, materialize_game_files_with_pool,
     FileReuseConfig, MaterializeSummary, SourceInstallInput,

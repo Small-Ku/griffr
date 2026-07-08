@@ -4,12 +4,20 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use griffr_common::config::{GameId, ServerId};
+use griffr_common::runtime::{copy_dir_recursive, remove_dir_all};
 
 use crate::ui;
 use crate::GlobalOptions;
 
 const BUNDLE_SDK_DIR: &str = "sdk_data";
 const BUNDLE_MMKV_DIR: &str = "mmkv";
+
+async fn create_dir_all(path: &Path) -> Result<()> {
+    compio::fs::create_dir_all(path)
+        .await
+        .with_context(|| format!("Failed to create {}", path.display()))?;
+    Ok(())
+}
 
 pub async fn capture(
     game_id: GameId,
@@ -43,21 +51,24 @@ pub async fn capture(
         return Ok(());
     }
 
-    ensure_destination_dir(&bundle_path, force).with_context(|| {
-        format!(
-            "Refusing to write bundle destination {}",
-            bundle_path.display()
-        )
-    })?;
-    std::fs::create_dir_all(&bundle_path)
-        .with_context(|| format!("Failed to create {}", bundle_path.display()))?;
+    ensure_destination_dir(&bundle_path, force)
+        .await
+        .with_context(|| {
+            format!(
+                "Refusing to write bundle destination {}",
+                bundle_path.display()
+            )
+        })?;
+    create_dir_all(&bundle_path).await?;
 
-    let sdk_stats = copy_dir_recursive(&source_sdk_dir, &bundle_sdk_dir).with_context(|| {
-        format!(
-            "Failed to capture sdk_data from {}",
-            source_sdk_dir.display()
-        )
-    })?;
+    let sdk_stats = copy_dir_recursive(source_sdk_dir.clone(), bundle_sdk_dir.clone())
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to capture sdk_data from {}",
+                source_sdk_dir.display()
+            )
+        })?;
 
     ui::print_info(format!(
         "Captured sdk_data: files={} size={} source={} target={}",
@@ -79,12 +90,14 @@ pub async fn capture(
             );
         }
         let bundle_mmkv = bundle_path.join(BUNDLE_MMKV_DIR);
-        let mmkv_stats = copy_dir_recursive(&source_mmkv, &bundle_mmkv).with_context(|| {
-            format!(
-                "Failed to capture install mmkv from {}",
-                source_mmkv.display()
-            )
-        })?;
+        let mmkv_stats = copy_dir_recursive(source_mmkv.clone(), bundle_mmkv.clone())
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to capture install mmkv from {}",
+                    source_mmkv.display()
+                )
+            })?;
         ui::print_info(format!(
             "Captured install mmkv: files={} size={} source={} target={}",
             mmkv_stats.files,
@@ -136,24 +149,27 @@ pub async fn activate(
         return Ok(());
     }
 
-    ensure_destination_dir(&target_sdk_dir, force).with_context(|| {
-        format!(
-            "Refusing to overwrite target sdk_data directory {} without --force",
-            target_sdk_dir.display()
-        )
-    })?;
+    ensure_destination_dir(&target_sdk_dir, force)
+        .await
+        .with_context(|| {
+            format!(
+                "Refusing to overwrite target sdk_data directory {} without --force",
+                target_sdk_dir.display()
+            )
+        })?;
 
     if let Some(parent) = target_sdk_dir.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
+        create_dir_all(parent).await?;
     }
 
-    let sdk_stats = copy_dir_recursive(&bundle_sdk_dir, &target_sdk_dir).with_context(|| {
-        format!(
-            "Failed to restore sdk_data from bundle {}",
-            bundle_sdk_dir.display()
-        )
-    })?;
+    let sdk_stats = copy_dir_recursive(bundle_sdk_dir.clone(), target_sdk_dir.clone())
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to restore sdk_data from bundle {}",
+                bundle_sdk_dir.display()
+            )
+        })?;
     ui::print_info(format!(
         "Activated sdk_data: files={} size={} source={} target={}",
         sdk_stats.files,
@@ -174,18 +190,22 @@ pub async fn activate(
             );
         }
         let target_mmkv = install_path.join("mmkv");
-        ensure_destination_dir(&target_mmkv, force).with_context(|| {
-            format!(
-                "Refusing to overwrite install mmkv {} without --force",
-                target_mmkv.display()
-            )
-        })?;
-        let mmkv_stats = copy_dir_recursive(&bundle_mmkv, &target_mmkv).with_context(|| {
-            format!(
-                "Failed to restore install mmkv into {}",
-                target_mmkv.display()
-            )
-        })?;
+        ensure_destination_dir(&target_mmkv, force)
+            .await
+            .with_context(|| {
+                format!(
+                    "Refusing to overwrite install mmkv {} without --force",
+                    target_mmkv.display()
+                )
+            })?;
+        let mmkv_stats = copy_dir_recursive(bundle_mmkv.clone(), target_mmkv.clone())
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to restore install mmkv into {}",
+                    target_mmkv.display()
+                )
+            })?;
         ui::print_info(format!(
             "Activated install mmkv: files={} size={} source={} target={}",
             mmkv_stats.files,
@@ -369,7 +389,7 @@ fn select_latest_sdk_dir_from_roots(roots: &[PathBuf]) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn ensure_destination_dir(path: &Path, force: bool) -> Result<()> {
+async fn ensure_destination_dir(path: &Path, force: bool) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
@@ -377,58 +397,11 @@ fn ensure_destination_dir(path: &Path, force: bool) -> Result<()> {
         anyhow::bail!("Destination exists: {}", path.display());
     }
     if path.is_file() {
-        std::fs::remove_file(path)
+        compio::fs::remove_file(path)
+            .await
             .with_context(|| format!("Failed to remove {}", path.display()))?;
     } else {
-        std::fs::remove_dir_all(path)
-            .with_context(|| format!("Failed to remove {}", path.display()))?;
-    }
-    Ok(())
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-struct CopyStats {
-    files: usize,
-    bytes: u64,
-}
-
-fn copy_dir_recursive(source: &Path, target: &Path) -> Result<CopyStats> {
-    if !source.is_dir() {
-        anyhow::bail!("Source directory not found: {}", source.display());
-    }
-    std::fs::create_dir_all(target)
-        .with_context(|| format!("Failed to create {}", target.display()))?;
-    let mut stats = CopyStats::default();
-    copy_dir_recursive_inner(source, target, &mut stats)?;
-    Ok(stats)
-}
-
-fn copy_dir_recursive_inner(source: &Path, target: &Path, stats: &mut CopyStats) -> Result<()> {
-    let entries = std::fs::read_dir(source)
-        .with_context(|| format!("Failed to read {}", source.display()))?;
-    for entry in entries {
-        let entry = entry.with_context(|| format!("Failed to enumerate {}", source.display()))?;
-        let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
-
-        if source_path.is_dir() {
-            std::fs::create_dir_all(&target_path)
-                .with_context(|| format!("Failed to create {}", target_path.display()))?;
-            copy_dir_recursive_inner(&source_path, &target_path, stats)?;
-        } else if source_path.is_file() {
-            std::fs::copy(&source_path, &target_path).with_context(|| {
-                format!(
-                    "Failed to copy {} -> {}",
-                    source_path.display(),
-                    target_path.display()
-                )
-            })?;
-            let len = std::fs::metadata(&source_path)
-                .with_context(|| format!("Failed to stat {}", source_path.display()))?
-                .len();
-            stats.files += 1;
-            stats.bytes += len;
-        }
+        remove_dir_all(path.to_path_buf()).await?;
     }
     Ok(())
 }
@@ -511,13 +484,13 @@ mod tests {
         assert!(err.to_string().contains("not available for game"));
     }
 
-    #[test]
-    fn ensure_destination_dir_requires_force_when_existing() {
+    #[compio::test]
+    async fn ensure_destination_dir_requires_force_when_existing() {
         let temp = tempfile::tempdir().unwrap();
         let existing = temp.path().join("existing");
         std::fs::create_dir_all(&existing).unwrap();
 
-        let err = ensure_destination_dir(&existing, false).unwrap_err();
+        let err = ensure_destination_dir(&existing, false).await.unwrap_err();
         assert!(err.to_string().contains("Destination exists"));
     }
 
@@ -532,7 +505,10 @@ mod tests {
         f.write_all(&[1, 2, 3, 4]).unwrap();
 
         let target = temp.path().join("target");
-        let stats = copy_dir_recursive(&source, &target).unwrap();
+        let stats = compio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(copy_dir_recursive(source.clone(), target.clone()))
+            .unwrap();
         assert_eq!(stats.files, 1);
         assert_eq!(stats.bytes, 4);
         assert_eq!(

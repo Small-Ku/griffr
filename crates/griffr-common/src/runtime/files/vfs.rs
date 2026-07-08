@@ -22,8 +22,8 @@ use crate::api::crypto::RES_INDEX_KEY;
 use crate::config::{GameId, ServerId};
 use crate::runtime::task_pool::{ProgressEvent, Task, TaskPoolRunner};
 use crate::runtime::{
-    logical_path_from_root, normalize_logical_path, PathOutcomeTracker, PathReuseMethod,
-    RunningByteProgress,
+    collect_files_recursive, logical_path_from_root, normalize_logical_path,
+    remove_empty_dirs_recursive, PathOutcomeTracker, PathReuseMethod, RunningByteProgress,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -124,12 +124,16 @@ fn should_include_bootstrap_group(scope: VfsBootstrapScope, resource_name: &str)
     }
 }
 
-fn read_local_res_index(path: &Path) -> Result<Option<crate::api::types::ResIndex>> {
+async fn read_local_res_index(path: &Path) -> Result<Option<crate::api::types::ResIndex>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let encrypted_b64 = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let encrypted_b64 = String::from_utf8(
+        compio::fs::read(path)
+            .await
+            .with_context(|| format!("Failed to read {}", path.display()))?,
+    )
+    .with_context(|| format!("{} is not valid UTF-8 text", path.display()))?;
     let decrypted = crate::api::crypto::decrypt_res_index(encrypted_b64.trim(), RES_INDEX_KEY)
         .with_context(|| format!("Failed to decrypt {}", path.display()))?;
     let index = serde_json::from_str::<crate::api::types::ResIndex>(&decrypted)
@@ -186,59 +190,6 @@ fn res_index_to_ensure_tasks(
     (tasks, total_files, total_bytes)
 }
 
-fn collect_files_recursive(root: &Path) -> Result<Vec<std::path::PathBuf>> {
-    let mut stack = vec![root.to_path_buf()];
-    let mut files = Vec::new();
-    while let Some(dir) = stack.pop() {
-        for entry in
-            std::fs::read_dir(&dir).with_context(|| format!("Failed to read {}", dir.display()))?
-        {
-            let entry = entry.with_context(|| format!("Failed to read {}", dir.display()))?;
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.is_file() {
-                files.push(path);
-            }
-        }
-    }
-    Ok(files)
-}
-
-fn remove_empty_dirs_recursive(root: &Path) -> Result<()> {
-    if !root.is_dir() {
-        return Ok(());
-    }
-    let mut dirs = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        dirs.push(dir.clone());
-        for entry in
-            std::fs::read_dir(&dir).with_context(|| format!("Failed to read {}", dir.display()))?
-        {
-            let entry = entry.with_context(|| format!("Failed to read {}", dir.display()))?;
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            }
-        }
-    }
-    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
-    for dir in dirs {
-        if dir == root {
-            continue;
-        }
-        if std::fs::read_dir(&dir)
-            .with_context(|| format!("Failed to read {}", dir.display()))?
-            .next()
-            .is_none()
-        {
-            let _ = std::fs::remove_dir(&dir);
-        }
-    }
-    Ok(())
-}
-
 pub async fn plan_persistent_bootstrap_tasks(
     api_client: &ApiClient,
     game_id: GameId,
@@ -278,8 +229,10 @@ pub async fn plan_persistent_bootstrap_tasks(
         let index_url = format!("{}/index_{}.json", resource.path, resource.name);
 
         let local_pref = read_local_res_index(&persistent_root.join(&pref_filename))
+            .await
             .with_context(|| format!("Failed to parse local {}", pref_filename))?;
         let local_index = read_local_res_index(&persistent_root.join(&index_filename))
+            .await
             .with_context(|| format!("Failed to parse local {}", index_filename))?;
 
         let (selected_index, manifest_kind) = if let Some(pref) = local_pref {
@@ -423,18 +376,20 @@ pub async fn bootstrap_persistent_vfs_with_runner(
     if cfg.prune_extra_files {
         let vfs_root = persistent_root.join("VFS");
         if vfs_root.is_dir() {
-            for file in collect_files_recursive(&vfs_root)? {
+            let files = collect_files_recursive(vfs_root.clone()).await?;
+            for file in files {
                 let rel = match file.strip_prefix(persistent_root) {
-                    Ok(r) => r,
+                    Ok(r) => r.to_path_buf(),
                     Err(_) => continue,
                 };
                 let rel_norm = normalize_logical_path(&rel.to_string_lossy());
                 if !plan.expected_paths.contains(&rel_norm) {
-                    std::fs::remove_file(&file)
+                    compio::fs::remove_file(&file)
+                        .await
                         .with_context(|| format!("Failed to remove {}", file.display()))?;
                 }
             }
-            remove_empty_dirs_recursive(&vfs_root)?;
+            remove_empty_dirs_recursive(vfs_root.clone()).await?;
         }
     }
 
