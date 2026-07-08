@@ -3,6 +3,8 @@ pub mod files;
 pub mod issues;
 pub mod launcher;
 pub mod manager;
+mod paths;
+mod progress;
 pub mod server;
 pub mod task_pool;
 
@@ -19,4 +21,9 @@ pub use files::vfs::{
 pub use issues::{FileIssue, FileIssueKind};
 pub use launcher::{GameProcess, Launcher};
 pub use manager::GameManager;
+pub use paths::{is_launcher_metadata_path, logical_path_from_root, normalize_logical_path};
+pub use progress::{
+    PathAttemptKind, PathOutcome, PathOutcomeSummary, PathOutcomeTracker, PathReuseMethod,
+    RunningByteProgress,
+};
 pub use server::Server;

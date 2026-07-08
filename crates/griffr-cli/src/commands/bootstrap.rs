@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
@@ -134,8 +133,8 @@ pub async fn bootstrap(
     pool_cfg.download_progress_buffer_bytes = opts.download_progress_buffer_bytes;
     let mut task_pool_runner = TaskPoolRunner::new(pool_cfg)?;
 
-    let progress = Arc::new(StepProgress::new("bootstrap.persistent-vfs", opts.verbose));
-    let progress_cb = progress.clone();
+    let progress = StepProgress::new("bootstrap.persistent-vfs", opts.verbose);
+    let progress_cb = progress.byte_callback("persistent-vfs");
     let result = bootstrap_persistent_vfs_with_runner(
         &api_client,
         game_id,
@@ -153,9 +152,7 @@ pub async fn bootstrap(
             prune_extra_files,
         },
         &mut task_pool_runner,
-        Some(&move |current, total| {
-            progress_cb.update_bytes(current, total, "persistent-vfs");
-        }),
+        Some(&progress_cb),
     )
     .await
     .context("Failed to bootstrap Persistent VFS")?;

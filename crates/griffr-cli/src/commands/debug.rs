@@ -5,6 +5,7 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::api::crypto;
 use griffr_common::api::types::ResIndex;
 use griffr_common::config::{GameId, ServerId};
+use griffr_common::runtime::normalize_logical_path;
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -166,13 +167,6 @@ struct ResourceStateSnapshot {
     streamingassets: ResourceRootSnapshot,
 }
 
-fn normalize_vfs_rel_path(path: &str) -> String {
-    path.replace('\\', "/")
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .to_ascii_lowercase()
-}
-
 fn merge_entries(
     target: &mut std::collections::BTreeSet<String>,
     index: &Option<ResIndex>,
@@ -183,7 +177,7 @@ fn merge_entries(
             if file.name.is_empty() {
                 continue;
             }
-            let normalized = normalize_vfs_rel_path(&file.name);
+            let normalized = normalize_logical_path(&file.name);
             if !normalized.is_empty() && target.insert(normalized) {
                 added += 1;
             }
@@ -220,7 +214,7 @@ fn merge_entries_with_checksums(
             else {
                 continue;
             };
-            let normalized = normalize_vfs_rel_path(&file.name);
+            let normalized = normalize_logical_path(&file.name);
             if normalized.is_empty() {
                 continue;
             }
@@ -390,7 +384,7 @@ fn collect_actual_vfs_files(root: &std::path::Path) -> Result<std::collections::
             let rel = path
                 .strip_prefix(root)
                 .with_context(|| format!("Failed to strip prefix {}", root.display()))?;
-            files.insert(normalize_vfs_rel_path(&rel.to_string_lossy()));
+            files.insert(normalize_logical_path(&rel.to_string_lossy()));
         }
     }
     Ok(files)

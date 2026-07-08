@@ -15,6 +15,7 @@ use crate::config::{GameConfig, GameId, ServerConfig, ServerId};
 use crate::runtime::task_pool::{
     run_tasks_with_progress, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
+use crate::runtime::{PathOutcomeTracker, PathReuseMethod, RunningByteProgress};
 
 /// Manages game installation state and version tracking
 #[derive(Debug)]
@@ -32,6 +33,23 @@ pub struct IntegrityRunSummary {
 }
 
 impl GameManager {
+    fn normalize_progress_path(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
+    fn resolve_reused_logical_path(
+        path: &Path,
+        tracked_paths: &HashSet<String>,
+        extra_tracked_paths: &HashSet<String>,
+    ) -> Option<String> {
+        let normalized = Self::normalize_progress_path(path);
+        tracked_paths
+            .iter()
+            .chain(extra_tracked_paths.iter())
+            .find(|candidate| normalized.ends_with(candidate.as_str()))
+            .cloned()
+    }
+
     fn task_progress_path(task: &Task) -> Option<&str> {
         match task {
             Task::Download { logical_path, .. }
@@ -425,13 +443,11 @@ impl GameManager {
         let total = tasks.len();
         let mut issues = Vec::new();
         let mut finished = 0usize;
-        let mut downloaded_paths = HashSet::new();
-        let mut downloaded_bytes_by_file = std::collections::HashMap::<String, u64>::new();
-        let mut running_downloaded_bytes = 0u64;
-        let mut reused_paths = HashSet::new();
+        let mut download_progress = RunningByteProgress::new();
+        let mut outcomes = PathOutcomeTracker::new();
 
         let mut on_event = |event: &ProgressEvent| match event {
-            ProgressEvent::Verified { path, issue, .. } => {
+            ProgressEvent::Verified { path, ok, issue } => {
                 if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
                     return;
                 }
@@ -439,18 +455,19 @@ impl GameManager {
                     cb(finished, total, path);
                 }
                 finished += 1;
+                outcomes.record_verified(path, *ok);
                 if tracked_paths.contains(path) {
                     if let Some(issue) = issue.clone() {
                         issues.push(issue);
                     }
                 }
             }
-            ProgressEvent::DownloadedBytes { path, bytes, .. } => {
+            ProgressEvent::DownloadedBytes { path, .. } => {
                 if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
                     return;
                 }
-                let old_bytes = downloaded_bytes_by_file.insert(path.clone(), *bytes).unwrap_or(0);
-                running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
+                let running_downloaded_bytes =
+                    download_progress.handle_download_event(event).expect("download event");
                 if let Some(ref cb) = download_progress_callback {
                     cb(running_downloaded_bytes, tracked_total_bytes, path);
                 }
@@ -459,9 +476,9 @@ impl GameManager {
                 if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
                     return;
                 }
-                downloaded_paths.insert(path.clone());
-                let old_bytes = downloaded_bytes_by_file.insert(path.clone(), *bytes).unwrap_or(0);
-                running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
+                outcomes.record_downloaded(path, *bytes);
+                let running_downloaded_bytes =
+                    download_progress.handle_download_event(event).expect("download event");
                 if let Some(ref cb) = progress_callback {
                     cb(finished, total, path);
                 }
@@ -470,9 +487,17 @@ impl GameManager {
                 }
             }
             ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {
-                let as_str = path.to_string_lossy();
-                if tracked_paths.iter().any(|p| as_str.ends_with(p)) {
-                    reused_paths.insert(path.clone());
+                if let Some(logical_path) =
+                    Self::resolve_reused_logical_path(path, &tracked_paths, &extra_tracked_paths)
+                {
+                    outcomes.record_reused(
+                        &logical_path,
+                        if matches!(event, ProgressEvent::Hardlinked { .. }) {
+                            PathReuseMethod::Hardlink
+                        } else {
+                            PathReuseMethod::Copy
+                        },
+                    );
                 }
             }
             ProgressEvent::Retried { path, reason } => {
@@ -499,11 +524,12 @@ impl GameManager {
             let _ = run_tasks_with_progress(tasks, TaskPoolConfig::default(), Some(&mut on_event))?;
         }
 
+        let summary = outcomes.summary();
         Ok(IntegrityRunSummary {
             issues,
             verified_files: finished,
-            downloaded_files: downloaded_paths.len(),
-            reused_files: reused_paths.len(),
+            downloaded_files: summary.downloaded_files,
+            reused_files: summary.reused_files,
         })
     }
 

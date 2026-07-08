@@ -4,14 +4,8 @@ use std::collections::HashMap;
 use crate::api::types::GameFileEntry;
 use crate::api::ApiClient;
 use crate::config::{GameId, ServerId};
+pub(crate) use crate::runtime::is_launcher_metadata_path;
 use crate::runtime::task_pool::{run_tasks, ProgressEvent, Task, TaskPoolConfig};
-
-pub(crate) fn is_launcher_metadata_path(path: &str) -> bool {
-    matches!(
-        path.replace('\\', "/").to_ascii_lowercase().as_str(),
-        "config.ini" | "game_files" | "package_files"
-    )
-}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn plan_file_reuse(

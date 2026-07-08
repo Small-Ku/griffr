@@ -1,9 +1,8 @@
 use std::path::PathBuf;
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::{GameId, ServerId};
+use griffr_common::runtime::is_launcher_metadata_path;
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
 use griffr_common::runtime::{plan_vfs_tasks, VfsMaterializeConfig, VfsTaskPlan};
 use serde_json::json;
@@ -13,13 +12,6 @@ use super::supports_vfs_sync;
 use crate::progress::StepProgress;
 use crate::ui;
 use crate::{GlobalOptions, OutputFormat};
-
-fn is_launcher_metadata_issue(path: &str) -> bool {
-    matches!(
-        path.replace('\\', "/").to_ascii_lowercase().as_str(),
-        "game_files" | "package_files"
-    )
-}
 
 pub async fn verify(
     path: PathBuf,
@@ -90,21 +82,12 @@ pub async fn verify(
     let progress_cb = if opts.output == OutputFormat::Json {
         None
     } else {
-        let verify_bar = Arc::new(StepProgress::new(
+        let verify_bar = StepProgress::new(
             if repair { "verify+repair" } else { "verify" },
             opts.verbose,
-        ));
-        let verify_bar_cb = verify_bar.clone();
-        let verify_download_bar_cb = verify_bar.clone();
-        Some((
-            verify_bar,
-            move |current: usize, total: usize, file: &str| {
-                verify_bar_cb.update(current, total, file);
-            },
-            move |downloaded: u64, total: u64, file: &str| {
-                verify_download_bar_cb.update_bytes(downloaded, total, file);
-            },
-        ))
+        );
+        let (cb1, cb2) = verify_bar.split_callbacks();
+        Some((verify_bar, cb1, cb2))
     };
 
     let mut source_roots = Vec::new();
@@ -227,7 +210,7 @@ pub async fn verify(
                     "actual_size": issue.actual_size,
                     "expected_md5": issue.expected_md5,
                     "actual_md5": issue.actual_md5,
-                    "is_metadata": is_launcher_metadata_issue(&issue.path),
+                    "is_metadata": is_launcher_metadata_path(&issue.path),
                 })
             })
             .collect::<Vec<_>>();
@@ -277,13 +260,13 @@ pub async fn verify(
         let metadata_issues: Vec<_> = summary
             .issues
             .iter()
-            .filter(|issue| is_launcher_metadata_issue(&issue.path))
+            .filter(|issue| is_launcher_metadata_path(&issue.path))
             .cloned()
             .collect();
         let remaining_non_metadata = summary
             .issues
             .iter()
-            .filter(|issue| !is_launcher_metadata_issue(&issue.path))
+            .filter(|issue| !is_launcher_metadata_path(&issue.path))
             .count();
 
         if !metadata_issues.is_empty() {

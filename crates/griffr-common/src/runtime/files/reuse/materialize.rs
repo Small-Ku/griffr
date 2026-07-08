@@ -7,6 +7,9 @@ use tracing::{info, warn};
 
 use crate::api::types::GameFileEntry;
 use crate::api::ApiClient;
+use crate::runtime::{
+    is_launcher_metadata_path, logical_path_from_root, PathOutcomeTracker, PathReuseMethod,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_file_reuse_flow(
@@ -84,7 +87,7 @@ pub async fn materialize_game_files_with_pool(
 
     let target_by_path: HashMap<&str, &GameFileEntry> = manifest
         .iter()
-        .filter(|entry| !super::plan::is_launcher_metadata_path(&entry.path))
+        .filter(|entry| !is_launcher_metadata_path(&entry.path))
         .map(|entry| (entry.path.as_str(), entry))
         .collect();
     let mut source_candidates: HashMap<String, Vec<std::path::PathBuf>> = HashMap::new();
@@ -92,7 +95,7 @@ pub async fn materialize_game_files_with_pool(
     for item in source_manifest_results.into_iter().flatten() {
         let (source, source_manifest) = item;
         for entry in source_manifest {
-            if super::plan::is_launcher_metadata_path(&entry.path) {
+            if is_launcher_metadata_path(&entry.path) {
                 continue;
             }
             let Some(target_entry) = target_by_path.get(entry.path.as_str()) else {
@@ -114,7 +117,7 @@ pub async fn materialize_game_files_with_pool(
     let mut dry_run_downloaded = 0usize;
     let tasks = manifest
         .iter()
-        .filter(|entry| !super::plan::is_launcher_metadata_path(&entry.path))
+        .filter(|entry| !is_launcher_metadata_path(&entry.path))
         .map(|entry| {
             let candidates = source_candidates.remove(&entry.path).unwrap_or_default();
             if config.dry_run {
@@ -154,7 +157,7 @@ pub async fn materialize_game_files_with_pool(
     let total = tasks.len();
     let total_bytes: u64 = manifest
         .iter()
-        .filter(|entry| !super::plan::is_launcher_metadata_path(&entry.path))
+        .filter(|entry| !is_launcher_metadata_path(&entry.path))
         .map(|entry| entry.size)
         .sum();
     let mut finished_stream = 0usize;
@@ -193,43 +196,57 @@ pub async fn materialize_game_files_with_pool(
     };
 
     let mut issues = Vec::new();
-    let mut reused = std::collections::HashSet::new();
-    let mut downloaded = std::collections::HashSet::new();
+    let mut outcomes = PathOutcomeTracker::new();
     for event in result.events {
         match event {
-            crate::runtime::task_pool::ProgressEvent::Verified { path: _, ok, issue } => {
+            crate::runtime::task_pool::ProgressEvent::Verified { path, ok, issue } => {
+                outcomes.record_verified(&path, ok);
                 if !ok {
                     if let Some(issue) = issue {
                         issues.push(issue);
                     }
                 }
             }
-            crate::runtime::task_pool::ProgressEvent::Hardlinked { path }
-            | crate::runtime::task_pool::ProgressEvent::Copied { path } => {
-                reused.insert(path);
+            crate::runtime::task_pool::ProgressEvent::Hardlinked { path } => {
+                if let Some(rel) = logical_path_from_root(install_path, &path) {
+                    outcomes.record_reused(
+                        &rel,
+                        PathReuseMethod::Hardlink,
+                    );
+                }
             }
-            crate::runtime::task_pool::ProgressEvent::Downloaded { path, .. } => {
-                downloaded.insert(path);
+            crate::runtime::task_pool::ProgressEvent::Copied { path } => {
+                if let Some(rel) = logical_path_from_root(install_path, &path) {
+                    outcomes.record_reused(
+                        &rel,
+                        PathReuseMethod::Copy,
+                    );
+                }
+            }
+            crate::runtime::task_pool::ProgressEvent::Downloaded { path, bytes } => {
+                outcomes.record_downloaded(&path, bytes);
             }
             crate::runtime::task_pool::ProgressEvent::Failed { path, reason } => {
+                outcomes.record_failed(&path);
                 warn!("materialize failed for {}: {}", path, reason);
             }
             _ => {}
         }
     }
+    let summary = outcomes.summary();
 
     if !config.dry_run {
         info!(
             "File materialization complete: reused={} downloaded={} issues={}",
-            reused.len(),
-            downloaded.len(),
+            summary.reused_files,
+            summary.downloaded_files,
             issues.len()
         );
     }
 
     Ok(super::models::MaterializeSummary {
-        reused_files: reused.len(),
-        downloaded_files: downloaded.len(),
+        reused_files: summary.reused_files,
+        downloaded_files: summary.downloaded_files,
         issues,
     })
 }

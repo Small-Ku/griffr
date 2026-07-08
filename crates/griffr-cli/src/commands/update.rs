@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::GameId;
+use griffr_common::runtime::is_launcher_metadata_path;
 use griffr_common::runtime::task_pool::{
     ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
@@ -16,7 +16,7 @@ use griffr_common::runtime::{
 
 use super::local::detect_local_install;
 use super::supports_vfs_sync;
-use crate::progress::StepProgress;
+use crate::progress::{ByteProgressTracker, StepProgress, VerifyTaskProgressTracker};
 use crate::ui;
 use crate::GlobalOptions;
 
@@ -52,13 +52,6 @@ fn archive_base_from_url(url: &str) -> Option<String> {
     }
 
     None
-}
-
-fn is_launcher_metadata_issue(path: &str) -> bool {
-    matches!(
-        path.replace('\\', "/").to_ascii_lowercase().as_str(),
-        "game_files" | "package_files"
-    )
 }
 
 fn choose_update_package(
@@ -235,46 +228,15 @@ async fn verify_updated_install(
 ) -> Result<()> {
     if skip_verify {
         if !extra_tasks.is_empty() {
-            let extra_task_count = extra_tasks.len();
-            let bar = Arc::new(StepProgress::new("update.vfs-sync", opts.verbose));
-            let bar_cb = bar.clone();
-            let bar_download_cb = bar.clone();
-            let mut finished = 0usize;
-            let mut downloaded_bytes_by_path = HashMap::<String, u64>::new();
-            let mut running_downloaded_bytes = 0u64;
+            let bar = StepProgress::new("update.vfs-sync", opts.verbose);
+            let mut byte_progress = ByteProgressTracker::new(bar.clone(), extra_task_total_bytes);
+            let mut verify_progress = VerifyTaskProgressTracker::new(bar.clone(), extra_tasks.len());
             let _ = task_pool_runner
                 .run_batch_with_progress(
                     extra_tasks,
-                    Some(&mut |event: &ProgressEvent| match event {
-                        ProgressEvent::Verified { path, .. } => {
-                            bar_cb.update(finished, extra_task_count, path);
-                            finished = finished.saturating_add(1);
-                        }
-                        ProgressEvent::DownloadedBytes { path, bytes, .. } => {
-                            let old_bytes =
-                                downloaded_bytes_by_path.insert(path.clone(), *bytes).unwrap_or(0);
-                            running_downloaded_bytes = running_downloaded_bytes
-                                .saturating_add(*bytes)
-                                .saturating_sub(old_bytes);
-                            bar_download_cb.update_bytes(
-                                running_downloaded_bytes,
-                                extra_task_total_bytes.max(1),
-                                path,
-                            );
-                        }
-                        ProgressEvent::Downloaded { path, bytes } => {
-                            let old_bytes =
-                                downloaded_bytes_by_path.insert(path.clone(), *bytes).unwrap_or(0);
-                            running_downloaded_bytes = running_downloaded_bytes
-                                .saturating_add(*bytes)
-                                .saturating_sub(old_bytes);
-                            bar_download_cb.update_bytes(
-                                running_downloaded_bytes,
-                                extra_task_total_bytes.max(1),
-                                path,
-                            );
-                        }
-                        _ => {}
+                    Some(&mut |event: &ProgressEvent| {
+                        byte_progress.handle_event(event);
+                        verify_progress.handle_event(event);
                     }),
                 )
                 .context("Failed to execute extra DAG tasks during skip-verify")?;
@@ -289,9 +251,8 @@ async fn verify_updated_install(
         return Ok(());
     }
 
-    let verify_bar = Arc::new(StepProgress::new("update.verify+repair", opts.verbose));
-    let verify_bar_cb = verify_bar.clone();
-    let verify_download_bar_cb = verify_bar.clone();
+    let verify_bar = StepProgress::new("update.verify+repair", opts.verbose);
+    let (cb1, cb2) = verify_bar.split_callbacks();
     let summary = manager
         .run_integrity_pool_with_runner(
             api_client,
@@ -301,12 +262,8 @@ async fn verify_updated_install(
             false,
             extra_tasks,
             Some(task_pool_runner),
-            Some(move |current: usize, total: usize, file: &str| {
-                verify_bar_cb.update(current, total, file);
-            }),
-            Some(move |downloaded: u64, total: u64, file: &str| {
-                verify_download_bar_cb.update_bytes(downloaded, total, file);
-            }),
+            Some(cb1),
+            Some(cb2),
         )
         .await?;
     verify_bar.finish();
@@ -321,7 +278,7 @@ async fn verify_updated_install(
     let remaining_non_metadata = summary
         .issues
         .iter()
-        .filter(|issue| !is_launcher_metadata_issue(&issue.path))
+        .filter(|issue| !is_launcher_metadata_path(&issue.path))
         .count();
     if remaining_non_metadata > 0 {
         anyhow::bail!(
@@ -389,8 +346,8 @@ async fn update_via_reuse(
         reuse_paths.len()
     ));
 
-    let materialize_bar = Arc::new(StepProgress::new("update.materialize", opts.verbose));
-    let materialize_bar_cb = materialize_bar.clone();
+    let materialize_bar = StepProgress::new("update.materialize", opts.verbose);
+    let (materialize_progress_cb, materialize_download_cb) = materialize_bar.split_callbacks();
     let materialized = materialize_game_files_with_pool(
         api_client,
         game_id,
@@ -405,12 +362,8 @@ async fn update_via_reuse(
             source_installs,
         },
         Some(task_pool_runner),
-        Some(|current: usize, total: usize, file: &str| {
-            materialize_bar_cb.update(current, total, file);
-        }),
-        Some(|downloaded: u64, total: u64, file: &str| {
-            materialize_bar_cb.update_bytes(downloaded, total, file);
-        }),
+        Some(materialize_progress_cb),
+        Some(materialize_download_cb),
     )
     .await?;
     materialize_bar.finish();
@@ -511,20 +464,14 @@ async fn download_and_extract_archives_from_dir(
         }
 
         let verify_task_count = verify_tasks.len();
-        let verify_bar = Arc::new(StepProgress::new(
+        let verify_bar = StepProgress::new(
             format!("update.{}.archive-verify", label),
             opts.verbose,
-        ));
-        let verify_bar_cb = verify_bar.clone();
-        let mut finished = 0usize;
+        );
+        let mut verify_progress = VerifyTaskProgressTracker::new(verify_bar.clone(), verify_task_count);
         let verify_result = task_pool_runner.run_batch_with_progress(
             verify_tasks,
-            Some(&mut |event: &ProgressEvent| {
-                if let ProgressEvent::Verified { path, .. } = event {
-                    verify_bar_cb.update(finished, verify_task_count.max(1), path);
-                    finished = finished.saturating_add(1);
-                }
-            }),
+            Some(&mut |event: &ProgressEvent| verify_progress.handle_event(event)),
         )?;
         verify_bar.finish();
         let verify_failures = verify_result
@@ -542,42 +489,14 @@ async fn download_and_extract_archives_from_dir(
             );
         }
 
-        let archive_bar = Arc::new(StepProgress::new(
+        let archive_bar = StepProgress::new(
             format!("update.{}.archive-apply", label),
             opts.verbose,
-        ));
-        let archive_bar_cb = archive_bar.clone();
-        let mut extracted_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
-        let mut extract_total_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
-        let mut running_extracted_bytes = 0u64;
-        let mut running_extract_total_bytes = 0u64;
+        );
+        let mut progress = ByteProgressTracker::new(archive_bar.clone(), 0);
         let result = task_pool_runner.run_batch_with_progress(
             extract_tasks,
-            Some(&mut |event: &ProgressEvent| {
-                if let ProgressEvent::ExtractedBytes {
-                    path,
-                    bytes,
-                    total_bytes,
-                } = event
-                {
-                    let old_bytes =
-                        extracted_bytes_by_archive.insert(path.clone(), *bytes).unwrap_or(0);
-                    running_extracted_bytes = running_extracted_bytes
-                        .saturating_add(*bytes)
-                        .saturating_sub(old_bytes);
-                    let old_total = extract_total_bytes_by_archive
-                        .insert(path.clone(), *total_bytes)
-                        .unwrap_or(0);
-                    running_extract_total_bytes = running_extract_total_bytes
-                        .saturating_add(*total_bytes)
-                        .saturating_sub(old_total);
-                    archive_bar_cb.update_bytes(
-                        running_extracted_bytes,
-                        running_extract_total_bytes.max(1),
-                        path,
-                    );
-                }
-            }),
+            Some(&mut |event: &ProgressEvent| progress.handle_event(event)),
         )?;
         archive_bar.finish();
 
@@ -612,55 +531,14 @@ async fn download_and_extract_archives_from_dir(
         });
     }
 
-    let archive_bar = Arc::new(StepProgress::new(
+    let archive_bar = StepProgress::new(
         format!("update.{}.archive-pipeline", label),
         opts.verbose,
-    ));
-    let archive_bar_cb = archive_bar.clone();
-    let mut downloaded_archive_bytes_by_part = std::collections::HashMap::<String, u64>::new();
-    let mut extracted_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
-    let mut extract_total_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
-    let mut running_downloaded_bytes = 0u64;
-    let mut running_extracted_bytes = 0u64;
-    let mut running_extract_total_bytes = 0u64;
+    );
+    let mut progress = ByteProgressTracker::new(archive_bar.clone(), total_size);
     let result = task_pool_runner.run_batch_with_progress(
         tasks,
-        Some(&mut |event: &ProgressEvent| match event {
-            ProgressEvent::DownloadedBytes { path, bytes, .. } => {
-                let old_bytes = downloaded_archive_bytes_by_part.insert(path.clone(), *bytes).unwrap_or(0);
-                running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
-                archive_bar_cb.update_bytes(
-                    running_downloaded_bytes.saturating_add(running_extracted_bytes),
-                    total_size.saturating_add(running_extract_total_bytes),
-                    path,
-                );
-            }
-            ProgressEvent::Downloaded { path, bytes } => {
-                let old_bytes = downloaded_archive_bytes_by_part.insert(path.clone(), *bytes).unwrap_or(0);
-                running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
-                archive_bar_cb.update_bytes(
-                    running_downloaded_bytes.saturating_add(running_extracted_bytes),
-                    total_size.saturating_add(running_extract_total_bytes),
-                    path,
-                );
-            }
-            ProgressEvent::ExtractedBytes {
-                path,
-                bytes,
-                total_bytes,
-            } => {
-                let old_bytes = extracted_bytes_by_archive.insert(path.clone(), *bytes).unwrap_or(0);
-                running_extracted_bytes = running_extracted_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
-                let old_total = extract_total_bytes_by_archive.insert(path.clone(), *total_bytes).unwrap_or(0);
-                running_extract_total_bytes = running_extract_total_bytes.saturating_add(*total_bytes).saturating_sub(old_total);
-                archive_bar_cb.update_bytes(
-                    running_downloaded_bytes.saturating_add(running_extracted_bytes),
-                    total_size.saturating_add(running_extract_total_bytes),
-                    path,
-                );
-            }
-            _ => {}
-        }),
+        Some(&mut |event: &ProgressEvent| progress.handle_event(event)),
     )?;
     archive_bar.finish();
 

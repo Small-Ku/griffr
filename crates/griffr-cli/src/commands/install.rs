@@ -1,11 +1,11 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::PackageInfo;
 use griffr_common::config::{GameConfig, GameId, ServerId};
+use griffr_common::runtime::is_launcher_metadata_path;
 use griffr_common::runtime::task_pool::{
     ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
@@ -16,16 +16,9 @@ use griffr_common::runtime::{
 
 use super::local::detect_local_install;
 use super::supports_vfs_sync;
-use crate::progress::StepProgress;
+use crate::progress::{ByteProgressTracker, StepProgress};
 use crate::ui;
 use crate::GlobalOptions;
-
-fn is_launcher_metadata_issue(path: &str) -> bool {
-    matches!(
-        path.replace('\\', "/").to_ascii_lowercase().as_str(),
-        "game_files" | "package_files"
-    )
-}
 
 fn strip_url_query(s: &str) -> &str {
     s.split('?').next().unwrap_or(s)
@@ -260,52 +253,11 @@ pub async fn install(
             });
         }
 
-        let archive_bar = Arc::new(StepProgress::new("install.archive-pipeline", opts.verbose));
-        let archive_bar_cb = archive_bar.clone();
-        let mut downloaded_archive_bytes_by_part = std::collections::HashMap::<String, u64>::new();
-        let mut extracted_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
-        let mut extract_total_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
-        let mut running_downloaded_bytes = 0u64;
-        let mut running_extracted_bytes = 0u64;
-        let mut running_extract_total_bytes = 0u64;
+        let archive_bar = StepProgress::new("install.archive-pipeline", opts.verbose);
+        let mut progress = ByteProgressTracker::new(archive_bar.clone(), total_archive_download_bytes);
         let result = task_pool.run_batch_with_progress(
             tasks,
-            Some(&mut |event: &ProgressEvent| match event {
-                ProgressEvent::DownloadedBytes { path, bytes, .. } => {
-                    let old_bytes = downloaded_archive_bytes_by_part.insert(path.clone(), *bytes).unwrap_or(0);
-                    running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
-                    archive_bar_cb.update_bytes(
-                        running_downloaded_bytes.saturating_add(running_extracted_bytes),
-                        total_archive_download_bytes.saturating_add(running_extract_total_bytes),
-                        path,
-                    );
-                }
-                ProgressEvent::Downloaded { path, bytes } => {
-                    let old_bytes = downloaded_archive_bytes_by_part.insert(path.clone(), *bytes).unwrap_or(0);
-                    running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
-                    archive_bar_cb.update_bytes(
-                        running_downloaded_bytes.saturating_add(running_extracted_bytes),
-                        total_archive_download_bytes.saturating_add(running_extract_total_bytes),
-                        path,
-                    );
-                }
-                ProgressEvent::ExtractedBytes {
-                    path,
-                    bytes,
-                    total_bytes,
-                } => {
-                    let old_bytes = extracted_bytes_by_archive.insert(path.clone(), *bytes).unwrap_or(0);
-                    running_extracted_bytes = running_extracted_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
-                    let old_total = extract_total_bytes_by_archive.insert(path.clone(), *total_bytes).unwrap_or(0);
-                    running_extract_total_bytes = running_extract_total_bytes.saturating_add(*total_bytes).saturating_sub(old_total);
-                    archive_bar_cb.update_bytes(
-                        running_downloaded_bytes.saturating_add(running_extracted_bytes),
-                        total_archive_download_bytes.saturating_add(running_extract_total_bytes),
-                        path,
-                    );
-                }
-                _ => {}
-            }),
+            Some(&mut |event: &ProgressEvent| progress.handle_event(event)),
         )?;
         archive_bar.finish();
 
@@ -349,8 +301,8 @@ pub async fn install(
                 install_path: source.install_path.clone(),
             });
         }
-        let materialize_bar = Arc::new(StepProgress::new("install.materialize", opts.verbose));
-        let materialize_bar_cb = materialize_bar.clone();
+        let materialize_bar = StepProgress::new("install.materialize", opts.verbose);
+        let (materialize_progress_cb, materialize_download_cb) = materialize_bar.split_callbacks();
         let materialized = materialize_game_files_with_pool(
             &api_client,
             game_id,
@@ -365,12 +317,8 @@ pub async fn install(
                 source_installs,
             },
             Some(&mut task_pool),
-            Some(|current: usize, total: usize, file: &str| {
-                materialize_bar_cb.update(current, total, file);
-            }),
-            Some(|downloaded: u64, total: u64, file: &str| {
-                materialize_bar_cb.update_bytes(downloaded, total, file);
-            }),
+            Some(materialize_progress_cb),
+            Some(materialize_download_cb),
         )
         .await
         .context("Failed to materialize files during install")?;
@@ -435,12 +383,8 @@ pub async fn install(
         ui::print_phase("Verifying install integrity");
         Vec::new()
     };
-    let verify_bar = Arc::new(StepProgress::new("install.verify+repair", opts.verbose));
-    let verify_bar_cb = verify_bar.clone();
-    let verify_download_bar_cb = verify_bar.clone();
-    let verify_progress = move |current: usize, total: usize, file: &str| {
-        verify_bar_cb.update(current, total, file);
-    };
+    let verify_bar = StepProgress::new("install.verify+repair", opts.verbose);
+    let (verify_progress_cb, verify_download_cb) = verify_bar.split_callbacks();
     let summary = manager
         .run_integrity_pool_with_runner(
             &api_client,
@@ -450,10 +394,8 @@ pub async fn install(
             false,
             extra_tasks,
             Some(&mut task_pool),
-            Some(verify_progress),
-            Some(|downloaded: u64, total: u64, file: &str| {
-                verify_download_bar_cb.update_bytes(downloaded, total, file);
-            }),
+            Some(verify_progress_cb),
+            Some(verify_download_cb),
         )
         .await?;
     verify_bar.finish();
@@ -472,7 +414,7 @@ pub async fn install(
             ));
         }
         for issue in &summary.issues {
-            if is_launcher_metadata_issue(&issue.path) {
+            if is_launcher_metadata_path(&issue.path) {
                 metadata_issues.push(issue.clone());
             } else {
                 repairable_issues.push(issue.clone());

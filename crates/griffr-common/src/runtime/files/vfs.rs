@@ -13,7 +13,6 @@
 //! Reference: `ref/ak-endfield-api-archive-main/src/cmds/archive.ts`
 
 use anyhow::{Context, Result};
-use std::collections::HashSet;
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -21,6 +20,10 @@ use crate::api::client::ApiClient;
 use crate::api::crypto::RES_INDEX_KEY;
 use crate::config::{GameId, ServerId};
 use crate::runtime::task_pool::{ProgressEvent, Task, TaskPoolRunner};
+use crate::runtime::{
+    logical_path_from_root, normalize_logical_path, PathOutcomeTracker, PathReuseMethod,
+    RunningByteProgress,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct VfsMaterializeConfig {
@@ -182,13 +185,6 @@ fn res_index_to_ensure_tasks(
     (tasks, total_files, total_bytes)
 }
 
-fn normalize_rel_path(path: &str) -> String {
-    path.replace('\\', "/")
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .to_ascii_lowercase()
-}
-
 fn collect_files_recursive(root: &Path) -> Result<Vec<std::path::PathBuf>> {
     let mut stack = vec![root.to_path_buf()];
     let mut files = Vec::new();
@@ -321,7 +317,7 @@ pub async fn plan_persistent_bootstrap_tasks(
         );
         for task in &group_tasks {
             if let Task::EnsureFile { logical_path, .. } = task {
-                expected_paths.insert(normalize_rel_path(logical_path));
+                expected_paths.insert(normalize_logical_path(logical_path));
             }
         }
         tasks.extend(group_tasks);
@@ -375,43 +371,48 @@ pub async fn bootstrap_persistent_vfs_with_runner(
             .with_context(|| format!("Failed to download {}", manifest.url))?;
     }
 
-    let mut downloaded_paths = HashSet::<String>::new();
-    let mut reused_paths = HashSet::<String>::new();
-    let mut verified_paths = HashSet::<String>::new();
-    let mut failed_paths = HashSet::<String>::new();
-    let mut downloaded_bytes_by_file = std::collections::HashMap::<String, u64>::new();
-    let mut running_downloaded_bytes = 0u64;
+    let mut download_progress = RunningByteProgress::new();
+    let mut outcomes = PathOutcomeTracker::new();
     let mut on_event = |event: &ProgressEvent| match event {
-        ProgressEvent::DownloadedBytes { path, bytes, .. } => {
-            let old_bytes = downloaded_bytes_by_file.insert(path.clone(), *bytes).unwrap_or(0);
-            running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
+        ProgressEvent::DownloadedBytes { .. } => {
+            let running_downloaded_bytes =
+                download_progress
+                    .handle_download_event(event)
+                    .expect("download event");
             if let Some(cb) = progress_callback {
                 cb(running_downloaded_bytes, plan.total_bytes);
             }
         }
         ProgressEvent::Downloaded { path, bytes } => {
-            downloaded_paths.insert(path.clone());
-            let old_bytes = downloaded_bytes_by_file.insert(path.clone(), *bytes).unwrap_or(0);
-            running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
+            outcomes.record_downloaded(path, *bytes);
+            let running_downloaded_bytes =
+                download_progress
+                    .handle_download_event(event)
+                    .expect("download event");
             if let Some(cb) = progress_callback {
                 cb(running_downloaded_bytes, plan.total_bytes);
             }
         }
         ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {
-            reused_paths.insert(path.to_string_lossy().to_string());
+            if let Some(logical_path) = logical_path_from_root(persistent_root, path) {
+                outcomes.record_reused(
+                    &logical_path,
+                    if matches!(event, ProgressEvent::Hardlinked { .. }) {
+                        PathReuseMethod::Hardlink
+                    } else {
+                        PathReuseMethod::Copy
+                    },
+                );
+            }
         }
         ProgressEvent::Verified { path, ok, .. } => {
-            if *ok {
-                verified_paths.insert(path.clone());
-            } else {
-                failed_paths.insert(path.clone());
-            }
+            outcomes.record_verified(path, *ok);
             if let Some(cb) = progress_callback {
-                cb(running_downloaded_bytes, plan.total_bytes);
+                cb(download_progress.total_bytes(), plan.total_bytes);
             }
         }
         ProgressEvent::Failed { path, .. } => {
-            failed_paths.insert(path.clone());
+            outcomes.record_failed(path);
         }
         _ => {}
     };
@@ -428,7 +429,7 @@ pub async fn bootstrap_persistent_vfs_with_runner(
                     Ok(r) => r,
                     Err(_) => continue,
                 };
-                let rel_norm = normalize_rel_path(&rel.to_string_lossy());
+                let rel_norm = normalize_logical_path(&rel.to_string_lossy());
                 if !plan.expected_paths.contains(&rel_norm) {
                     std::fs::remove_file(&file)
                         .with_context(|| format!("Failed to remove {}", file.display()))?;
@@ -438,18 +439,15 @@ pub async fn bootstrap_persistent_vfs_with_runner(
         }
     }
 
-    let skipped_files = verified_paths
-        .len()
-        .saturating_sub(downloaded_paths.len())
-        .saturating_sub(reused_paths.len());
+    let summary = outcomes.summary();
 
     Ok(VfsBootstrapResult {
         total_files: plan.total_files,
-        downloaded_files: downloaded_paths.len(),
-        downloaded_bytes: running_downloaded_bytes,
-        reused_files: reused_paths.len(),
-        skipped_files,
-        failed_files: failed_paths.len(),
+        downloaded_files: summary.downloaded_files,
+        downloaded_bytes: download_progress.total_bytes(),
+        reused_files: summary.reused_files,
+        skipped_files: summary.skipped_files,
+        failed_files: summary.failed_files,
         res_version: plan.res_version,
         scope_label: plan.scope_label,
     })
@@ -575,37 +573,38 @@ pub async fn download_vfs_resources(
         res_version: plan.res_version.clone(),
     };
 
-    let mut downloaded_paths = HashSet::<String>::new();
-    let mut verified_paths = HashSet::<String>::new();
     let mut failed_paths = Vec::<String>::new();
-    let mut downloaded_bytes_by_file = std::collections::HashMap::<String, u64>::new();
-    let mut running_downloaded_bytes = 0u64;
+    let mut download_progress = RunningByteProgress::new();
+    let mut outcomes = PathOutcomeTracker::new();
     let mut on_event = |event: &ProgressEvent| match event {
-        ProgressEvent::DownloadedBytes { path, bytes, .. } => {
-            let old_bytes = downloaded_bytes_by_file.insert(path.clone(), *bytes).unwrap_or(0);
-            running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
+        ProgressEvent::DownloadedBytes { .. } => {
+            let running_downloaded_bytes =
+                download_progress
+                    .handle_download_event(event)
+                    .expect("download event");
             if let Some(cb) = progress_callback {
                 cb(running_downloaded_bytes, plan.total_bytes);
             }
         }
         ProgressEvent::Downloaded { path, bytes } => {
-            downloaded_paths.insert(path.clone());
-            let old_bytes = downloaded_bytes_by_file.insert(path.clone(), *bytes).unwrap_or(0);
-            running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
+            outcomes.record_downloaded(path, *bytes);
+            let running_downloaded_bytes =
+                download_progress
+                    .handle_download_event(event)
+                    .expect("download event");
             if let Some(cb) = progress_callback {
                 cb(running_downloaded_bytes, plan.total_bytes);
             }
         }
         ProgressEvent::Verified { path, ok, .. } => {
-            if *ok {
-                verified_paths.insert(path.clone());
-            }
+            outcomes.record_verified(path, *ok);
             if let Some(cb) = progress_callback {
-                cb(running_downloaded_bytes, plan.total_bytes);
+                cb(download_progress.total_bytes(), plan.total_bytes);
             }
         }
         ProgressEvent::Failed { path, reason } => {
             warn!("Failed to materialize VFS file {}: {}", path, reason);
+            outcomes.record_failed(path);
             failed_paths.push(path.clone());
         }
         _ => {}
@@ -614,9 +613,10 @@ pub async fn download_vfs_resources(
         .run_batch_with_progress(plan.tasks, Some(&mut on_event))
         .context("Failed to materialize VFS files")?;
 
-    total_result.downloaded_files = downloaded_paths.len();
-    total_result.downloaded_bytes = running_downloaded_bytes;
-    total_result.skipped_files = verified_paths.len().saturating_sub(downloaded_paths.len());
+    let summary = outcomes.summary();
+    total_result.downloaded_files = summary.downloaded_files;
+    total_result.downloaded_bytes = summary.downloaded_bytes;
+    total_result.skipped_files = summary.skipped_files;
 
     if !failed_paths.is_empty() {
         warn!("VFS sync had {} failed file(s)", failed_paths.len());
