@@ -1139,6 +1139,7 @@ dependencies = [
 name = "griffr-gui"
 version = "0.0.1"
 dependencies = [
+ "bitflags",
  "griffr-gui-macros",
  "rapidhash",
  "winio",

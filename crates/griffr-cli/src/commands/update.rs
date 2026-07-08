@@ -230,7 +230,8 @@ async fn verify_updated_install(
         if !extra_tasks.is_empty() {
             let bar = StepProgress::new("update.vfs-sync", opts.verbose);
             let mut byte_progress = ByteProgressTracker::new(bar.clone(), extra_task_total_bytes);
-            let mut verify_progress = VerifyTaskProgressTracker::new(bar.clone(), extra_tasks.len());
+            let mut verify_progress =
+                VerifyTaskProgressTracker::new(bar.clone(), extra_tasks.len());
             let _ = task_pool_runner
                 .run_batch_with_progress(
                     extra_tasks,
@@ -464,11 +465,10 @@ async fn download_and_extract_archives_from_dir(
         }
 
         let verify_task_count = verify_tasks.len();
-        let verify_bar = StepProgress::new(
-            format!("update.{}.archive-verify", label),
-            opts.verbose,
-        );
-        let mut verify_progress = VerifyTaskProgressTracker::new(verify_bar.clone(), verify_task_count);
+        let verify_bar =
+            StepProgress::new(format!("update.{}.archive-verify", label), opts.verbose);
+        let mut verify_progress =
+            VerifyTaskProgressTracker::new(verify_bar.clone(), verify_task_count);
         let verify_result = task_pool_runner.run_batch_with_progress(
             verify_tasks,
             Some(&mut |event: &ProgressEvent| verify_progress.handle_event(event)),
@@ -489,10 +489,8 @@ async fn download_and_extract_archives_from_dir(
             );
         }
 
-        let archive_bar = StepProgress::new(
-            format!("update.{}.archive-apply", label),
-            opts.verbose,
-        );
+        let archive_bar =
+            StepProgress::new(format!("update.{}.archive-apply", label), opts.verbose);
         let mut progress = ByteProgressTracker::new(archive_bar.clone(), 0);
         let result = task_pool_runner.run_batch_with_progress(
             extract_tasks,
@@ -531,10 +529,7 @@ async fn download_and_extract_archives_from_dir(
         });
     }
 
-    let archive_bar = StepProgress::new(
-        format!("update.{}.archive-pipeline", label),
-        opts.verbose,
-    );
+    let archive_bar = StepProgress::new(format!("update.{}.archive-pipeline", label), opts.verbose);
     let mut progress = ByteProgressTracker::new(archive_bar.clone(), total_size);
     let result = task_pool_runner.run_batch_with_progress(
         tasks,

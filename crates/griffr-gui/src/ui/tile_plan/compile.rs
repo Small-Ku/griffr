@@ -2,10 +2,7 @@ use winio::primitive::{Point, Rect, Size};
 
 use crate::ui::{ClipPolicy, TileId, TileSpec, WidgetId, WidgetNode};
 
-pub fn partition_non_overlapping_tiles(
-    widgets: &[WidgetNode],
-    bounds: &[Rect],
-) -> Vec<TileSpec> {
+pub fn partition_non_overlapping_tiles(widgets: &[WidgetNode], bounds: &[Rect]) -> Vec<TileSpec> {
     if bounds.is_empty() {
         return Vec::new();
     }

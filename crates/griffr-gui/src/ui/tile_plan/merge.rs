@@ -37,10 +37,7 @@ pub fn merge_adjacent_non_clipped(
     tiles
 }
 
-fn merged_tile(
-    a: &TileSpec,
-    b: &TileSpec,
-) -> Option<TileSpec> {
+fn merged_tile(a: &TileSpec, b: &TileSpec) -> Option<TileSpec> {
     if a.signature() != b.signature() {
         return None;
     }

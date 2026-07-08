@@ -1,4 +1,4 @@
-use crate::ui::{TileSlot, Widget};
+use crate::ui::{DirtyFlags, TileSlot, Widget};
 use winio::prelude::{
     CanvasEvent, Color, DrawingContext, Point, Rect, Result, Size, SolidColorBrush,
 };
@@ -81,7 +81,10 @@ impl Widget for CounterWidget {
         Ok(())
     }
 
-    fn handle_event(&mut self, event: &CanvasEvent, is_target: bool) -> Result<()> {
+    fn handle_event(&mut self, event: &CanvasEvent, is_target: bool) -> Result<DirtyFlags> {
+        let before_hovered = self.hovered;
+        let before_pressed = self.pressed;
+        let before_click_count = self.click_count;
         match event {
             CanvasEvent::MouseMove(_) => {
                 self.hovered = is_target;
@@ -100,6 +103,13 @@ impl Widget for CounterWidget {
             }
             _ => {}
         }
-        Ok(())
+        let mut dirty = DirtyFlags::empty();
+        if before_hovered != self.hovered || before_pressed != self.pressed {
+            dirty |= DirtyFlags::PAINT;
+        }
+        if before_click_count != self.click_count {
+            dirty |= DirtyFlags::PAINT | DirtyFlags::TILE_PLAN | DirtyFlags::RESOURCES;
+        }
+        Ok(dirty)
     }
 }

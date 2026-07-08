@@ -39,27 +39,30 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         let id = n.id;
         quote! { ::griffr_gui::ui::WidgetId(#id) }
     });
-    let click_targets_front_to_back = sorted_front_to_back
-        .iter()
-        .filter(|n| n.clickable)
-        .map(|n| {
-            let id = n.id;
-            quote! { ::griffr_gui::ui::WidgetId(#id) }
-        });
-    let hover_targets_front_to_back = sorted_front_to_back
-        .iter()
-        .filter(|n| n.hoverable)
-        .map(|n| {
-            let id = n.id;
-            quote! { ::griffr_gui::ui::WidgetId(#id) }
-        });
-    let scroll_targets_front_to_back = sorted_front_to_back
-        .iter()
-        .filter(|n| n.scrollable)
-        .map(|n| {
-            let id = n.id;
-            quote! { ::griffr_gui::ui::WidgetId(#id) }
-        });
+    let click_targets_front_to_back =
+        sorted_front_to_back
+            .iter()
+            .filter(|n| n.clickable)
+            .map(|n| {
+                let id = n.id;
+                quote! { ::griffr_gui::ui::WidgetId(#id) }
+            });
+    let hover_targets_front_to_back =
+        sorted_front_to_back
+            .iter()
+            .filter(|n| n.hoverable)
+            .map(|n| {
+                let id = n.id;
+                quote! { ::griffr_gui::ui::WidgetId(#id) }
+            });
+    let scroll_targets_front_to_back =
+        sorted_front_to_back
+            .iter()
+            .filter(|n| n.scrollable)
+            .map(|n| {
+                let id = n.id;
+                quote! { ::griffr_gui::ui::WidgetId(#id) }
+            });
     let static_widgets = flat.iter().map(|n| {
         let id = n.id;
         let parent = n.parent;
@@ -184,6 +187,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             #(#canvas_fields)*
             widget_nodes: Vec<::griffr_gui::ui::WidgetNode>,
             plan: ::griffr_gui::ui::CompiledPlan,
+            pending_dirty: ::griffr_gui::ui::DirtyFlags,
             hovered: Option<::griffr_gui::ui::WidgetId>,
             widgets: Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>,
             pointers: [::winio::prelude::Point; #canvas_count],
@@ -221,7 +225,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 let size = init.client_size()?;
                 root.set_loc(::winio::prelude::Point::new(0.0, 0.0))?;
                 root.set_size(Self::expand_size(size))?;
-                let mut plan = Self::compile_plan(&widget_nodes, size, None);
+                let mut plan = Self::compile_plan(&widget_nodes, size, None, ::griffr_gui::ui::DirtyFlags::LAYOUT | ::griffr_gui::ui::DirtyFlags::TILE_PLAN | ::griffr_gui::ui::DirtyFlags::PAINT);
                 let widgets = Self::build_widgets(&plan)?;
                 for (id, w) in &widgets {
                     if let Some(node) = widget_nodes.iter_mut().find(|n| n.id == *id) {
@@ -231,9 +235,9 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                         node.opaque = w.opaque();
                     }
                 }
-                plan = Self::compile_plan(&widget_nodes, size, Some(&plan));
+                plan = Self::compile_plan(&widget_nodes, size, Some(&plan), ::griffr_gui::ui::DirtyFlags::TILE_PLAN | ::griffr_gui::ui::DirtyFlags::PAINT);
                 let mut this = Self {
-                    root, #(#canvas_struct_inits)* widgets, widget_nodes, plan, hovered: None,
+                    root, #(#canvas_struct_inits)* widgets, widget_nodes, plan, pending_dirty: ::griffr_gui::ui::DirtyFlags::empty(), hovered: None,
                     pointers: [::winio::prelude::Point::new(0.0, 0.0); #canvas_count],
                     next_tick_seq: 0,
                     scheduled_tick: None,
@@ -253,7 +257,15 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             async fn update(&mut self, message: Self::Message, sender: &::winio::prelude::ComponentSender<Self>) -> ::winio::prelude::Result<bool> {
                 match message {
                     #msg_ident::Noop => Ok(false),
-                    #msg_ident::Layout(rect) => { self.root.set_loc(rect.origin)?; self.root.set_size(Self::expand_size(rect.size))?; Ok(true) }
+                    #msg_ident::Layout(rect) => {
+                        self.root.set_loc(rect.origin)?;
+                        self.root.set_size(Self::expand_size(rect.size))?;
+                        self.pending_dirty |= ::griffr_gui::ui::DirtyFlags::LAYOUT
+                            | ::griffr_gui::ui::DirtyFlags::TILE_PLAN
+                            | ::griffr_gui::ui::DirtyFlags::PAINT;
+                        self.mark_all_widgets_dirty(self.pending_dirty);
+                        Ok(true)
+                    }
                     #msg_ident::Canvas(idx, ev) => {
                         let p_local = match &ev {
                             ::winio::prelude::CanvasEvent::MouseMove(p) => Some(*p),
@@ -269,34 +281,53 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                         let routed = Self::map_canvas_event(&ev, p.x, p.y);
                         self.hovered = routed.and_then(|e| Self::route_event(&self.plan, e));
                         let hit = self.hovered;
-                        for (id, widget) in &mut self.widgets { widget.handle_event(&ev, hit.is_some_and(|hit_id| hit_id == *id))?; }
+                        let mut dirty = ::griffr_gui::ui::DirtyFlags::empty();
+                        for (id, widget) in &mut self.widgets {
+                            let widget_dirty = widget.handle_event(&ev, hit.is_some_and(|hit_id| hit_id == *id))?;
+                            self.plan.mark_widget_dirty(*id, widget_dirty);
+                            dirty |= widget_dirty;
+                        }
+                        self.pending_dirty |= dirty;
                         self.reschedule_if_needed(sender);
                         sender.output(#event_ident::Target(hit));
-                        sender.output(#event_ident::Redraw);
-                        Ok(true)
+                        if !dirty.is_empty() {
+                            sender.output(#event_ident::Redraw);
+                        }
+                        Ok(!dirty.is_empty())
                     }
                     #msg_ident::AnimationTick(seq, now) => {
                         if self.scheduled_tick.map(|(scheduled_seq, _)| scheduled_seq != seq).unwrap_or(true) {
                             return Ok(false);
                         }
                         self.scheduled_tick = None;
-                        let mut needs_redraw = false;
-                        for (_, widget) in &mut self.widgets {
-                            needs_redraw |= widget.on_animation_frame(now);
+                        let mut dirty = ::griffr_gui::ui::DirtyFlags::empty();
+                        for (id, widget) in &mut self.widgets {
+                            let widget_dirty = widget.on_animation_frame(now);
+                            self.plan.mark_widget_dirty(*id, widget_dirty);
+                            dirty |= widget_dirty;
                         }
+                        self.pending_dirty |= dirty;
                         self.reschedule_if_needed(sender);
-                        if needs_redraw {
+                        if !dirty.is_empty() {
                             sender.output(#event_ident::Redraw);
                         }
-                        Ok(needs_redraw)
+                        Ok(!dirty.is_empty())
                     }
                 }
             }
             fn render(&mut self, _sender: &::winio::prelude::ComponentSender<Self>) -> ::winio::prelude::Result<()> {
                 const TILE_OVERLAP_PX: f64 = 0.5;
                 let size = self.root.size()?;
-                self.sync_widgets_rendering(); // Sync before relayout
-                self.plan = Self::compile_plan(&self.widget_nodes, size, Some(&self.plan));
+                let mut dirty = self.pending_dirty | self.plan.dirty_summary();
+                if self.plan.size != size {
+                    dirty |= ::griffr_gui::ui::DirtyFlags::LAYOUT
+                        | ::griffr_gui::ui::DirtyFlags::TILE_PLAN
+                        | ::griffr_gui::ui::DirtyFlags::PAINT;
+                    self.mark_all_widgets_dirty(dirty);
+                }
+                dirty |= self.sync_widgets_rendering();
+                self.pending_dirty |= dirty;
+                self.plan = Self::compile_plan(&self.widget_nodes, size, Some(&self.plan), self.pending_dirty);
                 for idx in 0..#canvas_count {
                     let canvas = match idx { #(#render_match_arms)* _ => &mut self.#last_canvas_field, };
                     if let Some(tile) = self.plan.tile_plan.tiles.get(idx) {
@@ -321,6 +352,8 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                         canvas.set_visible(false)?;
                     }
                 }
+                self.plan.clear_dirty();
+                self.pending_dirty = ::griffr_gui::ui::DirtyFlags::empty();
                 self.reschedule_if_needed(_sender);
                 Ok(())
             }
@@ -382,15 +415,35 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                     self.widget_nodes[idx].scrollable = s;
                 }
             }
-            fn sync_widgets_rendering(&mut self) {
+            fn sync_widgets_rendering(&mut self) -> ::griffr_gui::ui::DirtyFlags {
+                let mut dirty = ::griffr_gui::ui::DirtyFlags::empty();
                 for (id, w) in &self.widgets {
                     let o = w.opaque();
                     let s = w.scrollable();
                     let sz = w.sizing_policy();
                     let idx = id.0 as usize;
+                    if self.widget_nodes[idx].opaque != o || self.widget_nodes[idx].scrollable != s {
+                        dirty |= ::griffr_gui::ui::DirtyFlags::TILE_PLAN | ::griffr_gui::ui::DirtyFlags::PAINT;
+                        self.plan.mark_widget_dirty(*id, ::griffr_gui::ui::DirtyFlags::TILE_PLAN | ::griffr_gui::ui::DirtyFlags::PAINT);
+                    }
+                    if self.widget_nodes[idx].layout.sizing != sz {
+                        dirty |= ::griffr_gui::ui::DirtyFlags::LAYOUT
+                            | ::griffr_gui::ui::DirtyFlags::TILE_PLAN
+                            | ::griffr_gui::ui::DirtyFlags::PAINT;
+                        self.plan.mark_widget_dirty(*id, ::griffr_gui::ui::DirtyFlags::LAYOUT | ::griffr_gui::ui::DirtyFlags::TILE_PLAN | ::griffr_gui::ui::DirtyFlags::PAINT);
+                    }
                     self.widget_nodes[idx].opaque = o;
                     self.widget_nodes[idx].scrollable = s;
                     self.widget_nodes[idx].layout.sizing = sz;
+                }
+                dirty
+            }
+            fn mark_all_widgets_dirty(&mut self, dirty: ::griffr_gui::ui::DirtyFlags) {
+                if dirty.is_empty() {
+                    return;
+                }
+                for idx in 0..self.widget_nodes.len() {
+                    self.plan.mark_widget_dirty(::griffr_gui::ui::WidgetId(idx as u16), dirty);
                 }
             }
             fn build_widgets(plan: &::griffr_gui::ui::CompiledPlan) -> ::winio::prelude::Result<Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>> {
@@ -422,11 +475,23 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 widget_nodes: &[::griffr_gui::ui::WidgetNode],
                 size: ::winio::prelude::Size,
                 old_plan: Option<&::griffr_gui::ui::CompiledPlan>,
+                dirty: ::griffr_gui::ui::DirtyFlags,
             ) -> ::griffr_gui::ui::CompiledPlan {
                 let widgets = widget_nodes.to_vec();
-                let bounds = ::griffr_gui::ui::layout::compute_layout(&widgets, size);
+                let bounds = if let Some(old) = old_plan {
+                    if !dirty.contains(::griffr_gui::ui::DirtyFlags::LAYOUT) && old.size == size {
+                        old.bounds.clone()
+                    } else {
+                        ::griffr_gui::ui::layout::compute_layout(&widgets, size)
+                    }
+                } else {
+                    ::griffr_gui::ui::layout::compute_layout(&widgets, size)
+                };
                 let tile_plan = if let Some(old) = old_plan {
-                    if old.can_reuse_tile_plan(&widgets, &bounds) {
+                    let needs_tile_plan = dirty.intersects(
+                        ::griffr_gui::ui::DirtyFlags::LAYOUT | ::griffr_gui::ui::DirtyFlags::TILE_PLAN
+                    );
+                    if !needs_tile_plan && old.can_reuse_tile_plan(&widgets, &bounds) {
                         old.tile_plan.clone()
                     } else {
                         let mut tiles = ::griffr_gui::ui::tile_plan::compile::partition_non_overlapping_tiles(&widgets, &bounds);
@@ -448,7 +513,10 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 ::griffr_gui::ui::CompiledPlan {
                     widgets,
                     bounds,
-                    dirty: vec![false; num_widgets].into_boxed_slice(),
+                    dirty: old_plan
+                        .filter(|old| old.dirty.len() == num_widgets)
+                        .map(|old| old.dirty.clone())
+                        .unwrap_or_else(|| vec![::griffr_gui::ui::DirtyFlags::empty(); num_widgets].into_boxed_slice()),
                     tile_plan,
                     size,
                 }

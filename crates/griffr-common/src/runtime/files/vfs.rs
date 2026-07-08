@@ -13,9 +13,9 @@
 //! Reference: `ref/ak-endfield-api-archive-main/src/cmds/archive.ts`
 
 use anyhow::{Context, Result};
+use rapidhash::RapidHashSet as HashSet;
 use std::path::Path;
 use tracing::{info, warn};
-use rapidhash::RapidHashSet as HashSet;
 
 use crate::api::client::ApiClient;
 use crate::api::crypto::RES_INDEX_KEY;
@@ -376,20 +376,18 @@ pub async fn bootstrap_persistent_vfs_with_runner(
     let mut outcomes = PathOutcomeTracker::new();
     let mut on_event = |event: &ProgressEvent| match event {
         ProgressEvent::DownloadedBytes { .. } => {
-            let running_downloaded_bytes =
-                download_progress
-                    .handle_download_event(event)
-                    .expect("download event");
+            let running_downloaded_bytes = download_progress
+                .handle_download_event(event)
+                .expect("download event");
             if let Some(cb) = progress_callback {
                 cb(running_downloaded_bytes, plan.total_bytes);
             }
         }
         ProgressEvent::Downloaded { path, bytes } => {
             outcomes.record_downloaded(path, *bytes);
-            let running_downloaded_bytes =
-                download_progress
-                    .handle_download_event(event)
-                    .expect("download event");
+            let running_downloaded_bytes = download_progress
+                .handle_download_event(event)
+                .expect("download event");
             if let Some(cb) = progress_callback {
                 cb(running_downloaded_bytes, plan.total_bytes);
             }
@@ -579,20 +577,18 @@ pub async fn download_vfs_resources(
     let mut outcomes = PathOutcomeTracker::new();
     let mut on_event = |event: &ProgressEvent| match event {
         ProgressEvent::DownloadedBytes { .. } => {
-            let running_downloaded_bytes =
-                download_progress
-                    .handle_download_event(event)
-                    .expect("download event");
+            let running_downloaded_bytes = download_progress
+                .handle_download_event(event)
+                .expect("download event");
             if let Some(cb) = progress_callback {
                 cb(running_downloaded_bytes, plan.total_bytes);
             }
         }
         ProgressEvent::Downloaded { path, bytes } => {
             outcomes.record_downloaded(path, *bytes);
-            let running_downloaded_bytes =
-                download_progress
-                    .handle_download_event(event)
-                    .expect("download event");
+            let running_downloaded_bytes = download_progress
+                .handle_download_event(event)
+                .expect("download event");
             if let Some(cb) = progress_callback {
                 cb(running_downloaded_bytes, plan.total_bytes);
             }

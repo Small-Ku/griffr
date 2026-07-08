@@ -1,4 +1,4 @@
-use crate::ui::{TileSlot, Widget};
+use crate::ui::{DirtyFlags, TileSlot, Widget};
 use winio::prelude::{CanvasEvent, Color, DrawingContext, Rect, Result, Size, SolidColorBrush};
 
 pub struct Button {
@@ -48,7 +48,9 @@ impl Widget for Button {
         Ok(())
     }
 
-    fn handle_event(&mut self, event: &CanvasEvent, is_target: bool) -> Result<()> {
+    fn handle_event(&mut self, event: &CanvasEvent, is_target: bool) -> Result<DirtyFlags> {
+        let before_hovered = self.hovered;
+        let before_pressed = self.pressed;
         match event {
             CanvasEvent::MouseMove(_) => {
                 self.hovered = is_target;
@@ -67,6 +69,10 @@ impl Widget for Button {
             }
             _ => {}
         }
-        Ok(())
+        Ok(
+            ((before_hovered != self.hovered) || (before_pressed != self.pressed))
+                .then_some(DirtyFlags::PAINT)
+                .unwrap_or_else(DirtyFlags::empty),
+        )
     }
 }

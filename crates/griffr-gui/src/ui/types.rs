@@ -1,9 +1,20 @@
+use bitflags::bitflags;
 use std::time::Instant;
 
 use winio::prelude::Result;
 use winio::primitive::{Rect, Size};
 use winio::ui::DrawingContext;
 use winio::widgets::CanvasEvent;
+
+bitflags! {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct DirtyFlags: u8 {
+        const PAINT = 1 << 0;
+        const LAYOUT = 1 << 1;
+        const TILE_PLAN = 1 << 2;
+        const RESOURCES = 1 << 3;
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct TileSlot {
@@ -37,14 +48,14 @@ pub trait Widget {
     fn draw(&mut self, _ctx: &mut DrawingContext<'_>, _size: Size, _clipped: bool) -> Result<()> {
         Ok(())
     }
-    fn handle_event(&mut self, _event: &CanvasEvent, _is_target: bool) -> Result<()> {
-        Ok(())
+    fn handle_event(&mut self, _event: &CanvasEvent, _is_target: bool) -> Result<DirtyFlags> {
+        Ok(DirtyFlags::empty())
     }
     fn next_redraw_at(&self) -> Option<Instant> {
         None
     }
-    fn on_animation_frame(&mut self, _now: Instant) -> bool {
-        false
+    fn on_animation_frame(&mut self, _now: Instant) -> DirtyFlags {
+        DirtyFlags::empty()
     }
     fn sizing_policy(&self) -> SizingPolicy {
         SizingPolicy::default()
@@ -161,7 +172,7 @@ pub struct TilePlanWidgetKey {
 pub struct CompiledPlan {
     pub widgets: Vec<WidgetNode>,
     pub bounds: Box<[Rect]>,
-    pub dirty: Box<[bool]>,
+    pub dirty: Box<[DirtyFlags]>,
     pub tile_plan: TilePlan,
     pub size: Size,
 }
@@ -179,11 +190,29 @@ impl WidgetNode {
 }
 
 impl CompiledPlan {
-    pub fn can_reuse_tile_plan(
-        &self,
-        widgets: &[WidgetNode],
-        bounds: &[Rect],
-    ) -> bool {
+    pub fn dirty_summary(&self) -> DirtyFlags {
+        self.dirty
+            .iter()
+            .copied()
+            .fold(DirtyFlags::empty(), |acc, flags| acc | flags)
+    }
+
+    pub fn mark_widget_dirty(&mut self, id: WidgetId, flags: DirtyFlags) {
+        if flags.is_empty() {
+            return;
+        }
+        if let Some(slot) = self.dirty.get_mut(id.0 as usize) {
+            *slot |= flags;
+        }
+    }
+
+    pub fn clear_dirty(&mut self) {
+        for flags in &mut self.dirty {
+            *flags = DirtyFlags::empty();
+        }
+    }
+
+    pub fn can_reuse_tile_plan(&self, widgets: &[WidgetNode], bounds: &[Rect]) -> bool {
         self.bounds.as_ref() == bounds
             && self.widgets.len() == widgets.len()
             && self
@@ -197,7 +226,7 @@ impl CompiledPlan {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClipPolicy, CompiledPlan, LayoutDirection, LayoutSpec, SizingPolicy, TilePlan,
+        ClipPolicy, CompiledPlan, DirtyFlags, LayoutDirection, LayoutSpec, SizingPolicy, TilePlan,
         WidgetId, WidgetNode,
     };
     use winio::primitive::{Rect, Size};
@@ -230,10 +259,32 @@ mod tests {
         CompiledPlan {
             widgets,
             bounds: bounds.into_boxed_slice(),
-            dirty: vec![false; 2].into_boxed_slice(),
+            dirty: vec![DirtyFlags::empty(); 2].into_boxed_slice(),
             tile_plan: TilePlan { tiles: Vec::new() },
             size: Size::new(100.0, 100.0),
         }
+    }
+
+    #[test]
+    fn dirty_summary_accumulates_widget_flags() {
+        let mut plan = compiled_plan(
+            vec![widget_node(0), widget_node(1)],
+            vec![
+                Rect::from_size(Size::new(100.0, 100.0)),
+                Rect::from_size(Size::new(50.0, 50.0)),
+            ],
+        );
+
+        plan.mark_widget_dirty(WidgetId(0), DirtyFlags::PAINT);
+        plan.mark_widget_dirty(WidgetId(1), DirtyFlags::TILE_PLAN | DirtyFlags::RESOURCES);
+
+        assert_eq!(
+            plan.dirty_summary(),
+            DirtyFlags::PAINT | DirtyFlags::TILE_PLAN | DirtyFlags::RESOURCES
+        );
+
+        plan.clear_dirty();
+        assert!(plan.dirty_summary().is_empty());
     }
 
     #[test]

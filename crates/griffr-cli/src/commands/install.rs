@@ -254,7 +254,8 @@ pub async fn install(
         }
 
         let archive_bar = StepProgress::new("install.archive-pipeline", opts.verbose);
-        let mut progress = ByteProgressTracker::new(archive_bar.clone(), total_archive_download_bytes);
+        let mut progress =
+            ByteProgressTracker::new(archive_bar.clone(), total_archive_download_bytes);
         let result = task_pool.run_batch_with_progress(
             tasks,
             Some(&mut |event: &ProgressEvent| progress.handle_event(event)),

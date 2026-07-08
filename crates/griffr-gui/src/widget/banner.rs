@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::ui::{TileSlot, Widget};
+use crate::ui::{DirtyFlags, TileSlot, Widget};
 use winio::prelude::{CanvasEvent, Color, DrawingContext, Rect, Result, Size, SolidColorBrush};
 
 pub struct Banner {
@@ -74,7 +74,10 @@ impl Widget for Banner {
         Ok(())
     }
 
-    fn handle_event(&mut self, event: &CanvasEvent, is_target: bool) -> Result<()> {
+    fn handle_event(&mut self, event: &CanvasEvent, is_target: bool) -> Result<DirtyFlags> {
+        let before_hovered = self.hovered;
+        let before_h = self.h;
+        let before_next_frame_at = self.next_frame_at;
         match event {
             CanvasEvent::MouseMove(_) => {
                 self.hovered = is_target;
@@ -90,16 +93,21 @@ impl Widget for Banner {
             }
             _ => {}
         }
-        Ok(())
+        let changed = before_hovered != self.hovered
+            || before_h != self.h
+            || before_next_frame_at != self.next_frame_at;
+        Ok(changed
+            .then_some(DirtyFlags::PAINT)
+            .unwrap_or_else(DirtyFlags::empty))
     }
 
     fn next_redraw_at(&self) -> Option<Instant> {
         self.next_frame_at
     }
 
-    fn on_animation_frame(&mut self, now: Instant) -> bool {
+    fn on_animation_frame(&mut self, now: Instant) -> DirtyFlags {
         if !self.hovered && self.next_frame_at.is_none() {
-            return false;
+            return DirtyFlags::empty();
         }
         self.h = (self.h + 1.2) % 360.0;
         if self.hovered {
@@ -107,6 +115,6 @@ impl Widget for Banner {
         } else {
             self.next_frame_at = None;
         }
-        true
+        DirtyFlags::PAINT
     }
 }

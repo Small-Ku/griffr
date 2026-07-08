@@ -150,15 +150,13 @@ impl ByteProgressTracker {
     pub fn handle_event(&mut self, event: &griffr_common::runtime::task_pool::ProgressEvent) {
         match event {
             griffr_common::runtime::task_pool::ProgressEvent::DownloadedBytes { path, .. } => {
-                self
-                    .downloaded_archive_bytes_by_part
+                self.downloaded_archive_bytes_by_part
                     .handle_download_event(event)
                     .expect("download event");
                 self.update_bar(path);
             }
             griffr_common::runtime::task_pool::ProgressEvent::Downloaded { path, .. } => {
-                self
-                    .downloaded_archive_bytes_by_part
+                self.downloaded_archive_bytes_by_part
                     .handle_download_event(event)
                     .expect("download event");
                 self.update_bar(path);
@@ -169,7 +167,8 @@ impl ByteProgressTracker {
                 total_bytes,
             } => {
                 self.extracted_bytes_by_archive.record(path, *bytes);
-                self.extract_total_bytes_by_archive.record(path, *total_bytes);
+                self.extract_total_bytes_by_archive
+                    .record(path, *total_bytes);
                 self.update_bar(path);
             }
             griffr_common::runtime::task_pool::ProgressEvent::Verified { path, ok, .. } => {

@@ -35,6 +35,7 @@ md-5 = "0.10"
 # Platform
 dirs = "5.0"
 rapidhash = "4.5.1"
+bitflags = "2.6"
 
 # griffr crates
 griffr-common = { path = "crates/griffr-common" }

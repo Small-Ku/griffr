@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::{GameId, ServerId};
@@ -6,6 +5,7 @@ use griffr_common::runtime::is_launcher_metadata_path;
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
 use griffr_common::runtime::{plan_vfs_tasks, VfsMaterializeConfig, VfsTaskPlan};
 use serde_json::json;
+use std::path::PathBuf;
 
 use super::local::detect_local_install;
 use super::supports_vfs_sync;

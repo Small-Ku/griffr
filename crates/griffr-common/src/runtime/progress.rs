@@ -18,9 +18,15 @@ pub enum PathAttemptKind {
 pub enum PathOutcome {
     Pending,
     VerifiedSkipped,
-    VerifiedReused { method: PathReuseMethod },
-    VerifiedDownloaded { bytes: u64 },
-    Failed { last_attempt: Option<PathAttemptKind> },
+    VerifiedReused {
+        method: PathReuseMethod,
+    },
+    VerifiedDownloaded {
+        bytes: u64,
+    },
+    Failed {
+        last_attempt: Option<PathAttemptKind>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -72,9 +78,7 @@ impl PathOutcomeTracker {
     pub fn record_failed(&mut self, path: &str) {
         let last_attempt = match self.outcomes.get(path) {
             Some(PathOutcome::VerifiedDownloaded { .. }) => Some(PathAttemptKind::Download),
-            Some(PathOutcome::VerifiedReused { method }) => {
-                Some(PathAttemptKind::Reuse(*method))
-            }
+            Some(PathOutcome::VerifiedReused { method }) => Some(PathAttemptKind::Reuse(*method)),
             Some(PathOutcome::Failed { last_attempt }) => *last_attempt,
             _ => None,
         };
@@ -125,7 +129,10 @@ impl RunningByteProgress {
     }
 
     pub fn record(&mut self, key: &str, bytes: u64) -> u64 {
-        let old_bytes = self.bytes_by_key.insert(key.to_string(), bytes).unwrap_or(0);
+        let old_bytes = self
+            .bytes_by_key
+            .insert(key.to_string(), bytes)
+            .unwrap_or(0);
         self.total_bytes = self
             .total_bytes
             .saturating_add(bytes)

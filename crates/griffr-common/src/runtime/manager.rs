@@ -410,7 +410,10 @@ impl GameManager {
                     .push(path.clone());
             }
         }
-        let tracked_total_bytes: u64 = entries.iter().map(|entry| entry.size).sum::<u64>()
+        let tracked_total_bytes: u64 = entries
+            .iter()
+            .map(|entry| entry.size)
+            .sum::<u64>()
             .saturating_add(
                 extra_tasks
                     .iter()
@@ -475,8 +478,9 @@ impl GameManager {
                 if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
                     return;
                 }
-                let running_downloaded_bytes =
-                    download_progress.handle_download_event(event).expect("download event");
+                let running_downloaded_bytes = download_progress
+                    .handle_download_event(event)
+                    .expect("download event");
                 if let Some(ref cb) = download_progress_callback {
                     cb(running_downloaded_bytes, tracked_total_bytes, path);
                 }
@@ -486,8 +490,9 @@ impl GameManager {
                     return;
                 }
                 outcomes.record_downloaded(path, *bytes);
-                let running_downloaded_bytes =
-                    download_progress.handle_download_event(event).expect("download event");
+                let running_downloaded_bytes = download_progress
+                    .handle_download_event(event)
+                    .expect("download event");
                 if let Some(ref cb) = progress_callback {
                     cb(finished, total, path);
                 }
@@ -496,8 +501,7 @@ impl GameManager {
                 }
             }
             ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {
-                if let Some(logical_path) =
-                    Self::resolve_reused_logical_path(path, &filename_index)
+                if let Some(logical_path) = Self::resolve_reused_logical_path(path, &filename_index)
                 {
                     outcomes.record_reused(
                         &logical_path,

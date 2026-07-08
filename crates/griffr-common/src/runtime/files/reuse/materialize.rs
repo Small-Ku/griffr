@@ -209,18 +209,12 @@ pub async fn materialize_game_files_with_pool(
             }
             crate::runtime::task_pool::ProgressEvent::Hardlinked { path } => {
                 if let Some(rel) = logical_path_from_root(install_path, &path) {
-                    outcomes.record_reused(
-                        &rel,
-                        PathReuseMethod::Hardlink,
-                    );
+                    outcomes.record_reused(&rel, PathReuseMethod::Hardlink);
                 }
             }
             crate::runtime::task_pool::ProgressEvent::Copied { path } => {
                 if let Some(rel) = logical_path_from_root(install_path, &path) {
-                    outcomes.record_reused(
-                        &rel,
-                        PathReuseMethod::Copy,
-                    );
+                    outcomes.record_reused(&rel, PathReuseMethod::Copy);
                 }
             }
             crate::runtime::task_pool::ProgressEvent::Downloaded { path, bytes } => {
