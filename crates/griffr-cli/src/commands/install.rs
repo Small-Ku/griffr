@@ -215,6 +215,7 @@ pub async fn install(
     let mut task_pool_cfg = TaskPoolConfig::default();
     task_pool_cfg.max_retries = 3;
     task_pool_cfg.extraction_progress_buffer_bytes = opts.extraction_progress_buffer_bytes;
+    task_pool_cfg.download_progress_buffer_bytes = opts.download_progress_buffer_bytes;
     let mut task_pool = TaskPoolRunner::new(task_pool_cfg)?;
 
     if reuse_paths.is_empty() {
@@ -261,22 +262,30 @@ pub async fn install(
 
         let archive_bar = Arc::new(StepProgress::new("install.archive-pipeline", opts.verbose));
         let archive_bar_cb = archive_bar.clone();
-        let mut downloaded_archive_bytes = 0u64;
+        let mut downloaded_archive_bytes_by_part = std::collections::HashMap::<String, u64>::new();
         let mut extracted_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
         let mut extract_total_bytes_by_archive = std::collections::HashMap::<String, u64>::new();
+        let mut running_downloaded_bytes = 0u64;
+        let mut running_extracted_bytes = 0u64;
+        let mut running_extract_total_bytes = 0u64;
         let result = task_pool.run_batch_with_progress(
             tasks,
             Some(&mut |event: &ProgressEvent| match event {
-                ProgressEvent::Downloaded { path, bytes } => {
-                    downloaded_archive_bytes = downloaded_archive_bytes.saturating_add(*bytes);
-                    let extract_total_bytes = extract_total_bytes_by_archive
-                        .values()
-                        .copied()
-                        .sum::<u64>();
-                    let extracted_bytes = extracted_bytes_by_archive.values().copied().sum::<u64>();
+                ProgressEvent::DownloadedBytes { path, bytes, .. } => {
+                    let old_bytes = downloaded_archive_bytes_by_part.insert(path.clone(), *bytes).unwrap_or(0);
+                    running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
                     archive_bar_cb.update_bytes(
-                        downloaded_archive_bytes.saturating_add(extracted_bytes),
-                        total_archive_download_bytes.saturating_add(extract_total_bytes),
+                        running_downloaded_bytes.saturating_add(running_extracted_bytes),
+                        total_archive_download_bytes.saturating_add(running_extract_total_bytes),
+                        path,
+                    );
+                }
+                ProgressEvent::Downloaded { path, bytes } => {
+                    let old_bytes = downloaded_archive_bytes_by_part.insert(path.clone(), *bytes).unwrap_or(0);
+                    running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
+                    archive_bar_cb.update_bytes(
+                        running_downloaded_bytes.saturating_add(running_extracted_bytes),
+                        total_archive_download_bytes.saturating_add(running_extract_total_bytes),
                         path,
                     );
                 }
@@ -285,16 +294,13 @@ pub async fn install(
                     bytes,
                     total_bytes,
                 } => {
-                    extracted_bytes_by_archive.insert(path.clone(), *bytes);
-                    extract_total_bytes_by_archive.insert(path.clone(), *total_bytes);
-                    let extracted_bytes = extracted_bytes_by_archive.values().copied().sum::<u64>();
-                    let extract_total_bytes = extract_total_bytes_by_archive
-                        .values()
-                        .copied()
-                        .sum::<u64>();
+                    let old_bytes = extracted_bytes_by_archive.insert(path.clone(), *bytes).unwrap_or(0);
+                    running_extracted_bytes = running_extracted_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
+                    let old_total = extract_total_bytes_by_archive.insert(path.clone(), *total_bytes).unwrap_or(0);
+                    running_extract_total_bytes = running_extract_total_bytes.saturating_add(*total_bytes).saturating_sub(old_total);
                     archive_bar_cb.update_bytes(
-                        downloaded_archive_bytes.saturating_add(extracted_bytes),
-                        total_archive_download_bytes.saturating_add(extract_total_bytes),
+                        running_downloaded_bytes.saturating_add(running_extracted_bytes),
+                        total_archive_download_bytes.saturating_add(running_extract_total_bytes),
                         path,
                     );
                 }

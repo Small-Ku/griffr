@@ -167,19 +167,30 @@ pub async fn fetch(path: PathBuf, output_dir: Option<PathBuf>, opts: GlobalOptio
 
     let mut task_pool_cfg = TaskPoolConfig::default();
     task_pool_cfg.max_retries = 3;
+    task_pool_cfg.extraction_progress_buffer_bytes = opts.extraction_progress_buffer_bytes;
+    task_pool_cfg.download_progress_buffer_bytes = opts.download_progress_buffer_bytes;
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
     let tasks = build_predownload_tasks(&stage_dir, &pre_patch.patches)?;
 
     let total_size = predownload_total_size(&pre_patch);
     let bar = Arc::new(StepProgress::new("predownload.download", opts.verbose));
     let bar_cb = bar.clone();
-    let mut downloaded_bytes = 0u64;
+    let mut downloaded_bytes_by_part = std::collections::HashMap::<String, u64>::new();
+    let mut running_downloaded_bytes = 0u64;
     let result = task_pool_runner.run_batch_with_progress(
         tasks,
         Some(&mut |event: &ProgressEvent| match event {
+            ProgressEvent::DownloadedBytes { path, bytes, .. } => {
+                let old_bytes = downloaded_bytes_by_part.insert(path.clone(), *bytes).unwrap_or(0);
+                running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
+                let total_downloaded = running_downloaded_bytes.min(total_size);
+                bar_cb.update_bytes(total_downloaded, total_size, path);
+            }
             ProgressEvent::Downloaded { path, bytes } => {
-                downloaded_bytes = downloaded_bytes.saturating_add(*bytes).min(total_size);
-                bar_cb.update_bytes(downloaded_bytes, total_size, path);
+                let old_bytes = downloaded_bytes_by_part.insert(path.clone(), *bytes).unwrap_or(0);
+                running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
+                let total_downloaded = running_downloaded_bytes.min(total_size);
+                bar_cb.update_bytes(total_downloaded, total_size, path);
             }
             ProgressEvent::Verified { path, ok, .. } if *ok => {
                 if opts.verbose {

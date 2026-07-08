@@ -275,6 +275,8 @@ fn do_download_resume_incremental_md5_produces_correct_result() {
         &dest,
         &expected_md5,
         Some(payload.len() as u64),
+        0,
+        None::<fn(u64)>,
     )
     .unwrap();
 

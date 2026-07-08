@@ -32,6 +32,23 @@ pub struct IntegrityRunSummary {
 }
 
 impl GameManager {
+    fn task_progress_path(task: &Task) -> Option<&str> {
+        match task {
+            Task::Download { logical_path, .. }
+            | Task::Verify { logical_path, .. }
+            | Task::EnsureFile { logical_path, .. } => Some(logical_path.as_str()),
+            _ => None,
+        }
+    }
+
+    fn task_expected_bytes(task: &Task) -> u64 {
+        match task {
+            Task::Download { expected_size, .. } => expected_size.unwrap_or(0),
+            Task::EnsureFile { expected_size, .. } => *expected_size,
+            _ => 0,
+        }
+    }
+
     /// Create a new game manager for the given game configuration
     pub fn new(game_id: GameId, config: GameConfig) -> Self {
         Self { game_id, config }
@@ -361,7 +378,18 @@ impl GameManager {
             .iter()
             .map(|entry| entry.path.clone())
             .collect::<HashSet<_>>();
-        let tracked_total_bytes: u64 = entries.iter().map(|entry| entry.size).sum();
+        let extra_tracked_paths = extra_tasks
+            .iter()
+            .filter_map(Self::task_progress_path)
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        let tracked_total_bytes: u64 = entries.iter().map(|entry| entry.size).sum::<u64>()
+            .saturating_add(
+                extra_tasks
+                    .iter()
+                    .map(Self::task_expected_bytes)
+                    .sum::<u64>(),
+            );
 
         let mut tasks = entries
             .iter()
@@ -398,33 +426,47 @@ impl GameManager {
         let mut issues = Vec::new();
         let mut finished = 0usize;
         let mut downloaded_paths = HashSet::new();
-        let mut downloaded_bytes = 0u64;
+        let mut downloaded_bytes_by_file = std::collections::HashMap::<String, u64>::new();
+        let mut running_downloaded_bytes = 0u64;
         let mut reused_paths = HashSet::new();
 
         let mut on_event = |event: &ProgressEvent| match event {
             ProgressEvent::Verified { path, issue, .. } => {
-                if !tracked_paths.contains(path) {
+                if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
                     return;
                 }
                 if let Some(ref cb) = progress_callback {
                     cb(finished, total, path);
                 }
                 finished += 1;
-                if let Some(issue) = issue.clone() {
-                    issues.push(issue);
+                if tracked_paths.contains(path) {
+                    if let Some(issue) = issue.clone() {
+                        issues.push(issue);
+                    }
+                }
+            }
+            ProgressEvent::DownloadedBytes { path, bytes, .. } => {
+                if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
+                    return;
+                }
+                let old_bytes = downloaded_bytes_by_file.insert(path.clone(), *bytes).unwrap_or(0);
+                running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
+                if let Some(ref cb) = download_progress_callback {
+                    cb(running_downloaded_bytes, tracked_total_bytes, path);
                 }
             }
             ProgressEvent::Downloaded { path, bytes } => {
-                if !tracked_paths.contains(path) {
+                if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
                     return;
                 }
                 downloaded_paths.insert(path.clone());
-                downloaded_bytes = downloaded_bytes.saturating_add(*bytes);
+                let old_bytes = downloaded_bytes_by_file.insert(path.clone(), *bytes).unwrap_or(0);
+                running_downloaded_bytes = running_downloaded_bytes.saturating_add(*bytes).saturating_sub(old_bytes);
                 if let Some(ref cb) = progress_callback {
                     cb(finished, total, path);
                 }
                 if let Some(ref cb) = download_progress_callback {
-                    cb(downloaded_bytes, tracked_total_bytes, path);
+                    cb(running_downloaded_bytes, tracked_total_bytes, path);
                 }
             }
             ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {

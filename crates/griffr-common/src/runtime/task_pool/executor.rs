@@ -12,10 +12,11 @@ pub(crate) fn execute_task(
     task: Task,
     max_retries: u32,
     extraction_progress_buffer_bytes: usize,
+    download_progress_buffer_bytes: usize,
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
     spawned: &mut Vec<Task>,
-    events: &mut Vec<ProgressEvent>,
+    event_tx: &flume::Sender<ProgressEvent>,
 ) {
     match task {
         Task::InstallArchive {
@@ -33,10 +34,11 @@ pub(crate) fn execute_task(
             password,
             parts,
             max_retries,
+            download_progress_buffer_bytes,
             io_dispatcher,
             user_agent,
             spawned,
-            events,
+            event_tx,
         ),
         Task::Verify {
             path,
@@ -51,7 +53,7 @@ pub(crate) fn execute_task(
             expected_size,
             on_fail,
             spawned,
-            events,
+            event_tx,
         ),
         Task::Download {
             url,
@@ -70,10 +72,11 @@ pub(crate) fn execute_task(
                 retry_count,
                 max_retries,
             },
+            download_progress_buffer_bytes,
             io_dispatcher,
             user_agent,
             spawned,
-            events,
+            event_tx,
         ),
         Task::EnsureFile {
             dest,
@@ -98,17 +101,22 @@ pub(crate) fn execute_task(
                 retry_count,
                 max_retries,
             },
+            download_progress_buffer_bytes,
             io_dispatcher,
             user_agent,
             spawned,
-            events,
+            event_tx,
         ),
         Task::Hardlink { src, dest } => match create_hardlink(io_dispatcher, &src, &dest) {
-            Ok(()) => events.push(ProgressEvent::Hardlinked { path: dest }),
-            Err(err) => events.push(ProgressEvent::Failed {
-                path: dest.display().to_string(),
-                reason: err.to_string(),
-            }),
+            Ok(()) => {
+                let _ = event_tx.send(ProgressEvent::Hardlinked { path: dest });
+            }
+            Err(err) => {
+                let _ = event_tx.send(ProgressEvent::Failed {
+                    path: dest.display().to_string(),
+                    reason: err.to_string(),
+                });
+            }
         },
         Task::Extract {
             source_dir,
@@ -123,7 +131,7 @@ pub(crate) fn execute_task(
             cleanup,
             password,
             extraction_progress_buffer_bytes,
-            events,
+            event_tx,
         ),
     }
 }
@@ -136,10 +144,11 @@ fn execute_install_archive(
     password: Option<String>,
     parts: Vec<ArchivePart>,
     max_retries: u32,
+    download_progress_buffer_bytes: usize,
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
     spawned: &mut Vec<Task>,
-    events: &mut Vec<ProgressEvent>,
+    event_tx: &flume::Sender<ProgressEvent>,
 ) {
     for part in parts {
         let mut completed = false;
@@ -152,7 +161,7 @@ fn execute_install_archive(
             )
             .is_none()
             {
-                events.push(ProgressEvent::Verified {
+                let _ = event_tx.send(ProgressEvent::Verified {
                     path: part.logical_path.clone(),
                     ok: true,
                     issue: None,
@@ -161,6 +170,9 @@ fn execute_install_archive(
                 break;
             }
 
+            let event_tx_clone = event_tx.clone();
+            let logical_path_clone = part.logical_path.clone();
+            let expected_size_val = part.expected_size;
             match super::download::do_download(
                 io_dispatcher,
                 user_agent,
@@ -168,9 +180,17 @@ fn execute_install_archive(
                 &part.dest,
                 &part.expected_md5,
                 Some(part.expected_size),
+                download_progress_buffer_bytes,
+                Some(move |bytes| {
+                    let _ = event_tx_clone.send(ProgressEvent::DownloadedBytes {
+                        path: logical_path_clone.clone(),
+                        bytes,
+                        total_bytes: expected_size_val,
+                    });
+                }),
             ) {
                 Ok(bytes) => {
-                    events.push(ProgressEvent::Downloaded {
+                    let _ = event_tx.send(ProgressEvent::Downloaded {
                         path: part.logical_path.clone(),
                         bytes,
                     });
@@ -181,7 +201,7 @@ fn execute_install_archive(
                         Some(part.expected_size),
                     );
                     if post_issue.is_none() {
-                        events.push(ProgressEvent::Verified {
+                        let _ = event_tx.send(ProgressEvent::Verified {
                             path: part.logical_path.clone(),
                             ok: true,
                             issue: None,
@@ -190,7 +210,7 @@ fn execute_install_archive(
                         break;
                     }
                     if attempt < max_retries {
-                        events.push(ProgressEvent::Retried {
+                        let _ = event_tx.send(ProgressEvent::Retried {
                             path: part.logical_path.clone(),
                             reason: format!(
                                 "install-archive verify attempt {} failed",
@@ -199,12 +219,12 @@ fn execute_install_archive(
                         });
                         continue;
                     }
-                    events.push(ProgressEvent::Verified {
+                    let _ = event_tx.send(ProgressEvent::Verified {
                         path: part.logical_path.clone(),
                         ok: false,
                         issue: post_issue,
                     });
-                    events.push(ProgressEvent::Failed {
+                    let _ = event_tx.send(ProgressEvent::Failed {
                         path: part.logical_path.clone(),
                         reason: "install-archive verify failed after retries".to_string(),
                     });
@@ -212,7 +232,7 @@ fn execute_install_archive(
                 }
                 Err(err) => {
                     if attempt < max_retries {
-                        events.push(ProgressEvent::Retried {
+                        let _ = event_tx.send(ProgressEvent::Retried {
                             path: part.logical_path.clone(),
                             reason: format!(
                                 "install-archive download attempt {} failed: {}",
@@ -228,12 +248,12 @@ fn execute_install_archive(
                         &part.expected_md5,
                         Some(part.expected_size),
                     );
-                    events.push(ProgressEvent::Verified {
+                    let _ = event_tx.send(ProgressEvent::Verified {
                         path: part.logical_path.clone(),
                         ok: false,
                         issue,
                     });
-                    events.push(ProgressEvent::Failed {
+                    let _ = event_tx.send(ProgressEvent::Failed {
                         path: part.logical_path.clone(),
                         reason: format!("install-archive download failed after retries: {}", err),
                     });
@@ -262,9 +282,10 @@ fn execute_extract_archive(
     cleanup: bool,
     password: Option<String>,
     extraction_progress_buffer_bytes: usize,
-    events: &mut Vec<ProgressEvent>,
+    event_tx: &flume::Sender<ProgressEvent>,
 ) {
-    let extract_progress_events = std::cell::RefCell::new(Vec::<ProgressEvent>::new());
+    let progress_path = base_name.clone();
+    let event_tx_clone = event_tx.clone();
     let result =
         crate::download::extractor::MultiVolumeExtractor::from_directory(&source_dir, &base_name)
             .and_then(|extractor| {
@@ -275,19 +296,16 @@ fn execute_extract_archive(
                         staging_dir.display()
                     )
                 })?;
-                let progress_path = base_name.clone();
                 if let Err(err) = extractor.extract_to_with_progress(
                     &staging_dir,
                     password.as_deref(),
                     extraction_progress_buffer_bytes,
-                    Some(|bytes, total_bytes| {
-                        extract_progress_events
-                            .borrow_mut()
-                            .push(ProgressEvent::ExtractedBytes {
-                                path: progress_path.clone(),
-                                bytes,
-                                total_bytes,
-                            });
+                    Some(move |bytes, total_bytes| {
+                        let _ = event_tx_clone.send(ProgressEvent::ExtractedBytes {
+                            path: progress_path.clone(),
+                            bytes,
+                            total_bytes,
+                        });
                     }),
                 ) {
                     let _ = std::fs::remove_dir_all(&staging_dir);
@@ -302,13 +320,16 @@ fn execute_extract_archive(
                 }
                 Ok(())
             });
-    events.extend(extract_progress_events.into_inner());
     match result {
-        Ok(()) => events.push(ProgressEvent::Extracted { path: dest }),
-        Err(err) => events.push(ProgressEvent::Failed {
-            path: format!("{}/{}", source_dir.display(), base_name),
-            reason: err.to_string(),
-        }),
+        Ok(()) => {
+            let _ = event_tx.send(ProgressEvent::Extracted { path: dest });
+        }
+        Err(err) => {
+            let _ = event_tx.send(ProgressEvent::Failed {
+                path: format!("{}/{}", source_dir.display(), base_name),
+                reason: err.to_string(),
+            });
+        }
     }
 }
 
@@ -337,11 +358,15 @@ struct EnsureFileInput {
 
 fn execute_download(
     input: DownloadExecInput,
+    download_progress_buffer_bytes: usize,
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
     spawned: &mut Vec<Task>,
-    events: &mut Vec<ProgressEvent>,
+    event_tx: &flume::Sender<ProgressEvent>,
 ) {
+    let event_tx_clone = event_tx.clone();
+    let logical_path_clone = input.logical_path.clone();
+    let expected_size_val = input.expected_size;
     let result = super::download::do_download(
         io_dispatcher,
         user_agent,
@@ -349,10 +374,18 @@ fn execute_download(
         &input.dest,
         &input.expected_md5,
         input.expected_size,
+        download_progress_buffer_bytes,
+        Some(move |bytes| {
+            let _ = event_tx_clone.send(ProgressEvent::DownloadedBytes {
+                path: logical_path_clone.clone(),
+                bytes,
+                total_bytes: expected_size_val.unwrap_or(bytes),
+            });
+        }),
     );
     match result {
         Ok(bytes) => {
-            events.push(ProgressEvent::Downloaded {
+            let _ = event_tx.send(ProgressEvent::Downloaded {
                 path: input.logical_path.clone(),
                 bytes,
             });
@@ -378,7 +411,7 @@ fn execute_download(
         }
         Err(err) => {
             if input.retry_count < input.max_retries {
-                events.push(ProgressEvent::Retried {
+                let _ = event_tx.send(ProgressEvent::Retried {
                     path: input.logical_path.clone(),
                     reason: format!("download attempt {} failed: {}", input.retry_count + 1, err),
                 });
@@ -391,7 +424,7 @@ fn execute_download(
                     retry_count: input.retry_count + 1,
                 });
             } else {
-                events.push(ProgressEvent::Failed {
+                let _ = event_tx.send(ProgressEvent::Failed {
                     path: input.logical_path.clone(),
                     reason: format!("download failed after retries: {}", err),
                 });
@@ -409,10 +442,11 @@ fn execute_download(
 
 fn execute_ensure_file(
     input: EnsureFileInput,
+    download_progress_buffer_bytes: usize,
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
     spawned: &mut Vec<Task>,
-    events: &mut Vec<ProgressEvent>,
+    event_tx: &flume::Sender<ProgressEvent>,
 ) {
     let existing_ok = super::verify::build_issue(
         &input.dest,
@@ -422,7 +456,7 @@ fn execute_ensure_file(
     )
     .is_none();
     if existing_ok && !input.prefer_reuse {
-        events.push(ProgressEvent::Verified {
+        let _ = event_tx.send(ProgressEvent::Verified {
             path: input.logical_path,
             ok: true,
             issue: None,
@@ -448,7 +482,7 @@ fn execute_ensure_file(
             input.allow_copy_fallback,
         ) {
             Ok(ReuseMethod::Hardlink) => {
-                events.push(ProgressEvent::Hardlinked {
+                let _ = event_tx.send(ProgressEvent::Hardlinked {
                     path: input.dest.clone(),
                 });
                 if super::verify::build_issue(
@@ -459,7 +493,7 @@ fn execute_ensure_file(
                 )
                 .is_none()
                 {
-                    events.push(ProgressEvent::Verified {
+                    let _ = event_tx.send(ProgressEvent::Verified {
                         path: input.logical_path,
                         ok: true,
                         issue: None,
@@ -468,7 +502,7 @@ fn execute_ensure_file(
                 }
             }
             Ok(ReuseMethod::Copy) => {
-                events.push(ProgressEvent::Copied {
+                let _ = event_tx.send(ProgressEvent::Copied {
                     path: input.dest.clone(),
                 });
                 if super::verify::build_issue(
@@ -479,7 +513,7 @@ fn execute_ensure_file(
                 )
                 .is_none()
                 {
-                    events.push(ProgressEvent::Verified {
+                    let _ = event_tx.send(ProgressEvent::Verified {
                         path: input.logical_path,
                         ok: true,
                         issue: None,
@@ -491,7 +525,7 @@ fn execute_ensure_file(
         }
     }
     if existing_ok {
-        events.push(ProgressEvent::Verified {
+        let _ = event_tx.send(ProgressEvent::Verified {
             path: input.logical_path,
             ok: true,
             issue: None,
@@ -499,6 +533,9 @@ fn execute_ensure_file(
         return;
     }
     if let Some(download_url) = &input.download_url {
+        let event_tx_clone = event_tx.clone();
+        let logical_path_clone = input.logical_path.clone();
+        let expected_size_val = input.expected_size;
         match super::download::do_download(
             io_dispatcher,
             user_agent,
@@ -506,9 +543,17 @@ fn execute_ensure_file(
             &input.dest,
             &input.expected_md5,
             Some(input.expected_size),
+            download_progress_buffer_bytes,
+            Some(move |bytes| {
+                let _ = event_tx_clone.send(ProgressEvent::DownloadedBytes {
+                    path: logical_path_clone.clone(),
+                    bytes,
+                    total_bytes: expected_size_val,
+                });
+            }),
         ) {
             Ok(bytes) => {
-                events.push(ProgressEvent::Downloaded {
+                let _ = event_tx.send(ProgressEvent::Downloaded {
                     path: input.logical_path.clone(),
                     bytes,
                 });
@@ -520,7 +565,7 @@ fn execute_ensure_file(
                 )
                 .is_none()
                 {
-                    events.push(ProgressEvent::Verified {
+                    let _ = event_tx.send(ProgressEvent::Verified {
                         path: input.logical_path,
                         ok: true,
                         issue: None,
@@ -532,7 +577,7 @@ fn execute_ensure_file(
                         &input.expected_md5,
                         Some(input.expected_size),
                     );
-                    events.push(ProgressEvent::Verified {
+                    let _ = event_tx.send(ProgressEvent::Verified {
                         path: input.logical_path.clone(),
                         ok: false,
                         issue,
@@ -541,7 +586,7 @@ fn execute_ensure_file(
                 return;
             }
             Err(err) if input.retry_count < input.max_retries => {
-                events.push(ProgressEvent::Retried {
+                let _ = event_tx.send(ProgressEvent::Retried {
                     path: input.logical_path.clone(),
                     reason: format!(
                         "ensure-file download attempt {} failed: {}",
@@ -571,12 +616,12 @@ fn execute_ensure_file(
         &input.expected_md5,
         Some(input.expected_size),
     );
-    events.push(ProgressEvent::Verified {
+    let _ = event_tx.send(ProgressEvent::Verified {
         path: input.logical_path.clone(),
         ok: false,
         issue,
     });
-    events.push(ProgressEvent::Failed {
+    let _ = event_tx.send(ProgressEvent::Failed {
         path: input.logical_path,
         reason: reuse_error.unwrap_or_else(|| "ensure-file failed".to_string()),
     });

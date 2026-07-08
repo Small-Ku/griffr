@@ -66,6 +66,11 @@ pub enum ProgressEvent {
         path: String,
         bytes: u64,
     },
+    DownloadedBytes {
+        path: String,
+        bytes: u64,
+        total_bytes: u64,
+    },
     Verified {
         path: String,
         ok: bool,
@@ -103,6 +108,7 @@ pub struct TaskPoolConfig {
     pub max_retries: u32,
     pub user_agent: String,
     pub extraction_progress_buffer_bytes: usize,
+    pub download_progress_buffer_bytes: usize,
 }
 
 impl Default for TaskPoolConfig {
@@ -117,6 +123,7 @@ impl Default for TaskPoolConfig {
             max_retries: 3,
             user_agent: "Mozilla/5.0".to_string(),
             extraction_progress_buffer_bytes: 256 * 1024,
+            download_progress_buffer_bytes: 256 * 1024,
         }
     }
 }

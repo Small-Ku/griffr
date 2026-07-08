@@ -203,19 +203,16 @@ fn spawn_workers(
                     Err(RecvTimeoutError::Disconnected) => break,
                 };
                 let mut spawned = Vec::new();
-                let mut events = Vec::new();
                 execute_task(
                     task,
                     worker_ctx.config.max_retries,
                     worker_ctx.config.extraction_progress_buffer_bytes,
+                    worker_ctx.config.download_progress_buffer_bytes,
                     Some(worker_ctx.shared_dispatcher.as_ref()),
                     &worker_ctx.config.user_agent,
                     &mut spawned,
-                    &mut events,
+                    &worker_ctx.event_tx,
                 );
-                for event in events {
-                    let _ = worker_ctx.event_tx.send(event);
-                }
                 for task in spawned {
                     let _ = enqueue_task(&worker_ctx, task);
                 }

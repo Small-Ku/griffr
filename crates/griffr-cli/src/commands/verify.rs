@@ -183,6 +183,7 @@ pub async fn verify(
     let mut pool_cfg = TaskPoolConfig::default();
     pool_cfg.max_retries = 3;
     pool_cfg.extraction_progress_buffer_bytes = opts.extraction_progress_buffer_bytes;
+    pool_cfg.download_progress_buffer_bytes = opts.download_progress_buffer_bytes;
     if repair && !extra_tasks.is_empty() {
         // VFS CDN endpoints can become unstable under high parallelism on some routes.
         // Keep a moderate IO fanout for repair+VFS runs to improve success rate.

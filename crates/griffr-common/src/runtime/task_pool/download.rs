@@ -28,6 +28,8 @@ pub(crate) fn do_download(
     dest: &Path,
     expected_md5: &str,
     expected_size: Option<u64>,
+    progress_buffer_bytes: usize,
+    on_progress: Option<impl Fn(u64) + Send + 'static>,
 ) -> Result<u64> {
     let send_timeout = duration_from_env_secs(
         "GRIFFR_DOWNLOAD_SEND_TIMEOUT_SECS",
@@ -117,6 +119,7 @@ pub(crate) fn do_download(
         let mut stream = response.bytes_stream();
         let mut total_written = if resume_effective { resume_offset } else { 0 };
         let mut write_offset = total_written;
+        let mut last_reported_bytes = total_written;
         loop {
             let next = compio::time::timeout(body_timeout, stream.next())
                 .await
@@ -142,6 +145,18 @@ pub(crate) fn do_download(
             })?;
             write_offset = write_offset.saturating_add(chunk_len);
             total_written = total_written.saturating_add(chunk_len);
+            if let Some(ref cb) = on_progress {
+                if total_written - last_reported_bytes >= progress_buffer_bytes as u64 {
+                    cb(total_written);
+                    last_reported_bytes = total_written;
+                }
+            }
+        }
+
+        if let Some(ref cb) = on_progress {
+            if total_written > last_reported_bytes {
+                cb(total_written);
+            }
         }
 
         out.sync_data().await.with_context(|| {
