@@ -6,36 +6,103 @@ pub fn partition_non_overlapping_tiles(
     widgets: &[WidgetNode],
     bounds: &[Rect],
 ) -> Vec<TileSpec> {
-    let mut xs: Vec<f64> = Vec::new();
+    if bounds.is_empty() {
+        return Vec::new();
+    }
+
+    // Collect all unique Y coordinates
     let mut ys: Vec<f64> = Vec::new();
     for r in bounds {
-        xs.push(r.origin.x);
-        xs.push(r.max_x());
         ys.push(r.origin.y);
         ys.push(r.max_y());
     }
-    xs.sort_by(|a, b| a.total_cmp(b));
     ys.sort_by(|a, b| a.total_cmp(b));
-    xs.dedup();
     ys.dedup();
 
-    let mut out = Vec::<TileSpec>::new();
-    for yi in 0..ys.len().saturating_sub(1) {
-        for xi in 0..xs.len().saturating_sub(1) {
+    if ys.len() < 2 {
+        return Vec::new();
+    }
+
+    struct ActiveTile {
+        x0: f64,
+        x1: f64,
+        y0: f64,
+        y1: f64,
+        signature: crate::ui::TileSignature,
+        clipped: bool,
+        widgets: Vec<WidgetId>,
+    }
+
+    let mut active_tiles: Vec<ActiveTile> = Vec::new();
+    let mut final_tiles: Vec<TileSpec> = Vec::new();
+
+    // Iterate through Y-bands
+    for yi in 0..ys.len() - 1 {
+        let y_start = ys[yi];
+        let y_end = ys[yi + 1];
+
+        // Find widgets overlapping this Y-band
+        let mut overlapping_indices = Vec::new();
+        for (idx, r) in bounds.iter().enumerate() {
+            if r.origin.y < y_end && r.max_y() > y_start {
+                overlapping_indices.push(idx);
+            }
+        }
+
+        if overlapping_indices.is_empty() {
+            // Close all active tiles since this band has no widgets
+            for active in active_tiles.drain(..) {
+                final_tiles.push(TileSpec {
+                    id: TileId(0), // will be re-indexed later
+                    bounds: Rect::new(
+                        Point::new(active.x0, active.y0),
+                        Size::new(active.x1 - active.x0, active.y1 - active.y0),
+                    ),
+                    clipped: active.clipped,
+                    widgets: active.widgets,
+                    signature: active.signature,
+                });
+            }
+            continue;
+        }
+
+        // Collect unique X coordinates for overlapping widgets
+        let mut xs: Vec<f64> = Vec::new();
+        for &idx in &overlapping_indices {
+            let r = &bounds[idx];
+            xs.push(r.origin.x);
+            xs.push(r.max_x());
+        }
+        xs.sort_by(|a, b| a.total_cmp(b));
+        xs.dedup();
+
+        if xs.len() < 2 {
+            continue;
+        }
+
+        struct Run {
+            x0: f64,
+            x1: f64,
+            signature: crate::ui::TileSignature,
+            clipped: bool,
+            widgets: Vec<WidgetId>,
+        }
+
+        let mut current_runs: Vec<Run> = Vec::new();
+
+        // X-axis scan
+        for xi in 0..xs.len() - 1 {
             let x0 = xs[xi];
             let x1 = xs[xi + 1];
-            let y0 = ys[yi];
-            let y1 = ys[yi + 1];
-            if x1 <= x0 || y1 <= y0 {
-                continue;
-            }
             let cx = (x0 + x1) * 0.5;
-            let cy = (y0 + y1) * 0.5;
+            let cy = (y_start + y_end) * 0.5;
+
+            // Find covering widgets in this interval
             let mut covering: Vec<(i32, WidgetId, bool)> = Vec::new();
-            for (wid_idx, rect) in bounds.iter().enumerate() {
-                let wid = WidgetId(wid_idx as u16);
+            for &idx in &overlapping_indices {
+                let rect = &bounds[idx];
                 if rect.contains(Point::new(cx, cy)) {
-                    let node = &widgets[wid.0 as usize];
+                    let node = &widgets[idx];
                     let clipped = match node.clip {
                         ClipPolicy::InferFromCapabilities => node.scrollable,
                         ClipPolicy::ForceClip => true,
@@ -44,9 +111,11 @@ pub fn partition_non_overlapping_tiles(
                     covering.push((node.z_order, node.id, clipped));
                 }
             }
+
             if covering.is_empty() {
                 continue;
             }
+
             covering.sort_by_key(|(z, id, _)| (*z, *id));
             let (_, _, top_clipped) = *covering.last().expect("non-empty covering");
 
@@ -87,14 +156,99 @@ pub fn partition_non_overlapping_tiles(
                 clipped: top_clipped,
             };
 
-            out.push(TileSpec {
-                id: TileId(out.len() as u16),
-                bounds: Rect::new(Point::new(x0, y0), Size::new(x1 - x0, y1 - y0)),
+            // Horizontal merge with previous run in the same band
+            if let Some(last_run) = current_runs.last_mut() {
+                if last_run.signature == signature && last_run.clipped == top_clipped {
+                    last_run.x1 = x1;
+                    continue;
+                }
+            }
+
+            current_runs.push(Run {
+                x0,
+                x1,
+                signature,
                 clipped: top_clipped,
                 widgets: draw_stack,
-                signature,
             });
         }
+
+        // Vertical merge with active_tiles
+        let mut next_active_tiles = Vec::new();
+        let mut matched_runs = vec![false; current_runs.len()];
+
+        for mut active in active_tiles {
+            let mut merged = false;
+            if active.y1 == y_start {
+                // Try to find a matching run in current_runs
+                for (r_idx, run) in current_runs.iter().enumerate() {
+                    if !matched_runs[r_idx]
+                        && active.x0 == run.x0
+                        && active.x1 == run.x1
+                        && active.signature == run.signature
+                        && active.clipped == run.clipped
+                    {
+                        active.y1 = y_end;
+                        matched_runs[r_idx] = true;
+                        merged = true;
+                        break;
+                    }
+                }
+            }
+
+            if merged {
+                next_active_tiles.push(active);
+            } else {
+                // Cannot extend further, output it
+                final_tiles.push(TileSpec {
+                    id: TileId(0),
+                    bounds: Rect::new(
+                        Point::new(active.x0, active.y0),
+                        Size::new(active.x1 - active.x0, active.y1 - active.y0),
+                    ),
+                    clipped: active.clipped,
+                    widgets: active.widgets,
+                    signature: active.signature,
+                });
+            }
+        }
+
+        // Any unmatched runs become new active tiles
+        for (r_idx, run) in current_runs.into_iter().enumerate() {
+            if !matched_runs[r_idx] {
+                next_active_tiles.push(ActiveTile {
+                    x0: run.x0,
+                    x1: run.x1,
+                    y0: y_start,
+                    y1: y_end,
+                    signature: run.signature,
+                    clipped: run.clipped,
+                    widgets: run.widgets,
+                });
+            }
+        }
+
+        active_tiles = next_active_tiles;
     }
-    out
+
+    // Flush remaining active tiles
+    for active in active_tiles {
+        final_tiles.push(TileSpec {
+            id: TileId(0),
+            bounds: Rect::new(
+                Point::new(active.x0, active.y0),
+                Size::new(active.x1 - active.x0, active.y1 - active.y0),
+            ),
+            clipped: active.clipped,
+            widgets: active.widgets,
+            signature: active.signature,
+        });
+    }
+
+    // Assign final sequential tile IDs
+    for (idx, tile) in final_tiles.iter_mut().enumerate() {
+        tile.id = TileId(idx as u16);
+    }
+
+    final_tiles
 }
