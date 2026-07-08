@@ -4,11 +4,11 @@ use crate::ui::{ClipPolicy, TileId, TileSpec, WidgetId, WidgetNode};
 
 pub fn partition_non_overlapping_tiles(
     widgets: &[WidgetNode],
-    bounds: &[(WidgetId, Rect)],
+    bounds: &[Rect],
 ) -> Vec<TileSpec> {
     let mut xs: Vec<f64> = Vec::new();
     let mut ys: Vec<f64> = Vec::new();
-    for (_, r) in bounds {
+    for r in bounds {
         xs.push(r.origin.x);
         xs.push(r.max_x());
         ys.push(r.origin.y);
@@ -32,9 +32,10 @@ pub fn partition_non_overlapping_tiles(
             let cx = (x0 + x1) * 0.5;
             let cy = (y0 + y1) * 0.5;
             let mut covering: Vec<(i32, WidgetId, bool)> = Vec::new();
-            for (wid, rect) in bounds {
+            for (wid_idx, rect) in bounds.iter().enumerate() {
+                let wid = WidgetId(wid_idx as u16);
                 if rect.contains(Point::new(cx, cy)) {
-                    if let Some(node) = widgets.iter().find(|w| w.id == *wid) {
+                    if let Some(node) = widgets.iter().find(|w| w.id == wid) {
                         let clipped = match node.clip {
                             ClipPolicy::InferFromCapabilities => node.scrollable,
                             ClipPolicy::ForceClip => true,

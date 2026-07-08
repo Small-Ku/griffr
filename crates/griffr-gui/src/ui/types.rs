@@ -150,7 +150,8 @@ pub struct TilePlan {
 
 pub struct CompiledPlan {
     pub widgets: Vec<WidgetNode>,
-    pub bounds: Vec<(WidgetId, Rect)>,
+    pub bounds: Box<[Rect]>,
+    pub dirty: Box<[bool]>,
     pub tile_plan: TilePlan,
     pub size: Size,
 }

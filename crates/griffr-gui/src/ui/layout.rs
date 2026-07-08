@@ -4,7 +4,7 @@ use winio::primitive::{Point, Rect, Size};
 
 use crate::ui::{LayoutDirection, SizingPolicy, WidgetId, WidgetNode};
 
-pub fn compute_layout(nodes: &[WidgetNode], size: Size) -> Vec<(WidgetId, Rect)> {
+pub fn compute_layout(nodes: &[WidgetNode], size: Size) -> Box<[Rect]> {
     let mut by_parent: HashMap<Option<WidgetId>, Vec<WidgetNode>> = HashMap::default();
     let mut by_id: HashMap<WidgetId, WidgetNode> = HashMap::default();
     for n in nodes {
@@ -15,15 +15,15 @@ pub fn compute_layout(nodes: &[WidgetNode], size: Size) -> Vec<(WidgetId, Rect)>
         children.sort_by_key(|n| (n.z_order, n.id));
     }
 
-    let mut out = Vec::new();
+    let mut out = vec![Rect::default(); nodes.len()];
     if let Some(roots) = by_parent.get(&None) {
         let root_bounds = Rect::from_size(size);
         for root in roots {
-            out.push((root.id, root_bounds));
+            out[root.id.0 as usize] = root_bounds;
             layout_node_children(root.id, root_bounds, &by_parent, &by_id, &mut out);
         }
     }
-    out
+    out.into_boxed_slice()
 }
 
 fn layout_node_children(
@@ -31,7 +31,7 @@ fn layout_node_children(
     parent_bounds: Rect,
     by_parent: &HashMap<Option<WidgetId>, Vec<WidgetNode>>,
     by_id: &HashMap<WidgetId, WidgetNode>,
-    out: &mut Vec<(WidgetId, Rect)>,
+    out: &mut [Rect],
 ) {
     let Some(children) = by_parent.get(&Some(parent)) else {
         return;
@@ -139,7 +139,7 @@ fn layout_node_children(
             }
         }
 
-        out.push((child.id, child_bounds));
+        out[child.id.0 as usize] = child_bounds;
         layout_node_children(child.id, child_bounds, by_parent, by_id, out);
     }
 }
@@ -232,8 +232,8 @@ mod tests {
         let size = Size::new(900.0, 640.0);
         let layout = compute_layout(&nodes, size);
 
-        let r1 = layout.iter().find(|(id, _)| id.0 == 1).unwrap().1;
-        let r2 = layout.iter().find(|(id, _)| id.0 == 2).unwrap().1;
+        let r1 = layout[1];
+        let r2 = layout[2];
 
         // Container start is 0. Padding 10 + Margin 6 = 16.
         assert_eq!(r1.origin.y, 16.0, "Top gap should be 16");

@@ -263,12 +263,11 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                             let mut ctx = canvas.context()?;
                             for &id in &tile.widgets {
                                 if let Some((_, widget)) = self.widgets.iter_mut().find(|(w_id, _)| *w_id == id) {
-                                    if let Some((_, widget_bounds)) = self.plan.bounds.iter().find(|(b_id, _)| *b_id == id) {
-                                        let tx = widget_bounds.origin.x - tile.bounds.origin.x;
-                                        let ty = widget_bounds.origin.y - tile.bounds.origin.y;
-                                        ctx.set_transform(::winio::prelude::Transform::translation(tx, ty))?;
-                                        widget.draw(&mut ctx, ::winio::prelude::Size::new(widget_bounds.size.width, widget_bounds.size.height), tile.clipped)?;
-                                    }
+                                    let widget_bounds = &self.plan.bounds[id.0 as usize];
+                                    let tx = widget_bounds.origin.x - tile.bounds.origin.x;
+                                    let ty = widget_bounds.origin.y - tile.bounds.origin.y;
+                                    ctx.set_transform(::winio::prelude::Transform::translation(tx, ty))?;
+                                    widget.draw(&mut ctx, ::winio::prelude::Size::new(widget_bounds.size.width, widget_bounds.size.height), tile.clipped)?;
                                 }
                             }
                         }
@@ -355,7 +354,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             fn build_widgets(plan: &::griffr_gui::ui::CompiledPlan) -> ::winio::prelude::Result<Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>> {
                 let mut out = Vec::<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>::new();
                 for node in &plan.widgets {
-                    let bounds = plan.bounds.iter().find(|(id, _)| *id == node.id).map(|(_, b)| *b).unwrap_or(::winio::primitive::Rect::from_size(::winio::prelude::Size::new(0.0, 0.0)));
+                    let bounds = plan.bounds.get(node.id.0 as usize).copied().unwrap_or(::winio::primitive::Rect::from_size(::winio::prelude::Size::new(0.0, 0.0)));
                     let clipped = plan.tile_plan.tiles.iter().find(|tile| tile.widgets.iter().any(|id| *id == node.id)).map(|t| t.clipped).unwrap_or(false);
                     let slot = ::griffr_gui::ui::TileSlot { bounds, clipped, sizing: node.layout.sizing };
                     let widget: Box<dyn ::griffr_gui::ui::Widget> = match node.widget_type {
@@ -388,9 +387,11 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 for (idx, t) in tiles.iter_mut().enumerate() {
                     t.id = ::griffr_gui::ui::TileId(idx as u16);
                 }
+                let num_widgets = widgets.len();
                 ::griffr_gui::ui::CompiledPlan {
                     widgets,
                     bounds,
+                    dirty: vec![false; num_widgets].into_boxed_slice(),
                     tile_plan: ::griffr_gui::ui::TilePlan { tiles },
                     size,
                 }
@@ -405,16 +406,15 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                     #routed_ident::MouseWheel { x, y } => (x, y, |_, _, s| s),
                 };
                 let mut best: Option<(i32, ::griffr_gui::ui::WidgetId)> = None;
-                for (id, bounds) in &plan.bounds {
+                for node in &plan.widgets {
+                    let bounds = &plan.bounds[node.id.0 as usize];
                     if !bounds.contains(::winio::prelude::Point::new(x, y)) {
                         continue;
                     }
-                    if let Some(node) = plan.widgets.iter().find(|n| n.id == *id) {
-                        if predicate(node.hoverable, node.clickable, node.scrollable) {
-                            match best {
-                                Some((z, _)) if z >= node.z_order => {}
-                                _ => best = Some((node.z_order, node.id)),
-                            }
+                    if predicate(node.hoverable, node.clickable, node.scrollable) {
+                        match best {
+                            Some((z, _)) if z >= node.z_order => {}
+                            _ => best = Some((node.z_order, node.id)),
                         }
                     }
                 }

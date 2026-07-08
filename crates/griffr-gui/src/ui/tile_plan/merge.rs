@@ -4,7 +4,7 @@ use crate::ui::{TileSpec, WidgetId, WidgetNode};
 
 pub fn merge_adjacent_non_clipped(
     mut tiles: Vec<TileSpec>,
-    _widget_bounds: &[(WidgetId, Rect)],
+    _widget_bounds: &[Rect],
     _widgets: &[WidgetNode],
 ) -> Vec<TileSpec> {
     loop {
@@ -119,7 +119,7 @@ mod tests {
                 },
             },
         ];
-        let wb = vec![(WidgetId(1), Rect::from_size(Size::new(100.0, 50.0)))];
+        let wb = vec![Rect::default(), Rect::from_size(Size::new(100.0, 50.0))];
         let wn = vec![WidgetNode {
             id: WidgetId(1),
             parent: None,
