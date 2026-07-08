@@ -239,7 +239,8 @@ pub(crate) fn enqueue_task(ctx: &WorkerContext, task: Task) -> Result<()> {
         Task::InstallArchive { .. }
         | Task::Download { .. }
         | Task::Hardlink { .. }
-        | Task::EnsureFile { .. } => ctx.io_tx.send(task),
+        | Task::EnsureFile { .. }
+        | Task::ApplyDeleteManifest { .. } => ctx.io_tx.send(task),
         Task::Verify { .. } => ctx.cpu_tx.send(task),
         Task::Extract { .. } => ctx.extract_tx.send(task),
     };

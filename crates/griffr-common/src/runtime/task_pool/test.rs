@@ -398,3 +398,59 @@ fn install_archive_recovers_from_interrupted_partial_part_on_rerun() {
     let extracted = std::fs::read_to_string(install_dir.join("data.txt")).unwrap();
     assert_eq!(extracted, "recovered after interruption");
 }
+
+#[test]
+fn extract_task_spawns_delete_manifest_follow_up_task() {
+    let tmp = tempdir().unwrap();
+    let source_dir = tmp.path().join("downloads");
+    let install_dir = tmp.path().join("install");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::create_dir_all(install_dir.join("Endfield_Data/Plugins/x86_64")).unwrap();
+    std::fs::write(
+        install_dir.join("Endfield_Data/Plugins/x86_64/libHAPI.dll"),
+        b"obsolete",
+    )
+    .unwrap();
+
+    let zip_path = tmp.path().join("bundle.zip");
+    let zip_file = std::fs::File::create(&zip_path).unwrap();
+    let mut zip = zip::ZipWriter::new(zip_file);
+    zip.start_file("payload.txt", FileOptions::<()>::default())
+        .unwrap();
+    zip.write_all(b"updated payload").unwrap();
+    zip.start_file("delete_files.txt", FileOptions::<()>::default())
+        .unwrap();
+    zip.write_all(b"Endfield_Data/Plugins/x86_64/libHAPI.dll\n")
+        .unwrap();
+    zip.finish().unwrap();
+
+    let zip_bytes = std::fs::read(&zip_path).unwrap();
+    std::fs::write(source_dir.join("bundle.zip.001"), &zip_bytes).unwrap();
+
+    let tasks = vec![Task::Extract {
+        source_dir: source_dir.clone(),
+        base_name: "bundle".to_string(),
+        dest: install_dir.clone(),
+        cleanup: false,
+        password: None,
+    }];
+
+    let result = run_tasks(tasks, TaskPoolConfig::default()).unwrap();
+
+    assert!(
+        result
+            .events
+            .iter()
+            .all(|event| !matches!(event, ProgressEvent::Failed { .. })),
+        "extract + delete manifest task should finish without failures: {:?}",
+        result.events
+    );
+    assert_eq!(
+        std::fs::read_to_string(install_dir.join("payload.txt")).unwrap(),
+        "updated payload"
+    );
+    assert!(!install_dir
+        .join("Endfield_Data/Plugins/x86_64/libHAPI.dll")
+        .exists());
+    assert!(!install_dir.join("delete_files.txt").exists());
+}

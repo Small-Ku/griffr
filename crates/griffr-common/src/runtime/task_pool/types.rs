@@ -45,6 +45,9 @@ pub enum Task {
         cleanup: bool,
         password: Option<String>,
     },
+    ApplyDeleteManifest {
+        install_root: PathBuf,
+    },
     Hardlink {
         src: PathBuf,
         dest: PathBuf,

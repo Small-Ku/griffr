@@ -4,7 +4,8 @@ use anyhow::Context;
 use compio::dispatcher::Dispatcher;
 
 use super::fs_ops::{
-    commit_staged_extract, create_hardlink, make_extract_staging_dir, reuse_file, ReuseMethod,
+    apply_delete_files_manifest, commit_staged_extract, create_hardlink, make_extract_staging_dir,
+    reuse_file, ReuseMethod,
 };
 use super::types::{ArchivePart, ProgressEvent, Task};
 
@@ -131,8 +132,20 @@ pub(crate) fn execute_task(
             cleanup,
             password,
             extraction_progress_buffer_bytes,
+            spawned,
             event_tx,
         ),
+        Task::ApplyDeleteManifest { install_root } => {
+            match apply_delete_files_manifest(&install_root) {
+                Ok(()) => {}
+                Err(err) => {
+                    let _ = event_tx.send(ProgressEvent::Failed {
+                        path: install_root.display().to_string(),
+                        reason: err.to_string(),
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -282,6 +295,7 @@ fn execute_extract_archive(
     cleanup: bool,
     password: Option<String>,
     extraction_progress_buffer_bytes: usize,
+    spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<ProgressEvent>,
 ) {
     let progress_path = base_name.clone();
@@ -315,6 +329,9 @@ fn execute_extract_archive(
                     let _ = std::fs::remove_dir_all(&staging_dir);
                     return Err(err);
                 }
+                spawned.push(Task::ApplyDeleteManifest {
+                    install_root: dest.clone(),
+                });
                 if cleanup {
                     extractor.cleanup()?;
                 }

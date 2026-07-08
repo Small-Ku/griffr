@@ -929,6 +929,20 @@ mod tests {
         );
     }
 
+    fn test_global_options() -> GlobalOptions {
+        GlobalOptions {
+            dry_run: false,
+            verbose: false,
+            skip_verify: false,
+            force_full_package: false,
+            skip_vfs: true,
+            keep_pack_archives: false,
+            extraction_progress_buffer_bytes: 256 * 1024,
+            download_progress_buffer_bytes: 256 * 1024,
+            output: crate::OutputFormat::Text,
+        }
+    }
+
     #[test]
     fn choose_patch_package_when_available() {
         let response = GetLatestGameResponse {
@@ -1378,17 +1392,7 @@ mod tests {
             },
         ];
 
-        let opts = GlobalOptions {
-            dry_run: false,
-            verbose: false,
-            skip_verify: false,
-            force_full_package: false,
-            skip_vfs: true,
-            keep_pack_archives: false,
-            extraction_progress_buffer_bytes: 256 * 1024,
-            download_progress_buffer_bytes: 256 * 1024,
-            output: crate::OutputFormat::Text,
-        };
+        let opts = test_global_options();
 
         let mut pool_cfg = TaskPoolConfig::default();
         pool_cfg.max_retries = 3;
@@ -1423,6 +1427,71 @@ mod tests {
 
         let extracted = std::fs::read_to_string(install_path.join("payload.txt")).unwrap();
         assert_eq!(extracted, "cli updater recovery");
+    }
+
+    #[compio::test]
+    async fn download_and_extract_archives_applies_delete_files_manifest() {
+        let tmp = tempdir().unwrap();
+        let install_path = tmp.path().join("install");
+        std::fs::create_dir_all(install_path.join("Endfield_Data/Plugins/x86_64")).unwrap();
+        std::fs::write(
+            install_path.join("Endfield_Data/Plugins/x86_64/libHAPI.dll"),
+            b"obsolete",
+        )
+        .unwrap();
+
+        let zip_path = tmp.path().join("bundle.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("payload.txt", FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"updated payload").unwrap();
+        zip.start_file("delete_files.txt", FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"Endfield_Data/Plugins/x86_64/libHAPI.dll\n")
+            .unwrap();
+        zip.finish().unwrap();
+        let zip_bytes = std::fs::read(&zip_path).unwrap();
+
+        let part_name = "bundle.zip.001";
+        let mut routes = HashMap::new();
+        routes.insert(format!("/{}", part_name), zip_bytes.clone());
+        let (base_url, _hits, stop) = start_test_http_server(routes);
+
+        let archives = vec![PackFile {
+            url: format!("{}/{}", base_url, part_name),
+            md5: format!("{:x}", md5::Md5::digest(&zip_bytes)),
+            package_size: zip_bytes.len().to_string(),
+        }];
+
+        let opts = test_global_options();
+        let mut pool_cfg = TaskPoolConfig::default();
+        pool_cfg.max_retries = 3;
+        pool_cfg.extraction_progress_buffer_bytes = opts.extraction_progress_buffer_bytes;
+        pool_cfg.download_progress_buffer_bytes = opts.download_progress_buffer_bytes;
+        let mut pool_runner = TaskPoolRunner::new(pool_cfg).unwrap();
+
+        let result = download_and_extract_archives(
+            &archives,
+            &install_path,
+            "patch",
+            false,
+            None,
+            &opts,
+            &mut pool_runner,
+        )
+        .await;
+        stop.store(true, Ordering::Release);
+        result.unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(install_path.join("payload.txt")).unwrap(),
+            "updated payload"
+        );
+        assert!(!install_path
+            .join("Endfield_Data/Plugins/x86_64/libHAPI.dll")
+            .exists());
+        assert!(!install_path.join("delete_files.txt").exists());
     }
 
     #[compio::test]
