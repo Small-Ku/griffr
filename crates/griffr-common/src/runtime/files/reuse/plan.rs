@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::collections::HashMap;
+use rapidhash::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 
 use crate::api::types::GameFileEntry;
 use crate::api::ApiClient;
@@ -82,7 +82,7 @@ pub async fn plan_file_reuse(
         .collect();
 
     let mut reusable_files: Vec<super::models::ReusableFile> = Vec::new();
-    let mut reusable_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut reusable_paths: HashSet<String> = HashSet::default();
     let mut reusable_size: u64 = 0;
 
     for (idx, source) in source_servers.iter().enumerate() {
@@ -90,7 +90,7 @@ pub async fn plan_file_reuse(
             Some(m) => m,
             None => continue,
         };
-        let mut candidate_meta: HashMap<String, (String, u64)> = HashMap::new();
+        let mut candidate_meta: HashMap<String, (String, u64)> = HashMap::default();
         let mut verify_tasks = Vec::new();
 
         for entry in source_manifest {

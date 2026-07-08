@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rapidhash::RapidHashMap as HashMap;
 use winio::primitive::{Point, Rect, Size};
 
 use crate::ui::{TileSpec, WidgetId, WidgetNode};
@@ -97,7 +97,7 @@ fn rects_overlap(a: &Rect, b: &Rect) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use rapidhash::RapidHashMap as HashMap;
     use winio::primitive::{Point, Rect, Size};
 
     use crate::ui::tile_plan::merge::merge_adjacent_non_clipped;

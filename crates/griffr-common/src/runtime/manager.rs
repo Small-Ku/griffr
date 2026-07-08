@@ -1,6 +1,6 @@
 //! Game installation and version management
 
-use std::collections::HashSet;
+use rapidhash::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::{fs::File, io::Read};
@@ -39,13 +39,13 @@ impl GameManager {
 
     fn resolve_reused_logical_path(
         path: &Path,
-        tracked_paths: &HashSet<String>,
-        extra_tracked_paths: &HashSet<String>,
+        filename_index: &HashMap<String, Vec<String>>,
     ) -> Option<String> {
         let normalized = Self::normalize_progress_path(path);
-        tracked_paths
+        let filename = path.file_name()?.to_str()?;
+        let candidates = filename_index.get(filename)?;
+        candidates
             .iter()
-            .chain(extra_tracked_paths.iter())
             .find(|candidate| normalized.ends_with(candidate.as_str()))
             .cloned()
     }
@@ -401,6 +401,15 @@ impl GameManager {
             .filter_map(Self::task_progress_path)
             .map(str::to_owned)
             .collect::<HashSet<_>>();
+        let mut filename_index = HashMap::default();
+        for path in tracked_paths.iter().chain(extra_tracked_paths.iter()) {
+            if let Some(filename) = Path::new(path).file_name().and_then(|f| f.to_str()) {
+                filename_index
+                    .entry(filename.to_string())
+                    .or_insert_with(Vec::new)
+                    .push(path.clone());
+            }
+        }
         let tracked_total_bytes: u64 = entries.iter().map(|entry| entry.size).sum::<u64>()
             .saturating_add(
                 extra_tasks
@@ -488,7 +497,7 @@ impl GameManager {
             }
             ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {
                 if let Some(logical_path) =
-                    Self::resolve_reused_logical_path(path, &tracked_paths, &extra_tracked_paths)
+                    Self::resolve_reused_logical_path(path, &filename_index)
                 {
                     outcomes.record_reused(
                         &logical_path,

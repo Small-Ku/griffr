@@ -218,8 +218,8 @@ pub async fn install(
             .await
             .with_context(|| format!("Failed to create {}", download_dir.display()))?;
 
-        let mut archives: std::collections::HashMap<String, Vec<ArchivePart>> =
-            std::collections::HashMap::new();
+        let mut archives: rapidhash::RapidHashMap<String, Vec<ArchivePart>> =
+            rapidhash::RapidHashMap::default();
         let total_archive_download_bytes: u64 = pkg.packs.iter().map(|p| p.size()).sum();
         for pack in &pkg.packs {
             let filename = pack

@@ -15,6 +15,7 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 use tracing::{info, warn};
+use rapidhash::RapidHashSet as HashSet;
 
 use crate::api::client::ApiClient;
 use crate::api::crypto::RES_INDEX_KEY;
@@ -96,7 +97,7 @@ pub struct VfsBootstrapPlan {
     pub manifest_downloads: Vec<VfsBootstrapManifestDownload>,
     pub total_files: usize,
     pub total_bytes: u64,
-    pub expected_paths: std::collections::HashSet<String>,
+    pub expected_paths: HashSet<String>,
     pub res_version: String,
     pub scope_label: String,
 }
@@ -256,7 +257,7 @@ pub async fn plan_persistent_bootstrap_tasks(
     let mut manifest_downloads = Vec::new();
     let mut total_files = 0usize;
     let mut total_bytes = 0u64;
-    let mut expected_paths = std::collections::HashSet::new();
+    let mut expected_paths = HashSet::default();
     let mut scope_parts = Vec::new();
 
     let mut source_roots = vec![cfg.source_streaming_assets.clone()];

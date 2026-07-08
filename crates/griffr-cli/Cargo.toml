@@ -32,6 +32,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"
 md-5 = { workspace = true }
+rapidhash = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.14"

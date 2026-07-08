@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rapidhash::RapidHashMap as HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -385,7 +385,7 @@ fn group_archives_by_base(
     archives: &[griffr_common::api::types::PackFile],
     archive_dir: &Path,
 ) -> Result<HashMap<String, Vec<ArchivePart>>> {
-    let mut grouped: HashMap<String, Vec<ArchivePart>> = HashMap::new();
+    let mut grouped: HashMap<String, Vec<ArchivePart>> = HashMap::default();
     for archive in archives {
         let filename = archive
             .filename()

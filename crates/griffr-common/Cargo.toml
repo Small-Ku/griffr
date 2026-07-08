@@ -32,6 +32,7 @@ base64 = "0.22"
 
 # Platform
 dirs = { workspace = true }
+rapidhash = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

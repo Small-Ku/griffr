@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use rapidhash::RapidHashMap as HashMap;
 
 use winio::primitive::{Point, Rect, Size};
 
 use crate::ui::{LayoutDirection, SizingPolicy, WidgetId, WidgetNode};
 
 pub fn compute_layout(nodes: &[WidgetNode], size: Size) -> Vec<(WidgetId, Rect)> {
-    let mut by_parent: HashMap<Option<WidgetId>, Vec<WidgetNode>> = HashMap::new();
-    let mut by_id: HashMap<WidgetId, WidgetNode> = HashMap::new();
+    let mut by_parent: HashMap<Option<WidgetId>, Vec<WidgetNode>> = HashMap::default();
+    let mut by_id: HashMap<WidgetId, WidgetNode> = HashMap::default();
     for n in nodes {
         by_parent.entry(n.parent).or_default().push(n.clone());
         by_id.insert(n.id, n.clone());

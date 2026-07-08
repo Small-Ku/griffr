@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rapidhash::RapidHashMap as HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -90,7 +90,7 @@ pub async fn materialize_game_files_with_pool(
         .filter(|entry| !is_launcher_metadata_path(&entry.path))
         .map(|entry| (entry.path.as_str(), entry))
         .collect();
-    let mut source_candidates: HashMap<String, Vec<std::path::PathBuf>> = HashMap::new();
+    let mut source_candidates: HashMap<String, Vec<std::path::PathBuf>> = HashMap::default();
 
     for item in source_manifest_results.into_iter().flatten() {
         let (source, source_manifest) = item;

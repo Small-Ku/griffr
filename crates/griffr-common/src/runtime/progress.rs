@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rapidhash::RapidHashMap as HashMap;
 
 use crate::runtime::task_pool::ProgressEvent;
 

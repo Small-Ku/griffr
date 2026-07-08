@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +18,7 @@ pub struct Config {
     pub version: u32,
 
     /// Game configurations keyed by game ID
-    pub games: HashMap<GameId, GameConfig>,
+    pub games: BTreeMap<GameId, GameConfig>,
 
     /// Default settings
     #[serde(default)]
@@ -29,7 +29,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             version: CONFIG_VERSION,
-            games: HashMap::new(),
+            games: BTreeMap::new(),
             defaults: DefaultSettings::default(),
         }
     }
@@ -137,7 +137,7 @@ impl Config {
 }
 
 /// Game identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GameId {
     Arknights,
@@ -195,7 +195,7 @@ pub struct GameConfig {
 
     /// Per-server configurations
     #[serde(default)]
-    pub servers: HashMap<ServerId, ServerConfig>,
+    pub servers: BTreeMap<ServerId, ServerConfig>,
 }
 
 impl GameConfig {
@@ -218,13 +218,13 @@ impl Default for GameConfig {
             active_server: ServerId::CnOfficial,
             version: None,
             last_update: None,
-            servers: HashMap::new(),
+            servers: BTreeMap::new(),
         }
     }
 }
 
 /// Server identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum ServerId {

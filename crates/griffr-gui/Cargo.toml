@@ -10,3 +10,4 @@ rust-version.workspace = true
 [dependencies]
 winio = { version = "0.11.0", features = ["win32"], default-features = false }
 griffr-gui-macros = { path = "../griffr-gui-macros" }
+rapidhash = { workspace = true }

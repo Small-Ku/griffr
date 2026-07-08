@@ -30,8 +30,8 @@ pub async fn execute_reuse_plan(
         plan.reusable_files.len()
     );
     let mut hardlink_tasks = Vec::with_capacity(plan.reusable_files.len());
-    let mut path_to_source: std::collections::HashMap<std::path::PathBuf, std::path::PathBuf> =
-        std::collections::HashMap::new();
+    let mut path_to_source: rapidhash::RapidHashMap<std::path::PathBuf, std::path::PathBuf> =
+        rapidhash::RapidHashMap::default();
     for file in &plan.reusable_files {
         let source_file = file.source_path.join(&file.path);
         let target_file = target_path.join(&file.path);
