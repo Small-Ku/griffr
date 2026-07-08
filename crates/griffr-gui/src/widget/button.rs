@@ -1,5 +1,5 @@
-use crate::ui::{DirtyFlags, TileSlot, Widget};
-use winio::prelude::{CanvasEvent, Color, DrawingContext, Rect, Result, Size, SolidColorBrush};
+use crate::ui::{DirtyFlags, DrawResources, TileSlot, Widget};
+use winio::prelude::{CanvasEvent, Color, DrawingContext, Rect, Result, Size};
 
 pub struct Button {
     tile: TileSlot,
@@ -35,7 +35,13 @@ impl Widget for Button {
         self.tile.sizing
     }
 
-    fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {
+    fn draw(
+        &mut self,
+        ctx: &mut DrawingContext<'_>,
+        resources: &mut DrawResources,
+        size: Size,
+        _clipped: bool,
+    ) -> Result<()> {
         let color = if self.pressed {
             Color::new(0x1F, 0x4B, 0x91, 0xFF)
         } else if self.hovered {
@@ -43,7 +49,7 @@ impl Widget for Button {
         } else {
             Color::new(0x3A, 0x67, 0xB3, 0xFF)
         };
-        let brush = SolidColorBrush::new(color);
+        let brush = resources.solid_brush(color);
         ctx.fill_rect(&brush, Rect::from_size(size))?;
         Ok(())
     }

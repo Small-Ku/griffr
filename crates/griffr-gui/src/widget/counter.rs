@@ -1,7 +1,5 @@
-use crate::ui::{DirtyFlags, TileSlot, Widget};
-use winio::prelude::{
-    CanvasEvent, Color, DrawingContext, Point, Rect, Result, Size, SolidColorBrush,
-};
+use crate::ui::{DirtyFlags, DrawResources, TileSlot, Widget};
+use winio::prelude::{CanvasEvent, Color, DrawingContext, Point, Rect, Result, Size};
 use winio::primitive::DrawingFontBuilder;
 
 pub struct CounterWidget {
@@ -39,7 +37,13 @@ impl Widget for CounterWidget {
         self.click_count % 2 == 1
     }
 
-    fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {
+    fn draw(
+        &mut self,
+        ctx: &mut DrawingContext<'_>,
+        resources: &mut DrawResources,
+        size: Size,
+        _clipped: bool,
+    ) -> Result<()> {
         let mut alpha = 0xFF;
         if self.click_count % 2 != 0 {
             alpha = 0xAA; // Semi-transparent when "transparent"
@@ -52,12 +56,12 @@ impl Widget for CounterWidget {
         } else {
             Color::new(0x3A, 0x67, 0xB3, alpha)
         };
-        let brush = SolidColorBrush::new(color);
+        let brush = resources.solid_brush(color);
         ctx.fill_round_rect(&brush, Rect::from_size(size), Size::new(12.0, 12.0))?;
 
         // Counter bars at the bottom
         for i in 0..(self.click_count % 10) {
-            let bar_brush = SolidColorBrush::new(Color::new(255, 255, 255, 200));
+            let bar_brush = resources.solid_brush(Color::new(255, 255, 255, 200));
             let bar_rect = Rect::new(
                 Point::new(6.0 + i as f64 * 8.0, size.height - 10.0),
                 Size::new(4.0, 4.0),
@@ -66,12 +70,14 @@ impl Widget for CounterWidget {
         }
 
         let pos = Point::new(6.0, 6.0);
-        let font = DrawingFontBuilder::new()
-            .family("Segoe UI")
-            .size(12.0)
-            .build();
+        let font = resources.font(
+            DrawingFontBuilder::new()
+                .family("Segoe UI")
+                .size(12.0)
+                .build(),
+        );
 
-        let text_brush = SolidColorBrush::new(Color::new(255, 255, 255, 255));
+        let text_brush = resources.solid_brush(Color::new(255, 255, 255, 255));
         ctx.draw_str(
             &text_brush,
             font,
@@ -108,7 +114,7 @@ impl Widget for CounterWidget {
             dirty |= DirtyFlags::PAINT;
         }
         if before_click_count != self.click_count {
-            dirty |= DirtyFlags::PAINT | DirtyFlags::TILE_PLAN | DirtyFlags::RESOURCES;
+            dirty |= DirtyFlags::PAINT | DirtyFlags::TILE_PLAN;
         }
         Ok(dirty)
     }

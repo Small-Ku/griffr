@@ -1,6 +1,7 @@
 use bitflags::bitflags;
 use std::time::Instant;
 
+use crate::ui::DrawResources;
 use winio::prelude::Result;
 use winio::primitive::{Rect, Size};
 use winio::ui::DrawingContext;
@@ -45,7 +46,13 @@ pub trait Widget {
         false
     }
 
-    fn draw(&mut self, _ctx: &mut DrawingContext<'_>, _size: Size, _clipped: bool) -> Result<()> {
+    fn draw(
+        &mut self,
+        _ctx: &mut DrawingContext<'_>,
+        _resources: &mut DrawResources,
+        _size: Size,
+        _clipped: bool,
+    ) -> Result<()> {
         Ok(())
     }
     fn handle_event(&mut self, _event: &CanvasEvent, _is_target: bool) -> Result<DirtyFlags> {

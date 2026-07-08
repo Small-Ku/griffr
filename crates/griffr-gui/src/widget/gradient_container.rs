@@ -1,4 +1,4 @@
-use crate::ui::{TileSlot, Widget};
+use crate::ui::{DrawResources, TileSlot, Widget};
 use winio::prelude::{Color, DrawingContext, Point, Rect, Result, Size};
 use winio::primitive::{GradientStop, LinearGradientBrush, RelativePoint};
 
@@ -22,7 +22,13 @@ impl Widget for GradientContainer {
         self.tile.sizing
     }
 
-    fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {
+    fn draw(
+        &mut self,
+        ctx: &mut DrawingContext<'_>,
+        _resources: &mut DrawResources,
+        size: Size,
+        _clipped: bool,
+    ) -> Result<()> {
         let gradient = LinearGradientBrush {
             start: RelativePoint::new(0.0, 0.0), // Top-left
             end: RelativePoint::new(1.0, 1.0),   // Bottom-right

@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
-use crate::ui::{DirtyFlags, TileSlot, Widget};
-use winio::prelude::{CanvasEvent, Color, DrawingContext, Rect, Result, Size, SolidColorBrush};
+use crate::ui::{DirtyFlags, DrawResources, TileSlot, Widget};
+use winio::prelude::{CanvasEvent, Color, DrawingContext, Rect, Result, Size};
 
 pub struct Banner {
     tile: TileSlot,
@@ -41,7 +41,13 @@ impl Widget for Banner {
         self.tile.sizing
     }
 
-    fn draw(&mut self, ctx: &mut DrawingContext<'_>, size: Size, _clipped: bool) -> Result<()> {
+    fn draw(
+        &mut self,
+        ctx: &mut DrawingContext<'_>,
+        resources: &mut DrawResources,
+        size: Size,
+        _clipped: bool,
+    ) -> Result<()> {
         let mut current_v = self.v;
         if self.hovered {
             current_v = (current_v + 0.1).min(1.0);
@@ -69,7 +75,7 @@ impl Widget for Banner {
         let g = ((g1 + m) * 255.0).round() as u8;
         let b = ((b1 + m) * 255.0).round() as u8;
 
-        let brush = SolidColorBrush::new(Color::new(r, g, b, 0xFF));
+        let brush = resources.solid_brush(Color::new(r, g, b, 0xFF));
         ctx.fill_rect(&brush, Rect::from_size(size))?;
         Ok(())
     }

@@ -187,6 +187,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             #(#canvas_fields)*
             widget_nodes: Vec<::griffr_gui::ui::WidgetNode>,
             plan: ::griffr_gui::ui::CompiledPlan,
+            draw_resources: ::griffr_gui::ui::DrawResources,
             pending_dirty: ::griffr_gui::ui::DirtyFlags,
             hovered: Option<::griffr_gui::ui::WidgetId>,
             widgets: Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>,
@@ -237,7 +238,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 }
                 plan = Self::compile_plan(&widget_nodes, size, Some(&plan), ::griffr_gui::ui::DirtyFlags::TILE_PLAN | ::griffr_gui::ui::DirtyFlags::PAINT);
                 let mut this = Self {
-                    root, #(#canvas_struct_inits)* widgets, widget_nodes, plan, pending_dirty: ::griffr_gui::ui::DirtyFlags::empty(), hovered: None,
+                    root, #(#canvas_struct_inits)* widgets, widget_nodes, plan, draw_resources: ::griffr_gui::ui::DrawResources::default(), pending_dirty: ::griffr_gui::ui::DirtyFlags::empty(), hovered: None,
                     pointers: [::winio::prelude::Point::new(0.0, 0.0); #canvas_count],
                     next_tick_seq: 0,
                     scheduled_tick: None,
@@ -327,6 +328,9 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 }
                 dirty |= self.sync_widgets_rendering();
                 self.pending_dirty |= dirty;
+                if self.pending_dirty.contains(::griffr_gui::ui::DirtyFlags::RESOURCES) {
+                    self.draw_resources.clear();
+                }
                 self.plan = Self::compile_plan(&self.widget_nodes, size, Some(&self.plan), self.pending_dirty);
                 for idx in 0..#canvas_count {
                     let canvas = match idx { #(#render_match_arms)* _ => &mut self.#last_canvas_field, };
@@ -344,7 +348,12 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                                     let tx = widget_bounds.origin.x - tile.bounds.origin.x;
                                     let ty = widget_bounds.origin.y - tile.bounds.origin.y;
                                     ctx.set_transform(::winio::prelude::Transform::translation(tx, ty))?;
-                                    widget.draw(&mut ctx, ::winio::prelude::Size::new(widget_bounds.size.width, widget_bounds.size.height), tile.clipped)?;
+                                    widget.draw(
+                                        &mut ctx,
+                                        &mut self.draw_resources,
+                                        ::winio::prelude::Size::new(widget_bounds.size.width, widget_bounds.size.height),
+                                        tile.clipped,
+                                    )?;
                                 }
                             }
                         }
