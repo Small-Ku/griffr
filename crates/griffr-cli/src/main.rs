@@ -404,10 +404,12 @@ enum DebugCommands {
         #[command(flatten)]
         remote: RequiredGameServerArgs,
 
+        /// Version passed to get_latest_game (defaults to latest when omitted)
         #[arg(long)]
         version: Option<String>,
 
-        #[arg(long, id = "api_get_latest_game_output")]
+        /// Optional output file path for JSON payload
+        #[arg(long = "output-file", id = "api_get_latest_game_output")]
         output: Option<std::path::PathBuf>,
     },
     /// Call get_latest_resources and print raw response JSON
@@ -415,7 +417,7 @@ enum DebugCommands {
         #[command(flatten)]
         remote: RequiredGameServerArgs,
 
-        /// Version passed to get_latest_game for version/rand resolution
+        /// Version passed to get_latest_game for version/rand resolution (defaults to latest when omitted)
         #[arg(long)]
         version: Option<String>,
 
@@ -439,10 +441,12 @@ enum DebugCommands {
         #[command(flatten)]
         remote: RequiredGameServerArgs,
 
+        /// Version passed to get_latest_game for manifest resolution (defaults to latest when omitted)
         #[arg(long)]
         version: Option<String>,
 
-        #[arg(long, id = "api_get_game_files_output")]
+        /// Optional output file path for newline-delimited JSON entries
+        #[arg(long = "output-file", id = "api_get_game_files_output")]
         output: Option<std::path::PathBuf>,
     },
     /// List files from latest resource indexes (index_main/index_initial)
@@ -450,7 +454,7 @@ enum DebugCommands {
         #[command(flatten)]
         remote: RequiredGameServerArgs,
 
-        /// Version passed to get_latest_game for version/rand resolution
+        /// Version passed to get_latest_game for version/rand resolution (defaults to latest when omitted)
         #[arg(long)]
         version: Option<String>,
 
@@ -474,13 +478,15 @@ enum DebugCommands {
         #[command(flatten)]
         remote: RequiredGameServerArgs,
 
+        /// Version passed to get_latest_game for manifest resolution (defaults to latest when omitted)
         #[arg(long)]
         version: Option<String>,
 
         #[arg(long)]
         file: String,
 
-        #[arg(long, id = "api_get_file_output")]
+        /// Output file path for the downloaded remote file
+        #[arg(long = "output-file", id = "api_get_file_output")]
         output: std::path::PathBuf,
     },
     /// Fetch raw media/news payload as JSON
