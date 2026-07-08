@@ -1,4 +1,3 @@
-use rapidhash::RapidHashMap as HashMap;
 use winio::primitive::{Point, Rect, Size};
 
 use crate::ui::{TileSpec, WidgetId, WidgetNode};
@@ -6,15 +5,13 @@ use crate::ui::{TileSpec, WidgetId, WidgetNode};
 pub fn merge_adjacent_non_clipped(
     mut tiles: Vec<TileSpec>,
     _widget_bounds: &[(WidgetId, Rect)],
-    widgets: &[WidgetNode],
+    _widgets: &[WidgetNode],
 ) -> Vec<TileSpec> {
-    let widget_by_id: HashMap<WidgetId, WidgetNode> =
-        widgets.iter().map(|w| (w.id, w.clone())).collect();
     loop {
         let mut changed = false;
         'outer: for i in 0..tiles.len() {
             for j in (i + 1)..tiles.len() {
-                if let Some(candidate) = merged_tile(&tiles[i], &tiles[j], &widget_by_id) {
+                if let Some(candidate) = merged_tile(&tiles[i], &tiles[j]) {
                     let mut others: Vec<TileSpec> =
                         Vec::with_capacity(tiles.len().saturating_sub(2));
                     for (idx, t) in tiles.iter().enumerate() {
@@ -43,9 +40,8 @@ pub fn merge_adjacent_non_clipped(
 fn merged_tile(
     a: &TileSpec,
     b: &TileSpec,
-    widget_by_id: &HashMap<WidgetId, WidgetNode>,
 ) -> Option<TileSpec> {
-    if a.clipped || b.clipped {
+    if a.signature() != b.signature() {
         return None;
     }
     let horizontal = a.bounds.max_x() == b.bounds.origin.x
@@ -62,25 +58,12 @@ fn merged_tile(
     let right = a.bounds.max_x().max(b.bounds.max_x());
     let bottom = a.bounds.max_y().max(b.bounds.max_y());
 
-    let mut widgets = a.widgets.clone();
-    for &w in &b.widgets {
-        if !widgets.contains(&w) {
-            widgets.push(w);
-        }
-    }
-    // Sort by Z-order to ensure correct drawing order in the merged canvas.
-    widgets.sort_by_key(|id| {
-        widget_by_id
-            .get(id)
-            .map(|w| (w.z_order, w.id))
-            .unwrap_or((0, *id))
-    });
-
     Some(TileSpec {
         id: a.id,
         bounds: Rect::new(Point::new(x, y), Size::new(right - x, bottom - y)),
-        clipped: false,
-        widgets,
+        clipped: a.clipped,
+        widgets: a.widgets.clone(),
+        signature: a.signature.clone(),
     })
 }
 
@@ -114,12 +97,26 @@ mod tests {
                 bounds: Rect::from_size(Size::new(50.0, 50.0)),
                 clipped: false,
                 widgets: vec![WidgetId(1)],
+                signature: crate::ui::TileSignature {
+                    draw_stack: vec![WidgetId(1)],
+                    clip_id: None,
+                    opacity_barrier: Some(WidgetId(1)),
+                    scroll_space: None,
+                    clipped: false,
+                },
             },
             TileSpec {
                 id: TileId(1),
                 bounds: Rect::new(Point::new(50.0, 0.0), Size::new(50.0, 50.0)),
                 clipped: false,
                 widgets: vec![WidgetId(1)],
+                signature: crate::ui::TileSignature {
+                    draw_stack: vec![WidgetId(1)],
+                    clip_id: None,
+                    opacity_barrier: Some(WidgetId(1)),
+                    scroll_space: None,
+                    clipped: false,
+                },
             },
         ];
         let wb = vec![(WidgetId(1), Rect::from_size(Size::new(100.0, 50.0)))];

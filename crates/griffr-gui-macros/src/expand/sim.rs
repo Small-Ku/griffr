@@ -40,6 +40,7 @@ mod tests {
         z: i32,
         scrollable: bool,
         clip: i8,
+        opaque: bool,
     }
 
     #[derive(Clone, Copy)]
@@ -66,7 +67,7 @@ mod tests {
     struct SimTile {
         bounds: SimRect,
         clipped: bool,
-        top: u16,
+        widgets: Vec<u16>,
     }
 
     fn simulate_layout(nodes: &[SimNode], width: f64, height: f64) -> Vec<(u16, SimRect)> {
@@ -200,7 +201,17 @@ mod tests {
                     continue;
                 }
                 covering.sort_by_key(|(z, id, _)| (*z, *id));
-                let (_, top_id, clipped) = *covering.last().expect("non-empty");
+                let (_, _, clipped) = *covering.last().expect("non-empty");
+                let mut widget_ids: Vec<u16> = Vec::new();
+                for (_, id, _) in covering.iter().rev() {
+                    widget_ids.push(*id);
+                    if let Some(node) = nodes.iter().find(|w| w.id == *id) {
+                        if node.opaque {
+                            break;
+                        }
+                    }
+                }
+                widget_ids.reverse();
                 out.push(SimTile {
                     bounds: SimRect {
                         x: x0,
@@ -209,7 +220,7 @@ mod tests {
                         h: y1 - y0,
                     },
                     clipped,
-                    top: top_id,
+                    widgets: widget_ids,
                 });
             }
         }
@@ -218,8 +229,8 @@ mod tests {
 
     fn merge_adjacent(
         mut tiles: Vec<SimTile>,
-        bounds: &[(u16, SimRect)],
-        nodes: &[SimNode],
+        _bounds: &[(u16, SimRect)],
+        _nodes: &[SimNode],
     ) -> Vec<SimTile> {
         loop {
             let mut changed = false;
@@ -233,9 +244,7 @@ mod tests {
                                 others.push(t.clone());
                             }
                         }
-                        let safe = widgets_fit(&candidate, bounds)
-                            && no_scroll_or_clip_violation(&candidate, nodes)
-                            && !overlaps_others(candidate.bounds, &others);
+                        let safe = !overlaps_others(candidate.bounds, &others);
                         if safe {
                             others.push(candidate);
                             tiles = others;
@@ -253,7 +262,7 @@ mod tests {
     }
 
     fn merged_tile(a: &SimTile, b: &SimTile) -> Option<SimTile> {
-        if a.clipped || b.clipped || a.top != b.top {
+        if a.clipped || b.clipped || a.widgets != b.widgets {
             return None;
         }
         let horizontal =
@@ -270,28 +279,9 @@ mod tests {
                 w: a.bounds.right().max(b.bounds.right()) - a.bounds.x.min(b.bounds.x),
                 h: a.bounds.bottom().max(b.bounds.bottom()) - a.bounds.y.min(b.bounds.y),
             },
-            clipped: false,
-            top: a.top,
+            clipped: a.clipped,
+            widgets: a.widgets.clone(),
         })
-    }
-
-    fn widgets_fit(tile: &SimTile, bounds: &[(u16, SimRect)]) -> bool {
-        bounds
-            .iter()
-            .find(|(id, _)| *id == tile.top)
-            .is_some_and(|(_, b)| {
-                tile.bounds.x >= b.x
-                    && tile.bounds.y >= b.y
-                    && tile.bounds.right() <= b.right()
-                    && tile.bounds.bottom() <= b.bottom()
-            })
-    }
-
-    fn no_scroll_or_clip_violation(tile: &SimTile, nodes: &[SimNode]) -> bool {
-        nodes
-            .iter()
-            .find(|n| n.id == tile.top)
-            .is_some_and(|n| !n.scrollable && n.clip != 1)
     }
 
     fn overlaps_others(candidate: SimRect, others: &[SimTile]) -> bool {
@@ -382,6 +372,7 @@ mod tests {
                     z: n.z,
                     scrollable: n.scrollable,
                     clip: n.clip,
+                    opaque: n.opaque,
                 }
             })
             .collect();

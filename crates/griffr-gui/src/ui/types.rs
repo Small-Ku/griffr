@@ -126,6 +126,22 @@ pub struct TileSpec {
     pub bounds: Rect,
     pub clipped: bool,
     pub widgets: Vec<WidgetId>,
+    pub signature: TileSignature,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TileSignature {
+    pub draw_stack: Vec<WidgetId>,
+    pub clip_id: Option<WidgetId>,
+    pub opacity_barrier: Option<WidgetId>,
+    pub scroll_space: Option<WidgetId>,
+    pub clipped: bool,
+}
+
+impl TileSpec {
+    pub fn signature(&self) -> &TileSignature {
+        &self.signature
+    }
 }
 
 pub struct TilePlan {

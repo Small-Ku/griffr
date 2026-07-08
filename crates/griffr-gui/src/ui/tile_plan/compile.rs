@@ -50,22 +50,51 @@ pub fn partition_non_overlapping_tiles(
             covering.sort_by_key(|(z, id, _)| (*z, *id));
             let (_, _, top_clipped) = *covering.last().expect("non-empty covering");
 
-            let mut widget_ids: Vec<WidgetId> = Vec::new();
-            for (_, id, _) in covering.iter().rev() {
-                widget_ids.push(*id);
-                if let Some(node) = widgets.iter().find(|w| w.id == *id) {
+            let mut draw_stack: Vec<WidgetId> = Vec::new();
+            let mut opacity_barrier = None;
+            for &(_, id, _) in covering.iter().rev() {
+                draw_stack.push(id);
+                if let Some(node) = widgets.iter().find(|w| w.id == id) {
                     if node.opaque {
+                        opacity_barrier = Some(id);
                         break;
                     }
                 }
             }
-            widget_ids.reverse();
+            draw_stack.reverse();
+
+            let mut clip_id = None;
+            let mut scroll_space = None;
+            for &id in &draw_stack {
+                if let Some(node) = widgets.iter().find(|w| w.id == id) {
+                    if node.scrollable {
+                        scroll_space = Some(id);
+                    }
+                    let clipped = match node.clip {
+                        ClipPolicy::InferFromCapabilities => node.scrollable,
+                        ClipPolicy::ForceClip => true,
+                        ClipPolicy::ForceNoClip => false,
+                    };
+                    if clipped {
+                        clip_id = Some(id);
+                    }
+                }
+            }
+
+            let signature = crate::ui::TileSignature {
+                draw_stack: draw_stack.clone(),
+                clip_id,
+                opacity_barrier,
+                scroll_space,
+                clipped: top_clipped,
+            };
 
             out.push(TileSpec {
                 id: TileId(out.len() as u16),
                 bounds: Rect::new(Point::new(x0, y0), Size::new(x1 - x0, y1 - y0)),
                 clipped: top_clipped,
-                widgets: widget_ids,
+                widgets: draw_stack,
+                signature,
             });
         }
     }
