@@ -16,19 +16,50 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
     let last_canvas_idx = canvas_count.saturating_sub(1);
     let last_canvas_field = Ident::new(&format!("tile{}", last_canvas_idx), ident.span());
 
-    let topology = flat.iter().map(|n| {
-        let id = n.id;
+    let widget_count = flat.len();
+    let parents = flat.iter().map(|n| {
         let parent = n.parent;
-        quote! { (#id, #parent) }
+        if parent >= 0 {
+            quote! { Some(::griffr_gui::ui::WidgetId(#parent as u16)) }
+        } else {
+            quote! { None }
+        }
     });
-    let capabilities = flat.iter().map(|n| {
+
+    let mut sorted_back_to_front = flat.clone();
+    sorted_back_to_front.sort_by_key(|n| (n.z, n.id));
+    let mut sorted_front_to_back = sorted_back_to_front.clone();
+    sorted_front_to_back.reverse();
+
+    let z_order_back_to_front = sorted_back_to_front.iter().map(|n| {
         let id = n.id;
-        let h = n.hoverable;
-        let c = n.clickable;
-        let s = n.scrollable;
-        let o = n.opaque;
-        quote! { (#id, #h, #c, #s, #o) }
+        quote! { ::griffr_gui::ui::WidgetId(#id) }
     });
+    let z_order_front_to_back = sorted_front_to_back.iter().map(|n| {
+        let id = n.id;
+        quote! { ::griffr_gui::ui::WidgetId(#id) }
+    });
+    let click_targets_front_to_back = sorted_front_to_back
+        .iter()
+        .filter(|n| n.clickable)
+        .map(|n| {
+            let id = n.id;
+            quote! { ::griffr_gui::ui::WidgetId(#id) }
+        });
+    let hover_targets_front_to_back = sorted_front_to_back
+        .iter()
+        .filter(|n| n.hoverable)
+        .map(|n| {
+            let id = n.id;
+            quote! { ::griffr_gui::ui::WidgetId(#id) }
+        });
+    let scroll_targets_front_to_back = sorted_front_to_back
+        .iter()
+        .filter(|n| n.scrollable)
+        .map(|n| {
+            let id = n.id;
+            quote! { ::griffr_gui::ui::WidgetId(#id) }
+        });
     let static_widgets = flat.iter().map(|n| {
         let id = n.id;
         let parent = n.parent;
@@ -120,13 +151,28 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
     quote! {
         #root
         impl #ident {
-            pub const TOPOLOGY: &'static [(u16, i16)] = &[#(#topology),*];
-            pub const CAPABILITIES: &'static [(u16, bool, bool, bool, bool)] = &[#(#capabilities),*];
+            pub const WIDGET_COUNT: usize = #widget_count;
+            pub const PARENTS: [Option<::griffr_gui::ui::WidgetId>; Self::WIDGET_COUNT] = [
+                #(#parents),*
+            ];
+            pub const Z_ORDER_BACK_TO_FRONT: [::griffr_gui::ui::WidgetId; Self::WIDGET_COUNT] = [
+                #(#z_order_back_to_front),*
+            ];
+            pub const Z_ORDER_FRONT_TO_BACK: [::griffr_gui::ui::WidgetId; Self::WIDGET_COUNT] = [
+                #(#z_order_front_to_back),*
+            ];
+            pub const CLICK_TARGETS_FRONT_TO_BACK: &'static [::griffr_gui::ui::WidgetId] = &[
+                #(#click_targets_front_to_back),*
+            ];
+            pub const HOVER_TARGETS_FRONT_TO_BACK: &'static [::griffr_gui::ui::WidgetId] = &[
+                #(#hover_targets_front_to_back),*
+            ];
+            pub const SCROLL_TARGETS_FRONT_TO_BACK: &'static [::griffr_gui::ui::WidgetId] = &[
+                #(#scroll_targets_front_to_back),*
+            ];
             pub const CANVAS_COUNT: usize = #canvas_count;
             pub fn initial_widget_nodes() -> Vec<::griffr_gui::ui::WidgetNode> {
-                let mut widgets = vec![#(#static_widgets),*];
-                widgets.sort_by_key(|w| (w.z_order, w.id));
-                widgets
+                vec![#(#static_widgets),*]
             }
         }
 
@@ -327,16 +373,13 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                     let h = w.hoverable();
                     let c = w.clickable();
                     let s = w.scrollable();
-                    if let Some(node) = self.plan.widgets.iter_mut().find(|n| n.id == *id) {
-                        node.hoverable = h;
-                        node.clickable = c;
-                        node.scrollable = s;
-                    }
-                    if let Some(node) = self.widget_nodes.iter_mut().find(|n| n.id == *id) {
-                        node.hoverable = h;
-                        node.clickable = c;
-                        node.scrollable = s;
-                    }
+                    let idx = id.0 as usize;
+                    self.plan.widgets[idx].hoverable = h;
+                    self.plan.widgets[idx].clickable = c;
+                    self.plan.widgets[idx].scrollable = s;
+                    self.widget_nodes[idx].hoverable = h;
+                    self.widget_nodes[idx].clickable = c;
+                    self.widget_nodes[idx].scrollable = s;
                 }
             }
             fn sync_widgets_rendering(&mut self) {
@@ -344,11 +387,10 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                     let o = w.opaque();
                     let s = w.scrollable();
                     let sz = w.sizing_policy();
-                    if let Some(node) = self.widget_nodes.iter_mut().find(|n| n.id == *id) {
-                        node.opaque = o;
-                        node.scrollable = s;
-                        node.layout.sizing = sz;
-                    }
+                    let idx = id.0 as usize;
+                    self.widget_nodes[idx].opaque = o;
+                    self.widget_nodes[idx].scrollable = s;
+                    self.widget_nodes[idx].layout.sizing = sz;
                 }
             }
             fn build_widgets(plan: &::griffr_gui::ui::CompiledPlan) -> ::winio::prelude::Result<Vec<(::griffr_gui::ui::WidgetId, Box<dyn ::griffr_gui::ui::Widget>)>> {
@@ -400,25 +442,42 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 plan: &::griffr_gui::ui::CompiledPlan,
                 event: #routed_ident,
             ) -> Option<::griffr_gui::ui::WidgetId> {
-                let (x, y, predicate): (f64, f64, fn(bool, bool, bool) -> bool) = match event {
-                    #routed_ident::MouseMove { x, y } => (x, y, |h, _, _| h),
-                    #routed_ident::MouseDown { x, y } | #routed_ident::MouseUp { x, y } => (x, y, |_, c, _| c),
-                    #routed_ident::MouseWheel { x, y } => (x, y, |_, _, s| s),
-                };
-                let mut best: Option<(i32, ::griffr_gui::ui::WidgetId)> = None;
-                for node in &plan.widgets {
-                    let bounds = &plan.bounds[node.id.0 as usize];
-                    if !bounds.contains(::winio::prelude::Point::new(x, y)) {
-                        continue;
+                match event {
+                    #routed_ident::MouseMove { x, y } => {
+                        for &id in #ident::HOVER_TARGETS_FRONT_TO_BACK {
+                            let bounds = &plan.bounds[id.0 as usize];
+                            if bounds.contains(::winio::prelude::Point::new(x, y)) {
+                                let node = &plan.widgets[id.0 as usize];
+                                if node.hoverable {
+                                    return Some(id);
+                                }
+                            }
+                        }
                     }
-                    if predicate(node.hoverable, node.clickable, node.scrollable) {
-                        match best {
-                            Some((z, _)) if z >= node.z_order => {}
-                            _ => best = Some((node.z_order, node.id)),
+                    #routed_ident::MouseDown { x, y } | #routed_ident::MouseUp { x, y } => {
+                        for &id in #ident::CLICK_TARGETS_FRONT_TO_BACK {
+                            let bounds = &plan.bounds[id.0 as usize];
+                            if bounds.contains(::winio::prelude::Point::new(x, y)) {
+                                let node = &plan.widgets[id.0 as usize];
+                                if node.clickable {
+                                    return Some(id);
+                                }
+                            }
+                        }
+                    }
+                    #routed_ident::MouseWheel { x, y } => {
+                        for &id in #ident::SCROLL_TARGETS_FRONT_TO_BACK {
+                            let bounds = &plan.bounds[id.0 as usize];
+                            if bounds.contains(::winio::prelude::Point::new(x, y)) {
+                                let node = &plan.widgets[id.0 as usize];
+                                if node.scrollable {
+                                    return Some(id);
+                                }
+                            }
                         }
                     }
                 }
-                best.map(|(_, id)| id)
+                None
             }
             fn map_canvas_event(
                 event: &::winio::prelude::CanvasEvent,

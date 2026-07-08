@@ -35,14 +35,13 @@ pub fn partition_non_overlapping_tiles(
             for (wid_idx, rect) in bounds.iter().enumerate() {
                 let wid = WidgetId(wid_idx as u16);
                 if rect.contains(Point::new(cx, cy)) {
-                    if let Some(node) = widgets.iter().find(|w| w.id == wid) {
-                        let clipped = match node.clip {
-                            ClipPolicy::InferFromCapabilities => node.scrollable,
-                            ClipPolicy::ForceClip => true,
-                            ClipPolicy::ForceNoClip => false,
-                        };
-                        covering.push((node.z_order, node.id, clipped));
-                    }
+                    let node = &widgets[wid.0 as usize];
+                    let clipped = match node.clip {
+                        ClipPolicy::InferFromCapabilities => node.scrollable,
+                        ClipPolicy::ForceClip => true,
+                        ClipPolicy::ForceNoClip => false,
+                    };
+                    covering.push((node.z_order, node.id, clipped));
                 }
             }
             if covering.is_empty() {
@@ -55,11 +54,10 @@ pub fn partition_non_overlapping_tiles(
             let mut opacity_barrier = None;
             for &(_, id, _) in covering.iter().rev() {
                 draw_stack.push(id);
-                if let Some(node) = widgets.iter().find(|w| w.id == id) {
-                    if node.opaque {
-                        opacity_barrier = Some(id);
-                        break;
-                    }
+                let node = &widgets[id.0 as usize];
+                if node.opaque {
+                    opacity_barrier = Some(id);
+                    break;
                 }
             }
             draw_stack.reverse();
@@ -67,18 +65,17 @@ pub fn partition_non_overlapping_tiles(
             let mut clip_id = None;
             let mut scroll_space = None;
             for &id in &draw_stack {
-                if let Some(node) = widgets.iter().find(|w| w.id == id) {
-                    if node.scrollable {
-                        scroll_space = Some(id);
-                    }
-                    let clipped = match node.clip {
-                        ClipPolicy::InferFromCapabilities => node.scrollable,
-                        ClipPolicy::ForceClip => true,
-                        ClipPolicy::ForceNoClip => false,
-                    };
-                    if clipped {
-                        clip_id = Some(id);
-                    }
+                let node = &widgets[id.0 as usize];
+                if node.scrollable {
+                    scroll_space = Some(id);
+                }
+                let clipped = match node.clip {
+                    ClipPolicy::InferFromCapabilities => node.scrollable,
+                    ClipPolicy::ForceClip => true,
+                    ClipPolicy::ForceNoClip => false,
+                };
+                if clipped {
+                    clip_id = Some(id);
                 }
             }
 
