@@ -106,7 +106,7 @@ impl Default for LayoutSpec {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WidgetNode {
     pub id: WidgetId,
     pub parent: Option<WidgetId>,
@@ -144,8 +144,18 @@ impl TileSpec {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct TilePlan {
     pub tiles: Vec<TileSpec>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TilePlanWidgetKey {
+    pub id: WidgetId,
+    pub scrollable: bool,
+    pub opaque: bool,
+    pub clip: ClipPolicy,
+    pub z_order: i32,
 }
 
 pub struct CompiledPlan {
@@ -154,4 +164,122 @@ pub struct CompiledPlan {
     pub dirty: Box<[bool]>,
     pub tile_plan: TilePlan,
     pub size: Size,
+}
+
+impl WidgetNode {
+    pub fn tile_plan_key(&self) -> TilePlanWidgetKey {
+        TilePlanWidgetKey {
+            id: self.id,
+            scrollable: self.scrollable,
+            opaque: self.opaque,
+            clip: self.clip,
+            z_order: self.z_order,
+        }
+    }
+}
+
+impl CompiledPlan {
+    pub fn can_reuse_tile_plan(
+        &self,
+        widgets: &[WidgetNode],
+        bounds: &[Rect],
+    ) -> bool {
+        self.bounds.as_ref() == bounds
+            && self.widgets.len() == widgets.len()
+            && self
+                .widgets
+                .iter()
+                .zip(widgets.iter())
+                .all(|(old, new)| old.tile_plan_key() == new.tile_plan_key())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ClipPolicy, CompiledPlan, LayoutDirection, LayoutSpec, SizingPolicy, TilePlan,
+        WidgetId, WidgetNode,
+    };
+    use winio::primitive::{Rect, Size};
+
+    fn widget_node(id: u16) -> WidgetNode {
+        WidgetNode {
+            id: WidgetId(id),
+            parent: None,
+            hoverable: false,
+            clickable: false,
+            scrollable: false,
+            opaque: false,
+            clip: ClipPolicy::InferFromCapabilities,
+            layout: LayoutSpec {
+                direction: LayoutDirection::Column,
+                margin: 0.0,
+                padding: 0.0,
+                sizing: SizingPolicy::Flex {
+                    grow: 0.0,
+                    shrink: 1.0,
+                    basis: 100.0,
+                },
+            },
+            z_order: id as i32,
+            widget_type: "TestWidget",
+        }
+    }
+
+    fn compiled_plan(widgets: Vec<WidgetNode>, bounds: Vec<Rect>) -> CompiledPlan {
+        CompiledPlan {
+            widgets,
+            bounds: bounds.into_boxed_slice(),
+            dirty: vec![false; 2].into_boxed_slice(),
+            tile_plan: TilePlan { tiles: Vec::new() },
+            size: Size::new(100.0, 100.0),
+        }
+    }
+
+    #[test]
+    fn tile_plan_cache_ignores_routing_only_widget_changes() {
+        let old_widgets = vec![widget_node(0), widget_node(1)];
+        let bounds = vec![
+            Rect::from_size(Size::new(100.0, 100.0)),
+            Rect::from_size(Size::new(50.0, 50.0)),
+        ];
+        let plan = compiled_plan(old_widgets.clone(), bounds.clone());
+
+        let mut new_widgets = old_widgets;
+        new_widgets[1].hoverable = true;
+        new_widgets[1].clickable = true;
+
+        assert!(plan.can_reuse_tile_plan(&new_widgets, &bounds));
+    }
+
+    #[test]
+    fn tile_plan_cache_rejects_signature_affecting_widget_changes() {
+        let old_widgets = vec![widget_node(0), widget_node(1)];
+        let bounds = vec![
+            Rect::from_size(Size::new(100.0, 100.0)),
+            Rect::from_size(Size::new(50.0, 50.0)),
+        ];
+        let plan = compiled_plan(old_widgets.clone(), bounds.clone());
+
+        let mut new_widgets = old_widgets;
+        new_widgets[1].scrollable = true;
+
+        assert!(!plan.can_reuse_tile_plan(&new_widgets, &bounds));
+    }
+
+    #[test]
+    fn tile_plan_cache_rejects_bounds_changes() {
+        let widgets = vec![widget_node(0), widget_node(1)];
+        let old_bounds = vec![
+            Rect::from_size(Size::new(100.0, 100.0)),
+            Rect::from_size(Size::new(50.0, 50.0)),
+        ];
+        let new_bounds = vec![
+            Rect::from_size(Size::new(100.0, 100.0)),
+            Rect::from_size(Size::new(60.0, 50.0)),
+        ];
+        let plan = compiled_plan(widgets.clone(), old_bounds);
+
+        assert!(!plan.can_reuse_tile_plan(&widgets, &new_bounds));
+    }
 }

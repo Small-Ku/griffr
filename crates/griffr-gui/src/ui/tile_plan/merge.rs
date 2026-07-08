@@ -1,6 +1,6 @@
 use winio::primitive::{Point, Rect, Size};
 
-use crate::ui::{TileSpec, WidgetId, WidgetNode};
+use crate::ui::{TileSpec, WidgetNode};
 
 pub fn merge_adjacent_non_clipped(
     mut tiles: Vec<TileSpec>,

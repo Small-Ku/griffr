@@ -221,7 +221,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 let size = init.client_size()?;
                 root.set_loc(::winio::prelude::Point::new(0.0, 0.0))?;
                 root.set_size(Self::expand_size(size))?;
-                let mut plan = Self::compile_plan(&widget_nodes, size);
+                let mut plan = Self::compile_plan(&widget_nodes, size, None);
                 let widgets = Self::build_widgets(&plan)?;
                 for (id, w) in &widgets {
                     if let Some(node) = widget_nodes.iter_mut().find(|n| n.id == *id) {
@@ -231,7 +231,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                         node.opaque = w.opaque();
                     }
                 }
-                plan = Self::compile_plan(&widget_nodes, size);
+                plan = Self::compile_plan(&widget_nodes, size, Some(&plan));
                 let mut this = Self {
                     root, #(#canvas_struct_inits)* widgets, widget_nodes, plan, hovered: None,
                     pointers: [::winio::prelude::Point::new(0.0, 0.0); #canvas_count],
@@ -296,7 +296,7 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 const TILE_OVERLAP_PX: f64 = 0.5;
                 let size = self.root.size()?;
                 self.sync_widgets_rendering(); // Sync before relayout
-                self.plan = Self::compile_plan(&self.widget_nodes, size);
+                self.plan = Self::compile_plan(&self.widget_nodes, size, Some(&self.plan));
                 for idx in 0..#canvas_count {
                     let canvas = match idx { #(#render_match_arms)* _ => &mut self.#last_canvas_field, };
                     if let Some(tile) = self.plan.tile_plan.tiles.get(idx) {
@@ -421,20 +421,35 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             fn compile_plan(
                 widget_nodes: &[::griffr_gui::ui::WidgetNode],
                 size: ::winio::prelude::Size,
+                old_plan: Option<&::griffr_gui::ui::CompiledPlan>,
             ) -> ::griffr_gui::ui::CompiledPlan {
                 let widgets = widget_nodes.to_vec();
                 let bounds = ::griffr_gui::ui::layout::compute_layout(&widgets, size);
-                let mut tiles = ::griffr_gui::ui::tile_plan::compile::partition_non_overlapping_tiles(&widgets, &bounds);
-                tiles = ::griffr_gui::ui::tile_plan::merge::merge_adjacent_non_clipped(tiles, &bounds, &widgets);
-                for (idx, t) in tiles.iter_mut().enumerate() {
-                    t.id = ::griffr_gui::ui::TileId(idx as u16);
-                }
+                let tile_plan = if let Some(old) = old_plan {
+                    if old.can_reuse_tile_plan(&widgets, &bounds) {
+                        old.tile_plan.clone()
+                    } else {
+                        let mut tiles = ::griffr_gui::ui::tile_plan::compile::partition_non_overlapping_tiles(&widgets, &bounds);
+                        tiles = ::griffr_gui::ui::tile_plan::merge::merge_adjacent_non_clipped(tiles, &bounds, &widgets);
+                        for (idx, t) in tiles.iter_mut().enumerate() {
+                            t.id = ::griffr_gui::ui::TileId(idx as u16);
+                        }
+                        ::griffr_gui::ui::TilePlan { tiles }
+                    }
+                } else {
+                    let mut tiles = ::griffr_gui::ui::tile_plan::compile::partition_non_overlapping_tiles(&widgets, &bounds);
+                    tiles = ::griffr_gui::ui::tile_plan::merge::merge_adjacent_non_clipped(tiles, &bounds, &widgets);
+                    for (idx, t) in tiles.iter_mut().enumerate() {
+                        t.id = ::griffr_gui::ui::TileId(idx as u16);
+                    }
+                    ::griffr_gui::ui::TilePlan { tiles }
+                };
                 let num_widgets = widgets.len();
                 ::griffr_gui::ui::CompiledPlan {
                     widgets,
                     bounds,
                     dirty: vec![false; num_widgets].into_boxed_slice(),
-                    tile_plan: ::griffr_gui::ui::TilePlan { tiles },
+                    tile_plan,
                     size,
                 }
             }
