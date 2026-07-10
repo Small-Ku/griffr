@@ -134,7 +134,7 @@ pub async fn download_remaining_files(
     let tasks = download_files
         .iter()
         .map(|file| crate::runtime::task_pool::Task::Download {
-            url: format!("{}/{}", files_base_url, file.path),
+            url: crate::runtime::build_cdn_file_url(files_base_url, &file.path),
             dest: install_path.join(&file.path),
             logical_path: file.path.clone(),
             expected_md5: file.md5.clone(),

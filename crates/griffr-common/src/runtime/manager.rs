@@ -15,7 +15,7 @@ use crate::config::{GameConfig, GameId, ServerConfig, ServerId};
 use crate::runtime::task_pool::{
     run_tasks_with_progress, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
-use crate::runtime::{PathOutcomeTracker, PathReuseMethod, RunningByteProgress};
+use crate::runtime::{build_cdn_file_url, PathOutcomeTracker, PathReuseMethod, RunningByteProgress};
 
 /// Manages game installation state and version tracking
 #[derive(Debug)]
@@ -435,7 +435,7 @@ impl GameManager {
                         expected_md5: entry.md5.clone(),
                         expected_size: entry.size,
                         source_candidates,
-                        download_url: Some(format!("{}/{}", files_base_url, entry.path)),
+                        download_url: Some(build_cdn_file_url(files_base_url, &entry.path)),
                         allow_copy_fallback,
                         prefer_reuse,
                         retry_count: 0,
