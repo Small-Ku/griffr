@@ -33,6 +33,7 @@ pub use launch::launch;
 pub use news::show as news_show;
 pub use predownload::{
     apply as predownload_apply, check as predownload_check, fetch as predownload_fetch,
+    resume as predownload_resume,
 };
 pub use uninstall::uninstall;
 pub use update::update;

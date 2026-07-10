@@ -554,6 +554,11 @@ enum PredownloadCommands {
         #[arg(long)]
         keep_pack_archives: bool,
     },
+    /// Resume a previously extracted local patch state from `patch.json` + `vfs_files`
+    Resume {
+        #[command(flatten)]
+        path: PathArg,
+    },
 }
 
 #[derive(Subcommand)]
@@ -805,6 +810,11 @@ async fn main() -> Result<()> {
                     path, output_dir
                 ));
                 commands::predownload_apply(path, output_dir, opts).await?;
+            }
+            PredownloadCommands::Resume { path } => {
+                let PathArg { path } = path;
+                opts.verbose(format!("Predownload resume path: {:?}", path));
+                commands::predownload_resume(path, opts).await?;
             }
         },
 

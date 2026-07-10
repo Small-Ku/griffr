@@ -220,3 +220,55 @@ pub async fn apply(path: PathBuf, output_dir: Option<PathBuf>, opts: GlobalOptio
     }
     super::update::apply_staged_predownload(path, output_dir, opts).await
 }
+
+pub async fn resume(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
+    let local = detect_local_install(&path).await?;
+    let install_root = local.install_path;
+    let patch_manifest = install_root.join("patch.json");
+    let patch_stage_dir = install_root.join("vfs_files");
+    let delete_manifest = install_root.join("delete_files.txt");
+
+    let initial_task = if patch_manifest.is_file() || patch_stage_dir.exists() {
+        Task::ApplyExtractedVfsPatchManifest {
+            install_root: install_root.clone(),
+        }
+    } else if delete_manifest.is_file() {
+        Task::ApplyDeleteManifest {
+            install_root: install_root.clone(),
+        }
+    } else {
+        anyhow::bail!(
+            "No extracted local patch state found under {} (expected patch.json, vfs_files, or delete_files.txt).",
+            install_root.display()
+        );
+    };
+
+    ui::print_phase(format!(
+        "Resuming local extracted patch state at {}",
+        install_root.display()
+    ));
+
+    let mut task_pool_cfg = TaskPoolConfig::default();
+    task_pool_cfg.max_retries = 3;
+    let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
+    let result = task_pool_runner.run_batch_with_progress(vec![initial_task], None)?;
+
+    let failures = result
+        .events
+        .into_iter()
+        .filter_map(|event| match event {
+            ProgressEvent::Failed { path, reason } => Some(format!("{} ({})", path, reason)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "Local patch resume failed for {} item(s): {}",
+            failures.len(),
+            failures.join(", ")
+        );
+    }
+
+    ui::print_success("Local extracted patch state resumed");
+    Ok(())
+}
