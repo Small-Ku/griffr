@@ -4,27 +4,26 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::PackageInfo;
-use griffr_common::config::{GameConfig, GameId, ServerId};
+use griffr_common::config::{ChannelId, GameConfig, GameId};
 use griffr_common::runtime::task_pool::{
     ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
 use griffr_common::runtime::{directory_has_entries, is_launcher_metadata_path};
 use griffr_common::runtime::{
     materialize_game_files_with_pool, plan_vfs_tasks, FileReuseConfig, GameManager,
-    SourceInstallInput, VfsMaterializeConfig, VfsTaskPlan,
+    SourceInstallInput, VfsMaterializeConfig,
 };
 
-use super::local::detect_local_install;
-use super::supports_vfs_sync;
+use crate::commands::local::detect_local_install;
 use crate::progress::{ByteProgressTracker, StepProgress};
 use crate::ui;
 use crate::GlobalOptions;
 
-fn strip_url_query(s: &str) -> &str {
+pub(super) fn strip_url_query(s: &str) -> &str {
     s.split('?').next().unwrap_or(s)
 }
 
-fn archive_base_from_url(url: &str) -> Option<String> {
+pub(super) fn archive_base_from_url(url: &str) -> Option<String> {
     let filename = url.split('/').next_back()?;
     let filename = strip_url_query(filename);
 
@@ -37,18 +36,18 @@ fn archive_base_from_url(url: &str) -> Option<String> {
     None
 }
 
-fn parse_package_total_size(pkg: &PackageInfo) -> u64 {
+pub(super) fn parse_package_total_size(pkg: &PackageInfo) -> u64 {
     pkg.total_size.parse::<u64>().unwrap_or(0)
 }
 
-fn required_install_bytes(pkg: &PackageInfo) -> u64 {
+pub(super) fn required_install_bytes(pkg: &PackageInfo) -> u64 {
     let archive_bytes: u64 = pkg.packs.iter().map(|p| p.size()).sum();
     let package_total = parse_package_total_size(pkg);
     archive_bytes.max(package_total)
 }
 
 #[cfg(windows)]
-fn disk_available_bytes(path: &Path) -> Result<u64> {
+pub(super) fn disk_available_bytes(path: &Path) -> Result<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
@@ -82,11 +81,11 @@ fn disk_available_bytes(path: &Path) -> Result<u64> {
 }
 
 #[cfg(not(windows))]
-fn disk_available_bytes(_path: &Path) -> Result<u64> {
+pub(super) fn disk_available_bytes(_path: &Path) -> Result<u64> {
     Ok(u64::MAX)
 }
 
-fn validate_install_disk_space(pkg: &PackageInfo, install_path: &Path) -> Result<()> {
+pub(super) fn validate_install_disk_space(pkg: &PackageInfo, install_path: &Path) -> Result<()> {
     let required_bytes = required_install_bytes(pkg);
     let available_bytes = disk_available_bytes(install_path)?;
 
@@ -108,7 +107,8 @@ fn validate_install_disk_space(pkg: &PackageInfo, install_path: &Path) -> Result
 
 pub async fn install(
     game_id: GameId,
-    server_id: ServerId,
+    channel_id: ChannelId,
+    overrides: crate::InstallProfileOverrideArgs,
     install_path: PathBuf,
     force: bool,
     reuse_paths: Vec<PathBuf>,
@@ -124,20 +124,18 @@ pub async fn install(
         }
     };
 
-    if install_path_exists && !force {
-        if directory_has_entries(install_path.clone()).await? {
-            anyhow::bail!(
-                "Install path is not empty: {} (pass --force to reuse it)",
-                install_path.display()
-            );
-        }
+    if install_path_exists && !force && directory_has_entries(install_path.clone()).await? {
+        anyhow::bail!(
+            "Install path is not empty: {} (pass --force to reuse it)",
+            install_path.display()
+        );
     }
 
     if opts.is_dry_run() {
         opts.dry_run(format!(
             "Would install {:?} {:?} into {}",
             game_id,
-            server_id,
+            channel_id,
             install_path.display()
         ));
         if opts.keep_pack_archives {
@@ -163,8 +161,13 @@ pub async fn install(
         .with_context(|| format!("Failed to create {}", install_path.display()))?;
 
     let api_client = ApiClient::new()?;
+    let profile = griffr_common::config::resolve_install_profile(
+        &game_id,
+        &channel_id,
+        &overrides.clone().into(),
+    )?;
     let version_info = api_client
-        .get_latest_game(game_id, server_id, None)
+        .get_latest_game(&profile.target, None)
         .await
         .context("Failed to fetch version information")?;
 
@@ -178,7 +181,7 @@ pub async fn install(
     ui::print_phase(format!(
         "Installing {} ({}) into {}",
         game_id,
-        server_id,
+        channel_id,
         install_path.display()
     ));
     ui::print_info(format!(
@@ -193,20 +196,22 @@ pub async fn install(
 
     let mut game_config = GameConfig {
         install_path: Some(install_path.clone()),
-        active_server: server_id,
+        active_channel: channel_id.clone(),
         version: Some(version_info.version.clone()),
         last_update: None,
-        servers: Default::default(),
+        channels: Default::default(),
     };
-    let server = game_config.servers.entry(server_id).or_default();
-    server.installed = true;
-    server.install_path = Some(install_path.clone());
-    server.version = Some(version_info.version.clone());
-    let manager = GameManager::new(game_id, game_config);
-    let mut task_pool_cfg = TaskPoolConfig::default();
-    task_pool_cfg.max_retries = 3;
-    task_pool_cfg.extraction_progress_buffer_bytes = opts.extraction_progress_buffer_bytes;
-    task_pool_cfg.download_progress_buffer_bytes = opts.download_progress_buffer_bytes;
+    let channel = game_config.channels.entry(channel_id.clone()).or_default();
+    channel.installed = true;
+    channel.install_path = Some(install_path.clone());
+    channel.version = Some(version_info.version.clone());
+    let manager = GameManager::new(game_id.clone(), game_config, profile.clone());
+    let task_pool_cfg = TaskPoolConfig {
+        max_retries: 3,
+        extraction_progress_buffer_bytes: opts.extraction_progress_buffer_bytes,
+        download_progress_buffer_bytes: opts.download_progress_buffer_bytes,
+        ..Default::default()
+    };
     let mut task_pool = TaskPoolRunner::new(task_pool_cfg)?;
 
     if reuse_paths.is_empty() {
@@ -289,13 +294,13 @@ pub async fn install(
                     game_id
                 );
             }
-            let source_server_id = source.require_known_server()?;
+            let source_channel_id = source.require_known_channel()?;
             let source_version = source.require_config_ini_version()?.to_string();
             if source.install_path == install_path {
                 continue;
             }
             source_installs.push(SourceInstallInput {
-                server_id: source_server_id,
+                channel_id: source_channel_id,
                 version: source_version,
                 install_path: source.install_path.clone(),
             });
@@ -305,7 +310,7 @@ pub async fn install(
         let materialized = materialize_game_files_with_pool(
             &api_client,
             game_id,
-            server_id,
+            channel_id,
             &version_info.version,
             &install_path,
             &pkg.file_path,
@@ -339,27 +344,26 @@ pub async fn install(
         .await
         .context("Failed to sync launcher metadata after install staging")?;
 
-    let extra_tasks = if !opts.skip_vfs && supports_vfs_sync(game_id) {
+    let extra_tasks = if !opts.skip_vfs {
         ui::print_phase("Verifying install integrity + syncing VFS resources (single DAG batch)");
         ui::print_info(
             "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
         );
         let streaming_assets = install_path
-            .join(game_id.streaming_assets_subdir())
+            .join(profile.streaming_assets_subdir.clone())
             .join("StreamingAssets");
         let source_streaming_assets = reuse_paths
             .iter()
             .filter(|path| **path != install_path)
             .map(|path| {
-                path.join(game_id.streaming_assets_subdir())
+                path.join(profile.streaming_assets_subdir.clone())
                     .join("StreamingAssets")
             })
             .collect::<Vec<_>>();
         let rand_str = version_info.rand_str();
-        let VfsTaskPlan { tasks, .. } = plan_vfs_tasks(
+        match plan_vfs_tasks(
             &api_client,
-            game_id,
-            server_id,
+            &profile.target,
             &version_info.version,
             &rand_str,
             &streaming_assets,
@@ -370,15 +374,15 @@ pub async fn install(
             },
         )
         .await
-        .context("Failed to plan VFS tasks")?;
-        tasks
-    } else {
-        if !opts.skip_vfs && !supports_vfs_sync(game_id) {
-            ui::print_info(format!(
-                "Skipping VFS resource sync for {} (VFS sync is Endfield-only).",
-                game_id
-            ));
+        .context("Failed to plan VFS tasks")?
+        {
+            griffr_common::runtime::VfsPlanOutcome::Planned(plan) => plan.tasks,
+            griffr_common::runtime::VfsPlanOutcome::Unsupported => {
+                ui::print_info("The selected target does not expose the launcher resource-index pipeline; skipping VFS sync.");
+                Vec::new()
+            }
         }
+    } else {
         ui::print_phase("Verifying install integrity");
         Vec::new()
     };
@@ -437,76 +441,4 @@ pub async fn install(
 
     ui::print_success("Install complete");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use griffr_common::api::types::PackFile;
-
-    #[test]
-    fn required_install_bytes_uses_larger_of_archives_and_package_total() {
-        let pkg = PackageInfo {
-            packs: vec![
-                PackFile {
-                    url: "https://example.com/full.zip.001".to_string(),
-                    md5: "abc".to_string(),
-                    package_size: "8".to_string(),
-                },
-                PackFile {
-                    url: "https://example.com/full.zip.002".to_string(),
-                    md5: "def".to_string(),
-                    package_size: "7".to_string(),
-                },
-            ],
-            total_size: "20".to_string(),
-            file_path: "https://example.com/files".to_string(),
-            game_files_md5: None,
-        };
-
-        assert_eq!(required_install_bytes(&pkg), 20);
-    }
-
-    #[test]
-    fn required_install_bytes_falls_back_to_archive_sum_when_total_size_invalid() {
-        let pkg = PackageInfo {
-            packs: vec![
-                PackFile {
-                    url: "https://example.com/full.zip.001".to_string(),
-                    md5: "abc".to_string(),
-                    package_size: "4".to_string(),
-                },
-                PackFile {
-                    url: "https://example.com/full.zip.002".to_string(),
-                    md5: "def".to_string(),
-                    package_size: "6".to_string(),
-                },
-            ],
-            total_size: "invalid".to_string(),
-            file_path: "https://example.com/files".to_string(),
-            game_files_md5: None,
-        };
-
-        assert_eq!(required_install_bytes(&pkg), 10);
-    }
-
-    #[test]
-    #[ignore = "Uses host filesystem to query real free disk space"]
-    fn disk_available_bytes_reads_real_disk() {
-        let cwd = std::env::current_dir().expect("current dir");
-        let available = disk_available_bytes(&cwd).expect("query free space for cwd");
-        assert!(available > 0, "expected positive available space");
-
-        // Exercise fallback for not-yet-existing install paths.
-        let deep_missing_path = cwd
-            .join("griffr-test")
-            .join("disk-space")
-            .join("missing-target");
-        let fallback_available =
-            disk_available_bytes(&deep_missing_path).expect("query free space for nested path");
-        assert!(
-            fallback_available > 0,
-            "expected positive available space for nested path"
-        );
-    }
 }

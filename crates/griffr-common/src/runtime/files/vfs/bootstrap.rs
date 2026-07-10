@@ -1,25 +1,10 @@
-//! VFS (Virtual File System) resource download and update logic
-//!
-//! Hypergryph games store large game assets (audio, textures, etc.) in VFS files
-//! under `StreamingAssets/VFS/`. These are managed separately from the main game
-//! packs via the `get_latest_resources` API endpoint.
-//!
-//! The VFS flow:
-//! 1. Call `get_latest_resources` API to get resource group URLs
-//! 2. Fetch `index_main.json` (encrypted) and decrypt to get file list
-//! 3. Fetch `patch.json` (plain JSON) for incremental updates
-//! 4. Download missing/changed VFS files from CDN
-//!
-//! Reference: `ref/ak-endfield-api-archive-main/src/cmds/archive.ts`
-
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 use rapidhash::RapidHashSet as HashSet;
 use std::path::Path;
-use tracing::{info, warn};
 
-use crate::api::client::ApiClient;
+use crate::api::client::{ApiClient, ApiError};
 use crate::api::crypto::RES_INDEX_KEY;
-use crate::config::{GameId, ServerId};
+use crate::config::ApiTarget;
 use crate::runtime::task_pool::{ProgressEvent, Task, TaskPoolRunner};
 use crate::runtime::{
     collect_files_recursive, logical_path_from_root, normalize_logical_path,
@@ -57,6 +42,18 @@ pub struct VfsTaskPlan {
     pub total_files: usize,
     pub total_bytes: u64,
     pub res_version: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum VfsPlanOutcome {
+    Planned(VfsTaskPlan),
+    Unsupported,
+}
+
+#[derive(Debug, Clone)]
+pub enum VfsUpdateOutcome {
+    Updated(VfsUpdateResult),
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +111,10 @@ pub struct VfsBootstrapResult {
     pub scope_label: String,
 }
 
-fn should_include_bootstrap_group(scope: VfsBootstrapScope, resource_name: &str) -> bool {
+pub(super) fn should_include_bootstrap_group(
+    scope: VfsBootstrapScope,
+    resource_name: &str,
+) -> bool {
     match scope {
         VfsBootstrapScope::Initial => resource_name.eq_ignore_ascii_case("initial"),
         VfsBootstrapScope::Complete => {
@@ -128,16 +128,20 @@ async fn read_local_res_index(path: &Path) -> Result<Option<crate::api::types::R
     if !path.is_file() {
         return Ok(None);
     }
-    let encrypted_b64 = String::from_utf8(
-        compio::fs::read(path)
-            .await
-            .with_context(|| format!("Failed to read {}", path.display()))?,
-    )
-    .with_context(|| format!("{} is not valid UTF-8 text", path.display()))?;
+    let encrypted_b64 =
+        String::from_utf8(
+            compio::fs::read(path)
+                .await
+                .map_err(|e| Error::OpenFileFailed {
+                    path: path.to_path_buf(),
+                    source: e,
+                })?,
+        )
+        .map_err(|e| Error::Vfs(format!("{} is not valid UTF-8 text: {e}", path.display())))?;
     let decrypted = crate::api::crypto::decrypt_res_index(encrypted_b64.trim(), RES_INDEX_KEY)
-        .with_context(|| format!("Failed to decrypt {}", path.display()))?;
+        .map_err(|e| Error::Vfs(format!("Failed to decrypt {}: {e}", path.display())))?;
     let index = serde_json::from_str::<crate::api::types::ResIndex>(&decrypted)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+        .map_err(|e| Error::Vfs(format!("Failed to parse {}: {e}", path.display())))?;
     Ok(Some(index))
 }
 
@@ -192,17 +196,20 @@ fn res_index_to_ensure_tasks(
 
 pub async fn plan_persistent_bootstrap_tasks(
     api_client: &ApiClient,
-    game_id: GameId,
-    server_id: ServerId,
+    target: &ApiTarget,
     game_version: &str,
     rand_str: &str,
     persistent_root: &Path,
     cfg: &VfsBootstrapConfig,
-) -> Result<VfsBootstrapPlan> {
-    let resources = api_client
-        .get_latest_resources(game_id, server_id, game_version, rand_str, "Windows")
+) -> Result<Option<VfsBootstrapPlan>> {
+    let resources = match api_client
+        .get_latest_resources(target, game_version, rand_str, "Windows")
         .await
-        .context("Failed to get latest VFS resources for bootstrap")?;
+    {
+        Ok(res) => res,
+        Err(ApiError::ResourcePipelineUnavailable(_)) => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
 
     let mut tasks = Vec::new();
     let mut manifest_downloads = Vec::new();
@@ -230,10 +237,10 @@ pub async fn plan_persistent_bootstrap_tasks(
 
         let local_pref = read_local_res_index(&persistent_root.join(&pref_filename))
             .await
-            .with_context(|| format!("Failed to parse local {}", pref_filename))?;
+            .map_err(|e| Error::Vfs(format!("Failed to parse local {pref_filename}: {e}")))?;
         let local_index = read_local_res_index(&persistent_root.join(&index_filename))
             .await
-            .with_context(|| format!("Failed to parse local {}", index_filename))?;
+            .map_err(|e| Error::Vfs(format!("Failed to parse local {index_filename}: {e}")))?;
 
         let (selected_index, manifest_kind) = if let Some(pref) = local_pref {
             (pref, "pref-local")
@@ -249,11 +256,11 @@ pub async fn plan_persistent_bootstrap_tasks(
             let index = api_client
                 .fetch_res_index(&index_url, RES_INDEX_KEY)
                 .await
-                .with_context(|| {
-                    format!(
-                        "Failed to fetch both pref and index manifests for resource group {}",
+                .map_err(|e| {
+                    Error::Vfs(format!(
+                        "Failed to fetch both pref and index manifests for resource group {}: {e}",
                         resource.name
-                    )
+                    ))
                 })?;
             manifest_downloads.push(VfsBootstrapManifestDownload {
                 url: index_url,
@@ -280,7 +287,7 @@ pub async fn plan_persistent_bootstrap_tasks(
         scope_parts.push(format!("{}:{}", resource.name, manifest_kind));
     }
 
-    Ok(VfsBootstrapPlan {
+    Ok(Some(VfsBootstrapPlan {
         tasks,
         manifest_downloads,
         total_files,
@@ -288,41 +295,46 @@ pub async fn plan_persistent_bootstrap_tasks(
         expected_paths,
         res_version: resources.res_version,
         scope_label: scope_parts.join(","),
-    })
+    }))
 }
 
 pub async fn bootstrap_persistent_vfs_with_runner(
     api_client: &ApiClient,
-    game_id: GameId,
-    server_id: ServerId,
+    target: &ApiTarget,
     game_version: &str,
     rand_str: &str,
     persistent_root: &Path,
     cfg: &VfsBootstrapConfig,
     task_pool_runner: &mut TaskPoolRunner,
     progress_callback: Option<&dyn Fn(u64, u64)>,
-) -> Result<VfsBootstrapResult> {
-    let plan = plan_persistent_bootstrap_tasks(
+) -> Result<Option<VfsBootstrapResult>> {
+    let plan = match plan_persistent_bootstrap_tasks(
         api_client,
-        game_id,
-        server_id,
+        target,
         game_version,
         rand_str,
         persistent_root,
         cfg,
     )
-    .await?;
+    .await?
+    {
+        Some(p) => p,
+        None => return Ok(None),
+    };
 
     compio::fs::create_dir_all(persistent_root)
         .await
-        .with_context(|| format!("Failed to create {}", persistent_root.display()))?;
+        .map_err(|e| Error::CreateDirFailed {
+            path: persistent_root.to_path_buf(),
+            source: e,
+        })?;
 
     for manifest in &plan.manifest_downloads {
         let dest = persistent_root.join(&manifest.filename);
         api_client
             .download_file(&manifest.url, &dest, false)
             .await
-            .with_context(|| format!("Failed to download {}", manifest.url))?;
+            .map_err(|e| Error::ApiClient(format!("Failed to download {}: {e}", manifest.url)))?;
     }
 
     let mut download_progress = RunningByteProgress::new();
@@ -371,7 +383,11 @@ pub async fn bootstrap_persistent_vfs_with_runner(
 
     let _ = task_pool_runner
         .run_batch_with_progress(plan.tasks, Some(&mut on_event))
-        .context("Failed to materialize Persistent VFS bootstrap files")?;
+        .map_err(|e| {
+            Error::TaskPool(format!(
+                "Failed to materialize Persistent VFS bootstrap files: {e}"
+            ))
+        })?;
 
     if cfg.prune_extra_files {
         let vfs_root = persistent_root.join("VFS");
@@ -386,7 +402,10 @@ pub async fn bootstrap_persistent_vfs_with_runner(
                 if !plan.expected_paths.contains(&rel_norm) {
                     compio::fs::remove_file(&file)
                         .await
-                        .with_context(|| format!("Failed to remove {}", file.display()))?;
+                        .map_err(|e| Error::RemoveFailed {
+                            path: file.clone(),
+                            source: e,
+                        })?;
                 }
             }
             remove_empty_dirs_recursive(vfs_root.clone()).await?;
@@ -395,7 +414,7 @@ pub async fn bootstrap_persistent_vfs_with_runner(
 
     let summary = outcomes.summary();
 
-    Ok(VfsBootstrapResult {
+    Ok(Some(VfsBootstrapResult {
         total_files: plan.total_files,
         downloaded_files: summary.downloaded_files,
         downloaded_bytes: download_progress.total_bytes(),
@@ -404,263 +423,5 @@ pub async fn bootstrap_persistent_vfs_with_runner(
         failed_files: summary.failed_files,
         res_version: plan.res_version,
         scope_label: plan.scope_label,
-    })
-}
-
-pub async fn plan_vfs_tasks(
-    api_client: &ApiClient,
-    game_id: GameId,
-    server_id: ServerId,
-    game_version: &str,
-    rand_str: &str,
-    streaming_assets_path: &Path,
-    materialize: &VfsMaterializeConfig,
-) -> Result<VfsTaskPlan> {
-    let resources = api_client
-        .get_latest_resources(game_id, server_id, game_version, rand_str, "Windows")
-        .await
-        .context("Failed to get latest VFS resources")?;
-
-    let mut tasks = Vec::new();
-    let mut total_files = 0usize;
-    let mut total_bytes = 0u64;
-
-    for resource in &resources.resources {
-        let index_url = format!("{}/index_{}.json", resource.path, resource.name);
-        let index = api_client
-            .fetch_res_index(&index_url, RES_INDEX_KEY)
-            .await
-            .with_context(|| format!("Failed to fetch resource index for {}", resource.name))?;
-
-        for file in &index.files {
-            if file.name.is_empty() {
-                warn!(
-                    "Skipping VFS file with empty name in index {}",
-                    resource.name
-                );
-                continue;
-            }
-            let expected_md5 = file
-                .md5
-                .as_deref()
-                .or(file.hash.as_deref())
-                .unwrap_or("")
-                .to_string();
-            if expected_md5.is_empty() {
-                warn!(
-                    "Skipping VFS file without checksum in index {}: {}",
-                    resource.name, file.name
-                );
-                continue;
-            }
-            let source_candidates = materialize
-                .source_streaming_assets
-                .iter()
-                .map(|root| root.join(&file.name))
-                .collect::<Vec<_>>();
-            total_files += 1;
-            total_bytes = total_bytes.saturating_add(file.size);
-            tasks.push(Task::EnsureFile {
-                dest: streaming_assets_path.join(&file.name),
-                logical_path: file.name.clone(),
-                expected_md5,
-                expected_size: file.size,
-                source_candidates,
-                download_url: Some(format!("{}/{}", resource.path, file.name)),
-                allow_copy_fallback: materialize.allow_copy_fallback,
-                prefer_reuse: materialize.prefer_reuse,
-                retry_count: 0,
-            });
-        }
-    }
-
-    Ok(VfsTaskPlan {
-        tasks,
-        total_files,
-        total_bytes,
-        res_version: resources.res_version,
-    })
-}
-
-/// Check and download VFS game resources after a game update/install
-///
-/// This should be called after the main game packs are extracted. It:
-/// 1. Fetches the latest VFS resource info from the API
-/// 2. Downloads and decrypts the resource index
-/// 3. Downloads missing/changed VFS files
-///
-/// `streaming_assets_path` should point to the game's StreamingAssets directory
-/// (e.g., `{install_path}/Endfield_Data/StreamingAssets` for Endfield).
-///
-/// Returns a summary of what was downloaded.
-/// Check/download VFS resources using task-pool EnsureFile flow with optional
-/// hardlink/copy reuse from source installs.
-pub async fn download_vfs_resources(
-    api_client: &ApiClient,
-    game_id: GameId,
-    server_id: ServerId,
-    game_version: &str,
-    rand_str: &str,
-    streaming_assets_path: &Path,
-    materialize: &VfsMaterializeConfig,
-    task_pool_runner: &mut TaskPoolRunner,
-    progress_callback: Option<&dyn Fn(u64, u64)>,
-) -> Result<VfsUpdateResult> {
-    let plan = plan_vfs_tasks(
-        api_client,
-        game_id,
-        server_id,
-        game_version,
-        rand_str,
-        streaming_assets_path,
-        materialize,
-    )
-    .await?;
-
-    info!("VFS resource version: {}", plan.res_version);
-
-    let mut total_result = VfsUpdateResult {
-        total_files: plan.total_files,
-        downloaded_files: 0,
-        downloaded_bytes: 0,
-        skipped_files: 0,
-        res_version: plan.res_version.clone(),
-    };
-
-    let mut failed_paths = Vec::<String>::new();
-    let mut download_progress = RunningByteProgress::new();
-    let mut outcomes = PathOutcomeTracker::new();
-    let mut on_event = |event: &ProgressEvent| match event {
-        ProgressEvent::DownloadedBytes { .. } => {
-            let running_downloaded_bytes = download_progress
-                .handle_download_event(event)
-                .expect("download event");
-            if let Some(cb) = progress_callback {
-                cb(running_downloaded_bytes, plan.total_bytes);
-            }
-        }
-        ProgressEvent::Downloaded { path, bytes } => {
-            outcomes.record_downloaded(path, *bytes);
-            let running_downloaded_bytes = download_progress
-                .handle_download_event(event)
-                .expect("download event");
-            if let Some(cb) = progress_callback {
-                cb(running_downloaded_bytes, plan.total_bytes);
-            }
-        }
-        ProgressEvent::Verified { path, ok, .. } => {
-            outcomes.record_verified(path, *ok);
-            if let Some(cb) = progress_callback {
-                cb(download_progress.total_bytes(), plan.total_bytes);
-            }
-        }
-        ProgressEvent::Failed { path, reason } => {
-            warn!("Failed to materialize VFS file {}: {}", path, reason);
-            outcomes.record_failed(path);
-            failed_paths.push(path.clone());
-        }
-        _ => {}
-    };
-    let _ = task_pool_runner
-        .run_batch_with_progress(plan.tasks, Some(&mut on_event))
-        .context("Failed to materialize VFS files")?;
-
-    let summary = outcomes.summary();
-    total_result.downloaded_files = summary.downloaded_files;
-    total_result.downloaded_bytes = summary.downloaded_bytes;
-    total_result.skipped_files = summary.skipped_files;
-
-    if !failed_paths.is_empty() {
-        warn!("VFS sync had {} failed file(s)", failed_paths.len());
-    }
-
-    // Step 4: Print summary
-    if total_result.downloaded_files > 0 {
-        info!(
-            "VFS download complete: {} files downloaded ({:.2} GB), {} files up-to-date",
-            total_result.downloaded_files,
-            total_result.downloaded_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
-            total_result.skipped_files,
-        );
-    } else {
-        info!(
-            "VFS files: all {} files up-to-date",
-            total_result.total_files
-        );
-    }
-
-    Ok(total_result)
-}
-
-/// Get VFS resource info without downloading (for dry-run / planning)
-///
-/// Returns the resource version and file counts for display purposes.
-pub async fn get_vfs_resource_info(
-    api_client: &ApiClient,
-    game_id: GameId,
-    server_id: ServerId,
-    game_version: &str,
-    rand_str: &str,
-) -> Result<(String, usize, u64)> {
-    let resources = api_client
-        .get_latest_resources(game_id, server_id, game_version, rand_str, "Windows")
-        .await
-        .context("Failed to get VFS resource info")?;
-
-    let mut total_files = 0;
-    let mut total_size: u64 = 0;
-
-    for resource in &resources.resources {
-        let index_url = format!("{}/index_{}.json", resource.path, resource.name);
-        match api_client.fetch_res_index(&index_url, RES_INDEX_KEY).await {
-            Ok(index) => {
-                total_files += index.files.len();
-                total_size += index.files.iter().map(|f| f.size).sum::<u64>();
-            }
-            Err(e) => {
-                warn!("Could not fetch VFS index for {}: {}", resource.name, e);
-            }
-        }
-    }
-
-    Ok((resources.res_version, total_files, total_size))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_vfs_update_result_defaults() {
-        let result = VfsUpdateResult {
-            total_files: 100,
-            downloaded_files: 0,
-            downloaded_bytes: 0,
-            skipped_files: 100,
-            res_version: "initial_6331530-16_main_6331530-16".to_string(),
-        };
-        assert_eq!(result.total_files, 100);
-        assert_eq!(result.skipped_files, 100);
-        assert_eq!(result.downloaded_files, 0);
-    }
-
-    #[test]
-    fn bootstrap_scope_includes_expected_groups() {
-        assert!(should_include_bootstrap_group(
-            VfsBootstrapScope::Initial,
-            "initial"
-        ));
-        assert!(!should_include_bootstrap_group(
-            VfsBootstrapScope::Initial,
-            "main"
-        ));
-        assert!(should_include_bootstrap_group(
-            VfsBootstrapScope::Complete,
-            "initial"
-        ));
-        assert!(should_include_bootstrap_group(
-            VfsBootstrapScope::Complete,
-            "main"
-        ));
-    }
+    }))
 }

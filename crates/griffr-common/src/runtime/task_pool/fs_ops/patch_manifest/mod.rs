@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 
 use crate::api::types::ResourcePatch;
 
@@ -38,17 +38,19 @@ pub(crate) fn apply_extracted_vfs_patch_manifest(install_root: &Path) -> Result<
         return Ok(());
     }
     if !manifest_path.is_file() {
-        anyhow::bail!(
+        return Err(Error::Vfs(format!(
             "Extracted VFS patch manifest is incomplete: missing {}",
             manifest_path.display()
-        );
+        )));
     }
 
-    let manifest: ResourcePatch = serde_json::from_slice(
-        &std::fs::read(&manifest_path)
-            .with_context(|| format!("Failed to read {}", manifest_path.display()))?,
-    )
-    .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+    let manifest: ResourcePatch =
+        serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|e| {
+            Error::OpenFileFailed {
+                path: manifest_path.clone(),
+                source: e,
+            }
+        })?)?;
 
     let vfs_base_path =
         parse_safe_relative_path("patch.json vfs_base_path", manifest.vfs_base_path.trim())?;
@@ -56,14 +58,23 @@ pub(crate) fn apply_extracted_vfs_patch_manifest(install_root: &Path) -> Result<
 
     for entry in &manifest.files {
         materialize::materialize_vfs_patch_entry(install_root, &stage_root, &dest_root, entry)
-            .with_context(|| format!("Failed to materialize patch entry {}", entry.name))?;
+            .map_err(|e| {
+                Error::Other(format!(
+                    "Failed to materialize patch entry {}: {e}",
+                    entry.name
+                ))
+            })?;
     }
 
-    std::fs::remove_file(&manifest_path)
-        .with_context(|| format!("Failed to remove {}", manifest_path.display()))?;
+    std::fs::remove_file(&manifest_path).map_err(|e| Error::RemoveFailed {
+        path: manifest_path.clone(),
+        source: e,
+    })?;
     if stage_root.exists() {
-        std::fs::remove_dir_all(&stage_root)
-            .with_context(|| format!("Failed to remove {}", stage_root.display()))?;
+        std::fs::remove_dir_all(&stage_root).map_err(|e| Error::RemoveFailed {
+            path: stage_root.clone(),
+            source: e,
+        })?;
     }
     Ok(())
 }

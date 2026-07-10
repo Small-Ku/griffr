@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
@@ -18,11 +18,9 @@ pub(crate) fn make_extract_staging_dir(dest: &Path, base_name: &str) -> Result<P
 
 pub(crate) fn commit_staged_extract(staging_root: &Path, dest_root: &Path) -> Result<()> {
     commit_staged_extract_inner(staging_root, staging_root, dest_root)?;
-    std::fs::remove_dir_all(staging_root).with_context(|| {
-        format!(
-            "Failed to clean extraction staging directory {}",
-            staging_root.display()
-        )
+    std::fs::remove_dir_all(staging_root).map_err(|e| Error::RemoveFailed {
+        path: staging_root.to_path_buf(),
+        source: e,
     })?;
     Ok(())
 }
@@ -32,43 +30,47 @@ fn commit_staged_extract_inner(
     current: &Path,
     dest_root: &Path,
 ) -> Result<()> {
-    for entry in std::fs::read_dir(current)
-        .with_context(|| format!("Failed to read directory {}", current.display()))?
-    {
-        let entry = entry.with_context(|| {
-            format!("Failed to read directory entry under {}", current.display())
+    for entry in std::fs::read_dir(current).map_err(|e| Error::ReadDirFailed {
+        path: current.to_path_buf(),
+        source: e,
+    })? {
+        let entry = entry.map_err(|e| Error::ReadDirFailed {
+            path: current.to_path_buf(),
+            source: e,
         })?;
         let src_path = entry.path();
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("Failed to inspect directory entry {}", src_path.display()))?;
-        let relative = src_path.strip_prefix(staging_root).with_context(|| {
-            format!(
-                "Failed to derive relative path for staged entry {}",
-                src_path.display()
-            )
+        let file_type = entry.file_type().map_err(|e| Error::StatFailed {
+            path: src_path.clone(),
+            source: e,
         })?;
+        let relative = src_path.strip_prefix(staging_root)?;
         let dest_path = dest_root.join(relative);
         if file_type.is_dir() {
-            std::fs::create_dir_all(&dest_path)
-                .with_context(|| format!("Failed to create directory {}", dest_path.display()))?;
+            std::fs::create_dir_all(&dest_path).map_err(|e| Error::CreateDirFailed {
+                path: dest_path.clone(),
+                source: e,
+            })?;
             commit_staged_extract_inner(staging_root, &src_path, dest_root)?;
             continue;
         }
         if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+            std::fs::create_dir_all(parent).map_err(|e| Error::CreateDirFailed {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
         }
         if dest_path.exists() && dest_path.is_dir() {
-            std::fs::remove_dir_all(&dest_path)
-                .with_context(|| format!("Failed to replace {}", dest_path.display()))?;
+            std::fs::remove_dir_all(&dest_path).map_err(|e| Error::RemoveFailed {
+                path: dest_path.clone(),
+                source: e,
+            })?;
         }
-        move_path_replace(&src_path, &dest_path).with_context(|| {
-            format!(
-                "Failed to move extracted file {} -> {}",
+        move_path_replace(&src_path, &dest_path).map_err(|e| {
+            Error::Other(format!(
+                "Failed to move extracted file {} -> {}: {e}",
                 src_path.display(),
                 dest_path.display()
-            )
+            ))
         })?;
     }
     Ok(())
@@ -89,12 +91,10 @@ pub(super) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
             )
         };
         if moved == 0 {
-            return Err(std::io::Error::last_os_error()).with_context(|| {
-                format!(
-                    "MoveFileExW failed to replace {} -> {}",
-                    src.display(),
-                    dest.display()
-                )
+            return Err(Error::RenameFailed {
+                src: src.to_path_buf(),
+                dest: dest.to_path_buf(),
+                source: std::io::Error::last_os_error(),
             });
         }
         Ok(())
@@ -103,19 +103,21 @@ pub(super) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
     {
         if dest.exists() {
             if dest.is_dir() {
-                std::fs::remove_dir_all(dest)
-                    .with_context(|| format!("Failed to replace {}", dest.display()))?;
+                std::fs::remove_dir_all(dest).map_err(|e| Error::RemoveFailed {
+                    path: dest.to_path_buf(),
+                    source: e,
+                })?;
             } else {
-                std::fs::remove_file(dest)
-                    .with_context(|| format!("Failed to replace {}", dest.display()))?;
+                std::fs::remove_file(dest).map_err(|e| Error::RemoveFailed {
+                    path: dest.to_path_buf(),
+                    source: e,
+                })?;
             }
         }
-        std::fs::rename(src, dest).with_context(|| {
-            format!(
-                "Failed to rename staged path {} -> {}",
-                src.display(),
-                dest.display()
-            )
+        std::fs::rename(src, dest).map_err(|e| Error::RenameFailed {
+            src: src.to_path_buf(),
+            dest: dest.to_path_buf(),
+            source: e,
         })?;
         Ok(())
     }

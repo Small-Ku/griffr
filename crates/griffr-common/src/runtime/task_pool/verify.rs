@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 use md5::{Digest, Md5};
 
 use crate::runtime::issues::{FileIssue, FileIssueKind};
@@ -109,8 +109,10 @@ pub(crate) fn build_issue(
 }
 
 pub(crate) fn file_md5(path: &Path) -> Result<String> {
-    let mut file =
-        File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut file = File::open(path).map_err(|e| Error::OpenFileFailed {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
     let mut hasher = Md5::new();
     let mut buf = vec![0u8; 1024 * 1024];
     loop {

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Context;
+use crate::error::Error;
 use compio::dispatcher::Dispatcher;
 
 use super::super::fs_ops::{commit_staged_extract, make_extract_staging_dir};
@@ -161,11 +161,9 @@ pub(super) fn execute_extract_archive(
         crate::download::extractor::MultiVolumeExtractor::from_directory(&source_dir, &base_name)
             .and_then(|extractor| {
                 let staging_dir = make_extract_staging_dir(&dest, &base_name)?;
-                std::fs::create_dir_all(&staging_dir).with_context(|| {
-                    format!(
-                        "Failed to create extraction staging dir {}",
-                        staging_dir.display()
-                    )
+                std::fs::create_dir_all(&staging_dir).map_err(|e| Error::CreateDirFailed {
+                    path: staging_dir.clone(),
+                    source: e,
                 })?;
                 if let Err(err) = extractor.extract_to_with_progress(
                     &staging_dir,

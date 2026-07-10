@@ -1,8 +1,9 @@
 use std::io::ErrorKind;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 use compio::buf::BufResult;
+use compio::bytes::Bytes;
 use compio::dispatcher::Dispatcher;
 use compio::io::AsyncWriteAtExt;
 use futures_util::StreamExt;
@@ -43,17 +44,15 @@ pub(crate) fn do_download(
     let part_path_for_resume = part_path.clone();
     let resume_from = super::fs_ops::dispatch_io(io_dispatcher, move || async move {
         match compio::fs::metadata(&part_path_for_resume).await {
-            Ok(metadata) => Ok::<Option<u64>, anyhow::Error>(match expected_size {
+            Ok(metadata) => Ok::<Option<u64>, Error>(match expected_size {
                 Some(size) if metadata.len() < size => Some(metadata.len()),
                 Some(_) => Some(0),
                 None => Some(metadata.len()),
             }),
             Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(err).with_context(|| {
-                format!(
-                    "Failed to stat partial download file {}",
-                    part_path_for_resume.display()
-                )
+            Err(err) => Err(Error::StatFailed {
+                path: part_path_for_resume.clone(),
+                source: err,
             }),
         }
     })?;
@@ -63,31 +62,33 @@ pub(crate) fn do_download(
     let part_path_for_write = part_path.clone();
     let (written, actual_md5) = super::fs_ops::dispatch_io(io_dispatcher, move || async move {
         let client = cyper::Client::new();
-        let mut request = client
-            .get(&url_owned)
-            .with_context(|| format!("Failed to build request for {}", url_owned))?;
+        let mut request = client.get(&url_owned)?;
         request = request
             .header("User-Agent", user_agent_owned)
-            .context("Failed to attach User-Agent header")?;
+            .map_err(|e| Error::Download(format!("Failed to attach User-Agent header: {e}")))?;
         if let Some(offset) = resume_from.filter(|o| *o > 0) {
             request = request
                 .header("Range", format!("bytes={}-", offset))
-                .context("Failed to set Range header for resume")?;
+                .map_err(|e| {
+                    Error::Download(format!("Failed to set Range header for resume: {e}"))
+                })?;
             debug!("resuming download from byte {} for {}", offset, url_owned);
         }
         let response = compio::time::timeout(send_timeout, request.send())
-            .await
-            .with_context(|| format!("Timed out waiting for response from {}", url_owned))?
-            .with_context(|| format!("Failed to download {}", url_owned))?;
+            .await?
+            .map_err(|e| Error::Download(format!("Failed to download {}: {e}", url_owned)))?;
         let status = response.status();
         if !status.is_success() {
-            anyhow::bail!("HTTP error {}", status);
+            return Err(Error::Download(format!("HTTP error {}", status)));
         }
 
         if let Some(parent) = part_path_for_write.parent() {
             compio::fs::create_dir_all(parent)
                 .await
-                .with_context(|| format!("Failed to create {}", parent.display()))?;
+                .map_err(|e| Error::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
         }
 
         let resume_effective = resume_from.filter(|o| *o > 0).is_some() && status.as_u16() == 206;
@@ -97,15 +98,14 @@ pub(crate) fn do_download(
             .create(true)
             .write(true)
             .truncate(!resume_effective);
-        let mut out = open_options
-            .open(&part_path_for_write)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to open partial download file {}",
-                    part_path_for_write.display()
-                )
-            })?;
+        let mut out =
+            open_options
+                .open(&part_path_for_write)
+                .await
+                .map_err(|e| Error::OpenFileFailed {
+                    path: part_path_for_write.clone(),
+                    source: e,
+                })?;
 
         let mut hasher = Md5::new();
         if resume_effective {
@@ -121,27 +121,27 @@ pub(crate) fn do_download(
         let mut write_offset = total_written;
         let mut last_reported_bytes = total_written;
         loop {
-            let next = compio::time::timeout(body_timeout, stream.next())
-                .await
-                .with_context(|| {
-                    format!(
-                        "Timed out reading response body from {} (timeout={}s)",
-                        url_owned,
-                        body_timeout.as_secs()
-                    )
-                })?;
+            let next: Option<std::result::Result<Bytes, cyper::Error>> =
+                compio::time::timeout(body_timeout, stream.next())
+                    .await
+                    .map_err(|_| {
+                        Error::Download(format!(
+                            "Timed out reading response body from {} (timeout={}s)",
+                            url_owned,
+                            body_timeout.as_secs()
+                        ))
+                    })?;
             let Some(chunk) = next else {
                 break;
             };
-            let chunk = chunk.context("Failed to read response body chunk")?;
+            let chunk: Bytes = chunk
+                .map_err(|e| Error::Download(format!("Failed to read response body chunk: {e}")))?;
             md5::Digest::update(&mut hasher, chunk.as_ref());
             let chunk_len = chunk.len() as u64;
             let BufResult(write_result, _) = out.write_all_at(chunk, write_offset).await;
-            write_result.with_context(|| {
-                format!(
-                    "Failed to append chunk to partial file {}",
-                    part_path_for_write.display()
-                )
+            write_result.map_err(|e| Error::WriteFileFailed {
+                path: part_path_for_write.clone(),
+                source: e,
             })?;
             write_offset = write_offset.saturating_add(chunk_len);
             total_written = total_written.saturating_add(chunk_len);
@@ -159,34 +159,29 @@ pub(crate) fn do_download(
             }
         }
 
-        out.sync_data().await.with_context(|| {
-            format!(
-                "Failed to sync partial download file {}",
-                part_path_for_write.display()
-            )
+        out.sync_data().await.map_err(|e| Error::WriteFileFailed {
+            path: part_path_for_write.clone(),
+            source: e,
         })?;
 
         if let Some(expected) = expected_size {
             if total_written != expected {
-                anyhow::bail!(
+                return Err(Error::Download(format!(
                     "Downloaded size mismatch for {}: expected {}, got {}",
-                    url_owned,
-                    expected,
-                    total_written
-                );
+                    url_owned, expected, total_written
+                )));
             }
         }
 
         let actual_md5 = format!("{:x}", md5::Digest::finalize(hasher));
-        Ok::<(u64, String), anyhow::Error>((total_written, actual_md5))
+        Ok::<(u64, String), Error>((total_written, actual_md5))
     })?;
 
     if actual_md5 != expected_md5.to_lowercase() {
-        anyhow::bail!(
+        return Err(Error::Download(format!(
             "MD5 mismatch: expected {}, got {}",
-            expected_md5,
-            actual_md5
-        );
+            expected_md5, actual_md5
+        )));
     }
 
     super::fs_ops::commit_partial_download(io_dispatcher, &part_path, dest)?;
@@ -194,7 +189,10 @@ pub(crate) fn do_download(
     let metadata = super::fs_ops::dispatch_io(io_dispatcher, move || async move {
         compio::fs::metadata(&dest_owned)
             .await
-            .with_context(|| format!("Failed to stat {}", dest_owned.display()))
+            .map_err(|e| Error::StatFailed {
+                path: dest_owned.clone(),
+                source: e,
+            })
     })?;
     let len = metadata.len();
     if len != written {

@@ -1,30 +1,35 @@
-use anyhow::Result;
+use crate::error::{Error, Result};
 use rapidhash::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 
 use crate::api::types::GameFileEntry;
 use crate::api::ApiClient;
-use crate::config::{GameId, ServerId};
+use crate::config::{ChannelId, GameId};
 pub(crate) use crate::runtime::is_launcher_metadata_path;
 use crate::runtime::task_pool::{run_tasks, ProgressEvent, Task, TaskPoolConfig};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn plan_file_reuse(
     game_id: GameId,
-    _target_server_id: ServerId,
+    _target_channel_id: ChannelId,
     _target_version: &str,
     target_manifest: &[GameFileEntry],
     source_installs: &[super::models::SourceInstallInput],
     api_client: &ApiClient,
 ) -> Result<super::models::ReusePlan> {
-    let mut source_servers: Vec<super::models::SourceServer> = Vec::new();
+    let mut source_channels: Vec<super::models::SourceChannel> = Vec::new();
     let mut source_manifests: Vec<Vec<GameFileEntry>> = Vec::new();
 
     for source in source_installs {
-        let server_id = source.server_id;
+        let channel_id = source.channel_id.clone();
         let version = &source.version;
 
+        let preset = match crate::config::KnownTargets::resolve(&game_id, &channel_id) {
+            Some(p) => p,
+            None => continue,
+        };
+
         let version_info = match api_client
-            .get_latest_game(game_id, server_id, Some(version))
+            .get_latest_game(&preset.target, Some(version))
             .await
         {
             Ok(info) => info,
@@ -48,8 +53,8 @@ pub async fn plan_file_reuse(
             Err(_) => continue,
         };
 
-        source_servers.push(super::models::SourceServer {
-            server_id,
+        source_channels.push(super::models::SourceChannel {
+            channel_id,
             version: version.clone(),
             install_path: source.install_path.clone(),
             file_count: manifest.len(),
@@ -57,9 +62,9 @@ pub async fn plan_file_reuse(
         source_manifests.push(manifest);
     }
 
-    if source_servers.is_empty() {
+    if source_channels.is_empty() {
         return Ok(super::models::ReusePlan {
-            source_servers: vec![],
+            source_channels: vec![],
             reusable_files: vec![],
             download_files: target_manifest
                 .iter()
@@ -85,7 +90,7 @@ pub async fn plan_file_reuse(
     let mut reusable_paths: HashSet<String> = HashSet::default();
     let mut reusable_size: u64 = 0;
 
-    for (idx, source) in source_servers.iter().enumerate() {
+    for (idx, source) in source_channels.iter().enumerate() {
         let source_manifest = match source_manifests.get(idx) {
             Some(m) => m,
             None => continue,
@@ -122,11 +127,13 @@ pub async fn plan_file_reuse(
             continue;
         }
 
-        let mut cfg = TaskPoolConfig::default();
-        cfg.cpu_slots = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .clamp(1, 16);
+        let cfg = TaskPoolConfig {
+            cpu_slots: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .clamp(1, 16),
+            ..Default::default()
+        };
         let verify_result = run_tasks(verify_tasks, cfg)?;
         for event in verify_result.events {
             if let ProgressEvent::Verified { path, ok, .. } = event {
@@ -138,7 +145,7 @@ pub async fn plan_file_reuse(
                         path: path.clone(),
                         md5: md5.clone(),
                         size: *size,
-                        source_server_id: source.server_id,
+                        source_channel_id: source.channel_id.clone(),
                         source_path: source.install_path.clone(),
                     });
                     reusable_paths.insert(path);
@@ -168,7 +175,7 @@ pub async fn plan_file_reuse(
     let requires_copy_fallback = false;
 
     Ok(super::models::ReusePlan {
-        source_servers,
+        source_channels,
         reusable_files,
         download_files,
         reusable_size,
@@ -185,8 +192,8 @@ pub fn derive_files_base_url(file_path: &str) -> Result<String> {
     if normalized.ends_with("/files") {
         return Ok(normalized.to_string());
     }
-    anyhow::bail!(
+    Err(Error::Config(format!(
         "Expected file_path to end with '/game_files' or '/files', got: {}",
         file_path
-    );
+    )))
 }

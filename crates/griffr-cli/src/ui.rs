@@ -118,12 +118,12 @@ mod tests {
             "Remote State",
             &[
                 ("version".to_string(), "1.1.9".to_string()),
-                ("server".to_string(), "cn_official".to_string()),
+                ("channel".to_string(), "cn_official".to_string()),
             ],
         );
         assert_eq!(
             output,
-            "Remote State\n  version : 1.1.9\n  server  : cn_official\n"
+            "Remote State\n  version : 1.1.9\n  channel : cn_official\n"
         );
     }
 }

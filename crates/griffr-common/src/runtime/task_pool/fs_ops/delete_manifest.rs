@@ -1,7 +1,7 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 
 use super::path_safety::parse_safe_relative_path;
 
@@ -25,15 +25,17 @@ pub(crate) fn apply_delete_files_manifest(dest_root: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let manifest = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+    let manifest = std::fs::read_to_string(&manifest_path).map_err(|e| Error::OpenFileFailed {
+        path: manifest_path.clone(),
+        source: e,
+    })?;
     for (line_idx, line) in manifest.lines().enumerate() {
-        let Some(relative) = parse_delete_files_entry(line).with_context(|| {
-            format!(
-                "Failed to parse {} line {}",
+        let Some(relative) = parse_delete_files_entry(line).map_err(|e| {
+            Error::Config(format!(
+                "Failed to parse {} line {}: {e}",
                 DELETE_FILES_MANIFEST_NAME,
                 line_idx + 1
-            )
+            ))
         })?
         else {
             continue;
@@ -43,26 +45,31 @@ pub(crate) fn apply_delete_files_manifest(dest_root: &Path) -> Result<()> {
         match std::fs::symlink_metadata(&target_path) {
             Ok(meta) => {
                 if meta.is_dir() {
-                    std::fs::remove_dir_all(&target_path).with_context(|| {
-                        format!("Failed to delete directory {}", target_path.display())
+                    std::fs::remove_dir_all(&target_path).map_err(|e| Error::RemoveFailed {
+                        path: target_path.clone(),
+                        source: e,
                     })?;
                 } else {
-                    std::fs::remove_file(&target_path).with_context(|| {
-                        format!("Failed to delete file {}", target_path.display())
+                    std::fs::remove_file(&target_path).map_err(|e| Error::RemoveFailed {
+                        path: target_path.clone(),
+                        source: e,
                     })?;
                 }
             }
             Err(err) if err.kind() == ErrorKind::NotFound => {}
             Err(err) => {
-                return Err(err).with_context(|| {
-                    format!("Failed to inspect delete target {}", target_path.display())
+                return Err(Error::StatFailed {
+                    path: target_path.clone(),
+                    source: err,
                 });
             }
         }
     }
 
-    std::fs::remove_file(&manifest_path)
-        .with_context(|| format!("Failed to remove {}", manifest_path.display()))?;
+    std::fs::remove_file(&manifest_path).map_err(|e| Error::RemoveFailed {
+        path: manifest_path.clone(),
+        source: e,
+    })?;
     Ok(())
 }
 

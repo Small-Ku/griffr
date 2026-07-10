@@ -1,14 +1,13 @@
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::config::{GameId, ServerId};
+use griffr_common::config::{ChannelId, GameId};
 use griffr_common::runtime::is_launcher_metadata_path;
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
-use griffr_common::runtime::{plan_vfs_tasks, VfsMaterializeConfig, VfsTaskPlan};
+use griffr_common::runtime::{plan_vfs_tasks, VfsMaterializeConfig};
 use serde_json::json;
 use std::path::PathBuf;
 
 use super::local::detect_local_install;
-use super::supports_vfs_sync;
 use crate::progress::StepProgress;
 use crate::ui;
 use crate::{GlobalOptions, OutputFormat};
@@ -16,7 +15,8 @@ use crate::{GlobalOptions, OutputFormat};
 pub async fn verify(
     path: PathBuf,
     game_override: Option<GameId>,
-    server_override: Option<ServerId>,
+    channel_override: Option<ChannelId>,
+    overrides: crate::InstallProfileOverrideArgs,
     skip_local_detect: bool,
     repair: bool,
     reuse_paths: Vec<PathBuf>,
@@ -31,41 +31,46 @@ pub async fn verify(
     if relink_reuse && reuse_paths.is_empty() {
         anyhow::bail!("--relink-reuse requires at least one --reuse-from source");
     }
-    if skip_local_detect && (game_override.is_none() || server_override.is_none()) {
-        anyhow::bail!("--skip-local-detect requires both --game and --server");
+    if skip_local_detect && (game_override.is_none() || channel_override.is_none()) {
+        anyhow::bail!("--skip-local-detect requires both --game and --channel");
     }
 
     let local = detect_local_install(&path).await?;
-    let detected_game = local.game_id;
-    let detected_server = local.server_id;
+    let detected_game = local.game_id.as_ref();
+    let detected_channel = local.channel_id.as_ref();
     let game_id = if skip_local_detect {
         game_override.expect("validated above")
     } else {
         game_override.unwrap_or(local.require_known_game()?)
     };
-    let server_id = if skip_local_detect {
-        server_override.expect("validated above")
+    let channel_id = if skip_local_detect {
+        channel_override.expect("validated above")
     } else {
-        server_override.unwrap_or(local.require_known_server()?)
+        channel_override.unwrap_or(local.require_known_channel()?)
     };
     let installed_version = local.require_config_ini_version()?.to_string();
-    let manager = local.as_manager()?;
+    let profile = griffr_common::config::resolve_install_profile(
+        &game_id,
+        &channel_id,
+        &overrides.clone().into(),
+    )?;
+    let manager = local.as_manager(profile.clone())?;
     let api_client = ApiClient::new()?;
 
     if !skip_local_detect {
         if let Some(detected_game) = detected_game {
-            if detected_game != game_id && opts.output != OutputFormat::Json {
+            if detected_game != &game_id && opts.output != OutputFormat::Json {
                 ui::print_warning(format!(
                     "Overriding detected game {} with CLI --game {}",
                     detected_game, game_id
                 ));
             }
         }
-        if let Some(detected_server) = detected_server {
-            if detected_server != server_id && opts.output != OutputFormat::Json {
+        if let Some(detected_channel) = detected_channel {
+            if detected_channel != &channel_id && opts.output != OutputFormat::Json {
                 ui::print_warning(format!(
-                    "Overriding detected server {} with CLI --server {}",
-                    detected_server, server_id
+                    "Overriding detected channel {} with CLI --channel {}",
+                    detected_channel, channel_id
                 ));
             }
         }
@@ -74,7 +79,7 @@ pub async fn verify(
     ui::print_phase(format!(
         "Verifying {} ({}) at {}",
         game_id,
-        server_id,
+        channel_id,
         local.install_path.display(),
     ));
     ui::print_info(format!("Installed version: {}", installed_version));
@@ -102,7 +107,7 @@ pub async fn verify(
                     "Reuse source {} is {:?}, expected {:?}",
                     source.install_path.display(),
                     source_game_id,
-                    game_id
+                    &game_id
                 );
             }
             if source.install_path != local.install_path {
@@ -111,14 +116,14 @@ pub async fn verify(
         }
     }
 
-    let extra_tasks = if repair && !skip_vfs && supports_vfs_sync(game_id) {
+    let extra_tasks = if repair && !skip_vfs {
         if opts.output != OutputFormat::Json {
             ui::print_info(
                 "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
             );
         }
         let version_info = api_client
-            .get_latest_game(game_id, server_id, Some(&installed_version))
+            .get_latest_game(&profile.target, Some(&installed_version))
             .await
             .context("Failed to fetch version information for VFS planning")?;
         let rand_str = version_info.rand_str();
@@ -127,19 +132,18 @@ pub async fn verify(
         } else {
             let streaming_assets = local
                 .install_path
-                .join(game_id.streaming_assets_subdir())
+                .join(profile.streaming_assets_subdir.clone())
                 .join("StreamingAssets");
             let source_streaming_assets = source_roots
                 .iter()
                 .map(|path| {
-                    path.join(game_id.streaming_assets_subdir())
+                    path.join(profile.streaming_assets_subdir.clone())
                         .join("StreamingAssets")
                 })
                 .collect::<Vec<_>>();
-            let VfsTaskPlan { tasks, .. } = plan_vfs_tasks(
+            match plan_vfs_tasks(
                 &api_client,
-                game_id,
-                server_id,
+                &profile.target,
                 &version_info.version,
                 &rand_str,
                 &streaming_assets,
@@ -150,23 +154,22 @@ pub async fn verify(
                 },
             )
             .await
-            .context("Failed to plan VFS tasks for verify+repair")?;
-            tasks
+            .context("Failed to plan VFS tasks for verify+repair")?
+            {
+                griffr_common::runtime::VfsPlanOutcome::Planned(plan) => plan.tasks,
+                griffr_common::runtime::VfsPlanOutcome::Unsupported => Vec::new(),
+            }
         }
     } else {
-        if repair && !skip_vfs && !supports_vfs_sync(game_id) && opts.output != OutputFormat::Json {
-            ui::print_info(format!(
-                "Skipping VFS resource sync for {} (VFS sync is Endfield-only).",
-                game_id
-            ));
-        }
         Vec::new()
     };
 
-    let mut pool_cfg = TaskPoolConfig::default();
-    pool_cfg.max_retries = 3;
-    pool_cfg.extraction_progress_buffer_bytes = opts.extraction_progress_buffer_bytes;
-    pool_cfg.download_progress_buffer_bytes = opts.download_progress_buffer_bytes;
+    let mut pool_cfg = TaskPoolConfig {
+        max_retries: 3,
+        extraction_progress_buffer_bytes: opts.extraction_progress_buffer_bytes,
+        download_progress_buffer_bytes: opts.download_progress_buffer_bytes,
+        ..Default::default()
+    };
     if repair && !extra_tasks.is_empty() {
         // VFS CDN endpoints can become unstable under high parallelism on some routes.
         // Keep a moderate IO fanout for repair+VFS runs to improve success rate.
@@ -217,7 +220,7 @@ pub async fn verify(
         ui::emit_json(&json!({
             "path": local.install_path.display().to_string(),
             "game": game_id.to_string(),
-            "server": server_id.to_string(),
+            "channel": channel_id.to_string(),
             "version": installed_version,
             "repair": repair,
             "issues": issue_list,

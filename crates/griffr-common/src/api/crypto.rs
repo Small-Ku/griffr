@@ -1,8 +1,9 @@
 //! Cryptography utilities for Hypergryph APIs
 
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
-use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
+
+use crate::error::{Error, Result};
 
 /// AES-256-CBC key for game_files manifest decryption
 pub const GAME_FILES_AES_KEY: &[u8; 32] = &[
@@ -26,10 +27,9 @@ pub fn decrypt_game_files(data: &[u8]) -> Result<String> {
     let mut buf = data.to_vec();
     let pt = Aes256CbcDec::new(GAME_FILES_AES_KEY.into(), GAME_FILES_AES_IV.into())
         .decrypt_padded_mut::<Pkcs7>(&mut buf)
-        .map_err(|e| anyhow::anyhow!("AES decryption failed: {}", e))?;
+        .map_err(|e| Error::Crypto(format!("AES decryption failed: {e}")))?;
 
-    let decrypted =
-        String::from_utf8(pt.to_vec()).context("Failed to parse decrypted manifest as UTF-8")?;
+    let decrypted = String::from_utf8(pt.to_vec())?;
 
     Ok(decrypted)
 }
@@ -46,16 +46,14 @@ pub fn encrypt_game_files(data: &[u8]) -> Result<Vec<u8>> {
 
     let encrypted = Aes256CbcEnc::new(GAME_FILES_AES_KEY.into(), GAME_FILES_AES_IV.into())
         .encrypt_padded_mut::<Pkcs7>(&mut buf, pt.len())
-        .map_err(|e| anyhow::anyhow!("AES encryption failed: {}", e))?;
+        .map_err(|e| Error::Crypto(format!("AES encryption failed: {e}")))?;
 
     Ok(encrypted.to_vec())
 }
 
 /// Decrypt resource index files using modular subtraction cipher
 pub fn decrypt_res_index(data_base64: &str, key: &str) -> Result<String> {
-    let encrypted = STANDARD
-        .decode(data_base64)
-        .context("Failed to base64 decode resource index")?;
+    let encrypted = STANDARD.decode(data_base64)?;
 
     let key_bytes = key.as_bytes();
     let key_len = key_bytes.len();
@@ -69,8 +67,7 @@ pub fn decrypt_res_index(data_base64: &str, key: &str) -> Result<String> {
         decrypted.push(plain_byte);
     }
 
-    let result = String::from_utf8(decrypted)
-        .context("Failed to parse decrypted resource index as UTF-8")?;
+    let result = String::from_utf8(decrypted)?;
 
     Ok(result)
 }

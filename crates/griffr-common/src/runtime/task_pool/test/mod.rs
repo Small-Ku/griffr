@@ -20,14 +20,14 @@ use zip::write::FileOptions;
 mod archive;
 mod download;
 
-fn start_test_http_server(
+fn start_test_http_channel(
     routes: HashMap<String, Vec<u8>>,
 ) -> (String, Arc<Mutex<HashMap<String, usize>>>, Arc<AtomicBool>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test channel");
     listener
         .set_nonblocking(true)
-        .expect("set nonblocking test server");
-    let addr = listener.local_addr().expect("server addr");
+        .expect("set nonblocking test channel");
+    let addr = listener.local_addr().expect("channel addr");
     let hits = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
     let stop = Arc::new(AtomicBool::new(false));
     let hits_thread = Arc::clone(&hits);
@@ -83,15 +83,15 @@ fn start_test_http_server(
     (format!("http://{}", addr), hits, stop)
 }
 
-fn start_range_http_server(
+fn start_range_http_channel(
     path: &'static str,
     body: Vec<u8>,
 ) -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<AtomicBool>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test channel");
     listener
         .set_nonblocking(true)
-        .expect("set nonblocking test server");
-    let addr = listener.local_addr().expect("server addr");
+        .expect("set nonblocking test channel");
+    let addr = listener.local_addr().expect("channel addr");
     let range_hits = Arc::new(AtomicUsize::new(0));
     let total_hits = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));

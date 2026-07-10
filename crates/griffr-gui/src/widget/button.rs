@@ -75,10 +75,10 @@ impl Widget for Button {
             }
             _ => {}
         }
-        Ok(
-            ((before_hovered != self.hovered) || (before_pressed != self.pressed))
-                .then_some(DirtyFlags::PAINT)
-                .unwrap_or_else(DirtyFlags::empty),
-        )
+        if (before_hovered != self.hovered) || (before_pressed != self.pressed) {
+            Ok(DirtyFlags::PAINT)
+        } else {
+            Ok(DirtyFlags::empty())
+        }
     }
 }

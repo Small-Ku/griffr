@@ -1,6 +1,6 @@
 use anyhow::Result;
 use griffr_common::api::client::ApiClient;
-use griffr_common::config::{GameId, ServerId};
+use griffr_common::config::{ChannelId, GameId};
 use serde_json::json;
 
 use crate::{ui, GlobalOptions, OutputFormat};
@@ -11,12 +11,15 @@ fn format_announcement_text(content: &str) -> String {
 
 pub async fn show(
     game_id: GameId,
-    server_id: ServerId,
+    channel_id: ChannelId,
+    overrides: crate::ApiTargetOverrideArgs,
     language: &str,
     opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let media = api_client.get_media(game_id, server_id, language).await?;
+    let target =
+        griffr_common::config::resolve_api_target(&game_id, &channel_id, &overrides.into())?;
+    let media = api_client.get_media(&target, language).await?;
 
     let announcements = media.announcements;
     if opts.output == OutputFormat::Json {
@@ -46,7 +49,7 @@ pub async fn show(
 
         return ui::emit_json(&json!({
             "game": game_id.to_string(),
-            "server": server_id.to_string(),
+            "channel": channel_id.to_string(),
             "language": language,
             "tabs": tabs,
         }));
@@ -56,7 +59,7 @@ pub async fn show(
         "News",
         &[
             ("game".to_string(), game_id.to_string()),
-            ("server".to_string(), server_id.to_string()),
+            ("channel".to_string(), channel_id.to_string()),
             ("language".to_string(), language.to_string()),
         ],
     );

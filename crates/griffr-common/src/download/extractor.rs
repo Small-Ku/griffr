@@ -3,7 +3,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 
 /// Multi-volume stream that reads split zip files as a single stream
 pub struct MultiVolumeStream {
@@ -17,13 +17,16 @@ impl MultiVolumeStream {
     /// Create a new multi-volume stream from a list of volume paths
     pub fn new(volumes: Vec<PathBuf>) -> Result<Self> {
         if volumes.is_empty() {
-            anyhow::bail!("No volumes provided");
+            return Err(Error::Extraction("No volumes provided".to_string()));
         }
 
         // Verify all volumes exist
         for volume in &volumes {
             if !volume.exists() {
-                anyhow::bail!("Volume not found: {}", volume.display());
+                return Err(Error::Extraction(format!(
+                    "Volume not found: {}",
+                    volume.display()
+                )));
             }
         }
 
@@ -76,12 +79,14 @@ impl MultiVolumeStream {
     /// Open the current volume file
     fn open_current_volume(&mut self) -> Result<()> {
         if self.current_volume >= self.volumes.len() {
-            anyhow::bail!("No more volumes to open");
+            return Err(Error::Extraction("No more volumes to open".to_string()));
         }
 
         let path = &self.volumes[self.current_volume];
-        let file = std::fs::File::open(path)
-            .with_context(|| format!("Failed to open volume: {}", path.display()))?;
+        let file = std::fs::File::open(path).map_err(|e| Error::OpenFileFailed {
+            path: path.clone(),
+            source: e,
+        })?;
 
         self.current_file = Some(file);
         Ok(())
@@ -217,7 +222,7 @@ impl MultiVolumeExtractor {
     /// Create a new extractor from a list of volume paths
     pub fn new(volumes: Vec<PathBuf>) -> Result<Self> {
         if volumes.is_empty() {
-            anyhow::bail!("No volumes provided");
+            return Err(Error::Extraction("No volumes provided".to_string()));
         }
 
         Ok(Self { volumes })
@@ -248,7 +253,11 @@ impl MultiVolumeExtractor {
         }
 
         if volumes.is_empty() {
-            anyhow::bail!("No volumes found for {} in {}", base_name, dir.display());
+            return Err(Error::Extraction(format!(
+                "No volumes found for {} in {}",
+                base_name,
+                dir.display()
+            )));
         }
 
         Self::new(volumes)
@@ -273,14 +282,14 @@ impl MultiVolumeExtractor {
         ) -> Result<zip::read::ZipFile<'a>> {
             match password {
                 Some(password) => archive.by_index_decrypt(index, password.as_bytes()).map_err(
-                    |err| anyhow::anyhow!(
+                    |err| Error::Extraction(format!(
                         "Failed to decrypt archive entry {index}; archive password may be missing or incorrect: {err}"
-                    ),
+                    )),
                 ),
                 None => archive.by_index(index).map_err(|err| {
-                    anyhow::anyhow!(
+                    Error::Extraction(format!(
                         "Failed to open archive entry {index}; if the archive is password-protected, pass --archive-password: {err}"
-                    )
+                    ))
                 }),
             }
         }
@@ -289,14 +298,20 @@ impl MultiVolumeExtractor {
             let rel = Path::new(name);
 
             if rel.is_absolute() {
-                anyhow::bail!("Zip entry has absolute path: {}", name);
+                return Err(Error::InvalidPath(format!(
+                    "Zip entry has absolute path: {}",
+                    name
+                )));
             }
 
             // Prevent Zip Slip: reject any path containing '..', root dir, or Windows prefixes.
             for c in rel.components() {
                 match c {
                     Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
-                        anyhow::bail!("Zip entry has unsafe path: {}", name);
+                        return Err(Error::InvalidPath(format!(
+                            "Zip entry has unsafe path: {}",
+                            name
+                        )));
                     }
                     _ => {}
                 }
@@ -306,8 +321,7 @@ impl MultiVolumeExtractor {
         }
 
         let stream = MultiVolumeStream::new(self.volumes.clone())?;
-        let mut archive =
-            zip::ZipArchive::new(stream).context("Failed to open multi-volume zip archive")?;
+        let mut archive = zip::ZipArchive::new(stream)?;
         let mut total_extract_bytes = 0u64;
         for i in 0..archive.len() {
             let file = open_archive_entry(&mut archive, i, password)?;
@@ -323,33 +337,35 @@ impl MultiVolumeExtractor {
             let file_path = safe_join(target_dir, file.name())?;
 
             if file.is_dir() {
-                std::fs::create_dir_all(&file_path).with_context(|| {
-                    format!("Failed to create directory: {}", file_path.display())
+                std::fs::create_dir_all(&file_path).map_err(|e| Error::CreateDirFailed {
+                    path: file_path.clone(),
+                    source: e,
                 })?;
                 continue;
             }
 
             // Create parent directory if needed
             if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!("Failed to create parent directory: {}", parent.display())
+                std::fs::create_dir_all(parent).map_err(|e| Error::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
                 })?;
             }
 
             // Extract file (overwrite if exists)
-            let mut output = std::fs::File::create(&file_path)
-                .with_context(|| format!("Failed to create file: {}", file_path.display()))?;
+            let mut output =
+                std::fs::File::create(&file_path).map_err(|e| Error::OpenFileFailed {
+                    path: file_path.clone(),
+                    source: e,
+                })?;
             let buffer_size = progress_buffer_bytes.max(4 * 1024);
             let mut buf = vec![0u8; buffer_size];
             loop {
-                let n = file
-                    .read(&mut buf)
-                    .with_context(|| format!("Failed to read archive entry: {}", file.name()))?;
+                let n = file.read(&mut buf)?;
                 if n == 0 {
                     break;
                 }
-                std::io::Write::write_all(&mut output, &buf[..n])
-                    .with_context(|| format!("Failed to extract file: {}", file.name()))?;
+                std::io::Write::write_all(&mut output, &buf[..n])?;
                 extracted_bytes = extracted_bytes.saturating_add(n as u64);
                 if let Some(ref mut cb) = progress_callback {
                     cb(extracted_bytes, total_extract_bytes);
@@ -363,8 +379,7 @@ impl MultiVolumeExtractor {
     /// Get the list of files in the archive without extracting
     pub fn list_files(&self) -> Result<Vec<String>> {
         let stream = MultiVolumeStream::new(self.volumes.clone())?;
-        let mut archive =
-            zip::ZipArchive::new(stream).context("Failed to open multi-volume zip archive")?;
+        let mut archive = zip::ZipArchive::new(stream)?;
 
         let mut files = Vec::new();
         for i in 0..archive.len() {

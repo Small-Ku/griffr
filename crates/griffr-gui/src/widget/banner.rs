@@ -102,9 +102,11 @@ impl Widget for Banner {
         let changed = before_hovered != self.hovered
             || before_h != self.h
             || before_next_frame_at != self.next_frame_at;
-        Ok(changed
-            .then_some(DirtyFlags::PAINT)
-            .unwrap_or_else(DirtyFlags::empty))
+        if changed {
+            Ok(DirtyFlags::PAINT)
+        } else {
+            Ok(DirtyFlags::empty())
+        }
     }
 
     fn next_redraw_at(&self) -> Option<Instant> {

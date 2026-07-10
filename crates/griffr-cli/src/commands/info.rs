@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::config::{GameId, ServerId};
+use griffr_common::config::{ChannelId, GameId};
 use serde_json::json;
 
 use super::local::{detect_local_install, LocalInstall};
@@ -40,51 +40,58 @@ fn local_rows(local: &LocalInstall) -> Vec<(String, String)> {
             local.config_ini.entry().unwrap_or("").to_string(),
         ),
         ("known_game".to_string(), format!("{:?}", local.game_id)),
-        ("known_server".to_string(), format!("{:?}", local.server_id)),
+        (
+            "known_channel".to_string(),
+            format!("{:?}", local.channel_id),
+        ),
     ]
 }
 
 pub async fn show(
     path: Option<PathBuf>,
     game: Option<String>,
-    server: Option<String>,
+    channel: Option<String>,
     language: &str,
     opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
 
-    let mut remote_target: Option<(GameId, ServerId)> = None;
+    let mut remote_target: Option<(GameId, ChannelId)> = None;
     let mut local_install: Option<LocalInstall> = None;
 
     if let Some(path) = path {
         let local = detect_local_install(&path).await?;
-        if let (Some(game_id), Some(server_id)) = (local.game_id, local.server_id) {
-            remote_target = Some((game_id, server_id));
+        if let (Some(game_id), Some(channel_id)) = (local.game_id.clone(), local.channel_id.clone())
+        {
+            remote_target = Some((game_id, channel_id));
         }
         local_install = Some(local);
-    } else if let (Some(game), Some(server)) = (game, server) {
-        remote_target = Some((game.parse::<GameId>()?, server.parse::<ServerId>()?));
+    } else if let (Some(game), Some(channel)) = (game, channel) {
+        remote_target = Some((game.parse::<GameId>()?, channel.parse::<ChannelId>()?));
     } else {
-        anyhow::bail!("info requires either --path or both --game and --server");
+        anyhow::bail!("info requires either --path or both --game and --channel");
     }
 
     let mut remote_json = None;
     let mut media_json = None;
 
-    if let Some((game_id, server_id)) = remote_target {
+    if let Some((game_id, channel_id)) = remote_target {
+        let target =
+            griffr_common::config::resolve_api_target(&game_id, &channel_id, &Default::default())?;
+
         let info = api_client
-            .get_latest_game(game_id, server_id, None)
+            .get_latest_game(&target, None)
             .await
             .with_context(|| {
                 format!(
                     "Failed to fetch remote info for {:?} {}",
-                    game_id, server_id
+                    game_id, channel_id
                 )
             })?;
 
         remote_json = Some(json!({
             "game": game_id.to_string(),
-            "server": server_id.to_string(),
+            "channel": channel_id.to_string(),
             "version": info.version,
             "action": info.action,
             "request_version": info.request_version,
@@ -100,7 +107,7 @@ pub async fn show(
         }));
 
         if opts.verbose {
-            let media = api_client.get_media(game_id, server_id, language).await?;
+            let media = api_client.get_media(&target, language).await?;
             media_json = Some(json!({
                 "language": language,
                 "banners": media.banners.as_ref().map(|v| v.banners.len()).unwrap_or(0),
@@ -121,8 +128,8 @@ pub async fn show(
                 "sub_channel": local.config_ini.sub_channel(),
                 "version": local.config_ini.version(),
                 "entry": local.config_ini.entry(),
-                "known_game": local.game_id.map(|g| g.to_string()),
-                "known_server": local.server_id.map(|s| s.to_string()),
+                "known_game": local.game_id.as_ref().map(|g| g.to_string()),
+                "known_channel": local.channel_id.as_ref().map(|s| s.to_string()),
             })
         });
         return ui::emit_json(&json!({
@@ -147,9 +154,9 @@ pub async fn show(
                     .to_string(),
             ),
             (
-                "server".to_string(),
+                "channel".to_string(),
                 remote
-                    .get("server")
+                    .get("channel")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 use compio::dispatcher::Dispatcher;
 use md5::Md5;
 
@@ -17,25 +17,36 @@ where
     Fut: Future<Output = Result<T>> + 'static,
     T: Send + 'static,
 {
-    let dispatcher = io_dispatcher.context("IO dispatcher not available")?;
+    let dispatcher =
+        io_dispatcher.ok_or_else(|| Error::TaskPool("IO dispatcher not available".to_string()))?;
     let mut receiver = dispatcher
         .dispatch(task)
-        .map_err(|_| anyhow::anyhow!("Failed to dispatch IO task"))?;
+        .map_err(|_| Error::TaskPool("Failed to dispatch IO task".to_string()))?;
 
     loop {
         match receiver.try_recv() {
             Ok(Some(result)) => return result,
             Ok(None) => thread::sleep(Duration::from_millis(1)),
-            Err(_) => anyhow::bail!("IO task cancelled"),
+            Err(_) => return Err(Error::TaskPool("IO task cancelled".to_string())),
         }
     }
 }
 
 pub(crate) fn make_partial_download_path(path: &Path) -> Result<PathBuf> {
-    let parent = path.parent().context("Destination path has no parent")?;
+    let parent = path.parent().ok_or_else(|| {
+        Error::InvalidPath(format!(
+            "Destination path has no parent: {}",
+            path.display()
+        ))
+    })?;
     let file_name = path
         .file_name()
-        .context("Destination path has no file name")?
+        .ok_or_else(|| {
+            Error::InvalidPath(format!(
+                "Destination path has no file name: {}",
+                path.display()
+            ))
+        })?
         .to_string_lossy();
     Ok(parent.join(format!(".{}.griffr.part", file_name)))
 }
@@ -48,20 +59,22 @@ pub(crate) fn hash_file_prefix_into_hasher(
     if prefix_len == 0 {
         return Ok(());
     }
-    let mut file =
-        File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut file = File::open(path).map_err(|e| Error::OpenFileFailed {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
     let mut remaining = prefix_len;
     let mut buf = vec![0u8; 1024 * 1024];
     while remaining > 0 {
         let to_read = remaining.min(buf.len() as u64) as usize;
         let n = file.read(&mut buf[..to_read])?;
         if n == 0 {
-            anyhow::bail!(
+            return Err(Error::Extraction(format!(
                 "Partial file shorter than expected prefix: {} < {} for {}",
                 prefix_len - remaining,
                 prefix_len,
                 path.display()
-            );
+            )));
         }
         md5::Digest::update(hasher, &buf[..n]);
         remaining -= n as u64;
@@ -80,34 +93,49 @@ pub(crate) fn commit_partial_download(
         match compio::fs::metadata(&part_owned).await {
             Ok(_) => {}
             Err(err) if err.kind() == ErrorKind::NotFound => {
-                anyhow::bail!("Missing partial download file {}", part_owned.display())
+                return Err(Error::Download(format!(
+                    "Missing partial download file {}",
+                    part_owned.display()
+                )))
             }
             Err(err) => {
-                return Err(err).with_context(|| format!("Failed to stat {}", part_owned.display()))
+                return Err(Error::StatFailed {
+                    path: part_owned,
+                    source: err,
+                })
             }
         }
         if let Some(parent) = dest_owned.parent() {
             compio::fs::create_dir_all(parent)
                 .await
-                .with_context(|| format!("Failed to create {}", parent.display()))?;
+                .map_err(|e| Error::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
         }
         match compio::fs::metadata(&dest_owned).await {
-            Ok(_) => compio::fs::remove_file(&dest_owned)
-                .await
-                .with_context(|| format!("Failed to replace {}", dest_owned.display()))?,
+            Ok(_) => {
+                compio::fs::remove_file(&dest_owned)
+                    .await
+                    .map_err(|e| Error::RemoveFailed {
+                        path: dest_owned.clone(),
+                        source: e,
+                    })?
+            }
             Err(err) if err.kind() == ErrorKind::NotFound => {}
             Err(err) => {
-                return Err(err).with_context(|| format!("Failed to stat {}", dest_owned.display()))
+                return Err(Error::StatFailed {
+                    path: dest_owned,
+                    source: err,
+                })
             }
         }
         compio::fs::rename(&part_owned, &dest_owned)
             .await
-            .with_context(|| {
-                format!(
-                    "Failed to move {} to {}",
-                    part_owned.display(),
-                    dest_owned.display()
-                )
+            .map_err(|e| Error::RenameFailed {
+                src: part_owned,
+                dest: dest_owned,
+                source: e,
             })?;
         Ok(())
     })?;
@@ -130,12 +158,13 @@ pub(crate) fn create_hardlink(
         }
         compio::fs::hard_link(&src_owned, &dest_owned)
             .await
-            .with_context(|| {
-                format!(
-                    "Failed to hardlink {} -> {}",
+            .map_err(|e| {
+                Error::Other(format!(
+                    "Failed to hardlink {} -> {}: {}",
                     src_owned.display(),
-                    dest_owned.display()
-                )
+                    dest_owned.display(),
+                    e
+                ))
             })
     })?;
     Ok(())
@@ -160,7 +189,7 @@ pub(crate) fn reuse_file(
                 if let Some(parent) = dest_owned.parent() {
                     compio::fs::create_dir_all(parent)
                         .await
-                        .map_err(anyhow::Error::from)?;
+                        .map_err(Error::from)?;
                 }
                 match compio::fs::metadata(&dest_owned).await {
                     Ok(_) => {
@@ -169,10 +198,12 @@ pub(crate) fn reuse_file(
                     Err(meta_err) if meta_err.kind() == ErrorKind::NotFound => {}
                     Err(meta_err) => return Err(meta_err.into()),
                 }
-                Ok::<(), anyhow::Error>(())
+                Ok::<(), Error>(())
             })?;
-            std::fs::copy(src, dest).with_context(|| {
-                format!("Failed to copy {} -> {}", src.display(), dest.display())
+            std::fs::copy(src, dest).map_err(|e| Error::CopyFailed {
+                src: src.to_path_buf(),
+                dest: dest.to_path_buf(),
+                source: e,
             })?;
             let dest_owned = dest.to_path_buf();
             let copied = dispatch_io(io_dispatcher, move || async move {
@@ -186,7 +217,7 @@ pub(crate) fn reuse_file(
                             Err(meta_err)
                         }
                     })
-                    .map_err(anyhow::Error::from)
+                    .map_err(Error::from)
             })?;
             if !copied {
                 return Err(err);
@@ -199,10 +230,20 @@ pub(crate) fn reuse_file(
 
 pub(crate) fn make_temp_write_path(path: &Path) -> Result<PathBuf> {
     static TEMP_WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let parent = path.parent().context("Destination path has no parent")?;
+    let parent = path.parent().ok_or_else(|| {
+        Error::InvalidPath(format!(
+            "Destination path has no parent: {}",
+            path.display()
+        ))
+    })?;
     let file_name = path
         .file_name()
-        .context("Destination path has no file name")?
+        .ok_or_else(|| {
+            Error::InvalidPath(format!(
+                "Destination path has no file name: {}",
+                path.display()
+            ))
+        })?
         .to_string_lossy();
     let counter = TEMP_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
     Ok(parent.join(format!(".{}.griffr.tmp.{}", file_name, counter)))
@@ -223,24 +264,36 @@ pub(crate) fn write_file(
         let write_res = compio::fs::write(&temp_path, bytes).await;
         if let Err(err) = write_res.0 {
             let _ = compio::fs::remove_file(&temp_path).await;
-            return Err(err)
-                .with_context(|| format!("Failed to write temp file {}", temp_path.display()));
+            return Err(Error::WriteFileFailed {
+                path: temp_path,
+                source: err,
+            });
         }
         match compio::fs::metadata(&path_owned).await {
-            Ok(_) => compio::fs::remove_file(&path_owned)
-                .await
-                .with_context(|| format!("Failed to replace {}", path_owned.display()))?,
+            Ok(_) => {
+                compio::fs::remove_file(&path_owned)
+                    .await
+                    .map_err(|e| Error::RemoveFailed {
+                        path: path_owned.clone(),
+                        source: e,
+                    })?
+            }
             Err(err) if err.kind() == ErrorKind::NotFound => {}
             Err(err) => {
                 let _ = compio::fs::remove_file(&temp_path).await;
-                return Err(err)
-                    .with_context(|| format!("Failed to stat {}", path_owned.display()));
+                return Err(Error::StatFailed {
+                    path: path_owned,
+                    source: err,
+                });
             }
         }
         if let Err(err) = compio::fs::rename(&temp_path, &path_owned).await {
             let _ = compio::fs::remove_file(&temp_path).await;
-            return Err(err)
-                .with_context(|| format!("Failed to move temp file to {}", path_owned.display()));
+            return Err(Error::RenameFailed {
+                src: temp_path,
+                dest: path_owned,
+                source: err,
+            });
         }
         Ok(())
     })?;

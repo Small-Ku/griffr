@@ -21,7 +21,8 @@ pub use files::reuse::{
 pub use files::vfs::{
     bootstrap_persistent_vfs_with_runner, download_vfs_resources, get_vfs_resource_info,
     plan_persistent_bootstrap_tasks, plan_vfs_tasks, VfsBootstrapConfig, VfsBootstrapPlan,
-    VfsBootstrapResult, VfsBootstrapScope, VfsMaterializeConfig, VfsTaskPlan, VfsUpdateResult,
+    VfsBootstrapResult, VfsBootstrapScope, VfsMaterializeConfig, VfsPlanOutcome, VfsTaskPlan,
+    VfsUpdateOutcome, VfsUpdateResult,
 };
 pub use issues::{FileIssue, FileIssueKind};
 pub use launcher::{GameProcess, Launcher};
@@ -33,4 +34,4 @@ pub use progress::{
     PathAttemptKind, PathOutcome, PathOutcomeSummary, PathOutcomeTracker, PathReuseMethod,
     RunningByteProgress,
 };
-pub use server::Server;
+pub use server::Channel;

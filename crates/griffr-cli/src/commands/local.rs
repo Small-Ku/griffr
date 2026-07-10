@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use griffr_common::api::crypto;
-use griffr_common::config::{GameConfig, GameId, ServerId};
+use griffr_common::config::{ChannelId, GameConfig, GameId};
 use griffr_common::runtime::GameManager;
 
 #[derive(Debug, Clone)]
@@ -45,20 +45,20 @@ pub struct LocalInstall {
     pub install_path: PathBuf,
     pub config_ini: ParsedConfigIni,
     pub game_id: Option<GameId>,
-    pub server_id: Option<ServerId>,
+    pub channel_id: Option<ChannelId>,
 }
 
 impl LocalInstall {
     pub fn require_known_game(&self) -> Result<GameId> {
-        self.game_id.context(format!(
+        self.game_id.clone().context(format!(
             "Could not map local install to a supported game from {}",
             self.install_path.display()
         ))
     }
 
-    pub fn require_known_server(&self) -> Result<ServerId> {
-        self.server_id.context(format!(
-            "Could not map local install to a supported server from {}",
+    pub fn require_known_channel(&self) -> Result<ChannelId> {
+        self.channel_id.clone().context(format!(
+            "Could not map local install to a supported channel from {}",
             self.install_path.display()
         ))
     }
@@ -77,29 +77,33 @@ impl LocalInstall {
 
     pub fn as_game_config(&self) -> Result<GameConfig> {
         let game_id = self.require_known_game()?;
-        let server_id = self.require_known_server()?;
+        let channel_id = self.require_known_channel()?;
         let version = self.require_config_ini_version()?.to_string();
 
         let mut config = GameConfig {
             install_path: Some(self.install_path.clone()),
-            active_server: server_id,
+            active_channel: channel_id.clone(),
             version: Some(version.clone()),
             last_update: None,
-            servers: Default::default(),
+            channels: Default::default(),
         };
-        let server = config.servers.entry(server_id).or_default();
-        server.installed = true;
-        server.install_path = Some(self.install_path.clone());
-        server.version = Some(version);
+        let channel = config.channels.entry(channel_id).or_default();
+        channel.installed = true;
+        channel.install_path = Some(self.install_path.clone());
+        channel.version = Some(version);
 
         let _ = game_id;
         Ok(config)
     }
 
-    pub fn as_manager(&self) -> Result<GameManager> {
+    pub fn as_manager(
+        &self,
+        profile: griffr_common::config::InstallProfile,
+    ) -> Result<GameManager> {
         Ok(GameManager::new(
             self.require_known_game()?,
             self.as_game_config()?,
+            profile,
         ))
     }
 }
@@ -175,14 +179,41 @@ pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
         }
     };
 
-    let game_id = detect_game_id(&config_ini, has_arknights_exe, has_endfield_exe);
-    let server_id = detect_server_id(&config_ini);
+    let mut resolved_game = None;
+    let mut resolved_channel = None;
+
+    if let (Some(appcode), Some(channel), Some(sub_channel)) = (
+        config_ini.appcode(),
+        config_ini.channel(),
+        config_ini.sub_channel(),
+    ) {
+        if let Some((g, s)) = griffr_common::config::KnownTargets::find_by_appcode_and_channel(
+            appcode,
+            channel,
+            sub_channel,
+        ) {
+            resolved_game = Some(g);
+            resolved_channel = Some(s);
+        } else {
+            resolved_game = Some(GameId::new(appcode));
+            resolved_channel = Some(ChannelId::new(format!("{}_{}", channel, sub_channel)));
+        }
+    }
+
+    let game_id = match resolved_game {
+        Some(game) => Some(game),
+        None => detect_game_id(&config_ini, has_arknights_exe, has_endfield_exe),
+    };
+    let channel_id = match resolved_channel {
+        Some(channel) => Some(channel),
+        None => detect_channel_id(&config_ini),
+    };
 
     Ok(LocalInstall {
         install_path,
         config_ini,
         game_id,
-        server_id,
+        channel_id,
     })
 }
 
@@ -192,19 +223,19 @@ fn detect_game_id(
     has_endfield_exe: bool,
 ) -> Option<GameId> {
     match config_ini.appcode() {
-        Some("GzD1CpaWgmSq1wew") => return Some(GameId::Arknights),
-        Some("6LL0KJuqHBVz33WK") | Some("YDUTE5gscDZ229CW") => return Some(GameId::Endfield),
+        Some("GzD1CpaWgmSq1wew") => return Some(GameId::ARKNIGHTS),
+        Some("6LL0KJuqHBVz33WK") | Some("YDUTE5gscDZ229CW") => return Some(GameId::ENDFIELD),
         _ => {}
     }
 
     match config_ini.entry() {
-        Some(entry) if entry.eq_ignore_ascii_case("Arknights.exe") => Some(GameId::Arknights),
-        Some(entry) if entry.eq_ignore_ascii_case("Endfield.exe") => Some(GameId::Endfield),
+        Some(entry) if entry.eq_ignore_ascii_case("Arknights.exe") => Some(GameId::ARKNIGHTS),
+        Some(entry) if entry.eq_ignore_ascii_case("Endfield.exe") => Some(GameId::ENDFIELD),
         _ => {
             if has_arknights_exe {
-                Some(GameId::Arknights)
+                Some(GameId::ARKNIGHTS)
             } else if has_endfield_exe {
-                Some(GameId::Endfield)
+                Some(GameId::ENDFIELD)
             } else {
                 None
             }
@@ -212,14 +243,14 @@ fn detect_game_id(
     }
 }
 
-fn detect_server_id(config_ini: &ParsedConfigIni) -> Option<ServerId> {
+fn detect_channel_id(config_ini: &ParsedConfigIni) -> Option<ChannelId> {
     match (config_ini.channel(), config_ini.sub_channel()) {
-        (Some("1"), Some("1")) => Some(ServerId::CnOfficial),
-        (Some("1"), Some("2")) => Some(ServerId::CnBilibili),
-        (Some("2"), Some("2")) => Some(ServerId::CnBilibili),
-        (Some("6"), Some("6")) => Some(ServerId::GlobalOfficial),
-        (Some("6"), Some("801")) => Some(ServerId::GlobalEpic),
-        (Some("6"), Some("802")) => Some(ServerId::GlobalGoogleplay),
+        (Some("1"), Some("1")) => Some(ChannelId::CN_OFFICIAL),
+        (Some("1"), Some("2")) => Some(ChannelId::CN_BILIBILI),
+        (Some("2"), Some("2")) => Some(ChannelId::CN_BILIBILI),
+        (Some("6"), Some("6")) => Some(ChannelId::GLOBAL_OFFICIAL),
+        (Some("6"), Some("801")) => Some(ChannelId::GLOBAL_EPIC),
+        (Some("6"), Some("802")) => Some(ChannelId::GLOBAL_GOOGLEPLAY),
         _ => None,
     }
 }
@@ -240,27 +271,30 @@ mod tests {
     }
 
     #[test]
-    fn detect_server_maps_cn_bilibili_legacy_tuple() {
+    fn detect_channel_maps_cn_bilibili_legacy_tuple() {
         let parsed = parsed_with_channel("1", "2");
-        assert_eq!(detect_server_id(&parsed), Some(ServerId::CnBilibili));
+        assert_eq!(detect_channel_id(&parsed), Some(ChannelId::CN_BILIBILI));
     }
 
     #[test]
-    fn detect_server_maps_cn_bilibili_new_tuple() {
+    fn detect_channel_maps_cn_bilibili_new_tuple() {
         let parsed = parsed_with_channel("2", "2");
-        assert_eq!(detect_server_id(&parsed), Some(ServerId::CnBilibili));
+        assert_eq!(detect_channel_id(&parsed), Some(ChannelId::CN_BILIBILI));
     }
 
     #[test]
-    fn detect_server_maps_global_epic_tuple() {
+    fn detect_channel_maps_global_epic_tuple() {
         let parsed = parsed_with_channel("6", "801");
-        assert_eq!(detect_server_id(&parsed), Some(ServerId::GlobalEpic));
+        assert_eq!(detect_channel_id(&parsed), Some(ChannelId::GLOBAL_EPIC));
     }
 
     #[test]
-    fn detect_server_maps_global_googleplay_tuple() {
+    fn detect_channel_maps_global_googleplay_tuple() {
         let parsed = parsed_with_channel("6", "802");
-        assert_eq!(detect_server_id(&parsed), Some(ServerId::GlobalGoogleplay));
+        assert_eq!(
+            detect_channel_id(&parsed),
+            Some(ChannelId::GLOBAL_GOOGLEPLAY)
+        );
     }
 
     #[test]
@@ -275,8 +309,8 @@ mod tests {
                 raw: "version=1.1.9".to_string(),
                 fields,
             },
-            game_id: Some(GameId::Endfield),
-            server_id: Some(ServerId::CnOfficial),
+            game_id: Some(GameId::ENDFIELD),
+            channel_id: Some(ChannelId::CN_OFFICIAL),
         };
 
         assert_eq!(local.require_config_ini_version().unwrap(), "1.1.9");
@@ -291,8 +325,8 @@ mod tests {
                 raw: String::new(),
                 fields: BTreeMap::new(),
             },
-            game_id: Some(GameId::Endfield),
-            server_id: Some(ServerId::CnOfficial),
+            game_id: Some(GameId::ENDFIELD),
+            channel_id: Some(ChannelId::CN_OFFICIAL),
         };
 
         let err = local.require_config_ini_version().unwrap_err();

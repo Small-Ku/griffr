@@ -30,7 +30,7 @@ fn install_archive_recovers_from_interrupted_partial_part_on_rerun() {
     let mut routes = HashMap::new();
     routes.insert("/bundle.zip.001".to_string(), part1.clone());
     routes.insert("/bundle.zip.002".to_string(), part2.clone());
-    let (base_url, hits, stop) = start_test_http_server(routes);
+    let (base_url, hits, stop) = start_test_http_channel(routes);
 
     let tasks = vec![Task::InstallArchive {
         source_dir: source_dir.clone(),
@@ -56,8 +56,10 @@ fn install_archive_recovers_from_interrupted_partial_part_on_rerun() {
         ],
     }];
 
-    let mut cfg = TaskPoolConfig::default();
-    cfg.max_retries = 1;
+    let cfg = TaskPoolConfig {
+        max_retries: 1,
+        ..Default::default()
+    };
     let result = run_tasks(tasks, cfg).unwrap();
     stop.store(true, Ordering::Release);
 

@@ -1,21 +1,22 @@
 use rapidhash::RapidHashMap as HashMap;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 use futures_util::stream::{self, StreamExt};
 use tracing::{info, warn};
 
 use crate::api::types::GameFileEntry;
 use crate::api::ApiClient;
 use crate::runtime::{
-    build_cdn_file_url, is_launcher_metadata_path, logical_path_from_root, PathOutcomeTracker, PathReuseMethod,
+    build_cdn_file_url, is_launcher_metadata_path, logical_path_from_root, PathOutcomeTracker,
+    PathReuseMethod,
 };
 
 #[allow(clippy::too_many_arguments)]
 pub async fn apply_file_reuse_flow(
     api_client: &ApiClient,
     game_id: crate::config::GameId,
-    target_server_id: crate::config::ServerId,
+    target_channel_id: crate::config::ChannelId,
     target_version: &str,
     install_path: &Path,
     file_path: &str,
@@ -25,7 +26,7 @@ pub async fn apply_file_reuse_flow(
     let summary = materialize_game_files_with_pool(
         api_client,
         game_id,
-        target_server_id,
+        target_channel_id,
         target_version,
         install_path,
         file_path,
@@ -37,10 +38,10 @@ pub async fn apply_file_reuse_flow(
     )
     .await?;
     if !summary.issues.is_empty() {
-        anyhow::bail!(
+        return Err(Error::Vfs(format!(
             "File materialization finished with {} issue(s)",
             summary.issues.len()
-        );
+        )));
     }
     Ok(summary.reused_files)
 }
@@ -49,7 +50,7 @@ pub async fn apply_file_reuse_flow(
 pub async fn materialize_game_files_with_pool(
     api_client: &ApiClient,
     game_id: crate::config::GameId,
-    _target_server_id: crate::config::ServerId,
+    _target_channel_id: crate::config::ChannelId,
     _target_version: &str,
     install_path: &Path,
     file_path: &str,
@@ -62,24 +63,32 @@ pub async fn materialize_game_files_with_pool(
     let manifest = api_client
         .fetch_game_files(file_path, game_files_md5)
         .await
-        .context("Failed to fetch target manifest for reuse planning")?;
+        .map_err(|e| {
+            Error::ApiClient(format!(
+                "Failed to fetch target manifest for reuse planning: {e}"
+            ))
+        })?;
     let files_base_url = super::plan::derive_files_base_url(file_path)?;
 
     let source_manifest_results = stream::iter(config.source_installs.iter().cloned())
-        .map(|source| async move {
-            let version_info = api_client
-                .get_latest_game(game_id, source.server_id, Some(&source.version))
-                .await
-                .ok()?;
-            let pkg = version_info.pkg.as_ref()?;
-            if version_info.version != source.version {
-                return None;
+        .map(|source| {
+            let game_id = game_id.clone();
+            async move {
+                let preset = crate::config::KnownTargets::resolve(&game_id, &source.channel_id)?;
+                let version_info = api_client
+                    .get_latest_game(&preset.target, Some(&source.version))
+                    .await
+                    .ok()?;
+                let pkg = version_info.pkg.as_ref()?;
+                if version_info.version != source.version {
+                    return None;
+                }
+                let manifest = api_client
+                    .fetch_game_files(&pkg.file_path, pkg.game_files_md5.as_deref())
+                    .await
+                    .ok()?;
+                Some((source, manifest))
             }
-            let manifest = api_client
-                .fetch_game_files(&pkg.file_path, pkg.game_files_md5.as_deref())
-                .await
-                .ok()?;
-            Some((source, manifest))
         })
         .buffer_unordered(config.source_installs.len().clamp(1, 8))
         .collect::<Vec<_>>()
@@ -180,19 +189,21 @@ pub async fn materialize_game_files_with_pool(
     let result = if let Some(runner) = task_pool_runner {
         runner
             .run_batch_with_progress(tasks, Some(&mut progress_event_cb))
-            .context("File materialization pool failed")?
+            .map_err(|e| Error::TaskPool(format!("File materialization pool failed: {e}")))?
     } else {
-        let mut pool_cfg = crate::runtime::task_pool::TaskPoolConfig::default();
-        pool_cfg.io_slots = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .clamp(4, 24);
+        let pool_cfg = crate::runtime::task_pool::TaskPoolConfig {
+            io_slots: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .clamp(4, 24),
+            ..Default::default()
+        };
         crate::runtime::task_pool::run_tasks_with_progress(
             tasks,
             pool_cfg,
             Some(&mut progress_event_cb),
         )
-        .context("File materialization pool failed")?
+        .map_err(|e| Error::TaskPool(format!("File materialization pool failed: {e}")))?
     };
 
     let mut issues = Vec::new();

@@ -90,7 +90,7 @@ fn do_download_resume_incremental_md5_produces_correct_result() {
     let cut = 1_048_576usize;
     std::fs::write(&part, &payload[..cut]).unwrap();
 
-    let (base, range_hits, total_hits, stop) = start_range_http_server("/blob", payload.clone());
+    let (base, range_hits, total_hits, stop) = start_range_http_channel("/blob", payload.clone());
     let url = format!("{}/blob", base);
 
     let dispatcher = Dispatcher::builder()

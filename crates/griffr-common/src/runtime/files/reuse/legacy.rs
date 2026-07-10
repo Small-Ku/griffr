@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 use tracing::{info, warn};
 
 use crate::api::ApiClient;
@@ -17,7 +17,7 @@ pub async fn execute_reuse_plan(
     if options.dry_run {
         info!("Would create {} hardlinks:", plan.reusable_files.len());
         for file in plan.reusable_files.iter().take(10) {
-            info!("  {} <- {}", file.path, file.source_server_id);
+            info!("  {} <- {}", file.path, file.source_channel_id);
         }
         if plan.reusable_files.len() > 10 {
             info!("  ... and {} more", plan.reusable_files.len() - 10);
@@ -42,13 +42,15 @@ pub async fn execute_reuse_plan(
         });
     }
 
-    let mut cfg = crate::runtime::task_pool::TaskPoolConfig::default();
-    cfg.io_slots = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .clamp(2, 16);
+    let cfg = crate::runtime::task_pool::TaskPoolConfig {
+        io_slots: std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(2, 16),
+        ..Default::default()
+    };
     let result = crate::runtime::task_pool::run_tasks(hardlink_tasks, cfg)
-        .context("Failed to execute hardlink task pool")?;
+        .map_err(|e| Error::TaskPool(format!("Failed to execute hardlink task pool: {e}")))?;
 
     let mut hardlink_failures: Vec<(std::path::PathBuf, String)> = Vec::new();
     for event in result.events {
@@ -57,45 +59,45 @@ pub async fn execute_reuse_plan(
         }
     }
 
-    if !hardlink_failures.is_empty() && options.allow_copy_fallback {
-        for (target, _reason) in &hardlink_failures {
-            if let Some(source) = path_to_source.get(target) {
-                if let Some(parent) = target.parent() {
-                    compio::fs::create_dir_all(parent).await?;
+    if !hardlink_failures.is_empty() {
+        if options.allow_copy_fallback {
+            for (target, _reason) in &hardlink_failures {
+                if let Some(source) = path_to_source.get(target) {
+                    if let Some(parent) = target.parent() {
+                        compio::fs::create_dir_all(parent).await?;
+                    }
+                    if compio::fs::metadata(target).await.is_ok() {
+                        let _ = compio::fs::remove_file(target).await;
+                    }
+                    std::fs::copy(source, target).map_err(|e| Error::CopyFailed {
+                        src: source.to_path_buf(),
+                        dest: target.to_path_buf(),
+                        source: e,
+                    })?;
                 }
-                if compio::fs::metadata(target).await.is_ok() {
-                    let _ = compio::fs::remove_file(target).await;
-                }
-                std::fs::copy(source, target).with_context(|| {
-                    format!(
-                        "Copy fallback failed for {} -> {}",
-                        source.display(),
-                        target.display()
-                    )
-                })?;
             }
+        } else {
+            return Err(Error::Vfs(format!(
+                "Failed to create hardlinks for {} files. Use --force-copy to allow copying. \
+                 First failure: {} - {}",
+                hardlink_failures.len(),
+                hardlink_failures[0].0.display(),
+                hardlink_failures[0].1
+            )));
         }
-    } else if !hardlink_failures.is_empty() {
-        anyhow::bail!(
-            "Failed to create hardlinks for {} files. Use --force-copy to allow copying. \
-             First failure: {} - {}",
-            hardlink_failures.len(),
-            hardlink_failures[0].0.display(),
-            hardlink_failures[0].1
-        );
     }
 
     Ok(())
 }
 
 pub fn print_reuse_plan_summary(plan: &super::models::ReusePlan, force_copy: bool) {
-    if !plan.source_servers.is_empty() {
+    if !plan.source_channels.is_empty() {
         info!("File reuse plan:");
-        info!(" Source servers:");
-        for source in &plan.source_servers {
+        info!(" Source channels:");
+        for source in &plan.source_channels {
             info!(
                 " - {} (version {}, {} files)",
-                source.server_id, source.version, source.file_count
+                source.channel_id, source.version, source.file_count
             );
         }
         info!(
@@ -114,7 +116,7 @@ pub fn print_reuse_plan_summary(plan: &super::models::ReusePlan, force_copy: boo
             info!("Use --force-copy to allow copying if hardlink fails.");
         }
     } else {
-        info!("No eligible source servers found for file reuse.");
+        info!("No eligible source channels found for file reuse.");
     }
 }
 
@@ -143,13 +145,15 @@ pub async fn download_remaining_files(
         })
         .collect::<Vec<_>>();
 
-    let mut pool_cfg = crate::runtime::task_pool::TaskPoolConfig::default();
-    pool_cfg.io_slots = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .clamp(2, 16);
+    let pool_cfg = crate::runtime::task_pool::TaskPoolConfig {
+        io_slots: std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(2, 16),
+        ..Default::default()
+    };
     let result = crate::runtime::task_pool::run_tasks(tasks, pool_cfg)
-        .context("Task pool failed for reuse downloads")?;
+        .map_err(|e| Error::TaskPool(format!("Task pool failed for reuse downloads: {e}")))?;
 
     let mut completed = 0usize;
     let mut downloaded: u64 = 0;
@@ -158,7 +162,7 @@ pub async fn download_remaining_files(
         match event {
             crate::runtime::task_pool::ProgressEvent::Verified { path, ok, issue } => {
                 completed += 1;
-                if download_files.len() <= 10 || completed % 10 == 0 {
+                if download_files.len() <= 10 || completed.is_multiple_of(10) {
                     info!(
                         "  [{}/{}] Downloaded {} ({:.1} MB / {:.1} MB)",
                         completed,
@@ -187,11 +191,11 @@ pub async fn download_remaining_files(
     }
 
     if !failures.is_empty() {
-        anyhow::bail!(
+        return Err(Error::Download(format!(
             "Failed to download {} file(s): {}",
             failures.len(),
             failures.join(", ")
-        );
+        )));
     }
 
     info!(

@@ -1,4 +1,4 @@
-//! Integration tests against real Hypergryph API servers
+//! Integration tests against real Hypergryph API channels
 //!
 //! These tests make actual network requests and are marked with `#[ignore]`
 //! so they only run when explicitly requested.
@@ -11,7 +11,7 @@
 
 use crate::api::client::{ApiClient, MediaResponse};
 use crate::api::types::{GameFileEntry, GetLatestGameResponse};
-use crate::config::{GameId, ServerId};
+use crate::config::{ChannelId, GameId};
 
 fn assert_non_empty(label: &str, value: &str) {
     assert!(!value.trim().is_empty(), "{label} should not be empty");
@@ -63,12 +63,12 @@ fn assert_latest_payload_shape(info: &GetLatestGameResponse) {
     }
 }
 
-fn expected_cdn_fragment(server: ServerId) -> &'static str {
-    match server {
-        ServerId::CnOfficial | ServerId::CnBilibili => ".hycdn.cn",
-        ServerId::GlobalOfficial | ServerId::GlobalEpic | ServerId::GlobalGoogleplay => {
-            ".hg-cdn.com"
-        }
+fn expected_cdn_fragment(channel: &ChannelId) -> &'static str {
+    let s = channel.as_str();
+    if s == "cn_official" || s == "cn_bilibili" {
+        ".hycdn.cn"
+    } else {
+        ".hg-cdn.com"
     }
 }
 
@@ -131,31 +131,32 @@ fn assert_media_payload_shape(media: &MediaResponse) {
     }
 }
 
-async fn assert_latest_for_server(client: &ApiClient, game: GameId, server: ServerId) {
+async fn assert_latest_for_channel(client: &ApiClient, game: GameId, channel: ChannelId) {
+    let preset = crate::config::KnownTargets::resolve(&game, &channel).unwrap();
     let info = client
-        .get_latest_game(game, server, None)
+        .get_latest_game(&preset.target, None)
         .await
         .unwrap_or_else(|err| {
             panic!(
-                "failed get_latest_game for game={:?} server={:?}: {err}",
-                game, server
+                "failed get_latest_game for game={:?} channel={:?}: {err}",
+                game, channel
             )
         });
 
     assert_eq!(
         info.request_version, "",
-        "latest query should use empty request_version for game={:?} server={:?}",
-        game, server
+        "latest query should use empty request_version for game={:?} channel={:?}",
+        game, channel
     );
     assert_latest_payload_shape(&info);
 
     if let Some(pkg) = &info.pkg {
         if let Some(first_pack) = pkg.packs.first() {
             assert!(
-                first_pack.url.contains(expected_cdn_fragment(server)),
-                "pkg pack URL should use the expected CDN family for game={:?} server={:?}, got {}",
+                first_pack.url.contains(expected_cdn_fragment(&channel)),
+                "pkg pack URL should use the expected CDN family for game={:?} channel={:?}, got {}",
                 game,
-                server,
+                channel,
                 first_pack.url
             );
         }
@@ -164,43 +165,44 @@ async fn assert_latest_for_server(client: &ApiClient, game: GameId, server: Serv
     if let Some(patch) = &info.patch {
         if let Some(first_patch) = patch.patches.first() {
             assert!(
-                first_patch.url.contains(expected_cdn_fragment(server)),
-                "patch URL should use the expected CDN family for game={:?} server={:?}, got {}",
+                first_patch.url.contains(expected_cdn_fragment(&channel)),
+                "patch URL should use the expected CDN family for game={:?} channel={:?}, got {}",
                 game,
-                server,
+                channel,
                 first_patch.url
             );
         }
     }
 }
 
-async fn assert_media_for_server(
+async fn assert_media_for_channel(
     client: &ApiClient,
     game: GameId,
-    server: ServerId,
+    channel: ChannelId,
     language: &str,
 ) {
+    let preset = crate::config::KnownTargets::resolve(&game, &channel).unwrap();
     let media = client
-        .get_media(game, server, language)
+        .get_media(&preset.target, language)
         .await
         .unwrap_or_else(|err| {
             panic!(
-                "failed get_media for game={:?} server={:?} language={}: {err}",
-                game, server, language
+                "failed get_media for game={:?} channel={:?} language={}: {err}",
+                game, channel, language
             )
         });
 
     assert_media_payload_shape(&media);
 
-    let cdn = expected_cdn_fragment(server);
+    let cdn = expected_cdn_fragment(&channel);
 
     if let Some(banners) = &media.banners {
         if let Some(first) = banners.banners.first() {
             assert!(
                 first.url.contains(cdn),
-                "banner URL should use the expected CDN family for game={:?} server={:?}, got {}",
+                "banner URL should use the expected CDN family for game={:?} channel={:?}, got {}",
                 game,
-                server,
+                channel,
                 first.url
             );
         }
@@ -209,9 +211,9 @@ async fn assert_media_for_server(
     if let Some(background) = &media.background {
         assert!(
             background.main_bg_image.url.contains(cdn),
-            "background URL should use the expected CDN family for game={:?} server={:?}, got {}",
+            "background URL should use the expected CDN family for game={:?} channel={:?}, got {}",
             game,
-            server,
+            channel,
             background.main_bg_image.url
         );
     }
@@ -221,9 +223,9 @@ async fn assert_media_for_server(
             if !item.jump_url.trim().is_empty() {
                 assert!(
                     item.jump_url.starts_with("https://") || item.jump_url.starts_with("http://"),
-                    "sidebar jump URL should be a real URL for game={:?} server={:?}, got {}",
+                    "sidebar jump URL should be a real URL for game={:?} channel={:?}, got {}",
                     game,
-                    server,
+                    channel,
                     item.jump_url
                 );
             }
@@ -231,28 +233,29 @@ async fn assert_media_for_server(
     }
 }
 
-async fn assert_game_files_for_server(client: &ApiClient, game: GameId, server: ServerId) {
+async fn assert_game_files_for_channel(client: &ApiClient, game: GameId, channel: ChannelId) {
+    let preset = crate::config::KnownTargets::resolve(&game, &channel).unwrap();
     let info = client
-        .get_latest_game(game, server, None)
+        .get_latest_game(&preset.target, None)
         .await
         .unwrap_or_else(|err| {
             panic!(
-                "failed get_latest_game for game={:?} server={:?} before game_files fetch: {err}",
-                game, server
+                "failed get_latest_game for game={:?} channel={:?} before game_files fetch: {err}",
+                game, channel
             )
         });
 
     let pkg = info.pkg.as_ref().unwrap_or_else(|| {
         panic!(
-            "expected full package payload for game={:?} server={:?} when checking game_files",
-            game, server
+            "expected full package payload for game={:?} channel={:?} when checking game_files",
+            game, channel
         )
     });
 
     let expected_md5 = pkg.game_files_md5.as_deref().unwrap_or_else(|| {
         panic!(
-            "expected game_files_md5 for game={:?} server={:?}",
-            game, server
+            "expected game_files_md5 for game={:?} channel={:?}",
+            game, channel
         )
     });
 
@@ -261,8 +264,8 @@ async fn assert_game_files_for_server(client: &ApiClient, game: GameId, server: 
         .await
         .unwrap_or_else(|err| {
             panic!(
-                "failed fetch_game_files for game={:?} server={:?} base_url={}: {err}",
-                game, server, pkg.file_path
+                "failed fetch_game_files for game={:?} channel={:?} base_url={}: {err}",
+                game, channel, pkg.file_path
             )
         });
 
@@ -275,13 +278,13 @@ async fn test_real_api_latest_matrix() {
     let client = ApiClient::new().expect("Failed to create API client");
 
     let matrix = [
-        (GameId::Arknights, ServerId::CnOfficial),
-        (GameId::Arknights, ServerId::CnBilibili),
-        (GameId::Endfield, ServerId::CnOfficial),
-        (GameId::Endfield, ServerId::CnBilibili),
-        (GameId::Endfield, ServerId::GlobalOfficial),
-        (GameId::Endfield, ServerId::GlobalEpic),
-        (GameId::Endfield, ServerId::GlobalGoogleplay),
+        (GameId::ARKNIGHTS, ChannelId::CN_OFFICIAL),
+        (GameId::ARKNIGHTS, ChannelId::CN_BILIBILI),
+        (GameId::ENDFIELD, ChannelId::CN_OFFICIAL),
+        (GameId::ENDFIELD, ChannelId::CN_BILIBILI),
+        (GameId::ENDFIELD, ChannelId::GLOBAL_OFFICIAL),
+        (GameId::ENDFIELD, ChannelId::GLOBAL_EPIC),
+        (GameId::ENDFIELD, ChannelId::GLOBAL_GOOGLEPLAY),
     ];
     assert_eq!(
         matrix.len(),
@@ -289,8 +292,8 @@ async fn test_real_api_latest_matrix() {
         "latest matrix should cover all requested CN/OS combinations"
     );
 
-    for (game, server) in matrix {
-        assert_latest_for_server(&client, game, server).await;
+    for (game, channel) in matrix {
+        assert_latest_for_channel(&client, game, channel).await;
     }
 }
 
@@ -300,13 +303,13 @@ async fn test_real_api_media_matrix() {
     let client = ApiClient::new().expect("Failed to create API client");
 
     let matrix = [
-        (GameId::Arknights, ServerId::CnOfficial, "zh-cn"),
-        (GameId::Arknights, ServerId::CnBilibili, "zh-cn"),
-        (GameId::Endfield, ServerId::CnOfficial, "zh-cn"),
-        (GameId::Endfield, ServerId::CnBilibili, "zh-cn"),
-        (GameId::Endfield, ServerId::GlobalOfficial, "en-us"),
-        (GameId::Endfield, ServerId::GlobalEpic, "en-us"),
-        (GameId::Endfield, ServerId::GlobalGoogleplay, "en-us"),
+        (GameId::ARKNIGHTS, ChannelId::CN_OFFICIAL, "zh-cn"),
+        (GameId::ARKNIGHTS, ChannelId::CN_BILIBILI, "zh-cn"),
+        (GameId::ENDFIELD, ChannelId::CN_OFFICIAL, "zh-cn"),
+        (GameId::ENDFIELD, ChannelId::CN_BILIBILI, "zh-cn"),
+        (GameId::ENDFIELD, ChannelId::GLOBAL_OFFICIAL, "en-us"),
+        (GameId::ENDFIELD, ChannelId::GLOBAL_EPIC, "en-us"),
+        (GameId::ENDFIELD, ChannelId::GLOBAL_GOOGLEPLAY, "en-us"),
     ];
     assert_eq!(
         matrix.len(),
@@ -314,8 +317,8 @@ async fn test_real_api_media_matrix() {
         "media matrix should cover all requested CN/OS combinations"
     );
 
-    for (game, server, language) in matrix {
-        assert_media_for_server(&client, game, server, language).await;
+    for (game, channel, language) in matrix {
+        assert_media_for_channel(&client, game, channel, language).await;
     }
 }
 
@@ -325,13 +328,13 @@ async fn test_real_api_game_files_matrix() {
     let client = ApiClient::new().expect("Failed to create API client");
 
     let matrix = [
-        (GameId::Arknights, ServerId::CnOfficial),
-        (GameId::Arknights, ServerId::CnBilibili),
-        (GameId::Endfield, ServerId::CnOfficial),
-        (GameId::Endfield, ServerId::CnBilibili),
-        (GameId::Endfield, ServerId::GlobalOfficial),
-        (GameId::Endfield, ServerId::GlobalEpic),
-        (GameId::Endfield, ServerId::GlobalGoogleplay),
+        (GameId::ARKNIGHTS, ChannelId::CN_OFFICIAL),
+        (GameId::ARKNIGHTS, ChannelId::CN_BILIBILI),
+        (GameId::ENDFIELD, ChannelId::CN_OFFICIAL),
+        (GameId::ENDFIELD, ChannelId::CN_BILIBILI),
+        (GameId::ENDFIELD, ChannelId::GLOBAL_OFFICIAL),
+        (GameId::ENDFIELD, ChannelId::GLOBAL_EPIC),
+        (GameId::ENDFIELD, ChannelId::GLOBAL_GOOGLEPLAY),
     ];
     assert_eq!(
         matrix.len(),
@@ -339,8 +342,8 @@ async fn test_real_api_game_files_matrix() {
         "game_files matrix should cover all requested CN/OS combinations"
     );
 
-    for (game, server) in matrix {
-        assert_game_files_for_server(&client, game, server).await;
+    for (game, channel) in matrix {
+        assert_game_files_for_channel(&client, game, channel).await;
     }
 }
 
@@ -349,13 +352,12 @@ async fn test_real_api_game_files_matrix() {
 async fn test_real_endfield_os_known_versions_return_full_or_patch_payloads() {
     let client = ApiClient::new().expect("Failed to create API client");
 
+    let preset =
+        crate::config::KnownTargets::resolve(&GameId::ENDFIELD, &ChannelId::GLOBAL_OFFICIAL)
+            .unwrap();
     for requested_version in ["1.0.13", "1.0.14", "1.1.9"] {
         let info = client
-            .get_latest_game(
-                GameId::Endfield,
-                ServerId::GlobalOfficial,
-                Some(requested_version),
-            )
+            .get_latest_game(&preset.target, Some(requested_version))
             .await
             .unwrap_or_else(|err| {
                 panic!(

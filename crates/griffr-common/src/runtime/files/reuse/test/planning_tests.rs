@@ -1,12 +1,13 @@
-use super::*;
-use crate::config::GameId;
-use crate::runtime::files::reuse::{legacy, plan};
+use super::super::*;
+use crate::config::ChannelId;
+use crate::runtime::files::reuse::legacy;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[test]
 fn test_reuse_plan_size_calculation() {
     let plan = ReusePlan {
-        source_servers: vec![],
+        source_channels: vec![],
         reusable_files: vec![],
         download_files: vec![
             DownloadFile {
@@ -31,8 +32,8 @@ fn test_reuse_plan_size_calculation() {
 #[test]
 fn test_reuse_plan_size_calculation_with_reusable_files() {
     let plan = ReusePlan {
-        source_servers: vec![SourceServer {
-            server_id: ServerId::CnOfficial,
+        source_channels: vec![SourceChannel {
+            channel_id: ChannelId::CN_OFFICIAL,
             version: "1.0.0".to_string(),
             install_path: PathBuf::from("/source"),
             file_count: 2,
@@ -42,14 +43,14 @@ fn test_reuse_plan_size_calculation_with_reusable_files() {
                 path: "file1.bin".to_string(),
                 md5: "abc123".to_string(),
                 size: 100,
-                source_server_id: ServerId::CnOfficial,
+                source_channel_id: ChannelId::CN_OFFICIAL,
                 source_path: PathBuf::from("/source"),
             },
             ReusableFile {
                 path: "file2.bin".to_string(),
                 md5: "def456".to_string(),
                 size: 200,
-                source_server_id: ServerId::CnOfficial,
+                source_channel_id: ChannelId::CN_OFFICIAL,
                 source_path: PathBuf::from("/source"),
             },
         ],
@@ -71,7 +72,7 @@ fn test_reuse_plan_size_calculation_with_reusable_files() {
 #[test]
 fn test_reuse_plan_empty() {
     let plan = ReusePlan {
-        source_servers: vec![],
+        source_channels: vec![],
         reusable_files: vec![],
         download_files: vec![],
         reusable_size: 0,
@@ -81,7 +82,7 @@ fn test_reuse_plan_empty() {
 
     assert!(plan.reusable_files.is_empty());
     assert!(plan.download_files.is_empty());
-    assert!(plan.source_servers.is_empty());
+    assert!(plan.source_channels.is_empty());
     assert_eq!(plan.reusable_size, 0);
     assert_eq!(plan.download_size, 0);
 }
@@ -118,7 +119,7 @@ async fn test_execute_reuse_plan_empty() {
     let _temp_dir = TempDir::new().unwrap();
 
     let plan = ReusePlan {
-        source_servers: vec![],
+        source_channels: vec![],
         reusable_files: vec![],
         download_files: vec![],
         reusable_size: 0,
@@ -145,8 +146,8 @@ async fn test_execute_reuse_plan_dry_run() {
     std::fs::write(&source_file, b"test content").unwrap();
 
     let plan = ReusePlan {
-        source_servers: vec![SourceServer {
-            server_id: ServerId::CnOfficial,
+        source_channels: vec![SourceChannel {
+            channel_id: ChannelId::CN_OFFICIAL,
             version: "1.0.0".to_string(),
             install_path: source_dir.clone(),
             file_count: 1,
@@ -155,7 +156,7 @@ async fn test_execute_reuse_plan_dry_run() {
             path: "data.bin".to_string(),
             md5: "abc123".to_string(),
             size: 12,
-            source_server_id: ServerId::CnOfficial,
+            source_channel_id: ChannelId::CN_OFFICIAL,
             source_path: source_dir.clone(),
         }],
         download_files: vec![],
@@ -192,8 +193,8 @@ async fn test_execute_reuse_plan_with_hardlinks() {
     std::fs::write(&source_file2, b"content2").unwrap();
 
     let plan = ReusePlan {
-        source_servers: vec![SourceServer {
-            server_id: ServerId::CnOfficial,
+        source_channels: vec![SourceChannel {
+            channel_id: ChannelId::CN_OFFICIAL,
             version: "1.0.0".to_string(),
             install_path: source_dir.clone(),
             file_count: 2,
@@ -203,14 +204,14 @@ async fn test_execute_reuse_plan_with_hardlinks() {
                 path: "file1.bin".to_string(),
                 md5: "hash1".to_string(),
                 size: 8,
-                source_server_id: ServerId::CnOfficial,
+                source_channel_id: ChannelId::CN_OFFICIAL,
                 source_path: source_dir.clone(),
             },
             ReusableFile {
                 path: "subdir/file2.bin".to_string(),
                 md5: "hash2".to_string(),
                 size: 8,
-                source_server_id: ServerId::CnOfficial,
+                source_channel_id: ChannelId::CN_OFFICIAL,
                 source_path: source_dir.clone(),
             },
         ],
@@ -254,12 +255,12 @@ async fn test_execute_reuse_plan_with_copy_fallback() {
     let fake_source_dir = temp_dir.path().join("fake_source");
 
     let plan = ReusePlan {
-        source_servers: vec![],
+        source_channels: vec![],
         reusable_files: vec![ReusableFile {
             path: "test.bin".to_string(),
             md5: "hash".to_string(),
             size: 9,
-            source_server_id: ServerId::CnOfficial,
+            source_channel_id: ChannelId::CN_OFFICIAL,
             source_path: source_dir.clone(),
         }],
         download_files: vec![],
@@ -277,12 +278,12 @@ async fn test_execute_reuse_plan_with_copy_fallback() {
     assert!(result.is_ok(), "Hardlink should succeed: {:?}", result);
 
     let plan_with_missing_source = ReusePlan {
-        source_servers: vec![],
+        source_channels: vec![],
         reusable_files: vec![ReusableFile {
             path: "nonexistent.bin".to_string(),
             md5: "hash".to_string(),
             size: 9,
-            source_server_id: ServerId::CnOfficial,
+            source_channel_id: ChannelId::CN_OFFICIAL,
             source_path: fake_source_dir.clone(),
         }],
         download_files: vec![],
@@ -308,12 +309,12 @@ async fn test_execute_reuse_plan_with_copy_fallback() {
     std::fs::write(&source_file2, b"fallback data").unwrap();
 
     let plan_with_fallback = ReusePlan {
-        source_servers: vec![],
+        source_channels: vec![],
         reusable_files: vec![ReusableFile {
             path: "fallback.bin".to_string(),
             md5: "hash".to_string(),
             size: 13,
-            source_server_id: ServerId::CnOfficial,
+            source_channel_id: ChannelId::CN_OFFICIAL,
             source_path: source_dir.clone(),
         }],
         download_files: vec![],
@@ -344,7 +345,7 @@ async fn test_execute_reuse_plan_with_copy_fallback() {
 }
 
 #[compio::test]
-async fn test_execute_reuse_plan_multiple_source_servers() {
+async fn test_execute_reuse_plan_multiple_source_channels() {
     let temp_dir = TempDir::new().unwrap();
     let target_dir = temp_dir.path().join("target");
     std::fs::create_dir_all(&target_dir).unwrap();
@@ -360,15 +361,15 @@ async fn test_execute_reuse_plan_multiple_source_servers() {
     std::fs::write(&source_file2, b"server2 data").unwrap();
 
     let plan = ReusePlan {
-        source_servers: vec![
-            SourceServer {
-                server_id: ServerId::CnOfficial,
+        source_channels: vec![
+            SourceChannel {
+                channel_id: ChannelId::CN_OFFICIAL,
                 version: "1.0.0".to_string(),
                 install_path: source_dir1.clone(),
                 file_count: 1,
             },
-            SourceServer {
-                server_id: ServerId::CnBilibili,
+            SourceChannel {
+                channel_id: ChannelId::CN_BILIBILI,
                 version: "1.0.0".to_string(),
                 install_path: source_dir2.clone(),
                 file_count: 1,
@@ -379,14 +380,14 @@ async fn test_execute_reuse_plan_multiple_source_servers() {
                 path: "server1.bin".to_string(),
                 md5: "hash1".to_string(),
                 size: 13,
-                source_server_id: ServerId::CnOfficial,
+                source_channel_id: ChannelId::CN_OFFICIAL,
                 source_path: source_dir1.clone(),
             },
             ReusableFile {
                 path: "server2.bin".to_string(),
                 md5: "hash2".to_string(),
                 size: 13,
-                source_server_id: ServerId::CnBilibili,
+                source_channel_id: ChannelId::CN_BILIBILI,
                 source_path: source_dir2.clone(),
             },
         ],
@@ -438,112 +439,23 @@ fn test_reusable_file_struct() {
         path: "data/config.json".to_string(),
         md5: "1234567890ab".to_string(),
         size: 2048,
-        source_server_id: ServerId::GlobalOfficial,
+        source_channel_id: ChannelId::GLOBAL_OFFICIAL,
         source_path: PathBuf::from("/mnt/games/arknights/global"),
     };
     assert_eq!(file.path, "data/config.json");
-    assert_eq!(file.source_server_id, ServerId::GlobalOfficial);
+    assert_eq!(file.source_channel_id, ChannelId::GLOBAL_OFFICIAL);
     assert_eq!(file.size, 2048);
 }
 
 #[test]
-fn test_source_server_struct() {
-    let source = SourceServer {
-        server_id: ServerId::CnBilibili,
+fn test_source_channel_struct() {
+    let source = SourceChannel {
+        channel_id: ChannelId::CN_BILIBILI,
         version: "2.1.0".to_string(),
         install_path: PathBuf::from("/games/endfield/cn-bili"),
         file_count: 5000,
     };
-    assert_eq!(source.server_id, ServerId::CnBilibili);
+    assert_eq!(source.channel_id, ChannelId::CN_BILIBILI);
     assert_eq!(source.version, "2.1.0");
     assert_eq!(source.file_count, 5000);
-}
-
-#[test]
-fn test_reuse_plan_with_mixed_files() {
-    let plan = ReusePlan {
-        source_servers: vec![SourceServer {
-            server_id: ServerId::CnOfficial,
-            version: "2.0.0".to_string(),
-            install_path: PathBuf::from("/games/source"),
-            file_count: 100,
-        }],
-        reusable_files: (0..80)
-            .map(|i| ReusableFile {
-                path: format!("assets/file_{:03}.bin", i),
-                md5: format!("md5_{:03}", i),
-                size: 1024 * 1024,
-                source_server_id: ServerId::CnOfficial,
-                source_path: PathBuf::from("/games/source"),
-            })
-            .collect(),
-        download_files: (80..100)
-            .map(|i| DownloadFile {
-                path: format!("assets/file_{:03}.bin", i),
-                md5: format!("new_md5_{:03}", i),
-                size: 1024 * 1024,
-            })
-            .collect(),
-        reusable_size: 80 * 1024 * 1024,
-        download_size: 20 * 1024 * 1024,
-        requires_copy_fallback: false,
-    };
-
-    assert_eq!(plan.reusable_files.len(), 80);
-    assert_eq!(plan.download_files.len(), 20);
-    assert_eq!(plan.reusable_size, 80 * 1024 * 1024);
-    assert_eq!(plan.download_size, 20 * 1024 * 1024);
-    let reuse_percentage = plan.reusable_files.len() as f64
-        / (plan.reusable_files.len() + plan.download_files.len()) as f64
-        * 100.0;
-    assert!((reuse_percentage - 80.0).abs() < 0.1);
-}
-
-#[test]
-fn test_game_id_server_id_variants() {
-    let games = [GameId::Arknights, GameId::Endfield];
-    let servers = [
-        ServerId::CnOfficial,
-        ServerId::CnBilibili,
-        ServerId::GlobalOfficial,
-        ServerId::GlobalEpic,
-        ServerId::GlobalGoogleplay,
-    ];
-    for _game in &games {
-        for _server in &servers {}
-    }
-}
-
-#[test]
-fn test_is_launcher_metadata_path_matches_expected_names() {
-    assert!(plan::is_launcher_metadata_path("config.ini"));
-    assert!(plan::is_launcher_metadata_path("game_files"));
-    assert!(plan::is_launcher_metadata_path("package_files"));
-    assert!(plan::is_launcher_metadata_path("CONFIG.INI"));
-    assert!(plan::is_launcher_metadata_path("Package_Files"));
-    assert!(!plan::is_launcher_metadata_path("Endfield_Data/config.ini"));
-    assert!(!plan::is_launcher_metadata_path("SomeGame/game_files.bin"));
-}
-
-#[test]
-fn test_derive_files_base_url_from_game_files_suffix() {
-    let url = "https://cdn.example.com/path/files/game_files";
-    let base = plan::derive_files_base_url(url).unwrap();
-    assert_eq!(base, "https://cdn.example.com/path/files");
-}
-
-#[test]
-fn test_derive_files_base_url_from_files_suffix() {
-    let url = "https://cdn.example.com/path/files";
-    let base = plan::derive_files_base_url(url).unwrap();
-    assert_eq!(base, "https://cdn.example.com/path/files");
-}
-
-#[test]
-fn test_derive_files_base_url_rejects_unknown_shape() {
-    let url = "https://cdn.example.com/path";
-    let err = plan::derive_files_base_url(url).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("Expected file_path to end with '/game_files' or '/files'"));
 }

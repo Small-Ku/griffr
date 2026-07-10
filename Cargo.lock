@@ -1115,7 +1115,6 @@ name = "griffr-common"
 version = "0.0.1"
 dependencies = [
  "aes",
- "anyhow",
  "base64",
  "cbc",
  "chrono",

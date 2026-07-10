@@ -117,7 +117,7 @@ mod tests {
             },
         ];
         let wb = vec![Rect::default(), Rect::from_size(Size::new(100.0, 50.0))];
-        let wn = vec![WidgetNode {
+        let wn = [WidgetNode {
             id: WidgetId(1),
             parent: None,
             hoverable: false,

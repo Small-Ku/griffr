@@ -3,7 +3,7 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 use tracing::{info, warn};
 
 use crate::api::types::PackFile;
@@ -100,14 +100,17 @@ impl Downloader {
 
         compio::fs::create_dir_all(output_dir)
             .await
-            .with_context(|| format!("Failed to create {}", output_dir.display()))?;
+            .map_err(|e| Error::CreateDirFailed {
+                path: output_dir.to_path_buf(),
+                source: e,
+            })?;
 
         let mut expected = Vec::with_capacity(packs.len());
         let mut tasks = Vec::with_capacity(packs.len());
         for pack in packs {
             let filename = pack
                 .filename()
-                .context("Failed to extract filename from URL")?
+                .ok_or_else(|| Error::Download("Failed to extract filename from URL".to_string()))?
                 .split('?')
                 .next()
                 .unwrap_or_default()
@@ -130,9 +133,11 @@ impl Downloader {
             }
         }
 
-        let mut config = TaskPoolConfig::default();
-        config.io_slots = self.options.concurrent_connections.max(1) as usize;
-        config.max_retries = self.options.retry_attempts;
+        let config = TaskPoolConfig {
+            io_slots: self.options.concurrent_connections.max(1) as usize,
+            max_retries: self.options.retry_attempts,
+            ..Default::default()
+        };
 
         let result = run_tasks(tasks, config)?;
         let mut failed = Vec::new();
@@ -157,11 +162,11 @@ impl Downloader {
         }
 
         if !failed.is_empty() {
-            anyhow::bail!(
+            return Err(Error::Download(format!(
                 "Failed to download {} pack(s): {}",
                 failed.len(),
                 failed.join(", ")
-            );
+            )));
         }
 
         let mut paths = Vec::with_capacity(expected.len());
@@ -169,10 +174,16 @@ impl Downloader {
             match compio::fs::metadata(&path).await {
                 Ok(_) => {}
                 Err(err) if err.kind() == ErrorKind::NotFound => {
-                    anyhow::bail!("Missing downloaded pack: {}", path.display());
+                    return Err(Error::Download(format!(
+                        "Missing downloaded pack: {}",
+                        path.display()
+                    )));
                 }
                 Err(err) => {
-                    return Err(err).with_context(|| format!("Failed to stat {}", path.display()))
+                    return Err(Error::StatFailed {
+                        path: path.clone(),
+                        source: err,
+                    });
                 }
             }
             paths.push(path);

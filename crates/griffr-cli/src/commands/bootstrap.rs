@@ -8,7 +8,6 @@ use griffr_common::runtime::{
 };
 
 use super::local::detect_local_install;
-use super::supports_vfs_sync;
 use crate::progress::StepProgress;
 use crate::ui;
 use crate::{BootstrapScope, GlobalOptions};
@@ -22,6 +21,7 @@ fn map_scope(scope: BootstrapScope) -> VfsBootstrapScope {
 
 pub async fn bootstrap(
     path: PathBuf,
+    overrides: crate::InstallProfileOverrideArgs,
     scope: BootstrapScope,
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
@@ -32,17 +32,17 @@ pub async fn bootstrap(
 ) -> Result<()> {
     let local = detect_local_install(&path).await?;
     let game_id = local.require_known_game()?;
-    if !supports_vfs_sync(game_id) {
-        anyhow::bail!(
-            "Persistent VFS bootstrap is Endfield-only; {} does not use this VFS pipeline",
-            game_id
-        );
-    }
-    let server_id = local.require_known_server()?;
+    let channel_id = local.require_known_channel()?;
     let installed_version = local.require_config_ini_version()?.to_string();
+
+    let profile = griffr_common::config::resolve_install_profile(
+        &game_id,
+        &channel_id,
+        &overrides.clone().into(),
+    )?;
     let api_client = ApiClient::new()?;
     let version_info = api_client
-        .get_latest_game(game_id, server_id, Some(&installed_version))
+        .get_latest_game(&profile.target, Some(&installed_version))
         .await
         .context("Failed to fetch version information for bootstrap")?;
 
@@ -51,12 +51,14 @@ pub async fn bootstrap(
         anyhow::bail!(
             "Could not resolve rand_str for {} ({}) version {}",
             game_id,
-            server_id,
+            channel_id,
             installed_version
         );
     }
 
-    let data_root = local.install_path.join(game_id.streaming_assets_subdir());
+    let data_root = local
+        .install_path
+        .join(profile.streaming_assets_subdir.clone());
     let streaming_assets_root = data_root.join("StreamingAssets");
     let persistent_root = data_root.join("Persistent");
 
@@ -71,14 +73,21 @@ pub async fn bootstrap(
                 "Reuse source {} is {:?}, expected {:?}",
                 source.install_path.display(),
                 source_game_id,
-                game_id
+                &game_id
             );
         }
         if source.install_path != local.install_path {
+            let source_manager =
+                source.as_manager(griffr_common::config::resolve_install_profile(
+                    &source.require_known_game()?,
+                    &source.require_known_channel()?,
+                    &Default::default(),
+                )?)?;
+            let source_profile = source_manager.active_install_profile()?;
             extra_source_streaming_assets.push(
                 source
                     .install_path
-                    .join(game_id.streaming_assets_subdir())
+                    .join(source_profile.streaming_assets_subdir.clone())
                     .join("StreamingAssets"),
             );
         }
@@ -88,7 +97,7 @@ pub async fn bootstrap(
         opts.dry_run(format!(
             "Would bootstrap Persistent VFS for {} ({}) at {} with scope={:?}",
             game_id,
-            server_id,
+            channel_id,
             local.install_path.display(),
             scope
         ));
@@ -119,7 +128,7 @@ pub async fn bootstrap(
 
     ui::print_phase(format!(
         "Bootstrapping Persistent VFS ({:?}) for {} ({})",
-        scope, game_id, server_id
+        scope, game_id, channel_id
     ));
     ui::print_info(format!(
         "StreamingAssets source: {}",
@@ -127,18 +136,19 @@ pub async fn bootstrap(
     ));
     ui::print_info(format!("Persistent target: {}", persistent_root.display()));
 
-    let mut pool_cfg = TaskPoolConfig::default();
-    pool_cfg.max_retries = 3;
-    pool_cfg.extraction_progress_buffer_bytes = opts.extraction_progress_buffer_bytes;
-    pool_cfg.download_progress_buffer_bytes = opts.download_progress_buffer_bytes;
+    let pool_cfg = TaskPoolConfig {
+        max_retries: 3,
+        extraction_progress_buffer_bytes: opts.extraction_progress_buffer_bytes,
+        download_progress_buffer_bytes: opts.download_progress_buffer_bytes,
+        ..Default::default()
+    };
     let mut task_pool_runner = TaskPoolRunner::new(pool_cfg)?;
 
     let progress = StepProgress::new("bootstrap.persistent-vfs", opts.verbose);
     let progress_cb = progress.byte_callback("persistent-vfs");
     let result = bootstrap_persistent_vfs_with_runner(
         &api_client,
-        game_id,
-        server_id,
+        &profile.target,
         &version_info.version,
         &rand_str,
         &persistent_root,
@@ -158,26 +168,30 @@ pub async fn bootstrap(
     .context("Failed to bootstrap Persistent VFS")?;
     progress.finish();
 
-    ui::print_info(format!(
-        "Bootstrap scope: {} | res_version={}",
-        result.scope_label, result.res_version
-    ));
-    ui::print_info(format!(
-        "Persistent VFS: total={} reused={} downloaded={} ({}) skipped={} failed={}",
-        result.total_files,
-        result.reused_files,
-        result.downloaded_files,
-        ui::format_bytes(result.downloaded_bytes),
-        result.skipped_files,
-        result.failed_files
-    ));
-    if result.failed_files > 0 {
-        anyhow::bail!(
-            "Persistent bootstrap finished with {} failed file(s)",
+    if let Some(result) = result {
+        ui::print_info(format!(
+            "Bootstrap scope: {} | res_version={}",
+            result.scope_label, result.res_version
+        ));
+        ui::print_info(format!(
+            "Persistent VFS: total={} reused={} downloaded={} ({}) skipped={} failed={}",
+            result.total_files,
+            result.reused_files,
+            result.downloaded_files,
+            ui::format_bytes(result.downloaded_bytes),
+            result.skipped_files,
             result.failed_files
-        );
+        ));
+        if result.failed_files > 0 {
+            anyhow::bail!(
+                "Persistent bootstrap finished with {} failed file(s)",
+                result.failed_files
+            );
+        }
+        ui::print_success("Persistent bootstrap complete");
+    } else {
+        ui::print_info("Persistent VFS bootstrap skipped (VFS not supported for this target).");
     }
-    ui::print_success("Persistent bootstrap complete");
 
     Ok(())
 }

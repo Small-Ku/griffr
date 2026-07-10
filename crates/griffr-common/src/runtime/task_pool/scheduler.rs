@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 use compio::dispatcher::Dispatcher;
 use flume::{Receiver, RecvTimeoutError, Sender};
 use tracing::debug;
@@ -45,12 +45,13 @@ impl TaskPoolRunner {
         let dispatcher_threads = dispatcher_thread_count(&config);
         let shared_dispatcher = Arc::new(
             Dispatcher::builder()
-                .worker_threads(
-                    NonZeroUsize::new(dispatcher_threads)
-                        .context("dispatcher threads must be non-zero")?,
-                )
+                .worker_threads(NonZeroUsize::new(dispatcher_threads).ok_or_else(|| {
+                    Error::TaskPool("dispatcher threads must be non-zero".to_string())
+                })?)
                 .build()
-                .context("Failed to create task-pool dispatcher")?,
+                .map_err(|e| {
+                    Error::TaskPool(format!("Failed to create task-pool dispatcher: {e}"))
+                })?,
         );
         let ctx = WorkerContext {
             io_tx: io_tx.clone(),
@@ -163,8 +164,10 @@ pub fn extract_archives_pooled(
             password: None,
         })
         .collect::<Vec<_>>();
-    let mut config = TaskPoolConfig::default();
-    config.extract_slots = extract_slots.max(1);
+    let config = TaskPoolConfig {
+        extract_slots: extract_slots.max(1),
+        ..Default::default()
+    };
     let result = run_tasks(tasks, config)?;
     let mut failures = Vec::new();
     for event in result.events {
@@ -173,11 +176,11 @@ pub fn extract_archives_pooled(
         }
     }
     if !failures.is_empty() {
-        anyhow::bail!(
+        return Err(Error::Extraction(format!(
             "Failed to extract {} archive base(s): {}",
             failures.len(),
             failures.join(", ")
-        );
+        )));
     }
     Ok(())
 }
@@ -192,37 +195,39 @@ fn spawn_workers(
         let worker_rx = rx.clone();
         let worker_ctx = ctx.clone();
         let dispatcher = Arc::clone(&worker_ctx.shared_dispatcher);
-        let _ = dispatcher
-            .dispatch_blocking(move || loop {
-                if worker_ctx.shutdown.load(Ordering::Acquire) {
-                    break;
-                }
-                let task = match worker_rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(task) => task,
-                    Err(RecvTimeoutError::Timeout) => continue,
-                    Err(RecvTimeoutError::Disconnected) => break,
-                };
-                let mut spawned = Vec::new();
-                execute_task(
-                    task,
-                    worker_ctx.config.max_retries,
-                    worker_ctx.config.extraction_progress_buffer_bytes,
-                    worker_ctx.config.download_progress_buffer_bytes,
-                    Some(worker_ctx.shared_dispatcher.as_ref()),
-                    &worker_ctx.config.user_agent,
-                    &mut spawned,
-                    &worker_ctx.event_tx,
-                );
-                for task in spawned {
-                    let _ = enqueue_task(&worker_ctx, task);
-                }
-                let remaining = worker_ctx.pending.fetch_sub(1, Ordering::AcqRel) - 1;
-                if remaining == 0 {
-                    let (_, cv) = &*worker_ctx.done_pair;
-                    cv.notify_all();
-                }
-            })
-            .map_err(|_| anyhow::anyhow!("Failed to dispatch worker loop"))?;
+        std::mem::drop(
+            dispatcher
+                .dispatch_blocking(move || loop {
+                    if worker_ctx.shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let task = match worker_rx.recv_timeout(Duration::from_millis(100)) {
+                        Ok(task) => task,
+                        Err(RecvTimeoutError::Timeout) => continue,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    };
+                    let mut spawned = Vec::new();
+                    execute_task(
+                        task,
+                        worker_ctx.config.max_retries,
+                        worker_ctx.config.extraction_progress_buffer_bytes,
+                        worker_ctx.config.download_progress_buffer_bytes,
+                        Some(worker_ctx.shared_dispatcher.as_ref()),
+                        &worker_ctx.config.user_agent,
+                        &mut spawned,
+                        &worker_ctx.event_tx,
+                    );
+                    for task in spawned {
+                        let _ = enqueue_task(&worker_ctx, task);
+                    }
+                    let remaining = worker_ctx.pending.fetch_sub(1, Ordering::AcqRel) - 1;
+                    if remaining == 0 {
+                        let (_, cv) = &*worker_ctx.done_pair;
+                        cv.notify_all();
+                    }
+                })
+                .map_err(|_| Error::TaskPool("Failed to dispatch worker loop".to_string()))?,
+        );
     }
     Ok(())
 }
@@ -251,7 +256,9 @@ pub(crate) fn enqueue_task(ctx: &WorkerContext, task: Task) -> Result<()> {
             let (_, cv) = &*ctx.done_pair;
             cv.notify_all();
         }
-        anyhow::bail!("Failed to enqueue task: queue disconnected");
+        return Err(Error::TaskPool(
+            "Failed to enqueue task: queue disconnected".to_string(),
+        ));
     }
     Ok(())
 }

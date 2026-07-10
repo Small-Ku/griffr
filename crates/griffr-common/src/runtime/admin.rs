@@ -3,7 +3,7 @@
 //! Provides functions to check for admin privileges and self-elevate
 //! when running the launch command.
 
-use anyhow::Result;
+use crate::error::Result;
 use tracing::{debug, info, warn};
 
 /// Check if the current process is running with administrator privileges

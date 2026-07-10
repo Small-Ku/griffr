@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use griffr_common::config::{GameId, ServerId};
+use griffr_common::config::{ChannelId, GameId};
 use griffr_common::runtime::{copy_dir_recursive, remove_dir_all};
 
 use crate::ui;
@@ -12,7 +12,7 @@ use crate::GlobalOptions;
 const BUNDLE_SDK_DIR: &str = "sdk_data";
 const BUNDLE_MMKV_DIR: &str = "mmkv";
 
-async fn create_dir_all(path: &Path) -> Result<()> {
+pub(super) async fn create_dir_all(path: &Path) -> Result<()> {
     compio::fs::create_dir_all(path)
         .await
         .with_context(|| format!("Failed to create {}", path.display()))?;
@@ -21,7 +21,7 @@ async fn create_dir_all(path: &Path) -> Result<()> {
 
 pub async fn capture(
     game_id: GameId,
-    server_hint: Option<ServerId>,
+    channel_hint: Option<ChannelId>,
     bundle_path: PathBuf,
     sdk_dir: Option<PathBuf>,
     install_path: Option<PathBuf>,
@@ -29,7 +29,7 @@ pub async fn capture(
     force: bool,
     opts: GlobalOptions,
 ) -> Result<()> {
-    let source_sdk_dir = resolve_source_sdk_dir(game_id, server_hint, sdk_dir.as_deref())?;
+    let source_sdk_dir = resolve_source_sdk_dir(game_id, channel_hint, sdk_dir.as_deref())?;
     let bundle_sdk_dir = bundle_path.join(BUNDLE_SDK_DIR);
 
     if opts.is_dry_run() {
@@ -113,7 +113,7 @@ pub async fn capture(
 
 pub async fn activate(
     game_id: GameId,
-    server_hint: Option<ServerId>,
+    channel_hint: Option<ChannelId>,
     bundle_path: PathBuf,
     sdk_dir: Option<PathBuf>,
     install_path: Option<PathBuf>,
@@ -129,7 +129,7 @@ pub async fn activate(
         );
     }
 
-    let target_sdk_dir = resolve_target_sdk_dir(game_id, server_hint, sdk_dir.as_deref())?;
+    let target_sdk_dir = resolve_target_sdk_dir(game_id, channel_hint, sdk_dir.as_deref())?;
     if opts.is_dry_run() {
         opts.dry_run(format!(
             "Would activate account state from {} to {}",
@@ -219,21 +219,21 @@ pub async fn activate(
     Ok(())
 }
 
-fn resolve_source_sdk_dir(
+pub(super) fn resolve_source_sdk_dir(
     game_id: GameId,
-    server_hint: Option<ServerId>,
+    channel_hint: Option<ChannelId>,
     sdk_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     if let Some(explicit) = sdk_dir {
         validate_explicit_sdk_dir(explicit)?;
         return Ok(explicit.to_path_buf());
     }
-    select_latest_sdk_dir_from_roots(&default_game_local_low_roots(game_id, server_hint)?)
+    select_latest_sdk_dir_from_roots(&default_game_local_low_roots(game_id, channel_hint)?)
 }
 
-fn resolve_target_sdk_dir(
+pub(super) fn resolve_target_sdk_dir(
     game_id: GameId,
-    server_hint: Option<ServerId>,
+    channel_hint: Option<ChannelId>,
     sdk_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     if let Some(explicit) = sdk_dir {
@@ -247,10 +247,10 @@ fn resolve_target_sdk_dir(
         }
         return Ok(explicit.to_path_buf());
     }
-    select_latest_sdk_dir_from_roots(&default_game_local_low_roots(game_id, server_hint)?)
+    select_latest_sdk_dir_from_roots(&default_game_local_low_roots(game_id, channel_hint)?)
 }
 
-fn validate_explicit_sdk_dir(path: &Path) -> Result<()> {
+pub(super) fn validate_explicit_sdk_dir(path: &Path) -> Result<()> {
     if !path.is_dir() {
         anyhow::bail!("SDK dir not found: {}", path.display());
     }
@@ -262,39 +262,35 @@ fn validate_explicit_sdk_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn default_game_local_low_roots(
+pub(super) fn default_game_local_low_roots(
     game_id: GameId,
-    server_hint: Option<ServerId>,
+    channel_hint: Option<ChannelId>,
 ) -> Result<Vec<PathBuf>> {
     let user_profile = std::env::var("USERPROFILE")
         .context("USERPROFILE is not set; this command requires Windows user profile context")?;
-    let game_dir = match game_id {
-        GameId::Arknights => "Arknights",
-        GameId::Endfield => "Endfield",
+    let game_dir = if game_id == GameId::ARKNIGHTS {
+        "Arknights"
+    } else if game_id == GameId::ENDFIELD {
+        "Endfield"
+    } else {
+        anyhow::bail!("Custom games must provide --sdk-dir; no LocalLow path is inferred")
     };
     let base = PathBuf::from(user_profile).join("AppData").join("LocalLow");
-    local_low_roots_for_hint(&base, game_id, game_dir, server_hint)
+    local_low_roots_for_hint(&base, game_dir, channel_hint)
 }
 
-fn local_low_roots_for_hint(
+pub(super) fn local_low_roots_for_hint(
     base: &Path,
-    game_id: GameId,
     game_dir: &str,
-    server_hint: Option<ServerId>,
+    channel_hint: Option<ChannelId>,
 ) -> Result<Vec<PathBuf>> {
-    if let Some(server) = server_hint {
-        if !ServerId::available_for(game_id).contains(&server) {
-            anyhow::bail!(
-                "Server hint {} is not available for game {}",
-                server,
-                game_id
-            );
-        }
-        let vendor = match server {
-            ServerId::CnOfficial | ServerId::CnBilibili => "Hypergryph",
-            ServerId::GlobalOfficial | ServerId::GlobalEpic | ServerId::GlobalGoogleplay => {
-                "Gryphline"
-            }
+    if let Some(channel) = channel_hint {
+        let vendor = match channel.as_str() {
+            "cn_official" | "cn_bilibili" => "Hypergryph",
+            "global_official" | "global_epic" | "global_googleplay" => "Gryphline",
+            custom => anyhow::bail!(
+                "Custom channel {custom} must provide --sdk-dir; no LocalLow vendor is inferred"
+            ),
         };
         return Ok(vec![base.join(vendor).join(game_dir)]);
     }
@@ -306,7 +302,7 @@ fn local_low_roots_for_hint(
 }
 
 #[cfg(test)]
-fn select_latest_sdk_dir(root: &Path) -> Result<PathBuf> {
+pub(super) fn select_latest_sdk_dir(root: &Path) -> Result<PathBuf> {
     let mut candidates = Vec::<(PathBuf, SystemTime)>::new();
     let entries =
         std::fs::read_dir(root).with_context(|| format!("Failed to read {}", root.display()))?;
@@ -342,7 +338,7 @@ fn select_latest_sdk_dir(root: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn select_latest_sdk_dir_from_roots(roots: &[PathBuf]) -> Result<PathBuf> {
+pub(super) fn select_latest_sdk_dir_from_roots(roots: &[PathBuf]) -> Result<PathBuf> {
     let mut candidates = Vec::<(PathBuf, SystemTime)>::new();
     for root in roots {
         if !root.exists() {
@@ -389,7 +385,7 @@ fn select_latest_sdk_dir_from_roots(roots: &[PathBuf]) -> Result<PathBuf> {
     Ok(path)
 }
 
-async fn ensure_destination_dir(path: &Path, force: bool) -> Result<()> {
+pub(super) async fn ensure_destination_dir(path: &Path, force: bool) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
@@ -404,116 +400,4 @@ async fn ensure_destination_dir(path: &Path, force: bool) -> Result<()> {
         remove_dir_all(path.to_path_buf()).await?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::Write;
-
-    use super::*;
-
-    #[test]
-    fn select_latest_sdk_dir_prefers_newest_mtime() {
-        let temp = tempfile::tempdir().unwrap();
-        let older = temp.path().join("sdk_data_old");
-        let newer = temp.path().join("sdk_data_new");
-        std::fs::create_dir_all(&older).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(15));
-        std::fs::create_dir_all(&newer).unwrap();
-
-        let selected = select_latest_sdk_dir(temp.path()).unwrap();
-        assert_eq!(selected, newer);
-    }
-
-    #[test]
-    fn select_latest_sdk_dir_from_roots_prefers_newest_across_roots() {
-        let temp = tempfile::tempdir().unwrap();
-        let root_a = temp.path().join("Hypergryph").join("Endfield");
-        let root_b = temp.path().join("Gryphline").join("Endfield");
-        std::fs::create_dir_all(&root_a).unwrap();
-        std::fs::create_dir_all(&root_b).unwrap();
-
-        let older = root_a.join("sdk_data_older");
-        let newer = root_b.join("sdk_data_newer");
-        std::fs::create_dir_all(&older).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(15));
-        std::fs::create_dir_all(&newer).unwrap();
-
-        let selected = select_latest_sdk_dir_from_roots(&[root_a.clone(), root_b.clone()]).unwrap();
-        assert_eq!(selected, newer);
-    }
-
-    #[test]
-    fn local_low_roots_for_hint_cn_prefers_hypergryph() {
-        let base = PathBuf::from("C:\\Users\\Test\\AppData\\LocalLow");
-        let roots = local_low_roots_for_hint(
-            &base,
-            GameId::Endfield,
-            "Endfield",
-            Some(ServerId::CnOfficial),
-        )
-        .unwrap();
-        assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0], base.join("Hypergryph").join("Endfield"));
-    }
-
-    #[test]
-    fn local_low_roots_for_hint_global_prefers_gryphline() {
-        let base = PathBuf::from("C:\\Users\\Test\\AppData\\LocalLow");
-        let roots = local_low_roots_for_hint(
-            &base,
-            GameId::Endfield,
-            "Endfield",
-            Some(ServerId::GlobalOfficial),
-        )
-        .unwrap();
-        assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0], base.join("Gryphline").join("Endfield"));
-    }
-
-    #[test]
-    fn local_low_roots_for_hint_rejects_invalid_server_for_game() {
-        let base = PathBuf::from("C:\\Users\\Test\\AppData\\LocalLow");
-        let err = local_low_roots_for_hint(
-            &base,
-            GameId::Arknights,
-            "Arknights",
-            Some(ServerId::GlobalOfficial),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("not available for game"));
-    }
-
-    #[compio::test]
-    async fn ensure_destination_dir_requires_force_when_existing() {
-        let temp = tempfile::tempdir().unwrap();
-        let existing = temp.path().join("existing");
-        std::fs::create_dir_all(&existing).unwrap();
-
-        let err = ensure_destination_dir(&existing, false).await.unwrap_err();
-        assert!(err.to_string().contains("Destination exists"));
-    }
-
-    #[test]
-    fn copy_dir_recursive_copies_nested_content() {
-        let temp = tempfile::tempdir().unwrap();
-        let source = temp.path().join("source");
-        let nested = source.join("nested");
-        std::fs::create_dir_all(&nested).unwrap();
-        let file = nested.join("token_cache.bin");
-        let mut f = std::fs::File::create(&file).unwrap();
-        f.write_all(&[1, 2, 3, 4]).unwrap();
-
-        let target = temp.path().join("target");
-        let stats = compio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(copy_dir_recursive(source.clone(), target.clone()))
-            .unwrap();
-        assert_eq!(stats.files, 1);
-        assert_eq!(stats.bytes, 4);
-        assert_eq!(
-            std::fs::read(target.join("nested").join("token_cache.bin")).unwrap(),
-            vec![1, 2, 3, 4]
-        );
-    }
 }

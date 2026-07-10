@@ -40,8 +40,11 @@ impl StepProgress {
         let total_u64 = total as u64;
         self.ensure_started(total_u64);
 
-        let should_refresh =
-            self.verbose || total <= 20 || current <= 3 || current == total || (current % 10 == 0);
+        let should_refresh = self.verbose
+            || total <= 20
+            || current <= 3
+            || current == total
+            || current.is_multiple_of(10);
         if !should_refresh {
             return;
         }
