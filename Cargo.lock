@@ -1124,6 +1124,7 @@ dependencies = [
  "dirs",
  "flume",
  "futures-util",
+ "hdiffpatch-rs",
  "md-5",
  "rapidhash",
  "serde",
@@ -1168,6 +1169,14 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+
+[[package]]
+name = "hdiffpatch-rs"
+version = "0.1.0"
+source = "git+https://github.com/TwintailTeam/hdiffpatch-rs?branch=master#121fe9d7ad7f75014739b05d510f40350c75d293"
+dependencies = [
+ "zstd",
+]
 
 [[package]]
 name = "heck"

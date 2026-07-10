@@ -24,6 +24,7 @@ futures-util = { workspace = true }
 # File/Archive
 zip = { workspace = true }
 md-5 = { workspace = true }
+hdiffpatch-rs = { git = "https://github.com/TwintailTeam/hdiffpatch-rs", branch = "master" }
 
 # Crypto
 aes = "0.8"

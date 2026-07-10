@@ -240,6 +240,7 @@ pub(crate) fn enqueue_task(ctx: &WorkerContext, task: Task) -> Result<()> {
         | Task::Download { .. }
         | Task::Hardlink { .. }
         | Task::EnsureFile { .. }
+        | Task::ApplyExtractedVfsPatchManifest { .. }
         | Task::ApplyDeleteManifest { .. } => ctx.io_tx.send(task),
         Task::Verify { .. } => ctx.cpu_tx.send(task),
         Task::Extract { .. } => ctx.extract_tx.send(task),

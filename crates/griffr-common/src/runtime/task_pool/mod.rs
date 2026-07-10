@@ -9,5 +9,5 @@ pub use scheduler::{extract_archives_pooled, run_tasks, run_tasks_with_progress}
 pub use types::{ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolResult, TaskPoolRunner};
 
 #[cfg(test)]
-#[path = "test.rs"]
+#[path = "test/mod.rs"]
 mod test;

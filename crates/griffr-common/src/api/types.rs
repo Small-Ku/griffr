@@ -714,6 +714,8 @@ pub struct GameResource {
 pub struct ResourcePatch {
     #[serde(default)]
     pub version: String,
+    #[serde(default)]
+    pub vfs_base_path: String,
     pub files: Vec<ResourcePatchEntry>,
 }
 
@@ -726,10 +728,14 @@ pub struct ResourcePatchEntry {
     pub md5: String,
     /// New file size
     pub size: u64,
+    /// Extracted local file path within the patch payload, when the file ships directly.
+    #[serde(default)]
+    pub local_path: Option<String>,
     /// Diff type (1 = binary diff)
     #[serde(rename = "diffType", default)]
     pub diff_type: u64,
     /// Available patches from older versions
+    #[serde(default)]
     pub patch: Vec<ResourcePatchDiff>,
 }
 
@@ -739,6 +745,9 @@ pub struct ResourcePatchDiff {
     /// Old file relative path
     #[serde(rename = "base_file")]
     pub base_file: String,
+    /// Alternate old file relative path, when the manifest uses `base_file_path`.
+    #[serde(rename = "base_file_path", default)]
+    pub base_file_path: Option<String>,
     /// Old file MD5
     #[serde(rename = "base_md5")]
     pub base_md5: String,
@@ -747,6 +756,9 @@ pub struct ResourcePatchDiff {
     pub base_size: u64,
     /// Patch filename (relative to {path}/Patch/)
     pub patch: String,
+    /// Alternate patch payload path, when the manifest uses `patch_path`.
+    #[serde(rename = "patch_path", default)]
+    pub patch_path: Option<String>,
     /// Patch file size
     #[serde(rename = "patch_size")]
     pub patch_size: u64,

@@ -45,6 +45,9 @@ pub enum Task {
         cleanup: bool,
         password: Option<String>,
     },
+    ApplyExtractedVfsPatchManifest {
+        install_root: PathBuf,
+    },
     ApplyDeleteManifest {
         install_root: PathBuf,
     },
