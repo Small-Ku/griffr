@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::config::ChannelId;
+use crate::config::ChannelPair;
 use crate::runtime::files::reuse::legacy;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -33,7 +33,7 @@ fn test_reuse_plan_size_calculation() {
 fn test_reuse_plan_size_calculation_with_reusable_files() {
     let plan = ReusePlan {
         source_channels: vec![SourceChannel {
-            channel_id: ChannelId::CN_OFFICIAL,
+            channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
             version: "1.0.0".to_string(),
             install_path: PathBuf::from("/source"),
             file_count: 2,
@@ -43,14 +43,14 @@ fn test_reuse_plan_size_calculation_with_reusable_files() {
                 path: "file1.bin".to_string(),
                 md5: "abc123".to_string(),
                 size: 100,
-                source_channel_id: ChannelId::CN_OFFICIAL,
+                source_channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
                 source_path: PathBuf::from("/source"),
             },
             ReusableFile {
                 path: "file2.bin".to_string(),
                 md5: "def456".to_string(),
                 size: 200,
-                source_channel_id: ChannelId::CN_OFFICIAL,
+                source_channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
                 source_path: PathBuf::from("/source"),
             },
         ],
@@ -147,7 +147,7 @@ async fn test_execute_reuse_plan_dry_run() {
 
     let plan = ReusePlan {
         source_channels: vec![SourceChannel {
-            channel_id: ChannelId::CN_OFFICIAL,
+            channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
             version: "1.0.0".to_string(),
             install_path: source_dir.clone(),
             file_count: 1,
@@ -156,7 +156,7 @@ async fn test_execute_reuse_plan_dry_run() {
             path: "data.bin".to_string(),
             md5: "abc123".to_string(),
             size: 12,
-            source_channel_id: ChannelId::CN_OFFICIAL,
+            source_channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
             source_path: source_dir.clone(),
         }],
         download_files: vec![],
@@ -194,7 +194,7 @@ async fn test_execute_reuse_plan_with_hardlinks() {
 
     let plan = ReusePlan {
         source_channels: vec![SourceChannel {
-            channel_id: ChannelId::CN_OFFICIAL,
+            channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
             version: "1.0.0".to_string(),
             install_path: source_dir.clone(),
             file_count: 2,
@@ -204,14 +204,14 @@ async fn test_execute_reuse_plan_with_hardlinks() {
                 path: "file1.bin".to_string(),
                 md5: "hash1".to_string(),
                 size: 8,
-                source_channel_id: ChannelId::CN_OFFICIAL,
+                source_channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
                 source_path: source_dir.clone(),
             },
             ReusableFile {
                 path: "subdir/file2.bin".to_string(),
                 md5: "hash2".to_string(),
                 size: 8,
-                source_channel_id: ChannelId::CN_OFFICIAL,
+                source_channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
                 source_path: source_dir.clone(),
             },
         ],
@@ -260,7 +260,7 @@ async fn test_execute_reuse_plan_with_copy_fallback() {
             path: "test.bin".to_string(),
             md5: "hash".to_string(),
             size: 9,
-            source_channel_id: ChannelId::CN_OFFICIAL,
+            source_channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
             source_path: source_dir.clone(),
         }],
         download_files: vec![],
@@ -283,7 +283,7 @@ async fn test_execute_reuse_plan_with_copy_fallback() {
             path: "nonexistent.bin".to_string(),
             md5: "hash".to_string(),
             size: 9,
-            source_channel_id: ChannelId::CN_OFFICIAL,
+            source_channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
             source_path: fake_source_dir.clone(),
         }],
         download_files: vec![],
@@ -314,7 +314,7 @@ async fn test_execute_reuse_plan_with_copy_fallback() {
             path: "fallback.bin".to_string(),
             md5: "hash".to_string(),
             size: 13,
-            source_channel_id: ChannelId::CN_OFFICIAL,
+            source_channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
             source_path: source_dir.clone(),
         }],
         download_files: vec![],
@@ -363,13 +363,13 @@ async fn test_execute_reuse_plan_multiple_source_channels() {
     let plan = ReusePlan {
         source_channels: vec![
             SourceChannel {
-                channel_id: ChannelId::CN_OFFICIAL,
+                channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
                 version: "1.0.0".to_string(),
                 install_path: source_dir1.clone(),
                 file_count: 1,
             },
             SourceChannel {
-                channel_id: ChannelId::CN_BILIBILI,
+                channel_id: ChannelPair::parse("2", None::<String>).unwrap(),
                 version: "1.0.0".to_string(),
                 install_path: source_dir2.clone(),
                 file_count: 1,
@@ -380,14 +380,14 @@ async fn test_execute_reuse_plan_multiple_source_channels() {
                 path: "server1.bin".to_string(),
                 md5: "hash1".to_string(),
                 size: 13,
-                source_channel_id: ChannelId::CN_OFFICIAL,
+                source_channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
                 source_path: source_dir1.clone(),
             },
             ReusableFile {
                 path: "server2.bin".to_string(),
                 md5: "hash2".to_string(),
                 size: 13,
-                source_channel_id: ChannelId::CN_BILIBILI,
+                source_channel_id: ChannelPair::parse("2", None::<String>).unwrap(),
                 source_path: source_dir2.clone(),
             },
         ],
@@ -439,23 +439,29 @@ fn test_reusable_file_struct() {
         path: "data/config.json".to_string(),
         md5: "1234567890ab".to_string(),
         size: 2048,
-        source_channel_id: ChannelId::GLOBAL_OFFICIAL,
+        source_channel_id: ChannelPair::parse("6", None::<String>).unwrap(),
         source_path: PathBuf::from("/mnt/games/arknights/global"),
     };
     assert_eq!(file.path, "data/config.json");
-    assert_eq!(file.source_channel_id, ChannelId::GLOBAL_OFFICIAL);
+    assert_eq!(
+        file.source_channel_id,
+        ChannelPair::parse("6", None::<String>).unwrap()
+    );
     assert_eq!(file.size, 2048);
 }
 
 #[test]
 fn test_source_channel_struct() {
     let source = SourceChannel {
-        channel_id: ChannelId::CN_BILIBILI,
+        channel_id: ChannelPair::parse("2", None::<String>).unwrap(),
         version: "2.1.0".to_string(),
         install_path: PathBuf::from("/games/endfield/cn-bili"),
         file_count: 5000,
     };
-    assert_eq!(source.channel_id, ChannelId::CN_BILIBILI);
+    assert_eq!(
+        source.channel_id,
+        ChannelPair::parse("2", None::<String>).unwrap()
+    );
     assert_eq!(source.version, "2.1.0");
     assert_eq!(source.file_count, 5000);
 }

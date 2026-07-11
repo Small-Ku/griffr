@@ -274,10 +274,7 @@ pub(crate) enum AccountCommands {
         game: String,
 
         /// Optional channel hint to narrow default sdk_data discovery roots
-        #[arg(
-            long,
-            value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic", "global_googleplay"]
-        )]
+        #[arg(long)]
         channel_hint: Option<String>,
 
         /// Output bundle directory
@@ -308,10 +305,7 @@ pub(crate) enum AccountCommands {
         game: String,
 
         /// Optional channel hint to narrow default sdk_data discovery roots
-        #[arg(
-            long,
-            value_parser = ["cn_official", "cn_bilibili", "global_official", "global_epic", "global_googleplay"]
-        )]
+        #[arg(long)]
         channel_hint: Option<String>,
 
         /// Input bundle directory

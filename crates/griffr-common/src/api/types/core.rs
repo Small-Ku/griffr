@@ -90,62 +90,6 @@ impl Region {
     }
 }
 
-/// Channel and sub-channel configuration
-#[derive(Debug, Clone, Copy)]
-pub struct ChannelConfig {
-    pub channel: &'static str,
-    pub sub_channel: &'static str,
-}
-
-impl ChannelConfig {
-    const CN_OFFICIAL: Self = Self {
-        channel: "1",
-        sub_channel: "1",
-    };
-
-    const CN_BILIBILI: Self = Self {
-        channel: "2",
-        sub_channel: "2",
-    };
-
-    const GLOBAL_OFFICIAL: Self = Self {
-        channel: "6",
-        sub_channel: "6",
-    };
-
-    const GLOBAL_EPIC: Self = Self {
-        channel: "6",
-        sub_channel: "801",
-    };
-
-    const GLOBAL_GOOGLEPLAY: Self = Self {
-        channel: "6",
-        sub_channel: "802",
-    };
-
-    /// Get channel configuration for a game/channel pair.
-    pub fn for_game_channel(
-        game: crate::config::GameId,
-        channel: crate::config::ChannelId,
-    ) -> Self {
-        let _ = game;
-        let s = channel.as_str();
-        if s == "cn_official" {
-            Self::CN_OFFICIAL
-        } else if s == "cn_bilibili" {
-            Self::CN_BILIBILI
-        } else if s == "global_official" {
-            Self::GLOBAL_OFFICIAL
-        } else if s == "global_epic" {
-            Self::GLOBAL_EPIC
-        } else if s == "global_googleplay" {
-            Self::GLOBAL_GOOGLEPLAY
-        } else {
-            Self::CN_OFFICIAL
-        }
-    }
-}
-
 /// Extract rand_str from a CDN path (pkg.file_path format).
 ///
 /// The path format is: `.../{version}_{randStr}/files`

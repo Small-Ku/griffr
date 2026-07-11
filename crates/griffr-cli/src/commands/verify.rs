@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::config::{ChannelId, GameId};
+use griffr_common::config::{ChannelPair, GameId};
 use griffr_common::runtime::is_launcher_metadata_path;
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
 use griffr_common::runtime::{plan_vfs_tasks, VfsMaterializeConfig};
@@ -15,7 +15,7 @@ use crate::{GlobalOptions, OutputFormat};
 pub async fn verify(
     path: PathBuf,
     game_override: Option<GameId>,
-    channel_override: Option<ChannelId>,
+    channel_override: Option<ChannelPair>,
     overrides: crate::InstallProfileOverrideArgs,
     skip_local_detect: bool,
     repair: bool,
@@ -69,17 +69,21 @@ pub async fn verify(
         if let Some(detected_channel) = detected_channel {
             if detected_channel != &channel_id && opts.output != OutputFormat::Json {
                 ui::print_warning(format!(
-                    "Overriding detected channel {} with CLI --channel {}",
-                    detected_channel, channel_id
+                    "Overriding detected channel {}/{} with CLI --channel {}/{}",
+                    detected_channel.channel(),
+                    detected_channel.sub_channel(),
+                    channel_id.channel(),
+                    channel_id.sub_channel()
                 ));
             }
         }
     }
 
     ui::print_phase(format!(
-        "Verifying {} ({}) at {}",
+        "Verifying {} (channel={}, sub-channel={}) at {}",
         game_id,
-        channel_id,
+        channel_id.channel(),
+        channel_id.sub_channel(),
         local.install_path.display(),
     ));
     ui::print_info(format!("Installed version: {}", installed_version));
@@ -220,7 +224,8 @@ pub async fn verify(
         ui::emit_json(&json!({
             "path": local.install_path.display().to_string(),
             "game": game_id.to_string(),
-            "channel": channel_id.to_string(),
+            "channel": channel_id.channel().to_string(),
+            "sub_channel": channel_id.sub_channel().to_string(),
             "version": installed_version,
             "repair": repair,
             "issues": issue_list,

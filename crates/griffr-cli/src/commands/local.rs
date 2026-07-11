@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use griffr_common::api::crypto;
-use griffr_common::config::{ChannelId, GameConfig, GameId};
+use griffr_common::config::{ChannelPair, GameConfig, GameId};
 use griffr_common::runtime::GameManager;
 
 #[derive(Debug, Clone)]
@@ -45,7 +45,7 @@ pub struct LocalInstall {
     pub install_path: PathBuf,
     pub config_ini: ParsedConfigIni,
     pub game_id: Option<GameId>,
-    pub channel_id: Option<ChannelId>,
+    pub channel_id: Option<ChannelPair>,
 }
 
 impl LocalInstall {
@@ -56,7 +56,7 @@ impl LocalInstall {
         ))
     }
 
-    pub fn require_known_channel(&self) -> Result<ChannelId> {
+    pub fn require_known_channel(&self) -> Result<ChannelPair> {
         self.channel_id.clone().context(format!(
             "Could not map local install to a supported channel from {}",
             self.install_path.display()
@@ -80,14 +80,15 @@ impl LocalInstall {
         let channel_id = self.require_known_channel()?;
         let version = self.require_config_ini_version()?.to_string();
 
+        let install_channel = channel_id.channel().clone();
         let mut config = GameConfig {
             install_path: Some(self.install_path.clone()),
-            active_channel: channel_id.clone(),
+            active_channel: install_channel.clone(),
             version: Some(version.clone()),
             last_update: None,
             channels: Default::default(),
         };
-        let channel = config.channels.entry(channel_id).or_default();
+        let channel = config.channels.entry(install_channel).or_default();
         channel.installed = true;
         channel.install_path = Some(self.install_path.clone());
         channel.version = Some(version);
@@ -179,35 +180,8 @@ pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
         }
     };
 
-    let mut resolved_game = None;
-    let mut resolved_channel = None;
-
-    if let (Some(appcode), Some(channel), Some(sub_channel)) = (
-        config_ini.appcode(),
-        config_ini.channel(),
-        config_ini.sub_channel(),
-    ) {
-        if let Some((g, s)) = griffr_common::config::KnownTargets::find_by_appcode_and_channel(
-            appcode,
-            channel,
-            sub_channel,
-        ) {
-            resolved_game = Some(g);
-            resolved_channel = Some(s);
-        } else {
-            resolved_game = Some(GameId::new(appcode));
-            resolved_channel = Some(ChannelId::new(format!("{}_{}", channel, sub_channel)));
-        }
-    }
-
-    let game_id = match resolved_game {
-        Some(game) => Some(game),
-        None => detect_game_id(&config_ini, has_arknights_exe, has_endfield_exe),
-    };
-    let channel_id = match resolved_channel {
-        Some(channel) => Some(channel),
-        None => detect_channel_id(&config_ini),
-    };
+    let game_id = detect_game_id(&config_ini, has_arknights_exe, has_endfield_exe);
+    let channel_id = detect_channel_id(&config_ini);
 
     Ok(LocalInstall {
         install_path,
@@ -243,16 +217,9 @@ fn detect_game_id(
     }
 }
 
-fn detect_channel_id(config_ini: &ParsedConfigIni) -> Option<ChannelId> {
-    match (config_ini.channel(), config_ini.sub_channel()) {
-        (Some("1"), Some("1")) => Some(ChannelId::CN_OFFICIAL),
-        (Some("1"), Some("2")) => Some(ChannelId::CN_BILIBILI),
-        (Some("2"), Some("2")) => Some(ChannelId::CN_BILIBILI),
-        (Some("6"), Some("6")) => Some(ChannelId::GLOBAL_OFFICIAL),
-        (Some("6"), Some("801")) => Some(ChannelId::GLOBAL_EPIC),
-        (Some("6"), Some("802")) => Some(ChannelId::GLOBAL_GOOGLEPLAY),
-        _ => None,
-    }
+fn detect_channel_id(config_ini: &ParsedConfigIni) -> Option<ChannelPair> {
+    let channel = config_ini.channel()?;
+    ChannelPair::parse(channel, config_ini.sub_channel()).ok()
 }
 
 #[cfg(test)]
@@ -271,30 +238,19 @@ mod tests {
     }
 
     #[test]
-    fn detect_channel_maps_cn_bilibili_legacy_tuple() {
-        let parsed = parsed_with_channel("1", "2");
-        assert_eq!(detect_channel_id(&parsed), Some(ChannelId::CN_BILIBILI));
+    fn detect_channel_preserves_independent_pair() {
+        let parsed = parsed_with_channel("1", "802");
+        let channel = detect_channel_id(&parsed).unwrap();
+        assert_eq!(channel.channel().as_str(), "1");
+        assert_eq!(channel.sub_channel().as_str(), "802");
     }
 
     #[test]
-    fn detect_channel_maps_cn_bilibili_new_tuple() {
-        let parsed = parsed_with_channel("2", "2");
-        assert_eq!(detect_channel_id(&parsed), Some(ChannelId::CN_BILIBILI));
-    }
-
-    #[test]
-    fn detect_channel_maps_global_epic_tuple() {
-        let parsed = parsed_with_channel("6", "801");
-        assert_eq!(detect_channel_id(&parsed), Some(ChannelId::GLOBAL_EPIC));
-    }
-
-    #[test]
-    fn detect_channel_maps_global_googleplay_tuple() {
-        let parsed = parsed_with_channel("6", "802");
-        assert_eq!(
-            detect_channel_id(&parsed),
-            Some(ChannelId::GLOBAL_GOOGLEPLAY)
-        );
+    fn detect_channel_preserves_unknown_server_validated_values() {
+        let parsed = parsed_with_channel("123", "456");
+        let channel = detect_channel_id(&parsed).unwrap();
+        assert_eq!(channel.channel().as_str(), "123");
+        assert_eq!(channel.sub_channel().as_str(), "456");
     }
 
     #[test]
@@ -310,7 +266,7 @@ mod tests {
                 fields,
             },
             game_id: Some(GameId::ENDFIELD),
-            channel_id: Some(ChannelId::CN_OFFICIAL),
+            channel_id: Some(ChannelPair::parse("1", None::<String>).unwrap()),
         };
 
         assert_eq!(local.require_config_ini_version().unwrap(), "1.1.9");
@@ -326,7 +282,7 @@ mod tests {
                 fields: BTreeMap::new(),
             },
             game_id: Some(GameId::ENDFIELD),
-            channel_id: Some(ChannelId::CN_OFFICIAL),
+            channel_id: Some(ChannelPair::parse("1", None::<String>).unwrap()),
         };
 
         let err = local.require_config_ini_version().unwrap_err();

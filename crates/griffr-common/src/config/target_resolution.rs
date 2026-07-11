@@ -3,8 +3,8 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ApiTarget, ChannelCode, ChannelId, GameAppCode, GameId, InstallProfile, KnownTargets,
-    LauncherAppCode, LauncherGateway, SubChannelCode,
+    ApiTarget, ChannelPair, GameAppCode, GameId, InstallProfile, KnownTargets, LauncherAppCode,
+    LauncherGateway,
 };
 use crate::error::{Error, Result};
 
@@ -22,8 +22,6 @@ pub struct TargetOverride {
     pub gateway: Option<String>,
     pub game_appcode: Option<String>,
     pub launcher_appcode: Option<String>,
-    pub channel_code: Option<String>,
-    pub sub_channel: Option<String>,
     pub executable: Option<String>,
     pub streaming_assets_subdir: Option<String>,
 }
@@ -49,12 +47,12 @@ fn safe_relative_path(value: &str, field: &str) -> Result<PathBuf> {
 
 pub fn resolve_install_profile(
     game: &GameId,
-    channel: &ChannelId,
+    channel: &ChannelPair,
     overrides: &TargetOverride,
 ) -> Result<InstallProfile> {
     let mut profile = KnownTargets::resolve(game, channel).ok_or_else(|| {
         Error::Config(format!(
-            "Unknown target '{game}/{channel}'; custom targets are not supported without a complete built-in profile"
+            "Unknown game profile '{game}'; channel values are passed through to the server"
         ))
     })?;
 
@@ -66,12 +64,6 @@ pub fn resolve_install_profile(
     }
     if let Some(value) = &overrides.launcher_appcode {
         profile.target.launcher_appcode = LauncherAppCode::new(value.clone());
-    }
-    if let Some(value) = &overrides.channel_code {
-        profile.target.channel_code = ChannelCode::new(value.clone());
-    }
-    if let Some(value) = &overrides.sub_channel {
-        profile.target.sub_channel = SubChannelCode::new(value.clone());
     }
     if let Some(value) = &overrides.executable {
         profile.executable = safe_relative_path(value, "executable")
@@ -87,7 +79,7 @@ pub fn resolve_install_profile(
 
 pub fn resolve_api_target(
     game: &GameId,
-    channel: &ChannelId,
+    channel: &ChannelPair,
     overrides: &TargetOverride,
 ) -> Result<ApiTarget> {
     Ok(resolve_install_profile(game, channel, overrides)?.target)

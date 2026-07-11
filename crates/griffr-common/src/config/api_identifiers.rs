@@ -33,38 +33,6 @@ impl std::fmt::Display for LauncherAppCode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ChannelCode(pub String);
-
-impl ChannelCode {
-    pub fn new(val: impl Into<String>) -> Self {
-        Self(val.into())
-    }
-}
-
-impl std::fmt::Display for ChannelCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SubChannelCode(pub String);
-
-impl SubChannelCode {
-    pub fn new(val: impl Into<String>) -> Self {
-        Self(val.into())
-    }
-}
-
-impl std::fmt::Display for SubChannelCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
 pub struct LauncherGateway(pub String);
 
 impl LauncherGateway {

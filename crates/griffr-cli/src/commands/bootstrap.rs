@@ -49,9 +49,10 @@ pub async fn bootstrap(
     let rand_str = version_info.rand_str();
     if rand_str.is_empty() {
         anyhow::bail!(
-            "Could not resolve rand_str for {} ({}) version {}",
+            "Could not resolve rand_str for {} (channel={}, sub-channel={}) version {}",
             game_id,
-            channel_id,
+            channel_id.channel(),
+            channel_id.sub_channel(),
             installed_version
         );
     }
@@ -95,9 +96,10 @@ pub async fn bootstrap(
 
     if opts.is_dry_run() {
         opts.dry_run(format!(
-            "Would bootstrap Persistent VFS for {} ({}) at {} with scope={:?}",
+            "Would bootstrap Persistent VFS for {} (channel={}, sub-channel={}) at {} with scope={:?}",
             game_id,
-            channel_id,
+            channel_id.channel(),
+            channel_id.sub_channel(),
             local.install_path.display(),
             scope
         ));
@@ -127,8 +129,11 @@ pub async fn bootstrap(
     }
 
     ui::print_phase(format!(
-        "Bootstrapping Persistent VFS ({:?}) for {} ({})",
-        scope, game_id, channel_id
+        "Bootstrapping Persistent VFS ({:?}) for {} (channel={}, sub-channel={})",
+        scope,
+        game_id,
+        channel_id.channel(),
+        channel_id.sub_channel()
     ));
     ui::print_info(format!(
         "StreamingAssets source: {}",

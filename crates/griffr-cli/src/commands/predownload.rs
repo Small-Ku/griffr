@@ -117,9 +117,10 @@ async fn print_predownload_status(
     );
 
     ui::print_phase(format!(
-        "Checking predownload for {} ({}) at {}",
+        "Checking predownload for {} (channel={}, sub-channel={}) at {}",
         game_id,
-        channel_id,
+        channel_id.channel(),
+        channel_id.sub_channel(),
         local.install_path.display()
     ));
     ui::print_info(format!(

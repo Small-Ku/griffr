@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use griffr_common::api::client::ApiClient;
-use griffr_common::config::{ChannelId, GameId};
+use griffr_common::config::{ChannelPair, GameId};
 use serde_json::{json, Value};
 
 use super::utils::emit_json;
@@ -10,13 +10,14 @@ use crate::GlobalOptions;
 
 fn media_to_json(
     game_id: GameId,
-    channel_id: ChannelId,
+    channel_id: ChannelPair,
     language: &str,
     media: &griffr_common::api::client::MediaResponse,
 ) -> Value {
     json!({
         "game": game_id.to_string(),
-        "channel": channel_id.to_string(),
+        "channel": channel_id.channel().to_string(),
+            "sub_channel": channel_id.sub_channel().to_string(),
         "language": language,
         "banners": media.banners.as_ref().map(|b| {
             json!({
@@ -91,7 +92,7 @@ fn media_to_json(
 
 pub async fn api_get_media(
     game_id: GameId,
-    channel_id: ChannelId,
+    channel_id: ChannelPair,
     overrides: crate::ApiTargetOverrideArgs,
     language: String,
     output: Option<PathBuf>,
@@ -106,7 +107,7 @@ pub async fn api_get_media(
 
 pub async fn fetch_media(
     game_id: GameId,
-    channel_id: ChannelId,
+    channel_id: ChannelPair,
     overrides: crate::ApiTargetOverrideArgs,
     language: String,
     output: Option<PathBuf>,

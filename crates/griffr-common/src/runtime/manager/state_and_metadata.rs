@@ -307,8 +307,8 @@ impl GameManager {
             "cn"
         };
         let appcode = &profile.target.game_appcode.0;
-        let channel = &profile.target.channel_code.0;
-        let sub_channel = &profile.target.sub_channel.0;
+        let channel = profile.target.channel.as_str();
+        let sub_channel = profile.target.sub_channel.as_str();
 
         let uninstall_params = self
             .uninstall_params()?

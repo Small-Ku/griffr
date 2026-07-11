@@ -16,7 +16,7 @@ use crate::runtime::{
 pub async fn apply_file_reuse_flow(
     api_client: &ApiClient,
     game_id: crate::config::GameId,
-    target_channel_id: crate::config::ChannelId,
+    target_channel_id: crate::config::ChannelPair,
     target_version: &str,
     install_path: &Path,
     file_path: &str,
@@ -50,7 +50,7 @@ pub async fn apply_file_reuse_flow(
 pub async fn materialize_game_files_with_pool(
     api_client: &ApiClient,
     game_id: crate::config::GameId,
-    _target_channel_id: crate::config::ChannelId,
+    _target_channel_id: crate::config::ChannelPair,
     _target_version: &str,
     install_path: &Path,
     file_path: &str,

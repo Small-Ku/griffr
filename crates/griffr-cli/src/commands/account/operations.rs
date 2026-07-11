@@ -285,9 +285,10 @@ pub(super) fn local_low_roots_for_hint(
     channel_hint: Option<ChannelId>,
 ) -> Result<Vec<PathBuf>> {
     if let Some(channel) = channel_hint {
-        let vendor = match channel.as_str() {
-            "cn_official" | "cn_bilibili" => "Hypergryph",
-            "global_official" | "global_epic" | "global_googleplay" => "Gryphline",
+        let chan = channel.as_str();
+        let vendor = match chan {
+            "1" | "2" => "Hypergryph",
+            "6" | "801" | "802" => "Gryphline",
             custom => anyhow::bail!(
                 "Custom channel {custom} must provide --sdk-dir; no LocalLow vendor is inferred"
             ),

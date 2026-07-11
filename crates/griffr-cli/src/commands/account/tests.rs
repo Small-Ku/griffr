@@ -38,7 +38,7 @@ fn select_latest_sdk_dir_from_roots_prefers_newest_across_roots() {
 #[test]
 fn local_low_roots_for_hint_cn_prefers_hypergryph() {
     let base = PathBuf::from("C:\\Users\\Test\\AppData\\LocalLow");
-    let roots = local_low_roots_for_hint(&base, "Endfield", Some(ChannelId::CN_OFFICIAL)).unwrap();
+    let roots = local_low_roots_for_hint(&base, "Endfield", Some(ChannelId::HYPERGRYPH)).unwrap();
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0], base.join("Hypergryph").join("Endfield"));
 }
@@ -46,8 +46,7 @@ fn local_low_roots_for_hint_cn_prefers_hypergryph() {
 #[test]
 fn local_low_roots_for_hint_global_prefers_gryphline() {
     let base = PathBuf::from("C:\\Users\\Test\\AppData\\LocalLow");
-    let roots =
-        local_low_roots_for_hint(&base, "Endfield", Some(ChannelId::GLOBAL_OFFICIAL)).unwrap();
+    let roots = local_low_roots_for_hint(&base, "Endfield", Some(ChannelId::GRYPHLINE)).unwrap();
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0], base.join("Gryphline").join("Endfield"));
 }
@@ -55,8 +54,8 @@ fn local_low_roots_for_hint_global_prefers_gryphline() {
 #[test]
 fn local_low_roots_for_hint_rejects_invalid_channel_for_game() {
     let base = PathBuf::from("C:\\Users\\Test\\AppData\\LocalLow");
-    let err = local_low_roots_for_hint(&base, "FutureGame", Some(ChannelId::new("custom_channel")))
-        .unwrap_err();
+    let channel = ChannelId::new("999").unwrap();
+    let err = local_low_roots_for_hint(&base, "FutureGame", Some(channel)).unwrap_err();
     assert!(err.to_string().contains("must provide --sdk-dir"));
 }
 

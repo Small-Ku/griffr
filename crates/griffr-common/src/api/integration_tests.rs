@@ -11,7 +11,7 @@
 
 use crate::api::client::{ApiClient, MediaResponse};
 use crate::api::types::{GameFileEntry, GetLatestGameResponse};
-use crate::config::{ChannelId, GameId};
+use crate::config::{ChannelPair, GameId};
 
 fn assert_non_empty(label: &str, value: &str) {
     assert!(!value.trim().is_empty(), "{label} should not be empty");
@@ -63,9 +63,9 @@ fn assert_latest_payload_shape(info: &GetLatestGameResponse) {
     }
 }
 
-fn expected_cdn_fragment(channel: &ChannelId) -> &'static str {
-    let s = channel.as_str();
-    if s == "cn_official" || s == "cn_bilibili" {
+fn expected_cdn_fragment(channel: &ChannelPair) -> &'static str {
+    let chan = channel.channel().as_str();
+    if chan == "1" || chan == "2" {
         ".hycdn.cn"
     } else {
         ".hg-cdn.com"
@@ -131,7 +131,7 @@ fn assert_media_payload_shape(media: &MediaResponse) {
     }
 }
 
-async fn assert_latest_for_channel(client: &ApiClient, game: GameId, channel: ChannelId) {
+async fn assert_latest_for_channel(client: &ApiClient, game: GameId, channel: ChannelPair) {
     let preset = crate::config::KnownTargets::resolve(&game, &channel).unwrap();
     let info = client
         .get_latest_game(&preset.target, None)
@@ -178,7 +178,7 @@ async fn assert_latest_for_channel(client: &ApiClient, game: GameId, channel: Ch
 async fn assert_media_for_channel(
     client: &ApiClient,
     game: GameId,
-    channel: ChannelId,
+    channel: ChannelPair,
     language: &str,
 ) {
     let preset = crate::config::KnownTargets::resolve(&game, &channel).unwrap();
@@ -233,7 +233,7 @@ async fn assert_media_for_channel(
     }
 }
 
-async fn assert_game_files_for_channel(client: &ApiClient, game: GameId, channel: ChannelId) {
+async fn assert_game_files_for_channel(client: &ApiClient, game: GameId, channel: ChannelPair) {
     let preset = crate::config::KnownTargets::resolve(&game, &channel).unwrap();
     let info = client
         .get_latest_game(&preset.target, None)
@@ -278,13 +278,34 @@ async fn test_real_api_latest_matrix() {
     let client = ApiClient::new().expect("Failed to create API client");
 
     let matrix = [
-        (GameId::ARKNIGHTS, ChannelId::CN_OFFICIAL),
-        (GameId::ARKNIGHTS, ChannelId::CN_BILIBILI),
-        (GameId::ENDFIELD, ChannelId::CN_OFFICIAL),
-        (GameId::ENDFIELD, ChannelId::CN_BILIBILI),
-        (GameId::ENDFIELD, ChannelId::GLOBAL_OFFICIAL),
-        (GameId::ENDFIELD, ChannelId::GLOBAL_EPIC),
-        (GameId::ENDFIELD, ChannelId::GLOBAL_GOOGLEPLAY),
+        (
+            GameId::ARKNIGHTS,
+            ChannelPair::parse("1", None::<String>).unwrap(),
+        ),
+        (
+            GameId::ARKNIGHTS,
+            ChannelPair::parse("2", None::<String>).unwrap(),
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("1", None::<String>).unwrap(),
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("2", None::<String>).unwrap(),
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("6", None::<String>).unwrap(),
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("6", Some("801")).unwrap(),
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("6", Some("802")).unwrap(),
+        ),
     ];
     assert_eq!(
         matrix.len(),
@@ -303,13 +324,41 @@ async fn test_real_api_media_matrix() {
     let client = ApiClient::new().expect("Failed to create API client");
 
     let matrix = [
-        (GameId::ARKNIGHTS, ChannelId::CN_OFFICIAL, "zh-cn"),
-        (GameId::ARKNIGHTS, ChannelId::CN_BILIBILI, "zh-cn"),
-        (GameId::ENDFIELD, ChannelId::CN_OFFICIAL, "zh-cn"),
-        (GameId::ENDFIELD, ChannelId::CN_BILIBILI, "zh-cn"),
-        (GameId::ENDFIELD, ChannelId::GLOBAL_OFFICIAL, "en-us"),
-        (GameId::ENDFIELD, ChannelId::GLOBAL_EPIC, "en-us"),
-        (GameId::ENDFIELD, ChannelId::GLOBAL_GOOGLEPLAY, "en-us"),
+        (
+            GameId::ARKNIGHTS,
+            ChannelPair::parse("1", None::<String>).unwrap(),
+            "zh-cn",
+        ),
+        (
+            GameId::ARKNIGHTS,
+            ChannelPair::parse("2", None::<String>).unwrap(),
+            "zh-cn",
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("1", None::<String>).unwrap(),
+            "zh-cn",
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("2", None::<String>).unwrap(),
+            "zh-cn",
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("6", None::<String>).unwrap(),
+            "en-us",
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("6", Some("801")).unwrap(),
+            "en-us",
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("6", Some("802")).unwrap(),
+            "en-us",
+        ),
     ];
     assert_eq!(
         matrix.len(),
@@ -328,13 +377,34 @@ async fn test_real_api_game_files_matrix() {
     let client = ApiClient::new().expect("Failed to create API client");
 
     let matrix = [
-        (GameId::ARKNIGHTS, ChannelId::CN_OFFICIAL),
-        (GameId::ARKNIGHTS, ChannelId::CN_BILIBILI),
-        (GameId::ENDFIELD, ChannelId::CN_OFFICIAL),
-        (GameId::ENDFIELD, ChannelId::CN_BILIBILI),
-        (GameId::ENDFIELD, ChannelId::GLOBAL_OFFICIAL),
-        (GameId::ENDFIELD, ChannelId::GLOBAL_EPIC),
-        (GameId::ENDFIELD, ChannelId::GLOBAL_GOOGLEPLAY),
+        (
+            GameId::ARKNIGHTS,
+            ChannelPair::parse("1", None::<String>).unwrap(),
+        ),
+        (
+            GameId::ARKNIGHTS,
+            ChannelPair::parse("2", None::<String>).unwrap(),
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("1", None::<String>).unwrap(),
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("2", None::<String>).unwrap(),
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("6", None::<String>).unwrap(),
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("6", Some("801")).unwrap(),
+        ),
+        (
+            GameId::ENDFIELD,
+            ChannelPair::parse("6", Some("802")).unwrap(),
+        ),
     ];
     assert_eq!(
         matrix.len(),
@@ -352,9 +422,11 @@ async fn test_real_api_game_files_matrix() {
 async fn test_real_endfield_os_known_versions_return_full_or_patch_payloads() {
     let client = ApiClient::new().expect("Failed to create API client");
 
-    let preset =
-        crate::config::KnownTargets::resolve(&GameId::ENDFIELD, &ChannelId::GLOBAL_OFFICIAL)
-            .unwrap();
+    let preset = crate::config::KnownTargets::resolve(
+        &GameId::ENDFIELD,
+        &ChannelPair::parse("6", None::<String>).unwrap(),
+    )
+    .unwrap();
     for requested_version in ["1.0.13", "1.0.14", "1.1.9"] {
         let info = client
             .get_latest_game(&preset.target, Some(requested_version))

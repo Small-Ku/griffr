@@ -73,14 +73,6 @@ pub struct ApiTargetOverrideArgs {
     /// Override launcher appcode
     #[arg(long = "launcher-appcode")]
     pub launcher_appcode: Option<String>,
-
-    /// Override API channel code (for example 1 or 6)
-    #[arg(long = "channel-code")]
-    pub channel_code: Option<String>,
-
-    /// Override sub-channel ID
-    #[arg(long = "sub-channel")]
-    pub sub_channel: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -103,8 +95,6 @@ impl From<ApiTargetOverrideArgs> for griffr_common::config::TargetOverride {
             gateway: args.gateway,
             game_appcode: args.game_appcode,
             launcher_appcode: args.launcher_appcode,
-            channel_code: args.channel_code,
-            sub_channel: args.sub_channel,
             ..Default::default()
         }
     }
@@ -116,8 +106,6 @@ impl From<InstallProfileOverrideArgs> for griffr_common::config::TargetOverride 
             gateway: args.api.gateway,
             game_appcode: args.api.game_appcode,
             launcher_appcode: args.api.launcher_appcode,
-            channel_code: args.api.channel_code,
-            sub_channel: args.api.sub_channel,
             executable: args.executable,
             streaming_assets_subdir: args.streaming_assets_subdir,
         }
@@ -133,9 +121,13 @@ pub(crate) struct GameArg {
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct ChannelArg {
-    /// Known channel id or custom channel
+    /// API channel ID or friendly alias
     #[arg(long, requires = "game")]
     pub(crate) channel: Option<String>,
+
+    /// API sub-channel ID or friendly alias; defaults to --channel
+    #[arg(long = "sub-channel", alias = "subchannel", requires = "channel")]
+    pub(crate) sub_channel: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -153,14 +145,18 @@ pub(crate) struct RequiredGameChannelArgs {
     #[arg(long)]
     pub(crate) game: String,
 
-    /// Known channel id or custom channel
+    /// API channel ID or friendly alias
     #[arg(long)]
     pub(crate) channel: String,
+
+    /// API sub-channel ID or friendly alias; defaults to --channel
+    #[arg(long = "sub-channel", alias = "subchannel")]
+    pub(crate) sub_channel: Option<String>,
 }
 
 impl RequiredGameChannelArgs {
-    pub(crate) fn into_pair(self) -> (String, String) {
-        (self.game, self.channel)
+    pub(crate) fn into_parts(self) -> (String, String, Option<String>) {
+        (self.game, self.channel, self.sub_channel)
     }
 }
 

@@ -100,8 +100,8 @@ impl ApiClient {
             requests: vec![ProxyRequest::GetLatestGame {
                 req: GetLatestGameRequest {
                     appcode: target.game_appcode.0.clone(),
-                    channel: target.channel_code.0.clone(),
-                    sub_channel: target.sub_channel.0.clone(),
+                    channel: target.channel.as_str().to_owned(),
+                    sub_channel: target.sub_channel.as_str().to_owned(),
                     version: current_version.unwrap_or("").to_string(),
                     launcher_appcode: target.launcher_appcode.0.clone(),
                 },
@@ -126,8 +126,8 @@ impl ApiClient {
         let common_req = CommonRequest::new(
             target.game_appcode.0.clone(),
             language,
-            target.channel_code.0.clone(),
-            target.sub_channel.0.clone(),
+            target.channel.as_str().to_owned(),
+            target.sub_channel.as_str().to_owned(),
         );
 
         let request = BatchRequest {
@@ -180,8 +180,8 @@ impl ApiClient {
         let common_req = CommonRequest::new(
             target.game_appcode.0.clone(),
             language,
-            target.channel_code.0.clone(),
-            target.sub_channel.0.clone(),
+            target.channel.as_str().to_owned(),
+            target.sub_channel.as_str().to_owned(),
         );
 
         let request = BatchRequest {

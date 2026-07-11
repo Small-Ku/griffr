@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
-use crate::config::{resolve_install_profile, ChannelId, GameId};
+use crate::config::{resolve_install_profile, ChannelId, ChannelPair, GameId};
 #[cfg(not(windows))]
 use crate::runtime::read_link;
 use crate::runtime::{dir_size, directory_has_entries};
@@ -50,7 +50,7 @@ impl Channel {
     pub fn channel_path(&self) -> PathBuf {
         self.base_path
             .join("channels")
-            .join(format!("{}", self.channel_id))
+            .join(self.channel_id.as_str())
     }
 
     /// Get the "active" symlink/junction path
@@ -191,8 +191,8 @@ impl Channel {
 
     /// Get the game executable path
     pub fn game_exe_path(&self) -> Result<PathBuf> {
-        let profile =
-            resolve_install_profile(&self.game_id, &self.channel_id, &Default::default())?;
+        let channels = ChannelPair::new(self.channel_id.clone(), None);
+        let profile = resolve_install_profile(&self.game_id, &channels, &Default::default())?;
         Ok(self.file_path(&profile.executable))
     }
 
@@ -215,13 +215,13 @@ mod tests {
     fn test_channel_paths() {
         let channel = Channel::new(
             GameId::ENDFIELD,
-            ChannelId::CN_OFFICIAL,
+            ChannelId::new("1").unwrap(),
             PathBuf::from("C:\\Games\\Endfield"),
         );
 
         assert_eq!(
             channel.channel_path(),
-            PathBuf::from("C:\\Games\\Endfield\\channels\\cn_official")
+            PathBuf::from("C:\\Games\\Endfield\\channels\\1")
         );
         assert_eq!(
             channel.active_path(),
@@ -229,7 +229,7 @@ mod tests {
         );
         assert_eq!(
             channel.game_exe_path().unwrap(),
-            PathBuf::from("C:\\Games\\Endfield\\channels\\cn_official\\Endfield.exe")
+            PathBuf::from("C:\\Games\\Endfield\\channels\\1\\Endfield.exe")
         );
     }
 }

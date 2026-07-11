@@ -80,7 +80,7 @@ impl Default for GameConfig {
     fn default() -> Self {
         Self {
             install_path: None,
-            active_channel: ChannelId::CN_OFFICIAL,
+            active_channel: ChannelId::default(),
             version: None,
             last_update: None,
             channels: BTreeMap::new(),

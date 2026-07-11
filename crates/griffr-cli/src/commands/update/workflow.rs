@@ -44,9 +44,10 @@ pub(super) async fn update_internal(
         .await?;
 
     ui::print_phase(format!(
-        "Updating {} ({}) at {}",
+        "Updating {} (channel={}, sub-channel={}) at {}",
         game_id,
-        channel_id,
+        channel_id.channel(),
+        channel_id.sub_channel(),
         local.install_path.display(),
     ));
     ui::print_info(format!(

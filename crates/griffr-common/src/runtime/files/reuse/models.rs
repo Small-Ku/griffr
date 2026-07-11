@@ -6,14 +6,14 @@
 
 use std::path::PathBuf;
 
-use crate::config::ChannelId;
+use crate::config::ChannelPair;
 use crate::runtime::issues::FileIssue;
 
 /// Information about a source channel that can provide files for reuse
 #[derive(Debug, Clone)]
 pub struct SourceChannel {
     /// Channel ID of the source
-    pub channel_id: ChannelId,
+    pub channel_id: ChannelPair,
     /// Version of the source installation
     pub version: String,
     /// Install path of the source
@@ -26,7 +26,7 @@ pub struct SourceChannel {
 #[derive(Debug, Clone)]
 pub struct SourceInstallInput {
     /// Channel ID declared by the source installation metadata.
-    pub channel_id: ChannelId,
+    pub channel_id: ChannelPair,
     /// Installed version string of the source installation.
     pub version: String,
     /// Installation path used as the file source.
@@ -43,7 +43,7 @@ pub struct ReusableFile {
     /// File size in bytes
     pub size: u64,
     /// Source channel providing this file
-    pub source_channel_id: ChannelId,
+    pub source_channel_id: ChannelPair,
     /// Source install path
     pub source_path: PathBuf,
 }

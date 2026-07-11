@@ -475,9 +475,12 @@ mod tests {
 
     #[test]
     fn test_main_exe_names() {
-        use crate::config::{ChannelId, KnownTargets};
-        let ark_profile =
-            KnownTargets::resolve(&GameId::ARKNIGHTS, &ChannelId::CN_OFFICIAL).unwrap();
+        use crate::config::{ChannelPair, KnownTargets};
+        let ark_profile = KnownTargets::resolve(
+            &GameId::ARKNIGHTS,
+            &ChannelPair::parse("1", None::<String>).unwrap(),
+        )
+        .unwrap();
         let ark_launcher =
             Launcher::new(GameId::ARKNIGHTS, ark_profile, PathBuf::from("/games/ark"));
         assert_eq!(
@@ -485,8 +488,11 @@ mod tests {
             "Arknights.exe"
         );
 
-        let end_profile =
-            KnownTargets::resolve(&GameId::ENDFIELD, &ChannelId::CN_OFFICIAL).unwrap();
+        let end_profile = KnownTargets::resolve(
+            &GameId::ENDFIELD,
+            &ChannelPair::parse("1", None::<String>).unwrap(),
+        )
+        .unwrap();
         let end_launcher =
             Launcher::new(GameId::ENDFIELD, end_profile, PathBuf::from("/games/end"));
         assert_eq!(

@@ -37,36 +37,6 @@ fn test_region_domain_suffixes() {
 }
 
 #[test]
-fn test_channel_config() {
-    use crate::config::{ChannelId, GameId};
-    let official = ChannelConfig::for_game_channel(GameId::ENDFIELD, ChannelId::CN_OFFICIAL);
-    assert_eq!(official.channel, "1");
-    assert_eq!(official.sub_channel, "1");
-
-    let bilibili = ChannelConfig::for_game_channel(GameId::ARKNIGHTS, ChannelId::CN_BILIBILI);
-    assert_eq!(bilibili.channel, "2");
-    assert_eq!(bilibili.sub_channel, "2");
-
-    let endfield_bilibili =
-        ChannelConfig::for_game_channel(GameId::ENDFIELD, ChannelId::CN_BILIBILI);
-    assert_eq!(endfield_bilibili.channel, "2");
-    assert_eq!(endfield_bilibili.sub_channel, "2");
-
-    let global = ChannelConfig::for_game_channel(GameId::ENDFIELD, ChannelId::GLOBAL_OFFICIAL);
-    assert_eq!(global.channel, "6");
-    assert_eq!(global.sub_channel, "6");
-
-    let epic = ChannelConfig::for_game_channel(GameId::ENDFIELD, ChannelId::GLOBAL_EPIC);
-    assert_eq!(epic.channel, "6");
-    assert_eq!(epic.sub_channel, "801");
-
-    let googleplay =
-        ChannelConfig::for_game_channel(GameId::ENDFIELD, ChannelId::GLOBAL_GOOGLEPLAY);
-    assert_eq!(googleplay.channel, "6");
-    assert_eq!(googleplay.sub_channel, "802");
-}
-
-#[test]
 fn test_pack_file_parsing() {
     let json = r#"{
         "url": "https://beyond.hycdn.cn/pack.zip.001?auth_key=xxx",

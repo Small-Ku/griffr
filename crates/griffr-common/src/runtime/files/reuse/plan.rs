@@ -3,14 +3,14 @@ use rapidhash::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 
 use crate::api::types::GameFileEntry;
 use crate::api::ApiClient;
-use crate::config::{ChannelId, GameId};
+use crate::config::{ChannelPair, GameId};
 pub(crate) use crate::runtime::is_launcher_metadata_path;
 use crate::runtime::task_pool::{run_tasks, ProgressEvent, Task, TaskPoolConfig};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn plan_file_reuse(
     game_id: GameId,
-    _target_channel_id: ChannelId,
+    _target_channel_id: ChannelPair,
     _target_version: &str,
     target_manifest: &[GameFileEntry],
     source_installs: &[super::models::SourceInstallInput],

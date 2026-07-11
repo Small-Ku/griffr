@@ -1,7 +1,16 @@
 use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::config::{ChannelId, GameConfig, GameId, KnownTargets};
+use crate::config::{ChannelId, ChannelPair, GameConfig, GameId, InstallProfile, KnownTargets};
+
+fn channel(value: &str) -> ChannelId {
+    ChannelId::new(value).unwrap()
+}
+
+fn profile(game: &GameId, channel: &str, sub_channel: Option<&str>) -> InstallProfile {
+    let channels = ChannelPair::parse(channel, sub_channel).unwrap();
+    KnownTargets::resolve(game, &channels).unwrap()
+}
 
 #[test]
 fn test_game_manager() {
@@ -9,7 +18,7 @@ fn test_game_manager() {
     let mut manager = GameManager::new(
         GameId::ENDFIELD,
         config,
-        KnownTargets::resolve(&GameId::ENDFIELD, &ChannelId::CN_OFFICIAL).unwrap(),
+        profile(&GameId::ENDFIELD, "1", None),
     );
 
     assert!(!manager.is_installed());
@@ -22,10 +31,10 @@ fn test_game_manager() {
         Some(Path::new("C:\\Games\\Endfield"))
     );
 
-    assert_eq!(manager.active_channel(), ChannelId::CN_OFFICIAL);
+    assert_eq!(manager.active_channel(), channel("1"));
 
-    manager.set_active_channel(ChannelId::CN_BILIBILI);
-    assert_eq!(manager.active_channel(), ChannelId::CN_BILIBILI);
+    manager.set_active_channel(channel("2"));
+    assert_eq!(manager.active_channel(), channel("2"));
 }
 
 #[test]
@@ -34,7 +43,7 @@ fn test_game_manager_arknights() {
     let mut manager = GameManager::new(
         GameId::ARKNIGHTS,
         config,
-        KnownTargets::resolve(&GameId::ARKNIGHTS, &ChannelId::CN_OFFICIAL).unwrap(),
+        profile(&GameId::ARKNIGHTS, "1", None),
     );
 
     manager.set_install_path("C:\\Games\\Arknights");
@@ -55,7 +64,7 @@ fn test_game_manager_endfield() {
     let mut manager = GameManager::new(
         GameId::ENDFIELD,
         config,
-        KnownTargets::resolve(&GameId::ENDFIELD, &ChannelId::CN_OFFICIAL).unwrap(),
+        profile(&GameId::ENDFIELD, "1", None),
     );
 
     manager.set_install_path("C:\\Games\\Endfield");
@@ -77,17 +86,17 @@ fn test_channel_installation() {
     let mut manager = GameManager::new(
         GameId::ENDFIELD,
         config,
-        KnownTargets::resolve(&GameId::ENDFIELD, &ChannelId::CN_OFFICIAL).unwrap(),
+        profile(&GameId::ENDFIELD, "1", None),
     );
 
     manager.set_install_path("C:\\Games\\Endfield");
-    manager.mark_channel_installed(ChannelId::CN_OFFICIAL, "1.1.9");
+    manager.mark_channel_installed(channel("1"), "1.1.9");
 
     assert!(manager.is_active_channel_installed());
     assert_eq!(manager.current_version(), Some("1.1.9"));
 
     // Check channel config
-    let channel_config = manager.channel_config(ChannelId::CN_OFFICIAL);
+    let channel_config = manager.channel_config(channel("1"));
     assert!(channel_config.is_some());
     let channel_config = channel_config.unwrap();
     assert!(channel_config.installed);
@@ -101,30 +110,20 @@ fn test_multiple_channels() {
     let mut manager = GameManager::new(
         GameId::ENDFIELD,
         config,
-        KnownTargets::resolve(&GameId::ENDFIELD, &ChannelId::CN_OFFICIAL).unwrap(),
+        profile(&GameId::ENDFIELD, "1", None),
     );
     manager.set_install_path("C:\\Games\\Endfield");
 
     // Install CN Official
-    manager.mark_channel_installed(ChannelId::CN_OFFICIAL, "1.1.9");
+    manager.mark_channel_installed(channel("1"), "1.1.9");
 
     // Switch to Bilibili and install
-    manager.set_active_channel(ChannelId::CN_BILIBILI);
-    manager.mark_channel_installed(ChannelId::CN_BILIBILI, "1.1.9");
+    manager.set_active_channel(channel("2"));
+    manager.mark_channel_installed(channel("2"), "1.1.9");
 
     // Both should be marked installed
-    assert!(
-        manager
-            .channel_config(ChannelId::CN_OFFICIAL)
-            .unwrap()
-            .installed
-    );
-    assert!(
-        manager
-            .channel_config(ChannelId::CN_BILIBILI)
-            .unwrap()
-            .installed
-    );
+    assert!(manager.channel_config(channel("1")).unwrap().installed);
+    assert!(manager.channel_config(channel("2")).unwrap().installed);
 
     // Active version should be Bilibili's
     assert_eq!(manager.current_version(), Some("1.1.9"));
@@ -136,7 +135,7 @@ fn test_version_tracking() {
     let mut manager = GameManager::new(
         GameId::ENDFIELD,
         config,
-        KnownTargets::resolve(&GameId::ENDFIELD, &ChannelId::CN_OFFICIAL).unwrap(),
+        profile(&GameId::ENDFIELD, "1", None),
     );
 
     manager.set_version("1.0.0");
@@ -152,19 +151,19 @@ fn test_into_config() {
     let mut manager = GameManager::new(
         GameId::ENDFIELD,
         config,
-        KnownTargets::resolve(&GameId::ENDFIELD, &ChannelId::CN_OFFICIAL).unwrap(),
+        profile(&GameId::ENDFIELD, "1", None),
     );
 
     manager.set_install_path("C:\\Games\\Endfield");
     manager.set_version("1.1.9");
-    manager.set_active_channel(ChannelId::CN_BILIBILI);
+    manager.set_active_channel(channel("2"));
 
     let config = manager.into_config();
     assert_eq!(config.install_path, None);
     assert_eq!(config.version, Some("1.1.9".to_string()));
-    assert_eq!(config.active_channel, ChannelId::CN_BILIBILI);
+    assert_eq!(config.active_channel, channel("2"));
     assert_eq!(
-        config.channel_install_path(ChannelId::CN_OFFICIAL),
+        config.channel_install_path(channel("1")),
         Some(PathBuf::from("C:\\Games\\Endfield"))
     );
 }
@@ -175,20 +174,15 @@ fn test_channel_config_mut() {
     let mut manager = GameManager::new(
         GameId::ENDFIELD,
         config,
-        KnownTargets::resolve(&GameId::ENDFIELD, &ChannelId::CN_OFFICIAL).unwrap(),
+        profile(&GameId::ENDFIELD, "1", None),
     );
 
     // Get or create channel config
-    let channel_config = manager.channel_config_mut(ChannelId::CN_OFFICIAL);
+    let channel_config = manager.channel_config_mut(channel("1"));
     channel_config.installed = true;
     channel_config.version = Some("1.0.0".to_string());
 
-    assert!(
-        manager
-            .channel_config(ChannelId::CN_OFFICIAL)
-            .unwrap()
-            .installed
-    );
+    assert!(manager.channel_config(channel("1")).unwrap().installed);
 }
 
 #[compio::test]
@@ -199,15 +193,12 @@ async fn test_write_config_ini_uses_launcher_format() {
 
     let mut config = GameConfig {
         install_path: Some(temp.path().to_path_buf()),
-        active_channel: ChannelId::GLOBAL_OFFICIAL,
+        active_channel: channel("6"),
         version: Some("1.2.4".to_string()),
         last_update: None,
         channels: Default::default(),
     };
-    let channel = config
-        .channels
-        .entry(ChannelId::GLOBAL_OFFICIAL)
-        .or_default();
+    let channel = config.channels.entry(channel("6")).or_default();
     channel.installed = true;
     channel.install_path = Some(temp.path().to_path_buf());
     channel.version = Some("1.2.4".to_string());
@@ -215,7 +206,7 @@ async fn test_write_config_ini_uses_launcher_format() {
     let manager = GameManager::new(
         GameId::ENDFIELD,
         config,
-        KnownTargets::resolve(&GameId::ENDFIELD, &ChannelId::GLOBAL_OFFICIAL).unwrap(),
+        profile(&GameId::ENDFIELD, "6", None),
     );
     manager.write_config_ini().await.unwrap();
 

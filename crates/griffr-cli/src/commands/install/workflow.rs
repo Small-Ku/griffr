@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::PackageInfo;
-use griffr_common::config::{ChannelId, GameConfig, GameId};
+use griffr_common::config::{ChannelPair, GameConfig, GameId};
 use griffr_common::runtime::task_pool::{
     ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
@@ -107,7 +107,7 @@ pub(super) fn validate_install_disk_space(pkg: &PackageInfo, install_path: &Path
 
 pub async fn install(
     game_id: GameId,
-    channel_id: ChannelId,
+    channel_id: ChannelPair,
     overrides: crate::InstallProfileOverrideArgs,
     install_path: PathBuf,
     force: bool,
@@ -179,9 +179,10 @@ pub async fn install(
     validate_install_disk_space(pkg, &install_path)?;
 
     ui::print_phase(format!(
-        "Installing {} ({}) into {}",
+        "Installing {} (channel={}, sub-channel={}) into {}",
         game_id,
-        channel_id,
+        channel_id.channel(),
+        channel_id.sub_channel(),
         install_path.display()
     ));
     ui::print_info(format!(
@@ -194,14 +195,15 @@ pub async fn install(
         ui::print_info(format!("Reuse sources: {}", reuse_paths.len()));
     }
 
+    let install_channel = channel_id.channel().clone();
     let mut game_config = GameConfig {
         install_path: Some(install_path.clone()),
-        active_channel: channel_id.clone(),
+        active_channel: install_channel.clone(),
         version: Some(version_info.version.clone()),
         last_update: None,
         channels: Default::default(),
     };
-    let channel = game_config.channels.entry(channel_id.clone()).or_default();
+    let channel = game_config.channels.entry(install_channel).or_default();
     channel.installed = true;
     channel.install_path = Some(install_path.clone());
     channel.version = Some(version_info.version.clone());

@@ -2,16 +2,15 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{
-    ChannelCode, ChannelId, GameAppCode, GameId, LauncherAppCode, LauncherGateway, SubChannelCode,
-};
+use super::{ChannelId, ChannelPair, GameAppCode, GameId, LauncherAppCode, LauncherGateway};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiTarget {
     pub game_appcode: GameAppCode,
     pub launcher_appcode: LauncherAppCode,
     pub gateway: LauncherGateway,
-    pub channel_code: ChannelCode,
-    pub sub_channel: SubChannelCode,
+    pub channel: ChannelId,
+    pub sub_channel: ChannelId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,60 +23,41 @@ pub struct InstallProfile {
 pub struct KnownTargets;
 
 impl KnownTargets {
-    pub fn resolve(game: &GameId, channel: &ChannelId) -> Option<InstallProfile> {
-        let game_str = game.as_str();
-        let channel_str = channel.as_str();
+    pub fn resolve(game: &GameId, channels: &ChannelPair) -> Option<InstallProfile> {
+        let game = game.as_str();
+        let channel = channels.channel().as_str();
+        let sub_channel = channels.sub_channel().as_str();
+        let is_cn = matches!(channel, "1" | "2");
 
-        let (gateway, launcher_appcode, channel_code, sub_channel) = match channel_str {
-            "cn_official" => (
-                "https://launcher.hypergryph.com",
-                "abYeZZ16BPluCFyT",
-                "1",
-                "1",
-            ),
-            "cn_bilibili" => (
-                "https://launcher.hypergryph.com",
-                "abYeZZ16BPluCFyT",
-                "2",
-                "2",
-            ),
-            "global_official" => (
-                "https://launcher.gryphline.com",
-                "TiaytKBUIEdoEwRT",
-                "6",
-                "6",
-            ),
-            "global_epic" => (
-                "https://launcher.gryphline.com",
-                "BBWoqCzuZ2bZ1Dro",
-                "6",
-                "801",
-            ),
-            "global_googleplay" => (
-                "https://launcher.gryphline.com",
-                "TiaytKBUIEdoEwRT",
-                "6",
-                "802",
-            ),
-            _ => return None,
+        let gateway = if is_cn {
+            "https://launcher.hypergryph.com"
+        } else {
+            "https://launcher.gryphline.com"
+        };
+        let launcher_appcode = if is_cn {
+            "abYeZZ16BPluCFyT"
+        } else if sub_channel == "801" {
+            "BBWoqCzuZ2bZ1Dro"
+        } else {
+            "TiaytKBUIEdoEwRT"
         };
 
-        let (executable, streaming_assets_subdir) = match game_str {
-            "arknights" => (
+        let (game_appcode, executable, streaming_assets_subdir) = match (game, is_cn) {
+            ("arknights", _) => (
+                "GzD1CpaWgmSq1wew",
                 PathBuf::from("Arknights.exe"),
                 PathBuf::from("Arknights_Data"),
             ),
-            "endfield" => (
+            ("endfield", true) => (
+                "6LL0KJuqHBVz33WK",
                 PathBuf::from("Endfield.exe"),
                 PathBuf::from("Endfield_Data"),
             ),
-            _ => return None,
-        };
-
-        let game_appcode = match (game_str, channel_str.starts_with("global_")) {
-            ("arknights", _) => "GzD1CpaWgmSq1wew",
-            ("endfield", false) => "6LL0KJuqHBVz33WK",
-            ("endfield", true) => "YDUTE5gscDZ229CW",
+            ("endfield", false) => (
+                "YDUTE5gscDZ229CW",
+                PathBuf::from("Endfield.exe"),
+                PathBuf::from("Endfield_Data"),
+            ),
             _ => return None,
         };
 
@@ -86,45 +66,24 @@ impl KnownTargets {
                 game_appcode: GameAppCode::new(game_appcode),
                 launcher_appcode: LauncherAppCode::new(launcher_appcode),
                 gateway: LauncherGateway::new(gateway),
-                channel_code: ChannelCode::new(channel_code),
-                sub_channel: SubChannelCode::new(sub_channel),
+                channel: channels.channel().clone(),
+                sub_channel: channels.sub_channel().clone(),
             },
             executable,
             streaming_assets_subdir,
         })
     }
+}
 
-    pub fn find_by_appcode_and_channel(
-        appcode: &str,
-        channel_code: &str,
-        sub_channel: &str,
-    ) -> Option<(GameId, ChannelId)> {
-        for (game, channels) in &[
-            ("arknights", &["cn_official", "cn_bilibili"][..]),
-            (
-                "endfield",
-                &[
-                    "cn_official",
-                    "cn_bilibili",
-                    "global_official",
-                    "global_epic",
-                    "global_googleplay",
-                ][..],
-            ),
-        ] {
-            for channel_alias in *channels {
-                let g = GameId::new(*game);
-                let s = ChannelId::new(*channel_alias);
-                if let Some(profile) = Self::resolve(&g, &s) {
-                    if profile.target.game_appcode.0 == appcode
-                        && profile.target.channel_code.0 == channel_code
-                        && profile.target.sub_channel.0 == sub_channel
-                    {
-                        return Some((g, s));
-                    }
-                }
-            }
-        }
-        None
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_passes_both_channel_ids_through_unchanged() {
+        let channels = ChannelPair::parse("123", Some("456")).unwrap();
+        let profile = KnownTargets::resolve(&GameId::ENDFIELD, &channels).unwrap();
+        assert_eq!(profile.target.channel.as_str(), "123");
+        assert_eq!(profile.target.sub_channel.as_str(), "456");
     }
 }

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::config::{ChannelId, GameId};
+use griffr_common::config::{ChannelPair, GameId};
 use serde_json::json;
 
 use super::local::{detect_local_install, LocalInstall};
@@ -51,12 +51,13 @@ pub async fn show(
     path: Option<PathBuf>,
     game: Option<String>,
     channel: Option<String>,
+    sub_channel: Option<String>,
     language: &str,
     opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
 
-    let mut remote_target: Option<(GameId, ChannelId)> = None;
+    let mut remote_target: Option<(GameId, ChannelPair)> = None;
     let mut local_install: Option<LocalInstall> = None;
 
     if let Some(path) = path {
@@ -67,7 +68,8 @@ pub async fn show(
         }
         local_install = Some(local);
     } else if let (Some(game), Some(channel)) = (game, channel) {
-        remote_target = Some((game.parse::<GameId>()?, channel.parse::<ChannelId>()?));
+        let channel_id = ChannelPair::parse(channel, sub_channel)?;
+        remote_target = Some((game.parse::<GameId>()?, channel_id));
     } else {
         anyhow::bail!("info requires either --path or both --game and --channel");
     }
@@ -84,14 +86,17 @@ pub async fn show(
             .await
             .with_context(|| {
                 format!(
-                    "Failed to fetch remote info for {:?} {}",
-                    game_id, channel_id
+                    "Failed to fetch remote info for {:?} channel={} sub-channel={}",
+                    game_id,
+                    channel_id.channel(),
+                    channel_id.sub_channel()
                 )
             })?;
 
         remote_json = Some(json!({
             "game": game_id.to_string(),
-            "channel": channel_id.to_string(),
+            "channel": channel_id.channel().as_str(),
+            "sub_channel": channel_id.sub_channel().as_str(),
             "version": info.version,
             "action": info.action,
             "request_version": info.request_version,
@@ -129,7 +134,8 @@ pub async fn show(
                 "version": local.config_ini.version(),
                 "entry": local.config_ini.entry(),
                 "known_game": local.game_id.as_ref().map(|g| g.to_string()),
-                "known_channel": local.channel_id.as_ref().map(|s| s.to_string()),
+                "known_channel": local.channel_id.as_ref().map(|s| s.channel().to_string()),
+                "known_sub_channel": local.channel_id.as_ref().map(|s| s.sub_channel().to_string()),
             })
         });
         return ui::emit_json(&json!({
@@ -157,6 +163,14 @@ pub async fn show(
                 "channel".to_string(),
                 remote
                     .get("channel")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            ),
+            (
+                "sub_channel".to_string(),
+                remote
+                    .get("sub_channel")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),

@@ -17,7 +17,7 @@ pub async fn execute_reuse_plan(
     if options.dry_run {
         info!("Would create {} hardlinks:", plan.reusable_files.len());
         for file in plan.reusable_files.iter().take(10) {
-            info!("  {} <- {}", file.path, file.source_channel_id);
+            info!("  {} <- {:?}", file.path, file.source_channel_id);
         }
         if plan.reusable_files.len() > 10 {
             info!("  ... and {} more", plan.reusable_files.len() - 10);
@@ -96,7 +96,7 @@ pub fn print_reuse_plan_summary(plan: &super::models::ReusePlan, force_copy: boo
         info!(" Source channels:");
         for source in &plan.source_channels {
             info!(
-                " - {} (version {}, {} files)",
+                " - {:?} (version {}, {} files)",
                 source.channel_id, source.version, source.file_count
             );
         }

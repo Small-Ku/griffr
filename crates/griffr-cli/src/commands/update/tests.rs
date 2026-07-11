@@ -1,7 +1,7 @@
 use super::*;
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::{GetLatestGameResponse, PackFile, PackageInfo, PatchInfo};
-use griffr_common::config::{ChannelId, GameId};
+use griffr_common::config::{ChannelPair, GameId};
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
 use md5::Digest;
 use std::collections::HashMap;
