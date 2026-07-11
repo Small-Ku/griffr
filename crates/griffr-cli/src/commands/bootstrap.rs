@@ -78,17 +78,15 @@ pub async fn bootstrap(
             );
         }
         if source.install_path != local.install_path {
-            let source_manager =
-                source.as_manager(griffr_common::config::resolve_install_profile(
-                    &source.require_known_game()?,
-                    &source.require_known_channel()?,
-                    &Default::default(),
-                )?)?;
-            let source_profile = source_manager.active_install_profile()?;
+            let source_profile = griffr_common::config::resolve_install_profile(
+                &source.require_known_game()?,
+                &source.require_known_channel()?,
+                &Default::default(),
+            )?;
             extra_source_streaming_assets.push(
                 source
                     .install_path
-                    .join(source_profile.streaming_assets_subdir.clone())
+                    .join(source_profile.streaming_assets_subdir)
                     .join("StreamingAssets"),
             );
         }

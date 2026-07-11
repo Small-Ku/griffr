@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use griffr_common::api::crypto;
-use griffr_common::config::{ChannelPair, GameConfig, GameId};
-use griffr_common::runtime::GameManager;
+use griffr_common::config::{ChannelPair, GameId};
 
 #[derive(Debug, Clone)]
 pub struct ParsedConfigIni {
@@ -72,39 +71,6 @@ impl LocalInstall {
         self.config_ini.version().context(format!(
             "config.ini at {} does not contain a version field",
             self.config_ini.path.display()
-        ))
-    }
-
-    pub fn as_game_config(&self) -> Result<GameConfig> {
-        let game_id = self.require_known_game()?;
-        let channel_id = self.require_known_channel()?;
-        let version = self.require_config_ini_version()?.to_string();
-
-        let install_channel = channel_id.channel().clone();
-        let mut config = GameConfig {
-            install_path: Some(self.install_path.clone()),
-            active_channel: install_channel.clone(),
-            version: Some(version.clone()),
-            last_update: None,
-            channels: Default::default(),
-        };
-        let channel = config.channels.entry(install_channel).or_default();
-        channel.installed = true;
-        channel.install_path = Some(self.install_path.clone());
-        channel.version = Some(version);
-
-        let _ = game_id;
-        Ok(config)
-    }
-
-    pub fn as_manager(
-        &self,
-        profile: griffr_common::config::InstallProfile,
-    ) -> Result<GameManager> {
-        Ok(GameManager::new(
-            self.require_known_game()?,
-            self.as_game_config()?,
-            profile,
         ))
     }
 }

@@ -113,9 +113,6 @@ pub enum Error {
     #[error("Crypto error: {0}")]
     Crypto(String),
 
-    #[error("Server error: {0}")]
-    Server(String),
-
     #[error("Integrity error: {0}")]
     Integrity(String),
 

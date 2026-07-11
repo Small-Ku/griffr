@@ -8,10 +8,7 @@ use tracing::debug;
 
 fn parse_remote_args(remote: RequiredGameChannelArgs) -> Result<(GameId, ChannelPair)> {
     let (game, channel, sub_channel) = remote.into_parts();
-    Ok((
-        game.parse::<GameId>()?,
-        ChannelPair::parse(channel, sub_channel)?,
-    ))
+    Ok((game.parse::<GameId>()?, ChannelPair::parse(channel, sub_channel)?))
 }
 
 pub(crate) async fn run() -> Result<()> {
@@ -195,11 +192,7 @@ pub(crate) async fn run() -> Result<()> {
             } = reuse;
             let GameChannelArgs {
                 game: GameArg { game },
-                channel:
-                    ChannelArg {
-                        channel,
-                        sub_channel,
-                    },
+                channel: ChannelArg { channel, sub_channel },
             } = remote;
             let game = game.map(|value| value.parse::<GameId>()).transpose()?;
             let channel = channel

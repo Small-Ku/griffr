@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::{ChannelPair, GameId};
-use griffr_common::runtime::is_launcher_metadata_path;
+use griffr_common::runtime::{
+    is_launcher_metadata_path, run_integrity_pool, sync_launcher_metadata,
+};
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
 use griffr_common::runtime::{plan_vfs_tasks, VfsMaterializeConfig};
 use serde_json::json;
@@ -54,7 +56,6 @@ pub async fn verify(
         &channel_id,
         &overrides.clone().into(),
     )?;
-    let manager = local.as_manager(profile.clone())?;
     let api_client = ApiClient::new()?;
 
     if !skip_local_detect {
@@ -187,20 +188,22 @@ pub async fn verify(
         }
     }
     let mut pool_runner = TaskPoolRunner::new(pool_cfg)?;
-    let summary = manager
-        .run_integrity_pool_with_runner(
-            &api_client,
-            repair,
-            &source_roots,
-            force_copy,
-            relink_reuse,
-            extra_tasks,
-            Some(&mut pool_runner),
-            progress_cb.as_ref().map(|(_, cb, _)| cb),
-            progress_cb.as_ref().map(|(_, _, cb)| cb),
-        )
-        .await
-        .context("run_integrity_pool failed")?;
+    let summary = run_integrity_pool(
+        &api_client,
+        &local.install_path,
+        &profile,
+        Some(&installed_version),
+        repair,
+        &source_roots,
+        force_copy,
+        relink_reuse,
+        extra_tasks,
+        Some(&mut pool_runner),
+        progress_cb.as_ref().map(|(_, cb, _)| cb),
+        progress_cb.as_ref().map(|(_, _, cb)| cb),
+    )
+    .await
+    .context("run_integrity_pool failed")?;
     if let Some((bar, _, _)) = progress_cb {
         bar.finish();
     }
@@ -244,10 +247,14 @@ pub async fn verify(
 
     if summary.issues.is_empty() {
         if repair {
-            manager
-                .sync_launcher_metadata(&api_client)
-                .await
-                .context("Failed to sync launcher metadata")?;
+            sync_launcher_metadata(
+                &api_client,
+                &local.install_path,
+                &profile,
+                Some(&installed_version),
+            )
+            .await
+            .context("Failed to sync launcher metadata")?;
         }
         return Ok(());
     }
@@ -286,10 +293,14 @@ pub async fn verify(
         if opts.output != OutputFormat::Json {
             ui::print_phase("Syncing launcher metadata");
         }
-        manager
-            .sync_launcher_metadata(&api_client)
-            .await
-            .context("Failed to sync launcher metadata after repair")?;
+        sync_launcher_metadata(
+            &api_client,
+            &local.install_path,
+            &profile,
+            Some(&installed_version),
+        )
+        .await
+        .context("Failed to sync launcher metadata after repair")?;
         if opts.output != OutputFormat::Json {
             ui::print_success("Launcher metadata synced");
         }

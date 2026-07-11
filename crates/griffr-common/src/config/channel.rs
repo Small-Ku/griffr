@@ -64,12 +64,6 @@ impl ChannelId {
     }
 }
 
-impl Default for ChannelId {
-    fn default() -> Self {
-        Self::HYPERGRYPH
-    }
-}
-
 impl std::fmt::Display for ChannelId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -127,7 +121,9 @@ impl ChannelPair {
         sub_channel: Option<impl Into<String>>,
     ) -> Result<Self> {
         let channel = ChannelId::new(channel)?;
-        let sub_channel = sub_channel.map(|value| ChannelId::new(value)).transpose()?;
+        let sub_channel = sub_channel
+            .map(|value| ChannelId::new(value))
+            .transpose()?;
         Ok(Self::new(channel, sub_channel))
     }
 

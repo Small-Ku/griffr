@@ -3,10 +3,10 @@ mod compat_fs;
 pub mod files;
 pub mod issues;
 pub mod launcher;
-pub mod manager;
+mod integrity;
+mod launcher_metadata;
 mod paths;
 mod progress;
-pub mod server;
 pub mod task_pool;
 
 pub use admin::{ensure_admin, is_running_as_admin, restart_as_admin};
@@ -26,7 +26,8 @@ pub use files::vfs::{
 };
 pub use issues::{FileIssue, FileIssueKind};
 pub use launcher::{GameProcess, Launcher};
-pub use manager::GameManager;
+pub use integrity::{run_integrity_pool, IntegrityRunSummary};
+pub use launcher_metadata::sync_launcher_metadata;
 pub use paths::{
     build_cdn_file_url, is_launcher_metadata_path, logical_path_from_root, normalize_logical_path,
 };
@@ -34,4 +35,3 @@ pub use progress::{
     PathAttemptKind, PathOutcome, PathOutcomeSummary, PathOutcomeTracker, PathReuseMethod,
     RunningByteProgress,
 };
-pub use server::Channel;

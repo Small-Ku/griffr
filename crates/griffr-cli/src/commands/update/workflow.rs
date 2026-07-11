@@ -29,7 +29,6 @@ pub(super) async fn update_internal(
         &channel_id,
         &overrides.clone().into(),
     )?;
-    let mut manager = local.as_manager(profile.clone())?;
     let api_client = ApiClient::new()?;
     let task_pool_cfg = TaskPoolConfig {
         max_retries: 3,
@@ -251,9 +250,9 @@ pub(super) async fn update_internal(
     };
     verify_updated_install(
         &api_client,
-        &mut manager,
-        &version_info.version,
         &local.install_path,
+        &profile,
+        &version_info.version,
         opts.skip_verify,
         extra_tasks,
         extra_task_total_bytes,

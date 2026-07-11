@@ -8,15 +8,6 @@ use super::{
 };
 use crate::error::{Error, Result};
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ChannelSettings {
-    pub installed: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub install_path: Option<PathBuf>,
-    pub version: Option<String>,
-    pub last_update: Option<chrono::DateTime<chrono::Utc>>,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TargetOverride {
     pub gateway: Option<String>,

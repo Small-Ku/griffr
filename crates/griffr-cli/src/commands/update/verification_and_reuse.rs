@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::runtime::is_launcher_metadata_path;
+use griffr_common::config::InstallProfile;
 use griffr_common::runtime::task_pool::{ArchivePart, ProgressEvent, Task, TaskPoolRunner};
 use griffr_common::runtime::{
-    materialize_game_files_with_pool, FileReuseConfig, GameManager, SourceInstallInput,
+    is_launcher_metadata_path, materialize_game_files_with_pool,
+    run_integrity_pool, sync_launcher_metadata, FileReuseConfig, SourceInstallInput,
 };
 
 use super::*;
@@ -17,9 +18,9 @@ use crate::GlobalOptions;
 
 pub(super) async fn verify_updated_install(
     api_client: &ApiClient,
-    manager: &mut GameManager,
-    target_version: &str,
     install_path: &Path,
+    profile: &InstallProfile,
+    target_version: &str,
     skip_verify: bool,
     extra_tasks: Vec<Task>,
     extra_task_total_bytes: u64,
@@ -44,9 +45,7 @@ pub(super) async fn verify_updated_install(
             bar.finish();
         }
         ui::print_info("Skipping post-update integrity verification (--skip-verify)");
-        manager.set_version(target_version.to_string());
-        manager
-            .sync_launcher_metadata(api_client)
+        sync_launcher_metadata(api_client, install_path, profile, Some(target_version))
             .await
             .context("Failed to sync launcher metadata after update")?;
         return Ok(());
@@ -54,19 +53,21 @@ pub(super) async fn verify_updated_install(
 
     let verify_bar = StepProgress::new("update.verify+repair", opts.verbose);
     let (cb1, cb2) = verify_bar.split_callbacks();
-    let summary = manager
-        .run_integrity_pool_with_runner(
-            api_client,
-            true,
-            &[],
-            false,
-            false,
-            extra_tasks,
-            Some(task_pool_runner),
-            Some(cb1),
-            Some(cb2),
-        )
-        .await?;
+    let summary = run_integrity_pool(
+        api_client,
+        install_path,
+        profile,
+        Some(target_version),
+        true,
+        &[],
+        false,
+        false,
+        extra_tasks,
+        Some(task_pool_runner),
+        Some(cb1),
+        Some(cb2),
+    )
+    .await?;
     verify_bar.finish();
     ui::print_info(format!(
         "Verification summary: issues={} repaired_downloads={}",
@@ -90,9 +91,7 @@ pub(super) async fn verify_updated_install(
         );
     }
 
-    manager.set_version(target_version.to_string());
-    manager
-        .sync_launcher_metadata(api_client)
+    sync_launcher_metadata(api_client, install_path, profile, Some(target_version))
         .await
         .context("Failed to sync launcher metadata after update")?;
     Ok(())

@@ -4,14 +4,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::PackageInfo;
-use griffr_common::config::{ChannelPair, GameConfig, GameId};
+use griffr_common::config::{ChannelPair, GameId};
 use griffr_common::runtime::task_pool::{
     ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
 use griffr_common::runtime::{directory_has_entries, is_launcher_metadata_path};
 use griffr_common::runtime::{
-    materialize_game_files_with_pool, plan_vfs_tasks, FileReuseConfig, GameManager,
-    SourceInstallInput, VfsMaterializeConfig,
+    materialize_game_files_with_pool, plan_vfs_tasks, run_integrity_pool,
+    sync_launcher_metadata, FileReuseConfig, SourceInstallInput, VfsMaterializeConfig,
 };
 
 use crate::commands::local::detect_local_install;
@@ -195,19 +195,6 @@ pub async fn install(
         ui::print_info(format!("Reuse sources: {}", reuse_paths.len()));
     }
 
-    let install_channel = channel_id.channel().clone();
-    let mut game_config = GameConfig {
-        install_path: Some(install_path.clone()),
-        active_channel: install_channel.clone(),
-        version: Some(version_info.version.clone()),
-        last_update: None,
-        channels: Default::default(),
-    };
-    let channel = game_config.channels.entry(install_channel).or_default();
-    channel.installed = true;
-    channel.install_path = Some(install_path.clone());
-    channel.version = Some(version_info.version.clone());
-    let manager = GameManager::new(game_id.clone(), game_config, profile.clone());
     let task_pool_cfg = TaskPoolConfig {
         max_retries: 3,
         extraction_progress_buffer_bytes: opts.extraction_progress_buffer_bytes,
@@ -341,10 +328,14 @@ pub async fn install(
         }
     }
 
-    manager
-        .sync_launcher_metadata(&api_client)
-        .await
-        .context("Failed to sync launcher metadata after install staging")?;
+    sync_launcher_metadata(
+        &api_client,
+        &install_path,
+        &profile,
+        Some(&version_info.version),
+    )
+    .await
+    .context("Failed to sync launcher metadata after install staging")?;
 
     let extra_tasks = if !opts.skip_vfs {
         ui::print_phase("Verifying install integrity + syncing VFS resources (single DAG batch)");
@@ -390,19 +381,21 @@ pub async fn install(
     };
     let verify_bar = StepProgress::new("install.verify+repair", opts.verbose);
     let (verify_progress_cb, verify_download_cb) = verify_bar.split_callbacks();
-    let summary = manager
-        .run_integrity_pool_with_runner(
-            &api_client,
-            true,
-            &[],
-            false,
-            false,
-            extra_tasks,
-            Some(&mut task_pool),
-            Some(verify_progress_cb),
-            Some(verify_download_cb),
-        )
-        .await?;
+    let summary = run_integrity_pool(
+        &api_client,
+        &install_path,
+        &profile,
+        Some(&version_info.version),
+        true,
+        &[],
+        false,
+        false,
+        extra_tasks,
+        Some(&mut task_pool),
+        Some(verify_progress_cb),
+        Some(verify_download_cb),
+    )
+    .await?;
     verify_bar.finish();
     if !summary.issues.is_empty() {
         let mut repairable_issues = Vec::new();

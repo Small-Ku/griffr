@@ -46,7 +46,8 @@ fn local_low_roots_for_hint_cn_prefers_hypergryph() {
 #[test]
 fn local_low_roots_for_hint_global_prefers_gryphline() {
     let base = PathBuf::from("C:\\Users\\Test\\AppData\\LocalLow");
-    let roots = local_low_roots_for_hint(&base, "Endfield", Some(ChannelId::GRYPHLINE)).unwrap();
+    let roots =
+        local_low_roots_for_hint(&base, "Endfield", Some(ChannelId::GRYPHLINE)).unwrap();
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0], base.join("Gryphline").join("Endfield"));
 }

@@ -3,11 +3,9 @@ use super::*;
 #[ignore = "Makes real network request"]
 async fn real_cn_endfield_patch_and_full_fallback_selection() {
     let api_client = ApiClient::new().expect("Failed to create API client");
-    let preset = griffr_common::config::KnownTargets::resolve(
-        &GameId::ENDFIELD,
-        &ChannelPair::parse("1", None::<String>).unwrap(),
-    )
-    .unwrap();
+    let preset =
+        griffr_common::config::KnownTargets::resolve(&GameId::ENDFIELD, &ChannelPair::parse("1", None::<String>).unwrap())
+            .unwrap();
 
     // Observed live behavior (2026-04-19):
     // - 1.1.9 returns patch payload for CN official.

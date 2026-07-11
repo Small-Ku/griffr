@@ -278,34 +278,13 @@ async fn test_real_api_latest_matrix() {
     let client = ApiClient::new().expect("Failed to create API client");
 
     let matrix = [
-        (
-            GameId::ARKNIGHTS,
-            ChannelPair::parse("1", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ARKNIGHTS,
-            ChannelPair::parse("2", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("1", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("2", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("6", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("6", Some("801")).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("6", Some("802")).unwrap(),
-        ),
+        (GameId::ARKNIGHTS, ChannelPair::parse("1", None::<String>).unwrap()),
+        (GameId::ARKNIGHTS, ChannelPair::parse("2", None::<String>).unwrap()),
+        (GameId::ENDFIELD, ChannelPair::parse("1", None::<String>).unwrap()),
+        (GameId::ENDFIELD, ChannelPair::parse("2", None::<String>).unwrap()),
+        (GameId::ENDFIELD, ChannelPair::parse("6", None::<String>).unwrap()),
+        (GameId::ENDFIELD, ChannelPair::parse("6", Some("801")).unwrap()),
+        (GameId::ENDFIELD, ChannelPair::parse("6", Some("802")).unwrap()),
     ];
     assert_eq!(
         matrix.len(),
@@ -324,41 +303,13 @@ async fn test_real_api_media_matrix() {
     let client = ApiClient::new().expect("Failed to create API client");
 
     let matrix = [
-        (
-            GameId::ARKNIGHTS,
-            ChannelPair::parse("1", None::<String>).unwrap(),
-            "zh-cn",
-        ),
-        (
-            GameId::ARKNIGHTS,
-            ChannelPair::parse("2", None::<String>).unwrap(),
-            "zh-cn",
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("1", None::<String>).unwrap(),
-            "zh-cn",
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("2", None::<String>).unwrap(),
-            "zh-cn",
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("6", None::<String>).unwrap(),
-            "en-us",
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("6", Some("801")).unwrap(),
-            "en-us",
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("6", Some("802")).unwrap(),
-            "en-us",
-        ),
+        (GameId::ARKNIGHTS, ChannelPair::parse("1", None::<String>).unwrap(), "zh-cn"),
+        (GameId::ARKNIGHTS, ChannelPair::parse("2", None::<String>).unwrap(), "zh-cn"),
+        (GameId::ENDFIELD, ChannelPair::parse("1", None::<String>).unwrap(), "zh-cn"),
+        (GameId::ENDFIELD, ChannelPair::parse("2", None::<String>).unwrap(), "zh-cn"),
+        (GameId::ENDFIELD, ChannelPair::parse("6", None::<String>).unwrap(), "en-us"),
+        (GameId::ENDFIELD, ChannelPair::parse("6", Some("801")).unwrap(), "en-us"),
+        (GameId::ENDFIELD, ChannelPair::parse("6", Some("802")).unwrap(), "en-us"),
     ];
     assert_eq!(
         matrix.len(),
@@ -377,34 +328,13 @@ async fn test_real_api_game_files_matrix() {
     let client = ApiClient::new().expect("Failed to create API client");
 
     let matrix = [
-        (
-            GameId::ARKNIGHTS,
-            ChannelPair::parse("1", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ARKNIGHTS,
-            ChannelPair::parse("2", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("1", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("2", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("6", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("6", Some("801")).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            ChannelPair::parse("6", Some("802")).unwrap(),
-        ),
+        (GameId::ARKNIGHTS, ChannelPair::parse("1", None::<String>).unwrap()),
+        (GameId::ARKNIGHTS, ChannelPair::parse("2", None::<String>).unwrap()),
+        (GameId::ENDFIELD, ChannelPair::parse("1", None::<String>).unwrap()),
+        (GameId::ENDFIELD, ChannelPair::parse("2", None::<String>).unwrap()),
+        (GameId::ENDFIELD, ChannelPair::parse("6", None::<String>).unwrap()),
+        (GameId::ENDFIELD, ChannelPair::parse("6", Some("801")).unwrap()),
+        (GameId::ENDFIELD, ChannelPair::parse("6", Some("802")).unwrap()),
     ];
     assert_eq!(
         matrix.len(),
@@ -422,11 +352,9 @@ async fn test_real_api_game_files_matrix() {
 async fn test_real_endfield_os_known_versions_return_full_or_patch_payloads() {
     let client = ApiClient::new().expect("Failed to create API client");
 
-    let preset = crate::config::KnownTargets::resolve(
-        &GameId::ENDFIELD,
-        &ChannelPair::parse("6", None::<String>).unwrap(),
-    )
-    .unwrap();
+    let preset =
+        crate::config::KnownTargets::resolve(&GameId::ENDFIELD, &ChannelPair::parse("6", None::<String>).unwrap())
+            .unwrap();
     for requested_version in ["1.0.13", "1.0.14", "1.1.9"] {
         let info = client
             .get_latest_game(&preset.target, Some(requested_version))
