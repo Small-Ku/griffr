@@ -22,15 +22,39 @@ pub struct LocalResManifests {
     pub pref_main: Option<ResIndex>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VfsExpectedScope {
+    IndexFull,
+    PrefOnly,
+    IndexFullFallback,
+}
+
+impl VfsExpectedScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::IndexFull => "index-full",
+            Self::PrefOnly => "pref-only",
+            Self::IndexFullFallback => "index-full-fallback",
+        }
+    }
+}
+
+impl std::fmt::Display for VfsExpectedScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VfsExpectedSet {
-    pub scope: &'static str,
+    pub scope: VfsExpectedScope,
     pub entries: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VfsExpectedMap {
-    pub scope: &'static str,
+    pub scope: VfsExpectedScope,
     pub entries: std::collections::BTreeMap<String, String>,
 }
 
@@ -153,94 +177,85 @@ pub fn merge_entries_with_checksums(
     }
 }
 
+struct VfsManifestSelection<'a> {
+    scope: VfsExpectedScope,
+    first: &'a Option<ResIndex>,
+    second: &'a Option<ResIndex>,
+}
+
+fn select_vfs_manifests(
+    against: VfsDiffAgainst,
+    manifests: &LocalResManifests,
+) -> VfsManifestSelection<'_> {
+    match against {
+        VfsDiffAgainst::Streamingassets => VfsManifestSelection {
+            scope: VfsExpectedScope::IndexFull,
+            first: &manifests.index_initial,
+            second: &manifests.index_main,
+        },
+        VfsDiffAgainst::Persistent
+            if manifests.pref_initial.is_some() || manifests.pref_main.is_some() =>
+        {
+            VfsManifestSelection {
+                scope: VfsExpectedScope::PrefOnly,
+                first: &manifests.pref_initial,
+                second: &manifests.pref_main,
+            }
+        }
+        VfsDiffAgainst::Persistent => VfsManifestSelection {
+            scope: VfsExpectedScope::IndexFullFallback,
+            first: &manifests.index_initial,
+            second: &manifests.index_main,
+        },
+    }
+}
+
 pub fn select_expected_vfs_set(
     against: VfsDiffAgainst,
     manifests: &LocalResManifests,
 ) -> Result<VfsExpectedSet> {
+    let selection = select_vfs_manifests(against, manifests);
     let mut entries = std::collections::BTreeSet::new();
-    match against {
-        VfsDiffAgainst::Streamingassets => {
-            merge_entries(&mut entries, &manifests.index_initial);
-            merge_entries(&mut entries, &manifests.index_main);
-            if entries.is_empty() {
-                anyhow::bail!(
-                    "No index files found or index files were empty. Expected index_initial.json and/or index_main.json."
-                );
-            }
-            Ok(VfsExpectedSet {
-                scope: "index-full",
-                entries,
-            })
-        }
-        VfsDiffAgainst::Persistent => {
-            let has_pref = manifests.pref_initial.is_some() || manifests.pref_main.is_some();
-            if has_pref {
-                merge_entries(&mut entries, &manifests.pref_initial);
-                merge_entries(&mut entries, &manifests.pref_main);
-                Ok(VfsExpectedSet {
-                    scope: "pref-only",
-                    entries,
-                })
-            } else {
-                merge_entries(&mut entries, &manifests.index_initial);
-                merge_entries(&mut entries, &manifests.index_main);
-                if entries.is_empty() {
-                    anyhow::bail!(
-                        "No pref files found and no index files found. Expected pref_*.json or index_*.json."
-                    );
-                }
-                Ok(VfsExpectedSet {
-                    scope: "index-full-fallback",
-                    entries,
-                })
-            }
-        }
+    merge_entries(&mut entries, selection.first);
+    merge_entries(&mut entries, selection.second);
+    if entries.is_empty() {
+        anyhow::bail!(match selection.scope {
+            VfsExpectedScope::IndexFull =>
+                "No index files found or index files were empty. Expected index_initial.json and/or index_main.json.",
+            VfsExpectedScope::PrefOnly =>
+                "Pref files were present but empty. Expected pref_initial.json and/or pref_main.json entries.",
+            VfsExpectedScope::IndexFullFallback =>
+                "No pref files found and no index files found. Expected pref_*.json or index_*.json.",
+        });
     }
+    Ok(VfsExpectedSet {
+        scope: selection.scope,
+        entries,
+    })
 }
 
 pub fn select_expected_vfs_map(
     against: VfsDiffAgainst,
     manifests: &LocalResManifests,
 ) -> Result<VfsExpectedMap> {
+    let selection = select_vfs_manifests(against, manifests);
     let mut entries = std::collections::BTreeMap::new();
-    match against {
-        VfsDiffAgainst::Streamingassets => {
-            merge_entries_with_checksums(&mut entries, &manifests.index_initial);
-            merge_entries_with_checksums(&mut entries, &manifests.index_main);
-            if entries.is_empty() {
-                anyhow::bail!(
-                    "No index files with checksum fields found. Expected index_initial.json and/or index_main.json."
-                );
-            }
-            Ok(VfsExpectedMap {
-                scope: "index-full",
-                entries,
-            })
-        }
-        VfsDiffAgainst::Persistent => {
-            let has_pref = manifests.pref_initial.is_some() || manifests.pref_main.is_some();
-            if has_pref {
-                merge_entries_with_checksums(&mut entries, &manifests.pref_initial);
-                merge_entries_with_checksums(&mut entries, &manifests.pref_main);
-                Ok(VfsExpectedMap {
-                    scope: "pref-only",
-                    entries,
-                })
-            } else {
-                merge_entries_with_checksums(&mut entries, &manifests.index_initial);
-                merge_entries_with_checksums(&mut entries, &manifests.index_main);
-                if entries.is_empty() {
-                    anyhow::bail!(
-                        "No pref files found and no index files with checksum fields found."
-                    );
-                }
-                Ok(VfsExpectedMap {
-                    scope: "index-full-fallback",
-                    entries,
-                })
-            }
-        }
+    merge_entries_with_checksums(&mut entries, selection.first);
+    merge_entries_with_checksums(&mut entries, selection.second);
+    if entries.is_empty() {
+        anyhow::bail!(match selection.scope {
+            VfsExpectedScope::IndexFull =>
+                "No index files with checksum fields found. Expected index_initial.json and/or index_main.json.",
+            VfsExpectedScope::PrefOnly =>
+                "Pref files were present but contained no checksum fields.",
+            VfsExpectedScope::IndexFullFallback =>
+                "No pref files found and no index files with checksum fields found.",
+        });
     }
+    Ok(VfsExpectedMap {
+        scope: selection.scope,
+        entries,
+    })
 }
 
 pub fn resolve_vfs_root(path: &Path) -> Result<PathBuf> {

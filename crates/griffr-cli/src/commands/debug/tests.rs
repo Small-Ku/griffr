@@ -1,5 +1,6 @@
 use super::utils::{
     select_expected_vfs_map, select_expected_vfs_set, sorted_difference, LocalResManifests,
+    VfsExpectedScope,
 };
 use crate::VfsDiffAgainst;
 use griffr_common::api::types::ResIndex;
@@ -34,7 +35,7 @@ fn persistent_pref_only_when_pref_exists() {
         pref_main: None,
     };
     let selected = select_expected_vfs_set(VfsDiffAgainst::Persistent, &manifests).unwrap();
-    assert_eq!(selected.scope, "pref-only");
+    assert_eq!(selected.scope, VfsExpectedScope::PrefOnly);
     assert_eq!(selected.entries.len(), 1);
     assert!(selected.entries.contains("vfs/p/p.chk"));
 }
@@ -48,7 +49,7 @@ fn persistent_falls_back_to_index_when_no_pref() {
         pref_main: None,
     };
     let selected = select_expected_vfs_set(VfsDiffAgainst::Persistent, &manifests).unwrap();
-    assert_eq!(selected.scope, "index-full-fallback");
+    assert_eq!(selected.scope, VfsExpectedScope::IndexFullFallback);
     assert_eq!(selected.entries.len(), 2);
     assert!(selected.entries.contains("vfs/a/a.chk"));
     assert!(selected.entries.contains("vfs/b/b.chk"));
@@ -63,7 +64,7 @@ fn streamingassets_uses_index_full_even_if_pref_exists() {
         pref_main: Some(make_index(&["VFS/Q/q.chk"])),
     };
     let selected = select_expected_vfs_set(VfsDiffAgainst::Streamingassets, &manifests).unwrap();
-    assert_eq!(selected.scope, "index-full");
+    assert_eq!(selected.scope, VfsExpectedScope::IndexFull);
     assert_eq!(selected.entries.len(), 2);
     assert!(selected.entries.contains("vfs/a/a.chk"));
     assert!(selected.entries.contains("vfs/b/b.chk"));
@@ -78,7 +79,7 @@ fn expected_vfs_map_uses_pref_checksums_for_persistent() {
         pref_main: None,
     };
     let selected = select_expected_vfs_map(VfsDiffAgainst::Persistent, &manifests).unwrap();
-    assert_eq!(selected.scope, "pref-only");
+    assert_eq!(selected.scope, VfsExpectedScope::PrefOnly);
     assert_eq!(selected.entries.len(), 1);
     assert!(selected.entries.contains_key("vfs/p/p.chk"));
 }
