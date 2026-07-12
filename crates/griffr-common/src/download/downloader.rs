@@ -111,9 +111,6 @@ impl Downloader {
             let filename = pack
                 .filename()
                 .ok_or_else(|| Error::Download("Failed to extract filename from URL".to_string()))?
-                .split('?')
-                .next()
-                .unwrap_or_default()
                 .to_string();
             let output_path = output_dir.join(&filename);
             expected.push((filename.clone(), output_path.clone(), pack.size()));

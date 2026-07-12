@@ -48,9 +48,6 @@ fn build_predownload_tasks(stage_dir: &Path, patches: &[PackFile]) -> Result<Vec
         let filename = patch
             .filename()
             .context("Failed to extract predownload archive filename")?
-            .split('?')
-            .next()
-            .unwrap_or_default()
             .to_string();
         let dest = stage_dir.join(&filename);
         tasks.push(Task::Verify {

@@ -19,23 +19,6 @@ use crate::progress::{ByteProgressTracker, StepProgress};
 use crate::ui;
 use crate::GlobalOptions;
 
-pub(super) fn strip_url_query(s: &str) -> &str {
-    s.split('?').next().unwrap_or(s)
-}
-
-pub(super) fn archive_base_from_url(url: &str) -> Option<String> {
-    let filename = url.split('/').next_back()?;
-    let filename = strip_url_query(filename);
-
-    if let Some(stem) = filename.strip_suffix(".zip.001") {
-        return Some(stem.to_string());
-    }
-    if let Some(stem) = filename.strip_suffix(".zip") {
-        return Some(stem.to_string());
-    }
-    None
-}
-
 pub(super) fn parse_package_total_size(pkg: &PackageInfo) -> u64 {
     pkg.total_size.parse::<u64>().unwrap_or(0)
 }
@@ -217,12 +200,11 @@ pub async fn install(
             let filename = pack
                 .filename()
                 .context("Failed to extract pack filename")?
-                .split('?')
-                .next()
-                .unwrap_or_default()
                 .to_string();
-            let base = archive_base_from_url(&pack.url)
-                .context("Pack URL did not end with .zip.001 or .zip")?;
+            let base = pack
+                .archive_base_name()
+                .context("Pack URL did not end with .zip or a numeric .zip.<part>")?
+                .to_string();
             archives.entry(base).or_default().push(ArchivePart {
                 url: pack.url.clone(),
                 dest: download_dir.join(&filename),

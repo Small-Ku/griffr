@@ -2,28 +2,34 @@ use super::*;
 #[test]
 fn archive_base_name_is_extracted() {
     let url = "https://example.com/path/Beyond_Release_v1d1.zip.001?token=abc";
-    assert_eq!(
-        archive_base_from_url(url).as_deref(),
-        Some("Beyond_Release_v1d1")
-    );
+    let pack = griffr_common::api::types::PackFile {
+        url: url.to_string(),
+        md5: String::new(),
+        package_size: "0".to_string(),
+    };
+    assert_eq!(pack.archive_base_name(), Some("Beyond_Release_v1d1"));
 }
 
 #[test]
 fn archive_base_name_supports_single_zip_archives() {
     let url = "https://example.com/path/Beyond_Release_v1d1.zip?token=abc";
-    assert_eq!(
-        archive_base_from_url(url).as_deref(),
-        Some("Beyond_Release_v1d1")
-    );
+    let pack = griffr_common::api::types::PackFile {
+        url: url.to_string(),
+        md5: String::new(),
+        package_size: "0".to_string(),
+    };
+    assert_eq!(pack.archive_base_name(), Some("Beyond_Release_v1d1"));
 }
 
 #[test]
 fn archive_base_name_is_extracted_from_non_first_split_part() {
     let url = "https://example.com/path/Beyond_Release_v1d1.zip.002?token=abc";
-    assert_eq!(
-        archive_base_from_url(url).as_deref(),
-        Some("Beyond_Release_v1d1")
-    );
+    let pack = griffr_common::api::types::PackFile {
+        url: url.to_string(),
+        md5: String::new(),
+        package_size: "0".to_string(),
+    };
+    assert_eq!(pack.archive_base_name(), Some("Beyond_Release_v1d1"));
 }
 
 #[test]

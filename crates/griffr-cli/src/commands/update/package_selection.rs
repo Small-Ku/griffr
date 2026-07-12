@@ -16,28 +16,6 @@ pub(super) enum ArchiveAcquireMode {
     RequireExisting,
 }
 
-pub(super) fn strip_url_query(s: &str) -> &str {
-    s.split('?').next().unwrap_or(s)
-}
-
-pub(super) fn archive_base_from_url(url: &str) -> Option<String> {
-    let filename = url.split('/').next_back()?;
-    let filename = strip_url_query(filename);
-
-    if let Some(idx) = filename.rfind(".zip.") {
-        let suffix = &filename[(idx + ".zip.".len())..];
-        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
-            return Some(filename[..idx].to_string());
-        }
-    }
-
-    if let Some(stem) = filename.strip_suffix(".zip") {
-        return Some(stem.to_string());
-    }
-
-    None
-}
-
 pub(super) fn choose_update_package(
     version_info: &griffr_common::api::types::GetLatestGameResponse,
     current_version: Option<&str>,

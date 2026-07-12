@@ -10,7 +10,6 @@ use griffr_common::runtime::{
     sync_launcher_metadata, FileReuseConfig, SourceInstallInput,
 };
 
-use super::*;
 use crate::commands::local::detect_local_install;
 use crate::progress::{ByteProgressTracker, StepProgress, VerifyTaskProgressTracker};
 use crate::ui;
@@ -190,12 +189,11 @@ pub(super) fn group_archives_by_base(
         let filename = archive
             .filename()
             .context("Failed to extract archive filename")?
-            .split('?')
-            .next()
-            .unwrap_or_default()
             .to_string();
-        let base = archive_base_from_url(&archive.url)
-            .context("Could not determine archive base name from pack URL")?;
+        let base = archive
+            .archive_base_name()
+            .context("Could not determine archive base name from pack URL")?
+            .to_string();
         grouped.entry(base).or_default().push(ArchivePart {
             url: archive.url.clone(),
             dest: archive_dir.join(&filename),

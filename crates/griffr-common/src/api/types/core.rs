@@ -303,13 +303,29 @@ pub struct PackFile {
 }
 
 impl PackFile {
-    /// Get the size as u64
+    /// Get the size as u64.
     pub fn size(&self) -> u64 {
         self.package_size.parse().unwrap_or(0)
     }
 
-    /// Get the filename from the URL
+    /// Return the final URL path component without its query string.
     pub fn filename(&self) -> Option<&str> {
-        self.url.split('/').next_back()
+        let path = self
+            .url
+            .split_once('?')
+            .map_or(self.url.as_str(), |(path, _)| path);
+        path.rsplit('/').next().filter(|name| !name.is_empty())
+    }
+
+    /// Return the base name shared by a single `.zip` archive or any numeric
+    /// multipart archive such as `.zip.001` or `.zip.12`.
+    pub fn archive_base_name(&self) -> Option<&str> {
+        let filename = self.filename()?;
+        if let Some(stem) = filename.strip_suffix(".zip") {
+            return (!stem.is_empty()).then_some(stem);
+        }
+        let (stem, part) = filename.rsplit_once(".zip.")?;
+        (!stem.is_empty() && !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+            .then_some(stem)
     }
 }

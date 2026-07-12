@@ -7,8 +7,8 @@ pub(crate) enum Direction {
     Column,
 }
 
-#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum Clip {
     #[default]
     Infer,

@@ -9,7 +9,8 @@ fn test_pack_file_parsing() {
 
     let pack: PackFile = serde_json::from_str(json).unwrap();
     assert_eq!(pack.size(), 1073741824);
-    assert_eq!(pack.filename(), Some("pack.zip.001?auth_key=xxx"));
+    assert_eq!(pack.filename(), Some("pack.zip.001"));
+    assert_eq!(pack.archive_base_name(), Some("pack"));
     assert_eq!(pack.md5, "abc123");
 }
 
@@ -159,9 +160,10 @@ fn test_pre_patch_response_parsing() {
     assert_eq!(pre_patch.package_size, "6356034359");
     assert_eq!(pre_patch.total_size, "14368056414");
     assert_eq!(pre_patch.patches.len(), 1);
+    assert_eq!(pre_patch.patches[0].filename(), Some("predownload.zip.001"));
     assert_eq!(
-        pre_patch.patches[0].filename(),
-        Some("predownload.zip.001?auth_key=test")
+        pre_patch.patches[0].archive_base_name(),
+        Some("predownload")
     );
 }
 
