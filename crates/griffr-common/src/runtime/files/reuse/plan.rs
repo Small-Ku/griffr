@@ -127,13 +127,7 @@ pub async fn plan_file_reuse(
             continue;
         }
 
-        let cfg = TaskPoolConfig {
-            cpu_slots: std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
-                .clamp(1, 16),
-            ..Default::default()
-        };
+        let cfg = TaskPoolConfig::default();
         let verify_result = run_tasks(verify_tasks, cfg)?;
         for event in verify_result.events {
             if let ProgressEvent::Verified { path, ok, .. } = event {

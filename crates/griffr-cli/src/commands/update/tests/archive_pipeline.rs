@@ -116,12 +116,10 @@ async fn download_and_extract_archives_recovers_partial_part_on_rerun() {
 
     let opts = test_global_options();
 
-    let pool_cfg = TaskPoolConfig {
-        max_retries: 3,
-        extraction_progress_buffer_bytes: opts.extraction_progress_buffer_bytes,
-        download_progress_buffer_bytes: opts.download_progress_buffer_bytes,
-        ..Default::default()
-    };
+    let pool_cfg = TaskPoolConfig::with_progress_buffers(
+        opts.extraction_progress_buffer_bytes,
+        opts.download_progress_buffer_bytes,
+    );
     let mut pool_runner = TaskPoolRunner::new(pool_cfg).unwrap();
     let result = download_and_extract_archives(
         &archives,
@@ -189,12 +187,10 @@ async fn download_and_extract_archives_applies_delete_files_manifest() {
     }];
 
     let opts = test_global_options();
-    let pool_cfg = TaskPoolConfig {
-        max_retries: 3,
-        extraction_progress_buffer_bytes: opts.extraction_progress_buffer_bytes,
-        download_progress_buffer_bytes: opts.download_progress_buffer_bytes,
-        ..Default::default()
-    };
+    let pool_cfg = TaskPoolConfig::with_progress_buffers(
+        opts.extraction_progress_buffer_bytes,
+        opts.download_progress_buffer_bytes,
+    );
     let mut pool_runner = TaskPoolRunner::new(pool_cfg).unwrap();
 
     let result = download_and_extract_archives(

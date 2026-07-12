@@ -132,12 +132,10 @@ pub async fn bootstrap(
     ));
     ui::print_info(format!("Persistent target: {}", persistent_root.display()));
 
-    let pool_cfg = TaskPoolConfig {
-        max_retries: 3,
-        extraction_progress_buffer_bytes: opts.extraction_progress_buffer_bytes,
-        download_progress_buffer_bytes: opts.download_progress_buffer_bytes,
-        ..Default::default()
-    };
+    let pool_cfg = TaskPoolConfig::with_progress_buffers(
+        opts.extraction_progress_buffer_bytes,
+        opts.download_progress_buffer_bytes,
+    );
     let mut task_pool_runner = TaskPoolRunner::new(pool_cfg)?;
 
     let progress = StepProgress::new("bootstrap.persistent-vfs", opts.verbose);

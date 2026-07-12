@@ -164,10 +164,7 @@ pub fn extract_archives_pooled(
             password: None,
         })
         .collect::<Vec<_>>();
-    let config = TaskPoolConfig {
-        extract_slots: extract_slots.max(1),
-        ..Default::default()
-    };
+    let config = TaskPoolConfig::with_extract_slots(extract_slots);
     let result = run_tasks(tasks, config)?;
     let mut failures = Vec::new();
     for event in result.events {

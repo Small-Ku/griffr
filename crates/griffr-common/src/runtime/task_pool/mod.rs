@@ -6,7 +6,10 @@ pub mod types;
 pub mod verify;
 
 pub use scheduler::{extract_archives_pooled, run_tasks, run_tasks_with_progress};
-pub use types::{ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolResult, TaskPoolRunner};
+pub use types::{
+    ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolResult, TaskPoolRunner,
+    DEFAULT_PROGRESS_BUFFER_BYTES,
+};
 
 #[cfg(test)]
 #[path = "test/mod.rs"]

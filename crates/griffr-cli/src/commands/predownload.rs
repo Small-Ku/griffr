@@ -165,11 +165,8 @@ pub async fn fetch(path: PathBuf, output_dir: Option<PathBuf>, opts: GlobalOptio
         .await
         .with_context(|| format!("Failed to create {}", stage_dir.display()))?;
 
-    let task_pool_cfg = TaskPoolConfig {
-        max_retries: 3,
-        download_progress_buffer_bytes: opts.download_progress_buffer_bytes,
-        ..Default::default()
-    };
+    let task_pool_cfg =
+        TaskPoolConfig::with_download_progress_buffer(opts.download_progress_buffer_bytes);
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
     let tasks = build_predownload_tasks(&stage_dir, &pre_patch.patches)?;
 
@@ -259,10 +256,7 @@ pub async fn resume(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
         install_root.display()
     ));
 
-    let task_pool_cfg = TaskPoolConfig {
-        max_retries: 3,
-        ..Default::default()
-    };
+    let task_pool_cfg = TaskPoolConfig::default();
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
     let result = task_pool_runner.run_batch_with_progress(vec![initial_task], None)?;
 

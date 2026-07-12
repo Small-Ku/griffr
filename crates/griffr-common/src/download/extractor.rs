@@ -263,11 +263,6 @@ impl MultiVolumeExtractor {
         Self::new(volumes)
     }
 
-    /// Extract all volumes to the target directory
-    pub fn extract_to(&self, target_dir: &Path) -> Result<()> {
-        self.extract_to_with_progress(target_dir, None, 256 * 1024, None::<fn(u64, u64)>)
-    }
-
     pub fn extract_to_with_progress(
         &self,
         target_dir: &Path,
@@ -432,7 +427,7 @@ mod tests {
         let extractor = MultiVolumeExtractor::new(volumes)?;
         let output_dir = base_path.join("output");
         std::fs::create_dir(&output_dir)?;
-        extractor.extract_to(&output_dir)?;
+        extractor.extract_to_with_progress(&output_dir, None, 64, None::<fn(u64, u64)>)?;
 
         // 3. Verify
         let output_file = output_dir.join("hello.txt");

@@ -42,13 +42,7 @@ pub async fn execute_reuse_plan(
         });
     }
 
-    let cfg = crate::runtime::task_pool::TaskPoolConfig {
-        io_slots: std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .clamp(2, 16),
-        ..Default::default()
-    };
+    let cfg = crate::runtime::task_pool::TaskPoolConfig::for_file_reuse();
     let result = crate::runtime::task_pool::run_tasks(hardlink_tasks, cfg)
         .map_err(|e| Error::TaskPool(format!("Failed to execute hardlink task pool: {e}")))?;
 
@@ -145,13 +139,7 @@ pub async fn download_remaining_files(
         })
         .collect::<Vec<_>>();
 
-    let pool_cfg = crate::runtime::task_pool::TaskPoolConfig {
-        io_slots: std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-            .clamp(2, 16),
-        ..Default::default()
-    };
+    let pool_cfg = crate::runtime::task_pool::TaskPoolConfig::for_file_reuse();
     let result = crate::runtime::task_pool::run_tasks(tasks, pool_cfg)
         .map_err(|e| Error::TaskPool(format!("Task pool failed for reuse downloads: {e}")))?;
 

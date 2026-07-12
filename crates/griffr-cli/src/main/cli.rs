@@ -1,5 +1,6 @@
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use griffr_common::api::protocol::DEFAULT_LANGUAGE;
+use griffr_common::runtime::task_pool::DEFAULT_PROGRESS_BUFFER_BYTES;
 use griffr_common::runtime::VfsBootstrapScope;
 
 use crate::debug_cli::{AccountCommands, DebugCommands, PredownloadCommands};
@@ -33,11 +34,11 @@ pub(crate) struct Cli {
     pub(crate) output: OutputFormat,
 
     /// Extraction progress buffer size in bytes (controls progress update granularity)
-    #[arg(long, global = true, default_value_t = 256 * 1024)]
+    #[arg(long, global = true, default_value_t = DEFAULT_PROGRESS_BUFFER_BYTES)]
     pub(crate) extraction_progress_buffer_bytes: usize,
 
     /// Download progress buffer size in bytes (controls progress update granularity)
-    #[arg(long, global = true, default_value_t = 256 * 1024)]
+    #[arg(long, global = true, default_value_t = DEFAULT_PROGRESS_BUFFER_BYTES)]
     pub(crate) download_progress_buffer_bytes: usize,
 
     #[command(subcommand)]

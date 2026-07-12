@@ -2,7 +2,9 @@ use super::*;
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::{GetLatestGameResponse, PackFile, PackageInfo, PatchInfo};
 use griffr_common::config::{ChannelPair, GameId};
-use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
+use griffr_common::runtime::task_pool::{
+    TaskPoolConfig, TaskPoolRunner, DEFAULT_PROGRESS_BUFFER_BYTES,
+};
 use md5::Digest;
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -25,8 +27,8 @@ fn test_global_options() -> GlobalOptions {
         force_full_package: false,
         skip_vfs: true,
         keep_pack_archives: false,
-        extraction_progress_buffer_bytes: 256 * 1024,
-        download_progress_buffer_bytes: 256 * 1024,
+        extraction_progress_buffer_bytes: DEFAULT_PROGRESS_BUFFER_BYTES,
+        download_progress_buffer_bytes: DEFAULT_PROGRESS_BUFFER_BYTES,
         output: OutputFormat::Text,
     }
 }

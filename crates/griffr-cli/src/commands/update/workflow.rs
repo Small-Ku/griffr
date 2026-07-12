@@ -30,12 +30,10 @@ pub(super) async fn update_internal(
         &overrides.clone().into(),
     )?;
     let api_client = ApiClient::new()?;
-    let task_pool_cfg = TaskPoolConfig {
-        max_retries: 3,
-        extraction_progress_buffer_bytes: opts.extraction_progress_buffer_bytes,
-        download_progress_buffer_bytes: opts.download_progress_buffer_bytes,
-        ..Default::default()
-    };
+    let task_pool_cfg = TaskPoolConfig::with_progress_buffers(
+        opts.extraction_progress_buffer_bytes,
+        opts.download_progress_buffer_bytes,
+    );
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
 
     let version_info = api_client

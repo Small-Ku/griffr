@@ -191,13 +191,7 @@ pub async fn materialize_game_files_with_pool(
             .run_batch_with_progress(tasks, Some(&mut progress_event_cb))
             .map_err(|e| Error::TaskPool(format!("File materialization pool failed: {e}")))?
     } else {
-        let pool_cfg = crate::runtime::task_pool::TaskPoolConfig {
-            io_slots: std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
-                .clamp(4, 24),
-            ..Default::default()
-        };
+        let pool_cfg = crate::runtime::task_pool::TaskPoolConfig::for_file_materialization();
         crate::runtime::task_pool::run_tasks_with_progress(
             tasks,
             pool_cfg,

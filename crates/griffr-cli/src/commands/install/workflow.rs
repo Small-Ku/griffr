@@ -178,12 +178,10 @@ pub async fn install(
         ui::print_info(format!("Reuse sources: {}", reuse_paths.len()));
     }
 
-    let task_pool_cfg = TaskPoolConfig {
-        max_retries: 3,
-        extraction_progress_buffer_bytes: opts.extraction_progress_buffer_bytes,
-        download_progress_buffer_bytes: opts.download_progress_buffer_bytes,
-        ..Default::default()
-    };
+    let task_pool_cfg = TaskPoolConfig::with_progress_buffers(
+        opts.extraction_progress_buffer_bytes,
+        opts.download_progress_buffer_bytes,
+    );
     let mut task_pool = TaskPoolRunner::new(task_pool_cfg)?;
 
     if reuse_paths.is_empty() {
