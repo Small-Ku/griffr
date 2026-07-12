@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use griffr_common::api::crypto;
-use griffr_common::runtime::list_files_with_extension;
+use griffr_common::runtime::{list_files_with_extension, GAME_FILES_NAME};
 
 use crate::commands::local::{decrypt_config_ini, detect_local_install, resolve_named_path};
 use crate::GlobalOptions;
@@ -26,7 +26,7 @@ pub async fn config_ini(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
 }
 
 pub async fn game_files(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
-    let game_files_path = resolve_named_path(&path, "game_files");
+    let game_files_path = resolve_named_path(&path, GAME_FILES_NAME);
     let encrypted = compio::fs::read(&game_files_path)
         .await
         .with_context(|| format!("Failed to read {}", game_files_path.display()))?;

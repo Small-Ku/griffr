@@ -8,7 +8,8 @@ use crate::runtime::task_pool::verify::build_issue;
 use super::super::extract::move_path_replace;
 use super::super::path_safety::parse_safe_relative_path;
 use super::super::reuse::make_temp_write_path;
-use super::{resolve_patch_stage_path, PATCH_DIFF_STAGE_DIR, PATCH_FILES_STAGE_DIR};
+use super::resolve_patch_stage_path;
+use crate::runtime::{PATCH_DIFF_STAGE_DIR, PATCH_FILES_STAGE_DIR};
 
 fn verify_materialized_file(
     path: &Path,

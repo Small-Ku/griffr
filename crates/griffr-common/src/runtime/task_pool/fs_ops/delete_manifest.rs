@@ -2,10 +2,9 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+use crate::runtime::DELETE_FILES_MANIFEST_NAME;
 
 use super::path_safety::parse_safe_relative_path;
-
-pub(super) const DELETE_FILES_MANIFEST_NAME: &str = "delete_files.txt";
 
 fn parse_delete_files_entry(line: &str) -> Result<Option<PathBuf>> {
     let trimmed = line.trim();

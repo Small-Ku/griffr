@@ -8,6 +8,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 use crate::VfsDiffAgainst;
+use griffr_common::runtime::CONFIG_INI_NAME;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LocalResManifests {
@@ -348,7 +349,7 @@ pub fn resolve_endfield_data_root(path: &Path) -> Result<PathBuf> {
     if candidate.join("Persistent").is_dir() && candidate.join("StreamingAssets").is_dir() {
         return Ok(candidate);
     }
-    if candidate.join("config.ini").is_file() {
+    if candidate.join(CONFIG_INI_NAME).is_file() {
         return Ok(candidate.join("Endfield_Data"));
     }
     if candidate

@@ -1,5 +1,27 @@
 use std::path::Path;
 
+pub const CONFIG_INI_NAME: &str = "config.ini";
+pub const GAME_FILES_NAME: &str = "game_files";
+pub const PACKAGE_FILES_NAME: &str = "package_files";
+pub const PATCH_MANIFEST_NAME: &str = "patch.json";
+pub const PATCH_STAGE_DIR: &str = "vfs_files";
+pub const PATCH_FILES_STAGE_DIR: &str = "files";
+pub const PATCH_DIFF_STAGE_DIR: &str = "vfs_patch";
+pub const DELETE_FILES_MANIFEST_NAME: &str = "delete_files.txt";
+
+pub fn launcher_files_base_url(file_path: &str) -> &str {
+    let normalized = file_path.trim_end_matches('/');
+    if normalized.rsplit('/').next() == Some(GAME_FILES_NAME) {
+        &normalized[..normalized.len() - GAME_FILES_NAME.len() - 1]
+    } else {
+        normalized
+    }
+}
+
+pub fn launcher_metadata_url(file_path: &str, filename: &str) -> String {
+    format!("{}/{}", launcher_files_base_url(file_path), filename)
+}
+
 pub fn normalize_logical_path(path: &str) -> String {
     path.replace('\\', "/")
         .trim_start_matches("./")
@@ -16,7 +38,7 @@ pub fn logical_path_from_root(root: &Path, path: &Path) -> Option<String> {
 pub fn is_launcher_metadata_path(path: &str) -> bool {
     matches!(
         normalize_logical_path(path).as_str(),
-        "config.ini" | "game_files" | "package_files"
+        CONFIG_INI_NAME | GAME_FILES_NAME | PACKAGE_FILES_NAME
     )
 }
 
@@ -63,8 +85,8 @@ fn nibble_to_hex(nibble: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cdn_file_url, is_launcher_metadata_path, logical_path_from_root,
-        normalize_logical_path,
+        build_cdn_file_url, is_launcher_metadata_path, launcher_files_base_url,
+        launcher_metadata_url, logical_path_from_root, normalize_logical_path, GAME_FILES_NAME,
     };
     use std::path::Path;
 
@@ -110,6 +132,18 @@ mod tests {
         assert_eq!(
             build_cdn_file_url("https://cdn.example/files/", "ui\\[uc]battlefinish.ab"),
             "https://cdn.example/files/ui/%5Buc%5Dbattlefinish.ab"
+        );
+    }
+
+    #[test]
+    fn launcher_metadata_urls_share_one_base_rule() {
+        assert_eq!(
+            launcher_files_base_url("https://cdn.example/files/game_files"),
+            "https://cdn.example/files"
+        );
+        assert_eq!(
+            launcher_metadata_url("https://cdn.example/files/game_files", GAME_FILES_NAME),
+            "https://cdn.example/files/game_files"
         );
     }
 }

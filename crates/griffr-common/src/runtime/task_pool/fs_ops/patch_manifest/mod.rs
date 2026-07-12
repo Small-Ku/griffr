@@ -1,17 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
+use crate::runtime::{PATCH_MANIFEST_NAME, PATCH_STAGE_DIR};
 
 use crate::api::types::ResourcePatch;
 
 use super::path_safety::parse_safe_relative_path;
 
 mod materialize;
-
-pub(super) const PATCH_MANIFEST_NAME: &str = "patch.json";
-pub(super) const PATCH_STAGE_DIR: &str = "vfs_files";
-const PATCH_FILES_STAGE_DIR: &str = "files";
-const PATCH_DIFF_STAGE_DIR: &str = "vfs_patch";
 
 fn resolve_patch_stage_path(
     install_root: &Path,
@@ -81,7 +77,8 @@ pub(crate) fn apply_extracted_vfs_patch_manifest(install_root: &Path) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_extracted_vfs_patch_manifest, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR};
+    use super::apply_extracted_vfs_patch_manifest;
+    use crate::runtime::{PATCH_MANIFEST_NAME, PATCH_STAGE_DIR};
 
     #[test]
     fn apply_extracted_vfs_patch_manifest_moves_local_files_and_cleans_staging() {

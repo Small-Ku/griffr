@@ -7,6 +7,7 @@ use griffr_common::api::crypto;
 use griffr_common::config::{
     game_by_appcode, game_by_executable, ChannelPair, GameId, GAME_CATALOG,
 };
+use griffr_common::runtime::CONFIG_INI_NAME;
 
 #[derive(Debug, Clone)]
 pub struct ParsedConfigIni {
@@ -94,7 +95,7 @@ pub fn resolve_named_path(path: &Path, filename: &str) -> PathBuf {
 }
 
 pub async fn decrypt_config_ini(path: &Path) -> Result<ParsedConfigIni> {
-    let config_path = resolve_named_path(path, "config.ini");
+    let config_path = resolve_named_path(path, CONFIG_INI_NAME);
     let encrypted = compio::fs::read(&config_path)
         .await
         .with_context(|| format!("Failed to read {}", config_path.display()))?;

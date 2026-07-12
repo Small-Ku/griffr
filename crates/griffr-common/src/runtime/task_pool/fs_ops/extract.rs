@@ -126,7 +126,7 @@ pub(super) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::commit_staged_extract;
-    use crate::runtime::task_pool::fs_ops::delete_manifest::DELETE_FILES_MANIFEST_NAME;
+    use crate::runtime::DELETE_FILES_MANIFEST_NAME;
 
     #[test]
     fn commit_staged_extract_keeps_delete_manifest_for_follow_up_task() {

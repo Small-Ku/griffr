@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::{GetLatestGameResponse, PackFile, PrePatchInfo};
 use griffr_common::runtime::task_pool::{ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner};
+use griffr_common::runtime::{DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR};
 
 use super::local::{detect_local_install, LocalInstall};
 use crate::progress::{ByteProgressTracker, StepProgress};
@@ -231,9 +232,9 @@ pub async fn apply(
 pub async fn resume(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
     let local = detect_local_install(&path).await?;
     let install_root = local.install_path;
-    let patch_manifest = install_root.join("patch.json");
-    let patch_stage_dir = install_root.join("vfs_files");
-    let delete_manifest = install_root.join("delete_files.txt");
+    let patch_manifest = install_root.join(PATCH_MANIFEST_NAME);
+    let patch_stage_dir = install_root.join(PATCH_STAGE_DIR);
+    let delete_manifest = install_root.join(DELETE_FILES_MANIFEST_NAME);
 
     let initial_task = if patch_manifest.is_file() || patch_stage_dir.exists() {
         Task::ApplyExtractedVfsPatchManifest {
@@ -245,8 +246,11 @@ pub async fn resume(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
         }
     } else {
         anyhow::bail!(
-            "No extracted local patch state found under {} (expected patch.json, vfs_files, or delete_files.txt).",
-            install_root.display()
+            "No extracted local patch state found under {} (expected {}, {}, or {}).",
+            install_root.display(),
+            PATCH_MANIFEST_NAME,
+            PATCH_STAGE_DIR,
+            DELETE_FILES_MANIFEST_NAME
         );
     };
 
