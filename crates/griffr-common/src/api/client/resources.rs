@@ -1,6 +1,6 @@
 use std::io::ErrorKind;
 
-use crate::api::protocol::{RANGE_HEADER, USER_AGENT_HEADER};
+use crate::api::protocol::{byte_range_from, RANGE_HEADER, USER_AGENT_HEADER};
 use crate::error::{Error, Result};
 use md5::{Digest, Md5};
 
@@ -153,7 +153,7 @@ impl ApiClient {
                 Ok(bytes) => {
                     if !bytes.is_empty() {
                         request = request
-                            .header(RANGE_HEADER, format!("bytes={}-", bytes.len()))
+                            .header(RANGE_HEADER, byte_range_from(bytes.len() as u64))
                             .map_err(|e| {
                                 Error::ApiClient(format!("Failed to set Range header: {e}"))
                             })?;

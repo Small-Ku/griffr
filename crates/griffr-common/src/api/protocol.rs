@@ -19,6 +19,10 @@ pub const RANGE_HEADER: &str = "Range";
 pub const MIN_USER_AGENT: &str = "Mozilla/5.0";
 pub const OFFICIAL_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) QtWebEngine/5.15.8 Chrome/92.0.4515.159 PC/WIN/HGSDK HGWebPC/1.30.1 Safari/537.36";
 
+pub fn byte_range_from(offset: u64) -> String {
+    format!("bytes={offset}-")
+}
+
 pub fn endpoint_url(gateway: &str, path: &str) -> String {
     format!("{}{}", gateway.trim_end_matches('/'), path)
 }
@@ -67,4 +71,14 @@ pub fn media_batch(target: &ApiTarget, language: &str) -> BatchRequest {
         },
         ProxyRequest::GetSidebar { req: common },
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::byte_range_from;
+
+    #[test]
+    fn byte_range_value_starts_at_requested_offset() {
+        assert_eq!(byte_range_from(42), "bytes=42-");
+    }
 }

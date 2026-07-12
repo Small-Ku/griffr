@@ -1,7 +1,7 @@
 use std::io::ErrorKind;
 use std::path::Path;
 
-use crate::api::protocol::{RANGE_HEADER, USER_AGENT_HEADER};
+use crate::api::protocol::{byte_range_from, RANGE_HEADER, USER_AGENT_HEADER};
 use crate::error::{Error, Result};
 use compio::buf::BufResult;
 use compio::bytes::Bytes;
@@ -69,7 +69,7 @@ pub(crate) fn do_download(
             .map_err(|e| Error::Download(format!("Failed to attach User-Agent header: {e}")))?;
         if let Some(offset) = resume_from.filter(|o| *o > 0) {
             request = request
-                .header(RANGE_HEADER, format!("bytes={}-", offset))
+                .header(RANGE_HEADER, byte_range_from(offset))
                 .map_err(|e| {
                     Error::Download(format!("Failed to set Range header for resume: {e}"))
                 })?;
