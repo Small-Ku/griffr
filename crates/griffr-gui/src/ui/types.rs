@@ -76,12 +76,18 @@ pub enum SizingPolicy {
     Fixed(Size),
 }
 
+impl SizingPolicy {
+    pub const DEFAULT_FLEX_GROW: f64 = 0.0;
+    pub const DEFAULT_FLEX_SHRINK: f64 = 1.0;
+    pub const DEFAULT_FLEX_BASIS: f64 = 100.0;
+}
+
 impl Default for SizingPolicy {
     fn default() -> Self {
         Self::Flex {
-            grow: 0.0,
-            shrink: 1.0,
-            basis: 100.0,
+            grow: Self::DEFAULT_FLEX_GROW,
+            shrink: Self::DEFAULT_FLEX_SHRINK,
+            basis: Self::DEFAULT_FLEX_BASIS,
         }
     }
 }
@@ -99,9 +105,10 @@ pub enum ClipPolicy {
     ForceNoClip,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum LayoutDirection {
     Row,
+    #[default]
     Column,
 }
 
@@ -113,16 +120,24 @@ pub struct LayoutSpec {
     pub sizing: SizingPolicy,
 }
 
+impl LayoutSpec {
+    pub const DEFAULT_MARGIN: f64 = 0.0;
+    pub const DEFAULT_PADDING: f64 = 0.0;
+}
+
 impl Default for LayoutSpec {
     fn default() -> Self {
         Self {
-            direction: LayoutDirection::Column,
-            margin: 0.0,
-            padding: 0.0,
+            direction: LayoutDirection::default(),
+            margin: Self::DEFAULT_MARGIN,
+            padding: Self::DEFAULT_PADDING,
             sizing: SizingPolicy::default(),
         }
     }
 }
+
+/// Extra canvas extent used to hide sub-pixel seams between adjacent tiles.
+pub const CANVAS_OVERDRAW_PX: f64 = 0.5;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WidgetNode {

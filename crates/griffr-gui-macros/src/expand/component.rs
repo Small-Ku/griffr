@@ -196,7 +196,6 @@ fn render_definitions(tokens: &ComponentTokens<'_>) -> TokenStream {
                 }
             }
             fn render(&mut self, _sender: &::winio::prelude::ComponentSender<Self>) -> ::winio::prelude::Result<()> {
-                const TILE_OVERLAP_PX: f64 = 0.5;
                 let size = self.root.size()?;
                 let mut dirty = self.pending_dirty | self.plan.dirty_summary();
                 if self.plan.size != size {
@@ -221,7 +220,10 @@ fn render_definitions(tokens: &ComponentTokens<'_>) -> TokenStream {
                 for tile_idx in 0..self.plan.tile_plan.tiles.len() {
                     let slot_idx = self.canvas_pool.slot_for_tile(tile_idx);
                     let tile = &self.plan.tile_plan.tiles[tile_idx];
-                    let placement = ::griffr_gui::ui::CanvasPlacement::from_tile_bounds(tile.bounds, TILE_OVERLAP_PX);
+                    let placement = ::griffr_gui::ui::CanvasPlacement::from_tile_bounds(
+                        tile.bounds,
+                        ::griffr_gui::ui::CANVAS_OVERDRAW_PX,
+                    );
                     let slot_update = self.canvas_pool.apply_placement(slot_idx, placement);
                     let canvas = match slot_idx {
                         #(#canvas_match_arms)*

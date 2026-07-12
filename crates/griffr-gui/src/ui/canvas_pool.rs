@@ -177,7 +177,7 @@ mod tests {
     fn placement_from_tile_bounds_applies_overlap() {
         let placement = CanvasPlacement::from_tile_bounds(
             Rect::new(Point::new(4.0, 5.0), Size::new(10.0, 20.0)),
-            0.5,
+            crate::ui::CANVAS_OVERDRAW_PX,
         );
 
         assert_eq!(placement.loc, Point::new(4.0, 5.0));

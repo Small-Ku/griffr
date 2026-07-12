@@ -124,12 +124,16 @@ pub(super) fn render(tokens: &ComponentTokens<'_>) -> TokenStream {
                     .unwrap_or(p)
             }
             fn expand_size(size: ::winio::prelude::Size) -> ::winio::prelude::Size {
-                const COMPONENT_OVERDRAW_PX: f64 = 0.5;
-                ::winio::prelude::Size::new(size.width + COMPONENT_OVERDRAW_PX, size.height + COMPONENT_OVERDRAW_PX)
+                ::winio::prelude::Size::new(
+                    size.width + ::griffr_gui::ui::CANVAS_OVERDRAW_PX,
+                    size.height + ::griffr_gui::ui::CANVAS_OVERDRAW_PX,
+                )
             }
             fn shrink_size(size: ::winio::prelude::Size) -> ::winio::prelude::Size {
-                const COMPONENT_OVERDRAW_PX: f64 = 0.5;
-                ::winio::prelude::Size::new(size.width - COMPONENT_OVERDRAW_PX, size.height - COMPONENT_OVERDRAW_PX)
+                ::winio::prelude::Size::new(
+                    size.width - ::griffr_gui::ui::CANVAS_OVERDRAW_PX,
+                    size.height - ::griffr_gui::ui::CANVAS_OVERDRAW_PX,
+                )
             }
             fn compile_plan(
                 widget_nodes: &[::griffr_gui::ui::WidgetNode],

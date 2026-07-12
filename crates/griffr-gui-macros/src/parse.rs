@@ -1,7 +1,7 @@
 use syn::parse::{Parse, ParseStream};
 use syn::{braced, parenthesized, Expr, Ident, LitFloat, LitInt, Path, Result, Token};
 
-use crate::model::{NodeInput, NodeProps, TreeInput};
+use crate::model::{Clip, Direction, NodeInput, NodeProps, TreeInput};
 
 impl Parse for NodeInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
@@ -16,7 +16,11 @@ impl Parse for NodeInput {
                 match key.to_string().as_str() {
                     "flex_direction" => {
                         let v: Ident = content.parse()?;
-                        props.direction = Some(if v == "Row" { 0 } else { 1 });
+                        props.direction = Some(match v.to_string().as_str() {
+                            "Row" => Direction::Row,
+                            "Column" => Direction::Column,
+                            _ => return Err(syn::Error::new(v.span(), "expected Row or Column")),
+                        });
                     }
                     "flex_grow" => props.flex_grow = Some(parse_num(&content)?),
                     "flex_shrink" => props.flex_shrink = Some(parse_num(&content)?),
@@ -26,9 +30,15 @@ impl Parse for NodeInput {
                     "clip" => {
                         let v: Ident = content.parse()?;
                         props.clip = Some(match v.to_string().as_str() {
-                            "ForceClip" => 1,
-                            "ForceNoClip" => -1,
-                            _ => 0,
+                            "ForceClip" => Clip::ForceClip,
+                            "ForceNoClip" => Clip::ForceNoClip,
+                            "InferFromCapabilities" => Clip::Infer,
+                            _ => {
+                                return Err(syn::Error::new(
+                                    v.span(),
+                                    "expected ForceClip, ForceNoClip, or InferFromCapabilities",
+                                ))
+                            }
                         });
                     }
                     "z" => props.z = Some(content.parse::<LitInt>()?.base10_parse::<i32>()?),

@@ -3,7 +3,7 @@ use quote::quote;
 use std::collections::BTreeSet;
 use syn::{Ident, ItemStruct, Type};
 
-use crate::model::FlatNode;
+use crate::model::{Clip, Direction, FlatNode, Sizing};
 
 use super::component;
 
@@ -71,51 +71,82 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             quote! { ::griffr_gui::ui::WidgetId(#id) }
         })
         .collect();
-    let static_widgets = flat.iter().map(|n| {
-        let id = n.id;
-        let parent = n.parent;
-        let hoverable = n.hoverable;
-        let clickable = n.clickable;
-        let scrollable = n.scrollable;
-        let opaque = n.opaque;
-        let clip = n.clip;
-        let z = n.z;
-        let kind = &n.kind;
-        let direction = n.direction;
-        let sizing_mode = n.sizing_mode;
-        let sizing_f1 = n.sizing_f1;
-        let sizing_f2 = n.sizing_f2;
-        let sizing_f3 = n.sizing_f3;
-        let margin = n.margin;
-        let padding = n.padding;
-        quote! {
-            ::griffr_gui::ui::WidgetNode {
-                id: ::griffr_gui::ui::WidgetId(#id),
-                parent: (#parent >= 0).then_some(::griffr_gui::ui::WidgetId(#parent as u16)),
-                hoverable: #hoverable,
-                clickable: #clickable,
-                scrollable: #scrollable,
-                opaque: #opaque,
-                clip: match #clip {
-                    1 => ::griffr_gui::ui::ClipPolicy::ForceClip,
-                    -1 => ::griffr_gui::ui::ClipPolicy::ForceNoClip,
-                    _ => ::griffr_gui::ui::ClipPolicy::InferFromCapabilities,
-                },
-                layout: ::griffr_gui::ui::LayoutSpec {
-                    direction: if #direction == 0 { ::griffr_gui::ui::LayoutDirection::Row } else { ::griffr_gui::ui::LayoutDirection::Column },
-                    margin: #margin,
-                    padding: #padding,
-                    sizing: match #sizing_mode {
-                        1 => ::griffr_gui::ui::SizingPolicy::AspectRatio(#sizing_f1),
-                        2 => ::griffr_gui::ui::SizingPolicy::Fixed(::winio::prelude::Size::new(#sizing_f1, #sizing_f2)),
-                        _ => ::griffr_gui::ui::SizingPolicy::Flex { grow: #sizing_f1, shrink: #sizing_f2, basis: #sizing_f3 },
+    let static_widgets = flat
+        .iter()
+        .map(|n| {
+            let id = n.id;
+            let parent = n.parent;
+            let hoverable = n.hoverable;
+            let clickable = n.clickable;
+            let scrollable = n.scrollable;
+            let opaque = n.opaque;
+            let clip = match n.clip {
+                Clip::Infer => quote! { ::griffr_gui::ui::ClipPolicy::InferFromCapabilities },
+                Clip::ForceClip => quote! { ::griffr_gui::ui::ClipPolicy::ForceClip },
+                Clip::ForceNoClip => quote! { ::griffr_gui::ui::ClipPolicy::ForceNoClip },
+            };
+            let z = n.z;
+            let kind = &n.kind;
+            let direction = match n.direction {
+                Direction::Row => quote! { ::griffr_gui::ui::LayoutDirection::Row },
+                Direction::Column => quote! { ::griffr_gui::ui::LayoutDirection::Column },
+            };
+            let sizing = match n.sizing {
+                Sizing::AspectRatio(ratio) => {
+                    quote! { ::griffr_gui::ui::SizingPolicy::AspectRatio(#ratio) }
+                }
+                Sizing::Flex {
+                    grow,
+                    shrink,
+                    basis,
+                } => {
+                    let grow = grow.map(|value| quote! { #value }).unwrap_or_else(
+                        || quote! { ::griffr_gui::ui::SizingPolicy::DEFAULT_FLEX_GROW },
+                    );
+                    let shrink = shrink.map(|value| quote! { #value }).unwrap_or_else(
+                        || quote! { ::griffr_gui::ui::SizingPolicy::DEFAULT_FLEX_SHRINK },
+                    );
+                    let basis = basis.map(|value| quote! { #value }).unwrap_or_else(
+                        || quote! { ::griffr_gui::ui::SizingPolicy::DEFAULT_FLEX_BASIS },
+                    );
+                    quote! {
+                        ::griffr_gui::ui::SizingPolicy::Flex {
+                            grow: #grow,
+                            shrink: #shrink,
+                            basis: #basis,
+                        }
+                    }
+                }
+            };
+            let margin = n
+                .margin
+                .map(|value| quote! { #value })
+                .unwrap_or_else(|| quote! { ::griffr_gui::ui::LayoutSpec::DEFAULT_MARGIN });
+            let padding = n
+                .padding
+                .map(|value| quote! { #value })
+                .unwrap_or_else(|| quote! { ::griffr_gui::ui::LayoutSpec::DEFAULT_PADDING });
+            quote! {
+                ::griffr_gui::ui::WidgetNode {
+                    id: ::griffr_gui::ui::WidgetId(#id),
+                    parent: (#parent >= 0).then_some(::griffr_gui::ui::WidgetId(#parent as u16)),
+                    hoverable: #hoverable,
+                    clickable: #clickable,
+                    scrollable: #scrollable,
+                    opaque: #opaque,
+                    clip: #clip,
+                    layout: ::griffr_gui::ui::LayoutSpec {
+                        direction: #direction,
+                        margin: #margin,
+                        padding: #padding,
+                        sizing: #sizing,
                     },
-                },
-                z_order: #z,
-                widget_type: #kind,
+                    z_order: #z,
+                    widget_type: #kind,
+                }
             }
-        }
-    }).collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
     let canvas_fields: Vec<_> = (0..canvas_count)
         .map(|idx| {
             let field = Ident::new(&format!("tile{}", idx), ident.span());
