@@ -39,7 +39,9 @@ pub async fn sync_launcher_metadata(
     api_client
         .download_file(&config_ini_url, &config_ini_path, false)
         .await
-        .map_err(|e| Error::Download(format!("Failed to sync launcher config.ini metadata: {e}")))?;
+        .map_err(|e| {
+            Error::Download(format!("Failed to sync launcher config.ini metadata: {e}"))
+        })?;
 
     let game_files_url = game_files_url(&pkg.file_path);
     let game_files_path = install_path.join("game_files");

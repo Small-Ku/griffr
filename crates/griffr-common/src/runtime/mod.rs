@@ -1,9 +1,9 @@
 pub mod admin;
 mod compat_fs;
 pub mod files;
+mod integrity;
 pub mod issues;
 pub mod launcher;
-mod integrity;
 mod launcher_metadata;
 mod paths;
 mod progress;
@@ -24,9 +24,9 @@ pub use files::vfs::{
     VfsBootstrapResult, VfsBootstrapScope, VfsMaterializeConfig, VfsPlanOutcome, VfsTaskPlan,
     VfsUpdateOutcome, VfsUpdateResult,
 };
+pub use integrity::{run_integrity_pool, IntegrityRunSummary};
 pub use issues::{FileIssue, FileIssueKind};
 pub use launcher::{GameProcess, Launcher};
-pub use integrity::{run_integrity_pool, IntegrityRunSummary};
 pub use launcher_metadata::sync_launcher_metadata;
 pub use paths::{
     build_cdn_file_url, is_launcher_metadata_path, logical_path_from_root, normalize_logical_path,

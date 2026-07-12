@@ -121,9 +121,6 @@ mod tests {
                 ("channel".to_string(), "1".to_string()),
             ],
         );
-        assert_eq!(
-            output,
-            "Remote State\n  version : 1.1.9\n  channel : 1\n"
-        );
+        assert_eq!(output, "Remote State\n  version : 1.1.9\n  channel : 1\n");
     }
 }

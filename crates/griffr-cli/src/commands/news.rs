@@ -61,7 +61,10 @@ pub async fn show(
         &[
             ("game".to_string(), game_id.to_string()),
             ("channel".to_string(), channel_id.channel().to_string()),
-            ("sub_channel".to_string(), channel_id.sub_channel().to_string()),
+            (
+                "sub_channel".to_string(),
+                channel_id.sub_channel().to_string(),
+            ),
             ("language".to_string(), language.to_string()),
         ],
     );

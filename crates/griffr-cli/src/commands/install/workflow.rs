@@ -10,8 +10,8 @@ use griffr_common::runtime::task_pool::{
 };
 use griffr_common::runtime::{directory_has_entries, is_launcher_metadata_path};
 use griffr_common::runtime::{
-    materialize_game_files_with_pool, plan_vfs_tasks, run_integrity_pool,
-    sync_launcher_metadata, FileReuseConfig, SourceInstallInput, VfsMaterializeConfig,
+    materialize_game_files_with_pool, plan_vfs_tasks, run_integrity_pool, sync_launcher_metadata,
+    FileReuseConfig, SourceInstallInput, VfsMaterializeConfig,
 };
 
 use crate::commands::local::detect_local_install;

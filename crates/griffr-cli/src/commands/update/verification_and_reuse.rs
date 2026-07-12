@@ -6,8 +6,8 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::config::InstallProfile;
 use griffr_common::runtime::task_pool::{ArchivePart, ProgressEvent, Task, TaskPoolRunner};
 use griffr_common::runtime::{
-    is_launcher_metadata_path, materialize_game_files_with_pool,
-    run_integrity_pool, sync_launcher_metadata, FileReuseConfig, SourceInstallInput,
+    is_launcher_metadata_path, materialize_game_files_with_pool, run_integrity_pool,
+    sync_launcher_metadata, FileReuseConfig, SourceInstallInput,
 };
 
 use super::*;

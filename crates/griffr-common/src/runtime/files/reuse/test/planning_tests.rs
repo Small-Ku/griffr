@@ -443,7 +443,10 @@ fn test_reusable_file_struct() {
         source_path: PathBuf::from("/mnt/games/arknights/global"),
     };
     assert_eq!(file.path, "data/config.json");
-    assert_eq!(file.source_channel_id, ChannelPair::parse("6", None::<String>).unwrap());
+    assert_eq!(
+        file.source_channel_id,
+        ChannelPair::parse("6", None::<String>).unwrap()
+    );
     assert_eq!(file.size, 2048);
 }
 
@@ -455,7 +458,10 @@ fn test_source_channel_struct() {
         install_path: PathBuf::from("/games/endfield/cn-bili"),
         file_count: 5000,
     };
-    assert_eq!(source.channel_id, ChannelPair::parse("2", None::<String>).unwrap());
+    assert_eq!(
+        source.channel_id,
+        ChannelPair::parse("2", None::<String>).unwrap()
+    );
     assert_eq!(source.version, "2.1.0");
     assert_eq!(source.file_count, 5000);
 }

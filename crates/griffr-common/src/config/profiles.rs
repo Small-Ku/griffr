@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{
-    ChannelId, ChannelPair, GameAppCode, GameId, LauncherAppCode, LauncherGateway,
-};
+use super::{ChannelId, ChannelPair, GameAppCode, GameId, LauncherAppCode, LauncherGateway};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiTarget {
