@@ -67,12 +67,18 @@ pub enum VfsBootstrapScope {
     Complete,
 }
 
-impl std::fmt::Display for VfsBootstrapScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+impl VfsBootstrapScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
             Self::Initial => RESOURCE_GROUP_INITIAL,
             Self::Complete => "complete",
-        })
+        }
+    }
+}
+
+impl std::fmt::Display for VfsBootstrapScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -82,9 +88,11 @@ impl std::str::FromStr for VfsBootstrapScope {
     fn from_str(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             RESOURCE_GROUP_INITIAL => Ok(Self::Initial),
-            "complete" => Ok(Self::Complete),
+            value if value == Self::Complete.as_str() => Ok(Self::Complete),
             other => Err(Error::Config(format!(
-                "invalid bootstrap scope {other:?}: expected {RESOURCE_GROUP_INITIAL} or complete"
+                "invalid bootstrap scope {other:?}: expected {} or {}",
+                Self::Initial.as_str(),
+                Self::Complete.as_str()
             ))),
         }
     }
