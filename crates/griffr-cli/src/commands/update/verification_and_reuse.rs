@@ -1,10 +1,9 @@
-use rapidhash::RapidHashMap as HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::InstallProfile;
-use griffr_common::runtime::task_pool::{ArchivePart, ProgressEvent, Task, TaskPoolRunner};
+use griffr_common::runtime::task_pool::{ProgressEvent, Task, TaskPoolRunner};
 use griffr_common::runtime::{
     is_launcher_metadata_path, materialize_game_files_with_pool, run_integrity_pool,
     sync_launcher_metadata, FileReuseConfig, SourceInstallInput,
@@ -175,32 +174,4 @@ pub(super) async fn update_via_reuse(
         );
     }
     Ok(())
-}
-
-pub(super) fn group_archives_by_base(
-    archives: &[griffr_common::api::types::PackFile],
-    archive_dir: &Path,
-) -> Result<HashMap<String, Vec<ArchivePart>>> {
-    let mut grouped: HashMap<String, Vec<ArchivePart>> = HashMap::default();
-    for archive in archives {
-        let filename = archive
-            .filename()
-            .context("Failed to extract archive filename")?
-            .to_string();
-        let base = archive
-            .archive_base_name()
-            .context("Could not determine archive base name from pack URL")?
-            .to_string();
-        grouped.entry(base).or_default().push(ArchivePart {
-            url: archive.url.clone(),
-            dest: archive_dir.join(&filename),
-            logical_path: filename,
-            expected_md5: archive.md5.clone(),
-            expected_size: archive.size(),
-        });
-    }
-    if grouped.is_empty() {
-        anyhow::bail!("No archives to process");
-    }
-    Ok(grouped)
 }

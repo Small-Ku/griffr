@@ -33,13 +33,13 @@ fn install_archive_recovers_from_interrupted_partial_part_on_rerun() {
     let (base_url, hits, stop) = start_test_http_channel(routes);
 
     let tasks = vec![Task::InstallArchive {
-        source_dir: source_dir.clone(),
         base_name: "bundle".to_string(),
         dest: install_dir.clone(),
         cleanup: false,
         password: None,
         parts: vec![
             ArchivePart {
+                sequence: 1,
                 url: format!("{}/bundle.zip.001", base_url),
                 dest: part1_path.clone(),
                 logical_path: "bundle.zip.001".to_string(),
@@ -47,6 +47,7 @@ fn install_archive_recovers_from_interrupted_partial_part_on_rerun() {
                 expected_size: part1.len() as u64,
             },
             ArchivePart {
+                sequence: 2,
                 url: format!("{}/bundle.zip.002", base_url),
                 dest: part2_path.clone(),
                 logical_path: "bundle.zip.002".to_string(),
@@ -151,8 +152,8 @@ fn extract_task_spawns_vfs_patch_and_delete_manifest_follow_up_tasks() {
     std::fs::write(source_dir.join("bundle.zip.001"), &zip_bytes).unwrap();
 
     let tasks = vec![Task::Extract {
-        source_dir: source_dir.clone(),
         base_name: "bundle".to_string(),
+        volumes: vec![source_dir.join("bundle.zip.001")],
         dest: install_dir.clone(),
         cleanup: false,
         password: None,

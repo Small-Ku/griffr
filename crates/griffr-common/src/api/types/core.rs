@@ -321,12 +321,26 @@ impl PackFile {
     /// Return the base name shared by a single `.zip` archive or any numeric
     /// multipart archive such as `.zip.001` or `.zip.12`.
     pub fn archive_base_name(&self) -> Option<&str> {
+        self.archive_identity().map(|(base_name, _)| base_name)
+    }
+
+    /// Return the extraction order for this archive volume.
+    ///
+    /// A single `.zip` archive uses sequence zero. Numeric multipart suffixes
+    /// use their parsed number, so `.zip.2` sorts before `.zip.12`.
+    pub fn archive_sequence(&self) -> Option<u64> {
+        self.archive_identity().map(|(_, sequence)| sequence)
+    }
+
+    fn archive_identity(&self) -> Option<(&str, u64)> {
         let filename = self.filename()?;
         if let Some(stem) = filename.strip_suffix(".zip") {
-            return (!stem.is_empty()).then_some(stem);
+            return (!stem.is_empty()).then_some((stem, 0));
         }
         let (stem, part) = filename.rsplit_once(".zip.")?;
-        (!stem.is_empty() && !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-            .then_some(stem)
+        if stem.is_empty() || part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        Some((stem, part.parse().ok()?))
     }
 }

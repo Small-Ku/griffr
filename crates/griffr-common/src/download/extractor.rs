@@ -43,39 +43,6 @@ impl MultiVolumeStream {
         Ok(stream)
     }
 
-    /// Create from a base path and pattern
-    /// For example: `Beyond_Release.zip.001`, `Beyond_Release.zip.002`, etc.
-    pub fn from_pattern(base_path: &Path, pattern: &str) -> Result<Self> {
-        let mut volumes = Vec::new();
-        let mut index = 1;
-
-        loop {
-            let volume_path = base_path.join(format!("{}.{:03}", pattern, index));
-            if volume_path.exists() {
-                volumes.push(volume_path);
-                index += 1;
-            } else {
-                break;
-            }
-        }
-
-        if volumes.is_empty() {
-            // Try with the pattern as a full filename stem
-            let mut index = 1;
-            loop {
-                let volume_path = base_path.with_extension(format!("zip.{:03}", index));
-                if volume_path.exists() {
-                    volumes.push(volume_path);
-                    index += 1;
-                } else {
-                    break;
-                }
-            }
-        }
-
-        Self::new(volumes)
-    }
-
     /// Open the current volume file
     fn open_current_volume(&mut self) -> Result<()> {
         if self.current_volume >= self.volumes.len() {
@@ -226,41 +193,6 @@ impl MultiVolumeExtractor {
         }
 
         Ok(Self { volumes })
-    }
-
-    /// Create from a directory and base filename.
-    /// Supports either split archives like `base_name.zip.001`, `base_name.zip.002`, etc.
-    /// or a single archive named `base_name.zip`.
-    pub fn from_directory(dir: &Path, base_name: &str) -> Result<Self> {
-        let mut volumes = Vec::new();
-        let mut index = 1;
-
-        loop {
-            let volume_path = dir.join(format!("{}.zip.{:03}", base_name, index));
-            if volume_path.exists() {
-                volumes.push(volume_path);
-                index += 1;
-            } else {
-                break;
-            }
-        }
-
-        if volumes.is_empty() {
-            let single_archive = dir.join(format!("{}.zip", base_name));
-            if single_archive.exists() {
-                volumes.push(single_archive);
-            }
-        }
-
-        if volumes.is_empty() {
-            return Err(Error::Extraction(format!(
-                "No volumes found for {} in {}",
-                base_name,
-                dir.display()
-            )));
-        }
-
-        Self::new(volumes)
     }
 
     pub fn extract_to_with_progress(

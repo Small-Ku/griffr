@@ -144,44 +144,6 @@ pub fn run_tasks(initial_tasks: Vec<Task>, config: TaskPoolConfig) -> Result<Tas
     run_tasks_with_progress(initial_tasks, config, None)
 }
 
-pub fn extract_archives_pooled(
-    source_dir: &std::path::Path,
-    base_names: &[String],
-    dest: &std::path::Path,
-    extract_slots: usize,
-    cleanup: bool,
-) -> Result<()> {
-    if base_names.is_empty() {
-        return Ok(());
-    }
-    let tasks = base_names
-        .iter()
-        .map(|base| Task::Extract {
-            source_dir: source_dir.to_path_buf(),
-            base_name: base.clone(),
-            dest: dest.to_path_buf(),
-            cleanup,
-            password: None,
-        })
-        .collect::<Vec<_>>();
-    let config = TaskPoolConfig::with_extract_slots(extract_slots);
-    let result = run_tasks(tasks, config)?;
-    let mut failures = Vec::new();
-    for event in result.events {
-        if let ProgressEvent::Failed { path, reason } = event {
-            failures.push(format!("{} ({})", path, reason));
-        }
-    }
-    if !failures.is_empty() {
-        return Err(Error::Extraction(format!(
-            "Failed to extract {} archive base(s): {}",
-            failures.len(),
-            failures.join(", ")
-        )));
-    }
-    Ok(())
-}
-
 fn spawn_workers(
     _kind: WorkerKind,
     count: usize,

@@ -19,7 +19,6 @@ use crate::runtime::issues::FileIssue;
 #[derive(Debug, Clone)]
 pub enum Task {
     InstallArchive {
-        source_dir: PathBuf,
         base_name: String,
         dest: PathBuf,
         cleanup: bool,
@@ -53,8 +52,8 @@ pub enum Task {
         retry_count: u32,
     },
     Extract {
-        source_dir: PathBuf,
         base_name: String,
+        volumes: Vec<PathBuf>,
         dest: PathBuf,
         cleanup: bool,
         password: Option<String>,
@@ -73,6 +72,7 @@ pub enum Task {
 
 #[derive(Debug, Clone)]
 pub struct ArchivePart {
+    pub sequence: u64,
     pub url: String,
     pub dest: PathBuf,
     pub logical_path: String,

@@ -6,7 +6,7 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::PackageInfo;
 use griffr_common::config::{ChannelPair, GameId};
 use griffr_common::runtime::task_pool::{
-    ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
+    plan_archive_groups, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
 use griffr_common::runtime::{directory_has_entries, is_launcher_metadata_path};
 use griffr_common::runtime::{
@@ -191,37 +191,16 @@ pub async fn install(
             .await
             .with_context(|| format!("Failed to create {}", download_dir.display()))?;
 
-        let mut archives: rapidhash::RapidHashMap<String, Vec<ArchivePart>> =
-            rapidhash::RapidHashMap::default();
+        let archive_groups = plan_archive_groups(&pkg.packs, &download_dir)?;
         let total_archive_download_bytes: u64 = pkg.packs.iter().map(|p| p.size()).sum();
-        for pack in &pkg.packs {
-            let filename = pack
-                .filename()
-                .context("Failed to extract pack filename")?
-                .to_string();
-            let base = pack
-                .archive_base_name()
-                .context("Pack URL did not end with .zip or a numeric .zip.<part>")?
-                .to_string();
-            archives.entry(base).or_default().push(ArchivePart {
-                url: pack.url.clone(),
-                dest: download_dir.join(&filename),
-                logical_path: filename,
-                expected_md5: pack.md5.clone(),
-                expected_size: pack.size(),
-            });
-        }
-
-        let mut tasks = Vec::with_capacity(archives.len());
-        for (base_name, mut parts) in archives {
-            parts.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
+        let mut tasks = Vec::with_capacity(archive_groups.len());
+        for group in archive_groups {
             tasks.push(Task::InstallArchive {
-                source_dir: download_dir.clone(),
-                base_name,
+                base_name: group.base_name,
                 dest: install_path.clone(),
                 cleanup: !opts.keep_pack_archives,
                 password: None,
-                parts,
+                parts: group.parts,
             });
         }
 

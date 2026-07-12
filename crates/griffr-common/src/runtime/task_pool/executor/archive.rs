@@ -7,12 +7,11 @@ use super::super::fs_ops::{commit_staged_extract, make_extract_staging_dir};
 use super::super::types::{ArchivePart, ProgressEvent, Task};
 
 pub(super) fn execute_install_archive(
-    source_dir: PathBuf,
     base_name: String,
     dest: PathBuf,
     cleanup: bool,
     password: Option<String>,
-    parts: Vec<ArchivePart>,
+    mut parts: Vec<ArchivePart>,
     max_retries: u32,
     download_progress_buffer_bytes: usize,
     io_dispatcher: Option<&Dispatcher>,
@@ -20,6 +19,12 @@ pub(super) fn execute_install_archive(
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<ProgressEvent>,
 ) {
+    parts.sort_by(|left, right| {
+        left.sequence
+            .cmp(&right.sequence)
+            .then_with(|| left.logical_path.cmp(&right.logical_path))
+    });
+    let volumes = parts.iter().map(|part| part.dest.clone()).collect();
     for part in parts {
         let mut completed = false;
         for attempt in 0..=max_retries {
@@ -137,8 +142,8 @@ pub(super) fn execute_install_archive(
     }
 
     spawned.push(Task::Extract {
-        source_dir,
         base_name,
+        volumes,
         dest,
         cleanup,
         password,
@@ -146,8 +151,8 @@ pub(super) fn execute_install_archive(
 }
 
 pub(super) fn execute_extract_archive(
-    source_dir: PathBuf,
     base_name: String,
+    volumes: Vec<PathBuf>,
     dest: PathBuf,
     cleanup: bool,
     password: Option<String>,
@@ -158,47 +163,46 @@ pub(super) fn execute_extract_archive(
     let progress_path = base_name.clone();
     let event_tx_clone = event_tx.clone();
     let result =
-        crate::download::extractor::MultiVolumeExtractor::from_directory(&source_dir, &base_name)
-            .and_then(|extractor| {
-                let staging_dir = make_extract_staging_dir(&dest, &base_name)?;
-                std::fs::create_dir_all(&staging_dir).map_err(|e| Error::CreateDirFailed {
-                    path: staging_dir.clone(),
-                    source: e,
-                })?;
-                if let Err(err) = extractor.extract_to_with_progress(
-                    &staging_dir,
-                    password.as_deref(),
-                    extraction_progress_buffer_bytes,
-                    Some(move |bytes, total_bytes| {
-                        let _ = event_tx_clone.send(ProgressEvent::ExtractedBytes {
-                            path: progress_path.clone(),
-                            bytes,
-                            total_bytes,
-                        });
-                    }),
-                ) {
-                    let _ = std::fs::remove_dir_all(&staging_dir);
-                    return Err(err);
-                }
-                if let Err(err) = commit_staged_extract(&staging_dir, &dest) {
-                    let _ = std::fs::remove_dir_all(&staging_dir);
-                    return Err(err);
-                }
-                spawned.push(Task::ApplyExtractedVfsPatchManifest {
-                    install_root: dest.clone(),
-                });
-                if cleanup {
-                    extractor.cleanup()?;
-                }
-                Ok(())
+        crate::download::extractor::MultiVolumeExtractor::new(volumes).and_then(|extractor| {
+            let staging_dir = make_extract_staging_dir(&dest, &base_name)?;
+            std::fs::create_dir_all(&staging_dir).map_err(|e| Error::CreateDirFailed {
+                path: staging_dir.clone(),
+                source: e,
+            })?;
+            if let Err(err) = extractor.extract_to_with_progress(
+                &staging_dir,
+                password.as_deref(),
+                extraction_progress_buffer_bytes,
+                Some(move |bytes, total_bytes| {
+                    let _ = event_tx_clone.send(ProgressEvent::ExtractedBytes {
+                        path: progress_path.clone(),
+                        bytes,
+                        total_bytes,
+                    });
+                }),
+            ) {
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                return Err(err);
+            }
+            if let Err(err) = commit_staged_extract(&staging_dir, &dest) {
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                return Err(err);
+            }
+            spawned.push(Task::ApplyExtractedVfsPatchManifest {
+                install_root: dest.clone(),
             });
+            if cleanup {
+                extractor.cleanup()?;
+            }
+            Ok(())
+        });
     match result {
         Ok(()) => {
             let _ = event_tx.send(ProgressEvent::Extracted { path: dest });
         }
         Err(err) => {
             let _ = event_tx.send(ProgressEvent::Failed {
-                path: format!("{}/{}", source_dir.display(), base_name),
+                path: base_name,
                 reason: err.to_string(),
             });
         }

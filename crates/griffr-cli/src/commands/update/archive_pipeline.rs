@@ -2,7 +2,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use griffr_common::runtime::task_pool::{ProgressEvent, Task, TaskPoolRunner};
+use griffr_common::runtime::task_pool::{plan_archive_groups, ProgressEvent, Task, TaskPoolRunner};
 
 use super::*;
 use crate::progress::{ByteProgressTracker, StepProgress, VerifyTaskProgressTracker};
@@ -34,17 +34,17 @@ pub(super) async fn download_and_extract_archives_from_dir(
         .await
         .with_context(|| format!("Failed to create {}", archive_dir.display()))?;
 
-    let mut grouped = group_archives_by_base(archives, archive_dir)?;
-    for parts in grouped.values_mut() {
-        parts.sort_by(|a, b| a.logical_path.cmp(&b.logical_path));
-    }
+    let archive_groups = plan_archive_groups(archives, archive_dir)?;
 
     if mode == ArchiveAcquireMode::RequireExisting {
         let mut verify_tasks = Vec::new();
         let mut extract_tasks = Vec::new();
-        for (base_name, parts) in &grouped {
-            opts.verbose(format!("queued predownload apply archive {}", base_name));
-            for part in parts {
+        for group in &archive_groups {
+            opts.verbose(format!(
+                "queued predownload apply archive {}",
+                group.base_name
+            ));
+            for part in &group.parts {
                 verify_tasks.push(Task::Verify {
                     path: part.dest.clone(),
                     logical_path: part.logical_path.clone(),
@@ -54,8 +54,8 @@ pub(super) async fn download_and_extract_archives_from_dir(
                 });
             }
             extract_tasks.push(Task::Extract {
-                source_dir: archive_dir.to_path_buf(),
-                base_name: base_name.clone(),
+                base_name: group.base_name.clone(),
+                volumes: group.parts.iter().map(|part| part.dest.clone()).collect(),
                 dest: install_path.to_path_buf(),
                 cleanup: !keep_pack_archives,
                 password: archive_password.map(str::to_owned),
@@ -114,16 +114,15 @@ pub(super) async fn download_and_extract_archives_from_dir(
         return Ok(());
     }
 
-    let mut tasks = Vec::with_capacity(grouped.len());
-    for (base_name, parts) in grouped {
-        opts.verbose(format!("queued archive state-machine {}", base_name));
+    let mut tasks = Vec::with_capacity(archive_groups.len());
+    for group in archive_groups {
+        opts.verbose(format!("queued archive state-machine {}", group.base_name));
         tasks.push(Task::InstallArchive {
-            source_dir: archive_dir.to_path_buf(),
-            base_name,
+            base_name: group.base_name,
             dest: install_path.to_path_buf(),
             cleanup: !keep_pack_archives,
             password: archive_password.map(str::to_owned),
-            parts,
+            parts: group.parts,
         });
     }
 

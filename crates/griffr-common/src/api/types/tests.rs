@@ -12,7 +12,31 @@ fn test_pack_file_parsing() {
     assert_eq!(pack.size(), 1073741824);
     assert_eq!(pack.filename(), Some("pack.zip.001"));
     assert_eq!(pack.archive_base_name(), Some("pack"));
+    assert_eq!(pack.archive_sequence(), Some(1));
     assert_eq!(pack.md5, "abc123");
+}
+
+#[test]
+fn archive_sequence_orders_numeric_suffixes() {
+    let part_two = PackFile {
+        url: "https://example.com/bundle.zip.2".to_string(),
+        md5: String::new(),
+        package_size: "0".to_string(),
+    };
+    let part_twelve = PackFile {
+        url: "https://example.com/bundle.zip.12".to_string(),
+        md5: String::new(),
+        package_size: "0".to_string(),
+    };
+    let single = PackFile {
+        url: "https://example.com/bundle.zip".to_string(),
+        md5: String::new(),
+        package_size: "0".to_string(),
+    };
+
+    assert_eq!(single.archive_sequence(), Some(0));
+    assert_eq!(part_two.archive_sequence(), Some(2));
+    assert_eq!(part_twelve.archive_sequence(), Some(12));
 }
 
 #[test]

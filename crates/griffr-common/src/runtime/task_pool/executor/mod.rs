@@ -20,14 +20,12 @@ pub(crate) fn execute_task(
 ) {
     match task {
         Task::InstallArchive {
-            source_dir,
             base_name,
             dest,
             cleanup,
             password,
             parts,
         } => archive::execute_install_archive(
-            source_dir,
             base_name,
             dest,
             cleanup,
@@ -119,14 +117,14 @@ pub(crate) fn execute_task(
             }
         },
         Task::Extract {
-            source_dir,
             base_name,
+            volumes,
             dest,
             cleanup,
             password,
         } => archive::execute_extract_archive(
-            source_dir,
             base_name,
+            volumes,
             dest,
             cleanup,
             password,
