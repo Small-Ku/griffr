@@ -74,37 +74,6 @@ impl BatchRequest {
     }
 }
 
-/// Individual proxy request in a batch
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind")]
-pub enum ProxyRequest {
-    #[serde(rename = "get_latest_game")]
-    GetLatestGame {
-        #[serde(rename = "get_latest_game_req")]
-        req: GetLatestGameRequest,
-    },
-    #[serde(rename = "get_banner")]
-    GetBanner {
-        #[serde(rename = "get_banner_req")]
-        req: CommonRequest,
-    },
-    #[serde(rename = "get_announcement")]
-    GetAnnouncement {
-        #[serde(rename = "get_announcement_req")]
-        req: CommonRequest,
-    },
-    #[serde(rename = "get_main_bg_image")]
-    GetMainBgImage {
-        #[serde(rename = "get_main_bg_image_req")]
-        req: CommonRequest,
-    },
-    #[serde(rename = "get_sidebar")]
-    GetSidebar {
-        #[serde(rename = "get_sidebar_req")]
-        req: CommonRequest,
-    },
-}
-
 /// Get latest game request
 #[derive(Debug, Clone, Serialize)]
 pub struct GetLatestGameRequest {
@@ -144,43 +113,76 @@ impl CommonRequest {
     }
 }
 
+macro_rules! define_proxy_protocol {
+    ($(
+        $variant:ident {
+            kind: $kind:literal,
+            request: ($request_field:literal, $request_ty:ty),
+            response: ($response_field:literal, $response_ty:ty)
+        }
+    ),+ $(,)?) => {
+        /// Individual proxy request in a batch.
+        #[derive(Debug, Clone, Serialize)]
+        #[serde(tag = "kind")]
+        pub enum ProxyRequest {
+            $(
+                #[serde(rename = $kind)]
+                $variant {
+                    #[serde(rename = $request_field)]
+                    req: $request_ty,
+                },
+            )+
+        }
+
+        /// Individual proxy response in a batch.
+        #[derive(Debug, Clone, Deserialize)]
+        #[serde(tag = "kind")]
+        #[allow(clippy::large_enum_variant)]
+        pub enum ProxyResponse {
+            $(
+                #[serde(rename = $kind)]
+                $variant {
+                    #[serde(rename = $response_field)]
+                    rsp: $response_ty,
+                },
+            )+
+        }
+    };
+}
+
+define_proxy_protocol! {
+    GetLatestGame {
+        kind: "get_latest_game",
+        request: ("get_latest_game_req", GetLatestGameRequest),
+        response: ("get_latest_game_rsp", GetLatestGameResponse)
+    },
+    GetBanner {
+        kind: "get_banner",
+        request: ("get_banner_req", CommonRequest),
+        response: ("get_banner_rsp", BannerResponse)
+    },
+    GetAnnouncement {
+        kind: "get_announcement",
+        request: ("get_announcement_req", CommonRequest),
+        response: ("get_announcement_rsp", AnnouncementResponse)
+    },
+    GetMainBgImage {
+        kind: "get_main_bg_image",
+        request: ("get_main_bg_image_req", CommonRequest),
+        response: ("get_main_bg_image_rsp", MainBgImageResponse)
+    },
+    GetSidebar {
+        kind: "get_sidebar",
+        request: ("get_sidebar_req", CommonRequest),
+        response: ("get_sidebar_rsp", SidebarResponse)
+    }
+}
+
 /// Batch API response
 #[derive(Debug, Clone, Deserialize)]
 pub struct BatchResponse {
     #[serde(rename = "proxy_rsps")]
     pub responses: Vec<ProxyResponse>,
-}
-
-/// Individual proxy response
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind")]
-#[allow(clippy::large_enum_variant)]
-pub enum ProxyResponse {
-    #[serde(rename = "get_latest_game")]
-    GetLatestGame {
-        #[serde(rename = "get_latest_game_rsp")]
-        rsp: GetLatestGameResponse,
-    },
-    #[serde(rename = "get_banner")]
-    GetBanner {
-        #[serde(rename = "get_banner_rsp")]
-        rsp: BannerResponse,
-    },
-    #[serde(rename = "get_announcement")]
-    GetAnnouncement {
-        #[serde(rename = "get_announcement_rsp")]
-        rsp: AnnouncementResponse,
-    },
-    #[serde(rename = "get_main_bg_image")]
-    GetMainBgImage {
-        #[serde(rename = "get_main_bg_image_rsp")]
-        rsp: MainBgImageResponse,
-    },
-    #[serde(rename = "get_sidebar")]
-    GetSidebar {
-        #[serde(rename = "get_sidebar_rsp")]
-        rsp: SidebarResponse,
-    },
 }
 
 /// Get latest game response
