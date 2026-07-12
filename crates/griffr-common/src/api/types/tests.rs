@@ -1,4 +1,5 @@
 use super::*;
+use crate::api::protocol::{DEFAULT_LANGUAGE, DEFAULT_PLATFORM, LAUNCHER_SOURCE};
 #[test]
 fn test_pack_file_parsing() {
     let json = r#"{
@@ -169,12 +170,12 @@ fn test_pre_patch_response_parsing() {
 
 #[test]
 fn test_common_request_serialization() {
-    let req = CommonRequest::new("test_appcode", "zh-cn", "1", "1");
+    let req = CommonRequest::new("test_appcode", DEFAULT_LANGUAGE, "1", "1");
     let json = serde_json::to_string(&req).unwrap();
     assert!(json.contains("test_appcode"));
-    assert!(json.contains("zh-cn"));
-    assert!(json.contains("Windows"));
-    assert!(json.contains("launcher"));
+    assert!(json.contains(DEFAULT_LANGUAGE));
+    assert!(json.contains(DEFAULT_PLATFORM));
+    assert!(json.contains(LAUNCHER_SOURCE));
     assert!(!json.contains("common_req"));
 }
 

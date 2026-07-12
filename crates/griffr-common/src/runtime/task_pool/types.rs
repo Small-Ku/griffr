@@ -1,3 +1,4 @@
+use crate::api::protocol::MIN_USER_AGENT;
 use std::path::PathBuf;
 
 use crate::runtime::issues::FileIssue;
@@ -127,7 +128,7 @@ impl Default for TaskPoolConfig {
             cpu_slots: cpus.clamp(1, 16),
             extract_slots: (cpus / 2).clamp(1, 4),
             max_retries: 3,
-            user_agent: "Mozilla/5.0".to_string(),
+            user_agent: MIN_USER_AGENT.to_owned(),
             extraction_progress_buffer_bytes: 256 * 1024,
             download_progress_buffer_bytes: 256 * 1024,
         }

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::api::protocol::{DEFAULT_BATCH_SEQUENCE, DEFAULT_PLATFORM, LAUNCHER_SOURCE};
+
 use super::resources::{
     AnnouncementResponse, BannerResponse, MainBgImageResponse, PatchInfo, PrePatchInfo,
     SidebarResponse,
@@ -61,6 +63,15 @@ pub struct BatchRequest {
     /// Proxy requests to batch
     #[serde(rename = "proxy_reqs")]
     pub requests: Vec<ProxyRequest>,
+}
+
+impl BatchRequest {
+    pub fn new(requests: Vec<ProxyRequest>) -> Self {
+        Self {
+            seq: DEFAULT_BATCH_SEQUENCE.to_owned(),
+            requests,
+        }
+    }
 }
 
 /// Individual proxy request in a batch
@@ -127,8 +138,8 @@ impl CommonRequest {
             language: language.into(),
             channel: channel.into(),
             sub_channel: sub_channel.into(),
-            platform: "Windows".to_string(),
-            source: "launcher".to_string(),
+            platform: DEFAULT_PLATFORM.to_owned(),
+            source: LAUNCHER_SOURCE.to_owned(),
         }
     }
 }

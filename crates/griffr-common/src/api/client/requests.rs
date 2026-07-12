@@ -1,8 +1,14 @@
 use super::models::MediaResponse;
 use crate::{
     api::{
-        BatchRequest, BatchResponse, CommonRequest, GetLatestGameRequest, GetLatestGameResponse,
-        GetLatestResourcesResponse, ProxyRequest, ProxyResponse,
+        protocol::{
+            batch_proxy_url, latest_game_batch, latest_resources_url, media_batch,
+            web_batch_proxy_url, CONTENT_TYPE_HEADER, JSON_CONTENT_TYPE,
+            MIN_USER_AGENT as PROTOCOL_MIN_USER_AGENT,
+            OFFICIAL_USER_AGENT as PROTOCOL_OFFICIAL_USER_AGENT, USER_AGENT_HEADER,
+        },
+        BatchRequest, BatchResponse, GetLatestGameResponse, GetLatestResourcesResponse,
+        ProxyResponse,
     },
     config::ApiTarget,
     error::{Error, Result},
@@ -25,10 +31,10 @@ pub struct ApiClient {
 
 impl ApiClient {
     /// Minimum User-Agent that works with the API
-    pub const MIN_USER_AGENT: &'static str = "Mozilla/5.0";
+    pub const MIN_USER_AGENT: &'static str = PROTOCOL_MIN_USER_AGENT;
 
     /// Official launcher User-Agent
-    pub const OFFICIAL_USER_AGENT: &'static str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) QtWebEngine/5.15.8 Chrome/92.0.4515.159 PC/WIN/HGSDK HGWebPC/1.30.1 Safari/537.36";
+    pub const OFFICIAL_USER_AGENT: &'static str = PROTOCOL_OFFICIAL_USER_AGENT;
 
     /// Create a new API client
     pub fn new() -> Result<Self> {
@@ -50,22 +56,21 @@ impl ApiClient {
         gateway: &str,
         request: &BatchRequest,
     ) -> Result<BatchResponse> {
-        let url = format!("{}/api/proxy/batch_proxy", gateway.trim_end_matches('/'));
+        let url = batch_proxy_url(gateway);
         self.batch_request_with_url(&url, request).await
     }
 
     /// Send a batch API request to a specific URL
-    async fn batch_request_with_url(
-        &self,
-        url: &str,
-        request: &BatchRequest,
-    ) -> Result<BatchResponse> {
+    async fn batch_request_with_url<T>(&self, url: &str, request: &BatchRequest) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
         let response = self
             .client
             .post(url)?
-            .header("User-Agent", &self.user_agent)
+            .header(USER_AGENT_HEADER, &self.user_agent)
             .map_err(|e| Error::ApiClient(format!("Failed to set User-Agent header: {e}")))?
-            .header("Content-Type", "application/json")
+            .header(CONTENT_TYPE_HEADER, JSON_CONTENT_TYPE)
             .map_err(|e| Error::ApiClient(format!("Failed to set Content-Type header: {e}")))?
             .json(request)
             .map_err(|e| Error::ApiClient(format!("Failed to serialize batch request body: {e}")))?
@@ -81,12 +86,10 @@ impl ApiClient {
             )));
         }
 
-        let batch_response = response
-            .json::<BatchResponse>()
+        response
+            .json::<T>()
             .await
-            .map_err(|e| Error::ApiClient(format!("Failed to parse batch response: {e}")))?;
-
-        Ok(batch_response)
+            .map_err(|e| Error::ApiClient(format!("Failed to parse batch response: {e}")))
     }
 
     /// Get latest game version info
@@ -95,18 +98,7 @@ impl ApiClient {
         target: &ApiTarget,
         current_version: Option<&str>,
     ) -> Result<GetLatestGameResponse> {
-        let request = BatchRequest {
-            seq: "1".to_string(),
-            requests: vec![ProxyRequest::GetLatestGame {
-                req: GetLatestGameRequest {
-                    appcode: target.game_appcode.0.clone(),
-                    channel: target.channel.as_str().to_owned(),
-                    sub_channel: target.sub_channel.as_str().to_owned(),
-                    version: current_version.unwrap_or("").to_string(),
-                    launcher_appcode: target.launcher_appcode.0.clone(),
-                },
-            }],
-        };
+        let request = latest_game_batch(target, current_version);
 
         let response = self.batch_request(&target.gateway.0, &request).await?;
 
@@ -123,35 +115,11 @@ impl ApiClient {
 
     /// Get media resources (banners, announcements, background)
     pub async fn get_media(&self, target: &ApiTarget, language: &str) -> Result<MediaResponse> {
-        let common_req = CommonRequest::new(
-            target.game_appcode.0.clone(),
-            language,
-            target.channel.as_str().to_owned(),
-            target.sub_channel.as_str().to_owned(),
-        );
-
-        let request = BatchRequest {
-            seq: "1".to_string(),
-            requests: vec![
-                ProxyRequest::GetBanner {
-                    req: common_req.clone(),
-                },
-                ProxyRequest::GetAnnouncement {
-                    req: common_req.clone(),
-                },
-                ProxyRequest::GetMainBgImage {
-                    req: common_req.clone(),
-                },
-                ProxyRequest::GetSidebar { req: common_req },
-            ],
-        };
+        let request = media_batch(target, language);
 
         // Use web batch URL for media APIs
-        let url = format!(
-            "{}/api/proxy/web/batch_proxy",
-            target.gateway.0.trim_end_matches('/')
-        );
-        let response = self
+        let url = web_batch_proxy_url(&target.gateway.0);
+        let response: BatchResponse = self
             .batch_request_with_url(&url, &request)
             .await
             .map_err(|e| Error::ApiClient(format!("Media API request failed: {e}")))?;
@@ -177,61 +145,12 @@ impl ApiClient {
         target: &ApiTarget,
         language: &str,
     ) -> Result<serde_json::Value> {
-        let common_req = CommonRequest::new(
-            target.game_appcode.0.clone(),
-            language,
-            target.channel.as_str().to_owned(),
-            target.sub_channel.as_str().to_owned(),
-        );
+        let request = media_batch(target, language);
 
-        let request = BatchRequest {
-            seq: "1".to_string(),
-            requests: vec![
-                ProxyRequest::GetBanner {
-                    req: common_req.clone(),
-                },
-                ProxyRequest::GetAnnouncement {
-                    req: common_req.clone(),
-                },
-                ProxyRequest::GetMainBgImage {
-                    req: common_req.clone(),
-                },
-                ProxyRequest::GetSidebar { req: common_req },
-            ],
-        };
-
-        let url = format!(
-            "{}/api/proxy/web/batch_proxy",
-            target.gateway.0.trim_end_matches('/')
-        );
-        let response = self
-            .client
-            .post(&url)?
-            .header("User-Agent", &self.user_agent)
-            .map_err(|e| Error::ApiClient(format!("Failed to set User-Agent header: {e}")))?
-            .header("Content-Type", "application/json")
-            .map_err(|e| Error::ApiClient(format!("Failed to set Content-Type header: {e}")))?
-            .json(&request)
-            .map_err(|e| {
-                Error::ApiClient(format!("Failed to serialize media batch request body: {e}"))
-            })?
-            .send()
+        let url = web_batch_proxy_url(&target.gateway.0);
+        self.batch_request_with_url::<serde_json::Value>(&url, &request)
             .await
-            .map_err(|e| {
-                Error::ApiClient(format!("Failed to send media batch request to {url}: {e}"))
-            })?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::ApiClient(format!(
-                "Media API returned error {status}: {body}"
-            )));
-        }
-
-        response.json::<serde_json::Value>().await.map_err(|e| {
-            Error::ApiClient(format!("Failed to parse media batch response JSON: {e}"))
-        })
+            .map_err(|e| Error::ApiClient(format!("Media API request failed: {e}")))
     }
 
     /// Get latest game resources (VFS files) via the direct API endpoint
@@ -242,8 +161,7 @@ impl ApiClient {
         rand_str: &str,
         platform: &str,
     ) -> Result<GetLatestResourcesResponse, ApiError> {
-        let api_base = target.gateway.0.trim_end_matches('/');
-        let url = format!("{}/api/game/get_latest_resources", api_base);
+        let url = latest_resources_url(&target.gateway.0);
 
         // Derive the version minor (major.minor) from the full version
         let version_minor = game_version
@@ -264,7 +182,7 @@ impl ApiClient {
                 Error::ApiClient(format!("Failed to build get_latest_resources request: {e}"))
             })
             .map_err(ApiError::Other)?
-            .header("User-Agent", &self.user_agent)
+            .header(USER_AGENT_HEADER, &self.user_agent)
             .map_err(|e| Error::ApiClient(format!("Failed to set User-Agent header: {e}")))
             .map_err(ApiError::Other)?
             .send()

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::api::client::{ApiClient, ApiError};
 use crate::api::crypto::RES_INDEX_KEY;
+use crate::api::protocol::DEFAULT_PLATFORM;
 use crate::config::ApiTarget;
 use crate::runtime::task_pool::{ProgressEvent, Task, TaskPoolRunner};
 use crate::runtime::{
@@ -228,7 +229,7 @@ pub async fn plan_persistent_bootstrap_tasks(
     cfg: &VfsBootstrapConfig,
 ) -> Result<Option<VfsBootstrapPlan>> {
     let resources = match api_client
-        .get_latest_resources(target, game_version, rand_str, "Windows")
+        .get_latest_resources(target, game_version, rand_str, DEFAULT_PLATFORM)
         .await
     {
         Ok(res) => res,

@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::crypto;
 use griffr_common::config::{ChannelPair, GameId};
+use griffr_common::runtime::{resource_manifest_url, ResourceManifestKind};
 use serde_json::json;
 
 use super::utils::emit_json;
@@ -231,7 +232,8 @@ pub async fn list_resource_files(
     let mut total_bytes: u64 = 0;
     let mut files = Vec::new();
     for resource in &resources.resources {
-        let index_url = format!("{}/index_{}.json", resource.path, resource.name);
+        let index_url =
+            resource_manifest_url(&resource.path, ResourceManifestKind::Index, &resource.name);
         let index = api_client
             .fetch_res_index(&index_url, crypto::RES_INDEX_KEY)
             .await

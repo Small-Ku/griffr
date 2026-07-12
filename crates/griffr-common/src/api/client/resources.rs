@@ -1,23 +1,25 @@
 use std::io::ErrorKind;
 
+use crate::api::protocol::{RANGE_HEADER, USER_AGENT_HEADER};
 use crate::error::{Error, Result};
 use md5::{Digest, Md5};
 
 use super::requests::ApiClient;
 use crate::api::crypto;
 use crate::api::types::{GameFileEntry, ResIndex, ResourcePatch};
+use crate::runtime::{launcher_metadata_url, GAME_FILES_NAME};
 impl ApiClient {
     pub async fn fetch_game_files(
         &self,
         base_url: &str,
         expected_md5: Option<&str>,
     ) -> Result<Vec<GameFileEntry>> {
-        let url = format!("{}/game_files", base_url.trim_end_matches('/'));
+        let url = launcher_metadata_url(base_url, GAME_FILES_NAME);
 
         let response = self
             .client
             .get(&url)?
-            .header("User-Agent", &self.user_agent)
+            .header(USER_AGENT_HEADER, &self.user_agent)
             .map_err(|e| Error::ApiClient(format!("Failed to set User-Agent header: {e}")))?
             .send()
             .await
@@ -70,7 +72,7 @@ impl ApiClient {
         let response = self
             .client
             .get(url)?
-            .header("User-Agent", &self.user_agent)
+            .header(USER_AGENT_HEADER, &self.user_agent)
             .map_err(|e| Error::ApiClient(format!("Failed to set User-Agent header: {e}")))?
             .send()
             .await
@@ -110,7 +112,7 @@ impl ApiClient {
         let response = self
             .client
             .get(url)?
-            .header("User-Agent", &self.user_agent)
+            .header(USER_AGENT_HEADER, &self.user_agent)
             .map_err(|e| Error::ApiClient(format!("Failed to set User-Agent header: {e}")))?
             .send()
             .await
@@ -143,7 +145,7 @@ impl ApiClient {
         let mut request = self
             .client
             .get(url)?
-            .header("User-Agent", &self.user_agent)
+            .header(USER_AGENT_HEADER, &self.user_agent)
             .map_err(|e| Error::ApiClient(format!("Failed to set User-Agent header: {e}")))?;
 
         let existing = if resume {
@@ -151,7 +153,7 @@ impl ApiClient {
                 Ok(bytes) => {
                     if !bytes.is_empty() {
                         request = request
-                            .header("Range", format!("bytes={}-", bytes.len()))
+                            .header(RANGE_HEADER, format!("bytes={}-", bytes.len()))
                             .map_err(|e| {
                                 Error::ApiClient(format!("Failed to set Range header: {e}"))
                             })?;

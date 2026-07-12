@@ -1,4 +1,5 @@
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use griffr_common::api::protocol::DEFAULT_LANGUAGE;
 use griffr_common::runtime::VfsBootstrapScope;
 
 use crate::debug_cli::{AccountCommands, DebugCommands, PredownloadCommands};
@@ -176,7 +177,7 @@ pub(crate) struct InfoSelectorArgs {
     pub(crate) game_channel: GameChannelArgs,
 
     /// Launcher language
-    #[arg(long, default_value = "zh-cn")]
+    #[arg(long, default_value = DEFAULT_LANGUAGE)]
     pub(crate) language: String,
 }
 
@@ -346,7 +347,7 @@ pub(crate) enum Commands {
         overrides: ApiTargetOverrideArgs,
 
         /// Launcher language
-        #[arg(long, default_value = "zh-cn")]
+        #[arg(long, default_value = DEFAULT_LANGUAGE)]
         language: String,
     },
 

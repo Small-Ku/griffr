@@ -1,6 +1,7 @@
 use std::io::ErrorKind;
 use std::path::Path;
 
+use crate::api::protocol::{RANGE_HEADER, USER_AGENT_HEADER};
 use crate::error::{Error, Result};
 use compio::buf::BufResult;
 use compio::bytes::Bytes;
@@ -64,11 +65,11 @@ pub(crate) fn do_download(
         let client = cyper::Client::new();
         let mut request = client.get(&url_owned)?;
         request = request
-            .header("User-Agent", user_agent_owned)
+            .header(USER_AGENT_HEADER, user_agent_owned)
             .map_err(|e| Error::Download(format!("Failed to attach User-Agent header: {e}")))?;
         if let Some(offset) = resume_from.filter(|o| *o > 0) {
             request = request
-                .header("Range", format!("bytes={}-", offset))
+                .header(RANGE_HEADER, format!("bytes={}-", offset))
                 .map_err(|e| {
                     Error::Download(format!("Failed to set Range header for resume: {e}"))
                 })?;

@@ -10,6 +10,7 @@
 //! ```
 
 use crate::api::client::{ApiClient, MediaResponse};
+use crate::api::protocol::DEFAULT_LANGUAGE;
 use crate::api::types::{GameFileEntry, GetLatestGameResponse};
 use crate::config::{ChannelPair, GameId};
 
@@ -327,22 +328,22 @@ async fn test_real_api_media_matrix() {
         (
             GameId::ARKNIGHTS,
             ChannelPair::parse("1", None::<String>).unwrap(),
-            "zh-cn",
+            DEFAULT_LANGUAGE,
         ),
         (
             GameId::ARKNIGHTS,
             ChannelPair::parse("2", None::<String>).unwrap(),
-            "zh-cn",
+            DEFAULT_LANGUAGE,
         ),
         (
             GameId::ENDFIELD,
             ChannelPair::parse("1", None::<String>).unwrap(),
-            "zh-cn",
+            DEFAULT_LANGUAGE,
         ),
         (
             GameId::ENDFIELD,
             ChannelPair::parse("2", None::<String>).unwrap(),
-            "zh-cn",
+            DEFAULT_LANGUAGE,
         ),
         (
             GameId::ENDFIELD,

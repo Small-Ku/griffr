@@ -1,4 +1,5 @@
 use clap::Subcommand;
+use griffr_common::api::protocol::{DEFAULT_LANGUAGE, DEFAULT_PLATFORM};
 use griffr_common::config::{ChannelId, GameId};
 use tracing::debug;
 
@@ -117,7 +118,7 @@ pub(crate) enum DebugCommands {
         rand_str: Option<String>,
 
         /// Platform for get_latest_resources
-        #[arg(long, default_value = "Windows")]
+        #[arg(long, default_value = DEFAULT_PLATFORM)]
         platform: String,
 
         #[arg(long = "output-file", id = "api_get_latest_resources_output")]
@@ -160,7 +161,7 @@ pub(crate) enum DebugCommands {
         rand_str: Option<String>,
 
         /// Platform for get_latest_resources
-        #[arg(long, default_value = "Windows")]
+        #[arg(long, default_value = DEFAULT_PLATFORM)]
         platform: String,
 
         #[arg(long = "output-file", id = "list_resource_files_output")]
@@ -194,7 +195,7 @@ pub(crate) enum DebugCommands {
         overrides: ApiTargetOverrideArgs,
 
         /// Launcher language
-        #[arg(long, default_value = "zh-cn")]
+        #[arg(long, default_value = DEFAULT_LANGUAGE)]
         language: String,
 
         /// Optional output file path for JSON payload
@@ -210,7 +211,7 @@ pub(crate) enum DebugCommands {
         overrides: ApiTargetOverrideArgs,
 
         /// Launcher language
-        #[arg(long, default_value = "zh-cn")]
+        #[arg(long, default_value = DEFAULT_LANGUAGE)]
         language: String,
 
         /// Optional output file path for JSON payload
