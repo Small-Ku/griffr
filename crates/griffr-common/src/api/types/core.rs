@@ -268,16 +268,6 @@ impl GetLatestGameResponse {
             .as_ref()
             .is_some_and(|patch| !patch.patches.is_empty())
     }
-
-    /// Legacy helper retained for compatibility.
-    pub fn is_full_install(&self) -> bool {
-        self.action == 1
-    }
-
-    /// Legacy helper retained for compatibility.
-    pub fn is_patch(&self) -> bool {
-        self.action == 2
-    }
 }
 
 /// Package information for full installs

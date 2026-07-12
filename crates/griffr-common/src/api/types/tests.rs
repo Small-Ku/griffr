@@ -28,8 +28,6 @@ fn test_get_latest_game_response_helpers() {
         launcher_action: 0,
     };
     assert!(!no_update.has_update());
-    assert!(!no_update.is_full_install());
-    assert!(!no_update.is_patch());
     assert!(!no_update.has_full_package());
     assert!(!no_update.has_patch_package());
     assert!(!no_update.has_pre_patch_package());
@@ -54,8 +52,6 @@ fn test_get_latest_game_response_helpers() {
         launcher_action: 0,
     };
     assert!(full_update.has_update());
-    assert!(full_update.is_full_install());
-    assert!(!full_update.is_patch());
     assert!(full_update.has_full_package());
     assert!(!full_update.has_patch_package());
     assert!(!full_update.has_pre_patch_package());
@@ -83,8 +79,6 @@ fn test_get_latest_game_response_helpers() {
         launcher_action: 0,
     };
     assert!(patch_update.has_update());
-    assert!(!patch_update.is_full_install());
-    assert!(patch_update.is_patch());
     assert!(!patch_update.has_full_package());
     assert!(patch_update.has_patch_package());
     assert!(!patch_update.has_pre_patch_package());
