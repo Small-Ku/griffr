@@ -3,3 +3,5 @@
 /target*
 /tmp
 /docs/TODO.md
+/.cargo/config.toml
+/rust-toolchain.toml

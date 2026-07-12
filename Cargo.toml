@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/griffr-common", "crates/griffr-cli", "crates/griffr-gui", "crates/griffr-gui-macros"]
+members = [
+  "crates/griffr-common",
+  "crates/griffr-cli",
+  "crates/griffr-gui",
+  "crates/griffr-gui-macros",
+]
 resolver = "2"
 
 [workspace.package]
@@ -8,11 +13,16 @@ edition = "2021"
 authors = ["Small_Ku <small_ku@outlook.com>"]
 license = "UNLICENSED"
 repository = "https://github.com/Small-Ku/griffr"
-rust-version = "1.78"
 
 [workspace.dependencies]
 # Core
-compio = { version = "0.18", features = ["runtime", "io", "fs", "macros", "dispatcher"] }
+compio = { version = "0.18", features = [
+  "runtime",
+  "io",
+  "fs",
+  "macros",
+  "dispatcher",
+] }
 cyper = { version = "0.8", features = ["stream", "json"] }
 flume = "0.12"
 serde = { version = "1.0", features = ["derive"] }
@@ -40,7 +50,19 @@ bitflags = "2.6"
 # griffr crates
 griffr-common = { path = "crates/griffr-common" }
 
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+codegen-units = 256
+incremental = true
+lto = "off"
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = "thin"
+codegen-units = 1
+panic = "abort"
 strip = true

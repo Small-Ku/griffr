@@ -7,7 +7,7 @@ Rust workspace for a Hypergryph game launcher/downloader CLI.
 - `crates/griffr-cli`: CLI crate (binary: `griffr`)
 
 ## Prerequisites
-- Rust toolchain (`edition = "2021"`, `rust-version = "1.78"`)
+- Rust toolchain
 
 ## Common Commands
 
