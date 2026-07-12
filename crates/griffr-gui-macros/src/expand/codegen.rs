@@ -3,7 +3,6 @@ use quote::quote;
 use std::collections::BTreeSet;
 use syn::{Ident, ItemStruct, Type};
 
-use crate::expand::sim::merged_tile_count_for_flat;
 use crate::model::FlatNode;
 
 use super::component;
@@ -20,9 +19,6 @@ pub(super) struct ComponentTokens<'a> {
     pub(super) parents: Vec<TokenStream>,
     pub(super) z_order_back_to_front: Vec<TokenStream>,
     pub(super) z_order_front_to_back: Vec<TokenStream>,
-    pub(super) click_targets_front_to_back: Vec<TokenStream>,
-    pub(super) hover_targets_front_to_back: Vec<TokenStream>,
-    pub(super) scroll_targets_front_to_back: Vec<TokenStream>,
     pub(super) static_widgets: Vec<TokenStream>,
     pub(super) canvas_fields: Vec<TokenStream>,
     pub(super) canvas_inits: Vec<TokenStream>,
@@ -39,7 +35,9 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
     let msg_ident = Ident::new(&format!("{}ComponentMessage", ident), ident.span());
     let event_ident = Ident::new(&format!("{}ComponentEvent", ident), ident.span());
     let routed_ident = Ident::new(&format!("{}RoutedEvent", ident), ident.span());
-    let canvas_count = merged_tile_count_for_flat(&flat);
+    // Allocate the safe upper bound. Runtime widget capabilities are the sole
+    // source of truth and may change the final tile plan after construction.
+    let canvas_count = flat.len();
 
     let widget_count = flat.len();
     let parents: Vec<_> = flat
@@ -73,30 +71,6 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
             quote! { ::griffr_gui::ui::WidgetId(#id) }
         })
         .collect();
-    let click_targets_front_to_back = sorted_front_to_back
-        .iter()
-        .filter(|n| n.clickable)
-        .map(|n| {
-            let id = n.id;
-            quote! { ::griffr_gui::ui::WidgetId(#id) }
-        })
-        .collect::<Vec<_>>();
-    let hover_targets_front_to_back = sorted_front_to_back
-        .iter()
-        .filter(|n| n.hoverable)
-        .map(|n| {
-            let id = n.id;
-            quote! { ::griffr_gui::ui::WidgetId(#id) }
-        })
-        .collect::<Vec<_>>();
-    let scroll_targets_front_to_back = sorted_front_to_back
-        .iter()
-        .filter(|n| n.scrollable)
-        .map(|n| {
-            let id = n.id;
-            quote! { ::griffr_gui::ui::WidgetId(#id) }
-        })
-        .collect::<Vec<_>>();
     let static_widgets = flat.iter().map(|n| {
         let id = n.id;
         let parent = n.parent;
@@ -207,9 +181,6 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         parents,
         z_order_back_to_front,
         z_order_front_to_back,
-        click_targets_front_to_back,
-        hover_targets_front_to_back,
-        scroll_targets_front_to_back,
         static_widgets,
         canvas_fields,
         canvas_inits,

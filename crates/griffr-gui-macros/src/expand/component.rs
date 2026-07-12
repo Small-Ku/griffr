@@ -15,16 +15,13 @@ fn render_definitions(tokens: &ComponentTokens<'_>) -> TokenStream {
         canvas_inits,
         canvas_match_arms,
         canvas_struct_inits,
-        click_targets_front_to_back,
         comp_ident,
         event_ident,
-        hover_targets_front_to_back,
         ident,
         msg_ident,
         parents,
         root,
         routed_ident,
-        scroll_targets_front_to_back,
         start_arms,
         static_widgets,
         update_children_items,
@@ -45,15 +42,6 @@ fn render_definitions(tokens: &ComponentTokens<'_>) -> TokenStream {
             ];
             pub const Z_ORDER_FRONT_TO_BACK: [::griffr_gui::ui::WidgetId; Self::WIDGET_COUNT] = [
                 #(#z_order_front_to_back),*
-            ];
-            pub const CLICK_TARGETS_FRONT_TO_BACK: &'static [::griffr_gui::ui::WidgetId] = &[
-                #(#click_targets_front_to_back),*
-            ];
-            pub const HOVER_TARGETS_FRONT_TO_BACK: &'static [::griffr_gui::ui::WidgetId] = &[
-                #(#hover_targets_front_to_back),*
-            ];
-            pub const SCROLL_TARGETS_FRONT_TO_BACK: &'static [::griffr_gui::ui::WidgetId] = &[
-                #(#scroll_targets_front_to_back),*
             ];
             pub const CANVAS_COUNT: usize = #canvas_count;
             pub fn initial_widget_nodes() -> Vec<::griffr_gui::ui::WidgetNode> {

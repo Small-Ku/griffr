@@ -187,7 +187,7 @@ pub(super) fn render(tokens: &ComponentTokens<'_>) -> TokenStream {
             ) -> Option<::griffr_gui::ui::WidgetId> {
                 match event {
                     #routed_ident::MouseMove { x, y } => {
-                        for &id in #ident::HOVER_TARGETS_FRONT_TO_BACK {
+                        for &id in #ident::Z_ORDER_FRONT_TO_BACK.iter() {
                             let bounds = &plan.bounds[id.0 as usize];
                             if bounds.contains(::winio::prelude::Point::new(x, y)) {
                                 let node = &plan.widgets[id.0 as usize];
@@ -198,7 +198,7 @@ pub(super) fn render(tokens: &ComponentTokens<'_>) -> TokenStream {
                         }
                     }
                     #routed_ident::MouseDown { x, y } | #routed_ident::MouseUp { x, y } => {
-                        for &id in #ident::CLICK_TARGETS_FRONT_TO_BACK {
+                        for &id in #ident::Z_ORDER_FRONT_TO_BACK.iter() {
                             let bounds = &plan.bounds[id.0 as usize];
                             if bounds.contains(::winio::prelude::Point::new(x, y)) {
                                 let node = &plan.widgets[id.0 as usize];
@@ -209,7 +209,7 @@ pub(super) fn render(tokens: &ComponentTokens<'_>) -> TokenStream {
                         }
                     }
                     #routed_ident::MouseWheel { x, y } => {
-                        for &id in #ident::SCROLL_TARGETS_FRONT_TO_BACK {
+                        for &id in #ident::Z_ORDER_FRONT_TO_BACK.iter() {
                             let bounds = &plan.bounds[id.0 as usize];
                             if bounds.contains(::winio::prelude::Point::new(x, y)) {
                                 let node = &plan.widgets[id.0 as usize];

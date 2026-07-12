@@ -1,5 +1,5 @@
 use syn::parse::{Parse, ParseStream};
-use syn::{braced, parenthesized, Expr, Ident, LitBool, LitFloat, LitInt, Path, Result, Token};
+use syn::{braced, parenthesized, Expr, Ident, LitFloat, LitInt, Path, Result, Token};
 
 use crate::model::{NodeInput, NodeProps, TreeInput};
 
@@ -23,10 +23,6 @@ impl Parse for NodeInput {
                     "flex_basis" => props.flex_basis = Some(parse_num(&content)?),
                     "margin" => props.margin = Some(parse_num(&content)?),
                     "padding" => props.padding = Some(parse_num(&content)?),
-                    "hoverable" => props.hoverable = Some(content.parse::<LitBool>()?.value),
-                    "clickable" => props.clickable = Some(content.parse::<LitBool>()?.value),
-                    "scrollable" => props.scrollable = Some(content.parse::<LitBool>()?.value),
-                    "opaque" => props.opaque = Some(content.parse::<LitBool>()?.value),
                     "clip" => {
                         let v: Ident = content.parse()?;
                         props.clip = Some(match v.to_string().as_str() {

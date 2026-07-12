@@ -45,7 +45,7 @@ impl Widget for CounterWidget {
         _clipped: bool,
     ) -> Result<()> {
         let mut alpha = 0xFF;
-        if !self.click_count.is_multiple_of(2) {
+        if self.click_count % 2 != 0 {
             alpha = 0xAA; // Semi-transparent when "transparent"
         }
 
