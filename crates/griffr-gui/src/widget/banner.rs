@@ -91,11 +91,9 @@ impl Widget for Banner {
                     .hovered
                     .then_some(Instant::now() + Duration::from_millis(16));
             }
-            CanvasEvent::MouseWheel(_) => {
-                if is_target {
-                    self.h = (self.h + 15.0) % 360.0;
-                    self.next_frame_at = Some(Instant::now() + Duration::from_millis(16));
-                }
+            CanvasEvent::MouseWheel(_) if is_target => {
+                self.h = (self.h + 15.0) % 360.0;
+                self.next_frame_at = Some(Instant::now() + Duration::from_millis(16));
             }
             _ => {}
         }

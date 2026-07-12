@@ -174,10 +174,10 @@ impl ByteProgressTracker {
                     .record(path, *total_bytes);
                 self.update_bar(path);
             }
-            griffr_common::runtime::task_pool::ProgressEvent::Verified { path, ok, .. } => {
-                if *ok && self.log_verified_in_verbose && self.bar.verbose {
-                    crate::ui::print_info(format!("Verified {}", path));
-                }
+            griffr_common::runtime::task_pool::ProgressEvent::Verified { path, ok, .. }
+                if *ok && self.log_verified_in_verbose && self.bar.verbose =>
+            {
+                crate::ui::print_info(format!("Verified {}", path));
             }
             _ => {}
         }

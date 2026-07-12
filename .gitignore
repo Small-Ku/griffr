@@ -5,3 +5,8 @@
 /docs/TODO.md
 /.cargo/config.toml
 /rust-toolchain.toml
+
+.ruff_cache
+.pytest_cache
+.mypy_cache
+__pycache__
