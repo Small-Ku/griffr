@@ -13,45 +13,9 @@ use crate::runtime::{
 };
 
 #[allow(clippy::too_many_arguments)]
-pub async fn apply_file_reuse_flow(
-    api_client: &ApiClient,
-    game_id: crate::config::GameId,
-    target_channel_id: crate::config::ChannelPair,
-    target_version: &str,
-    install_path: &Path,
-    file_path: &str,
-    game_files_md5: Option<&str>,
-    config: &super::models::FileReuseConfig,
-) -> Result<usize> {
-    let summary = materialize_game_files_with_pool(
-        api_client,
-        game_id,
-        target_channel_id,
-        target_version,
-        install_path,
-        file_path,
-        game_files_md5,
-        config,
-        None,
-        None::<fn(usize, usize, &str)>,
-        None::<fn(u64, u64, &str)>,
-    )
-    .await?;
-    if !summary.issues.is_empty() {
-        return Err(Error::Vfs(format!(
-            "File materialization finished with {} issue(s)",
-            summary.issues.len()
-        )));
-    }
-    Ok(summary.reused_files)
-}
-
-#[allow(clippy::too_many_arguments)]
 pub async fn materialize_game_files_with_pool(
     api_client: &ApiClient,
     game_id: crate::config::GameId,
-    _target_channel_id: crate::config::ChannelPair,
-    _target_version: &str,
     install_path: &Path,
     file_path: &str,
     game_files_md5: Option<&str>,

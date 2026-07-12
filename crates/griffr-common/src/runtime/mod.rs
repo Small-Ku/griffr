@@ -15,8 +15,7 @@ pub use compat_fs::{
     list_files_with_extension, read_link, remove_dir_all, remove_empty_dirs_recursive, CopyStats,
 };
 pub use files::reuse::{
-    apply_file_reuse_flow, materialize_game_files_with_pool, FileReuseConfig, MaterializeSummary,
-    SourceInstallInput,
+    materialize_game_files_with_pool, FileReuseConfig, MaterializeSummary, SourceInstallInput,
 };
 pub use files::vfs::{
     bootstrap_persistent_vfs_with_runner, download_vfs_resources, get_vfs_resource_info,

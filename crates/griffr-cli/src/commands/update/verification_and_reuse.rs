@@ -106,7 +106,6 @@ pub(super) async fn update_via_reuse(
     task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<()> {
     let game_id = local.require_known_game()?;
-    let target_channel_id = local.require_known_channel()?;
 
     let pkg = version_info
         .pkg
@@ -150,8 +149,6 @@ pub(super) async fn update_via_reuse(
     let materialized = materialize_game_files_with_pool(
         api_client,
         game_id,
-        target_channel_id,
-        &version_info.version,
         &local.install_path,
         &pkg.file_path,
         pkg.game_files_md5.as_deref(),

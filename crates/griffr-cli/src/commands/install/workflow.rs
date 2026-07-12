@@ -279,8 +279,6 @@ pub async fn install(
         let materialized = materialize_game_files_with_pool(
             &api_client,
             game_id,
-            channel_id,
-            &version_info.version,
             &install_path,
             &pkg.file_path,
             pkg.game_files_md5.as_deref(),
