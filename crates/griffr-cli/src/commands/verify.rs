@@ -135,16 +135,11 @@ pub async fn verify(
         if rand_str.is_empty() {
             Vec::new()
         } else {
-            let streaming_assets = streaming_assets_path(
-                &local
-                    .install_path
-                    .join(profile.streaming_assets_subdir.clone()),
-            );
+            let streaming_assets =
+                streaming_assets_path(&local.install_path.join(profile.data_root.clone()));
             let source_streaming_assets = source_roots
                 .iter()
-                .map(|path| {
-                    streaming_assets_path(&path.join(profile.streaming_assets_subdir.clone()))
-                })
+                .map(|path| streaming_assets_path(&path.join(profile.data_root.clone())))
                 .collect::<Vec<_>>();
             match plan_vfs_tasks(
                 &api_client,

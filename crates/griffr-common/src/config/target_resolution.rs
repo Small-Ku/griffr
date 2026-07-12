@@ -14,7 +14,7 @@ pub struct TargetOverride {
     pub game_appcode: Option<String>,
     pub launcher_appcode: Option<String>,
     pub executable: Option<String>,
-    pub streaming_assets_subdir: Option<String>,
+    pub data_root: Option<String>,
 }
 
 fn safe_relative_path(value: &str, field: &str) -> Result<PathBuf> {
@@ -60,9 +60,9 @@ pub fn resolve_install_profile(
         profile.executable = safe_relative_path(value, "executable")
             .map_err(|e| Error::Config(format!("Invalid executable override: {e}")))?;
     }
-    if let Some(value) = &overrides.streaming_assets_subdir {
-        profile.streaming_assets_subdir = safe_relative_path(value, "streaming-assets-subdir")
-            .map_err(|e| Error::Config(format!("Invalid streaming assets override: {e}")))?;
+    if let Some(value) = &overrides.data_root {
+        profile.data_root = safe_relative_path(value, "data-root")
+            .map_err(|e| Error::Config(format!("Invalid data-root override: {e}")))?;
     }
 
     Ok(profile)

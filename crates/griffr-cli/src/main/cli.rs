@@ -87,9 +87,9 @@ pub struct InstallProfileOverrideArgs {
     #[arg(long = "executable")]
     pub executable: Option<String>,
 
-    /// Override StreamingAssets subdirectory name
-    #[arg(long = "streaming-assets-subdir")]
-    pub streaming_assets_subdir: Option<String>,
+    /// Override game data-root directory name (e.g. Arknights_Data)
+    #[arg(long = "data-root")]
+    pub data_root: Option<String>,
 }
 
 impl From<ApiTargetOverrideArgs> for griffr_common::config::TargetOverride {
@@ -110,7 +110,7 @@ impl From<InstallProfileOverrideArgs> for griffr_common::config::TargetOverride 
             game_appcode: args.api.game_appcode,
             launcher_appcode: args.api.launcher_appcode,
             executable: args.executable,
-            streaming_assets_subdir: args.streaming_assets_subdir,
+            data_root: args.data_root,
         }
     }
 }

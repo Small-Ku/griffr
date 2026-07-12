@@ -50,9 +50,7 @@ pub async fn bootstrap(
         );
     }
 
-    let data_root = local
-        .install_path
-        .join(profile.streaming_assets_subdir.clone());
+    let data_root = local.install_path.join(profile.data_root.clone());
     let streaming_assets_root = griffr_common::runtime::streaming_assets_path(&data_root);
     let persistent_root = griffr_common::runtime::persistent_path(&data_root);
 
@@ -79,7 +77,7 @@ pub async fn bootstrap(
             extra_source_streaming_assets.push(
                 source
                     .install_path
-                    .join(source_profile.streaming_assets_subdir)
+                    .join(source_profile.data_root)
                     .join(griffr_common::runtime::STREAMING_ASSETS_DIR),
             );
         }

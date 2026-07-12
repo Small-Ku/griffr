@@ -20,7 +20,7 @@ pub struct ApiTarget {
 pub struct InstallProfile {
     pub target: ApiTarget,
     pub executable: PathBuf,
-    pub streaming_assets_subdir: PathBuf,
+    pub data_root: PathBuf,
 }
 
 pub struct KnownTargets;
@@ -42,7 +42,7 @@ impl KnownTargets {
                 sub_channel: channels.sub_channel().clone(),
             },
             executable: PathBuf::from(game.executable),
-            streaming_assets_subdir: PathBuf::from(game.data_root),
+            data_root: PathBuf::from(game.data_root),
         })
     }
 }

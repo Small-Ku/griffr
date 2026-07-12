@@ -320,12 +320,11 @@ pub async fn install(
         ui::print_info(
             "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
         );
-        let streaming_assets =
-            streaming_assets_path(&install_path.join(profile.streaming_assets_subdir.clone()));
+        let streaming_assets = streaming_assets_path(&install_path.join(profile.data_root.clone()));
         let source_streaming_assets = reuse_paths
             .iter()
             .filter(|path| **path != install_path)
-            .map(|path| streaming_assets_path(&path.join(profile.streaming_assets_subdir.clone())))
+            .map(|path| streaming_assets_path(&path.join(profile.data_root.clone())))
             .collect::<Vec<_>>();
         let rand_str = version_info.rand_str();
         match plan_vfs_tasks(
