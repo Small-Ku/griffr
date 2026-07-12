@@ -13,7 +13,8 @@ use crate::ui;
 use crate::GlobalOptions;
 
 const BUNDLE_SDK_DIR: &str = "sdk_data";
-const BUNDLE_MMKV_DIR: &str = "mmkv";
+const MMKV_DIR: &str = "mmkv";
+const SDK_DATA_PREFIX: &str = "sdk_data_";
 
 pub(super) async fn create_dir_all(path: &Path) -> Result<()> {
     compio::fs::create_dir_all(path)
@@ -47,8 +48,8 @@ pub async fn capture(
                 .context("Missing --install-path while --include-install-mmkv is set")?;
             opts.dry_run(format!(
                 "Would capture optional install mmkv from {} to {}",
-                install_path.join("mmkv").display(),
-                bundle_path.join(BUNDLE_MMKV_DIR).display()
+                install_path.join(MMKV_DIR).display(),
+                bundle_path.join(MMKV_DIR).display()
             ));
         }
         return Ok(());
@@ -85,14 +86,14 @@ pub async fn capture(
         let install_path = install_path
             .as_ref()
             .context("Missing --install-path while --include-install-mmkv is set")?;
-        let source_mmkv = install_path.join("mmkv");
+        let source_mmkv = install_path.join(MMKV_DIR);
         if !source_mmkv.is_dir() {
             anyhow::bail!(
                 "Install mmkv path does not exist: {} (omit --include-install-mmkv or provide a compatible install)",
                 source_mmkv.display()
             );
         }
-        let bundle_mmkv = bundle_path.join(BUNDLE_MMKV_DIR);
+        let bundle_mmkv = bundle_path.join(MMKV_DIR);
         let mmkv_stats = copy_dir_recursive(source_mmkv.clone(), bundle_mmkv.clone())
             .await
             .with_context(|| {
@@ -145,8 +146,8 @@ pub async fn activate(
                 .context("Missing --install-path while --include-install-mmkv is set")?;
             opts.dry_run(format!(
                 "Would restore optional install mmkv from {} to {}",
-                bundle_path.join(BUNDLE_MMKV_DIR).display(),
-                install_path.join("mmkv").display()
+                bundle_path.join(MMKV_DIR).display(),
+                install_path.join(MMKV_DIR).display()
             ));
         }
         return Ok(());
@@ -185,14 +186,14 @@ pub async fn activate(
         let install_path = install_path
             .as_ref()
             .context("Missing --install-path while --include-install-mmkv is set")?;
-        let bundle_mmkv = bundle_path.join(BUNDLE_MMKV_DIR);
+        let bundle_mmkv = bundle_path.join(MMKV_DIR);
         if !bundle_mmkv.is_dir() {
             anyhow::bail!(
                 "Bundle is missing optional mmkv payload: {}",
                 bundle_mmkv.display()
             );
         }
-        let target_mmkv = install_path.join("mmkv");
+        let target_mmkv = install_path.join(MMKV_DIR);
         ensure_destination_dir(&target_mmkv, force)
             .await
             .with_context(|| {
@@ -241,9 +242,9 @@ pub(super) fn resolve_target_sdk_dir(
 ) -> Result<PathBuf> {
     if let Some(explicit) = sdk_dir {
         if let Some(name) = explicit.file_name().and_then(OsStr::to_str) {
-            if !name.starts_with("sdk_data_") {
+            if !name.starts_with(SDK_DATA_PREFIX) {
                 anyhow::bail!(
-                    "Explicit --sdk-dir must end with sdk_data_* (got {})",
+                    "Explicit --sdk-dir must end with {SDK_DATA_PREFIX}* (got {})",
                     explicit.display()
                 );
             }
@@ -258,8 +259,11 @@ pub(super) fn validate_explicit_sdk_dir(path: &Path) -> Result<()> {
         anyhow::bail!("SDK dir not found: {}", path.display());
     }
     if let Some(name) = path.file_name().and_then(OsStr::to_str) {
-        if !name.starts_with("sdk_data_") {
-            anyhow::bail!("Expected sdk_data_* directory, got {}", path.display());
+        if !name.starts_with(SDK_DATA_PREFIX) {
+            anyhow::bail!(
+                "Expected {SDK_DATA_PREFIX}* directory, got {}",
+                path.display()
+            );
         }
     }
     Ok(())
@@ -311,7 +315,7 @@ pub(super) fn select_latest_sdk_dir(root: &Path) -> Result<PathBuf> {
             continue;
         }
         let name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
-        if !name.starts_with("sdk_data_") {
+        if !name.starts_with(SDK_DATA_PREFIX) {
             continue;
         }
         let modified = std::fs::metadata(&path)
@@ -323,7 +327,7 @@ pub(super) fn select_latest_sdk_dir(root: &Path) -> Result<PathBuf> {
 
     if candidates.is_empty() {
         anyhow::bail!(
-            "No sdk_data_* directory found under {} (launch game once or pass --sdk-dir)",
+            "No {SDK_DATA_PREFIX}* directory found under {} (launch game once or pass --sdk-dir)",
             root.display()
         );
     }
@@ -351,7 +355,7 @@ pub(super) fn select_latest_sdk_dir_from_roots(roots: &[PathBuf]) -> Result<Path
                 continue;
             }
             let name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
-            if !name.starts_with("sdk_data_") {
+            if !name.starts_with(SDK_DATA_PREFIX) {
                 continue;
             }
             let modified = std::fs::metadata(&path)
