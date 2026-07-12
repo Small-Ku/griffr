@@ -13,6 +13,7 @@ const MIN_EXTRACT_SLOTS: usize = 1;
 const MAX_EXTRACT_SLOTS: usize = 4;
 const MIN_MATERIALIZATION_IO_SLOTS: usize = 4;
 const MAX_MATERIALIZATION_IO_SLOTS: usize = 24;
+const MAX_VFS_REPAIR_IO_SLOTS: usize = 6;
 
 use crate::runtime::issues::FileIssue;
 
@@ -170,6 +171,11 @@ impl TaskPoolConfig {
                 .clamp(MIN_MATERIALIZATION_IO_SLOTS, MAX_MATERIALIZATION_IO_SLOTS),
             ..Self::default()
         }
+    }
+
+    pub fn with_vfs_repair_limits(mut self) -> Self {
+        self.io_slots = self.io_slots.min(MAX_VFS_REPAIR_IO_SLOTS);
+        self
     }
 }
 

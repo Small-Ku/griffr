@@ -164,22 +164,23 @@ pub async fn verify(
         Vec::new()
     };
 
-    let mut pool_cfg = TaskPoolConfig::with_progress_buffers(
+    let base_pool_cfg = TaskPoolConfig::with_progress_buffers(
         opts.extraction_progress_buffer_bytes,
         opts.download_progress_buffer_bytes,
     );
-    if repair && !extra_tasks.is_empty() {
+    let pool_cfg = if repair && !extra_tasks.is_empty() {
         // VFS CDN endpoints can become unstable under high parallelism on some routes.
-        // Keep a moderate IO fanout for repair+VFS runs to improve success rate.
-        let clamped = pool_cfg.io_slots.min(6);
-        if clamped != pool_cfg.io_slots {
+        let limited = base_pool_cfg.clone().with_vfs_repair_limits();
+        if limited.io_slots != base_pool_cfg.io_slots {
             opts.verbose(format!(
                 "Clamping task-pool io_slots from {} to {} for verify+repair VFS batch",
-                pool_cfg.io_slots, clamped
+                base_pool_cfg.io_slots, limited.io_slots
             ));
-            pool_cfg.io_slots = clamped;
         }
-    }
+        limited
+    } else {
+        base_pool_cfg
+    };
     let mut pool_runner = TaskPoolRunner::new(pool_cfg)?;
     let summary = run_integrity_pool(
         &api_client,
