@@ -8,7 +8,11 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 use crate::VfsDiffAgainst;
-use griffr_common::runtime::CONFIG_INI_NAME;
+use griffr_common::config::{game_catalog_entry, GameId};
+use griffr_common::runtime::{
+    persistent_path, streaming_assets_path, vfs_path, CONFIG_INI_NAME, PERSISTENT_DIR,
+    STREAMING_ASSETS_DIR, VFS_DIR,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LocalResManifests {
@@ -240,20 +244,20 @@ pub fn select_expected_vfs_map(
 }
 
 pub fn resolve_vfs_root(path: &Path) -> Result<PathBuf> {
-    let direct_vfs = path.join("VFS");
+    let direct_vfs = vfs_path(path);
     if direct_vfs.is_dir() {
         return Ok(path.to_path_buf());
     }
     if path
         .file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| n.eq_ignore_ascii_case("VFS"))
+        .is_some_and(|n| n.eq_ignore_ascii_case(VFS_DIR))
     {
         let parent = path
             .parent()
             .context("VFS path has no parent directory")?
             .to_path_buf();
-        if parent.join("VFS").is_dir() {
+        if vfs_path(&parent).is_dir() {
             return Ok(parent);
         }
     }
@@ -282,7 +286,7 @@ pub async fn try_read_local_res_index(path: &Path, key: &str) -> Result<Option<R
 }
 
 pub fn collect_actual_vfs_files(root: &Path) -> Result<std::collections::BTreeSet<String>> {
-    let vfs_root = root.join("VFS");
+    let vfs_root = vfs_path(root);
     if !vfs_root.is_dir() {
         anyhow::bail!("Missing VFS directory at {}", vfs_root.display());
     }
@@ -328,6 +332,9 @@ pub fn file_md5(path: &Path) -> Result<String> {
 }
 
 pub fn resolve_endfield_data_root(path: &Path) -> Result<PathBuf> {
+    let data_root_name = game_catalog_entry(&GameId::ENDFIELD)
+        .expect("Endfield must be present in the product catalog")
+        .data_root;
     let mut candidate = if path.is_file() {
         path.parent()
             .context("Input file path has no parent directory")?
@@ -339,37 +346,41 @@ pub fn resolve_endfield_data_root(path: &Path) -> Result<PathBuf> {
     if candidate
         .file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| n.eq_ignore_ascii_case("Endfield_Data"))
+        .is_some_and(|n| n.eq_ignore_ascii_case(data_root_name))
     {
         return Ok(candidate);
     }
-    if candidate.join("Endfield_Data").is_dir() {
-        return Ok(candidate.join("Endfield_Data"));
+    if candidate.join(data_root_name).is_dir() {
+        return Ok(candidate.join(data_root_name));
     }
-    if candidate.join("Persistent").is_dir() && candidate.join("StreamingAssets").is_dir() {
+    if persistent_path(&candidate).is_dir() && streaming_assets_path(&candidate).is_dir() {
         return Ok(candidate);
     }
     if candidate.join(CONFIG_INI_NAME).is_file() {
-        return Ok(candidate.join("Endfield_Data"));
+        return Ok(candidate.join(data_root_name));
     }
     if candidate
         .file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| {
-            n.eq_ignore_ascii_case("Persistent") || n.eq_ignore_ascii_case("StreamingAssets")
+            n.eq_ignore_ascii_case(PERSISTENT_DIR) || n.eq_ignore_ascii_case(STREAMING_ASSETS_DIR)
         })
     {
         candidate = candidate
             .parent()
             .context("Persistent/StreamingAssets path has no parent")?
             .to_path_buf();
-        if candidate.join("Persistent").is_dir() && candidate.join("StreamingAssets").is_dir() {
+        if persistent_path(&candidate).is_dir() && streaming_assets_path(&candidate).is_dir() {
             return Ok(candidate);
         }
     }
     anyhow::bail!(
-        "Could not resolve Endfield_Data root from {}. Expected install root, Endfield_Data, or directory containing Persistent and StreamingAssets.",
-        path.display()
+        "Could not resolve {} root from {}. Expected install root, {}, or directory containing {} and {}.",
+        data_root_name,
+        path.display(),
+        data_root_name,
+        PERSISTENT_DIR,
+        STREAMING_ASSETS_DIR
     );
 }
 

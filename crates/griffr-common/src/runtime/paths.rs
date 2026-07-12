@@ -9,6 +9,55 @@ pub const PATCH_FILES_STAGE_DIR: &str = "files";
 pub const PATCH_DIFF_STAGE_DIR: &str = "vfs_patch";
 pub const DELETE_FILES_MANIFEST_NAME: &str = "delete_files.txt";
 
+pub const STREAMING_ASSETS_DIR: &str = "StreamingAssets";
+pub const PERSISTENT_DIR: &str = "Persistent";
+pub const VFS_DIR: &str = "VFS";
+pub const RESOURCE_GROUP_INITIAL: &str = "initial";
+pub const RESOURCE_GROUP_MAIN: &str = "main";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceManifestKind {
+    Index,
+    Pref,
+}
+
+impl ResourceManifestKind {
+    const fn prefix(self) -> &'static str {
+        match self {
+            Self::Index => "index",
+            Self::Pref => "pref",
+        }
+    }
+}
+
+pub fn resource_manifest_filename(kind: ResourceManifestKind, resource_name: &str) -> String {
+    format!("{}_{}.json", kind.prefix(), resource_name)
+}
+
+pub fn resource_manifest_url(
+    resource_path: &str,
+    kind: ResourceManifestKind,
+    resource_name: &str,
+) -> String {
+    format!(
+        "{}/{}",
+        resource_path.trim_end_matches('/'),
+        resource_manifest_filename(kind, resource_name)
+    )
+}
+
+pub fn streaming_assets_path(data_root: &Path) -> std::path::PathBuf {
+    data_root.join(STREAMING_ASSETS_DIR)
+}
+
+pub fn persistent_path(data_root: &Path) -> std::path::PathBuf {
+    data_root.join(PERSISTENT_DIR)
+}
+
+pub fn vfs_path(root: &Path) -> std::path::PathBuf {
+    root.join(VFS_DIR)
+}
+
 pub fn launcher_files_base_url(file_path: &str) -> &str {
     let normalized = file_path.trim_end_matches('/');
     if normalized.rsplit('/').next() == Some(GAME_FILES_NAME) {

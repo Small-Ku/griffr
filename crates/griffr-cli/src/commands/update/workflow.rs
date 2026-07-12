@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
-use griffr_common::runtime::{plan_vfs_tasks, VfsMaterializeConfig};
+use griffr_common::runtime::{plan_vfs_tasks, streaming_assets_path, VfsMaterializeConfig};
 
 use super::*;
 use crate::commands::local::detect_local_install;
@@ -214,17 +214,15 @@ pub(super) async fn update_internal(
         ui::print_info(
             "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
         );
-        let streaming_assets = local
-            .install_path
-            .join(profile.streaming_assets_subdir.clone())
-            .join("StreamingAssets");
+        let streaming_assets = streaming_assets_path(
+            &local
+                .install_path
+                .join(profile.streaming_assets_subdir.clone()),
+        );
         let source_streaming_assets = reuse_paths
             .iter()
             .filter(|path| **path != local.install_path)
-            .map(|path| {
-                path.join(profile.streaming_assets_subdir.clone())
-                    .join("StreamingAssets")
-            })
+            .map(|path| streaming_assets_path(&path.join(profile.streaming_assets_subdir.clone())))
             .collect::<Vec<_>>();
         let rand_str = version_info.rand_str();
         match plan_vfs_tasks(

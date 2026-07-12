@@ -1,4 +1,5 @@
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
+use griffr_common::runtime::VfsBootstrapScope;
 
 use crate::debug_cli::{AccountCommands, DebugCommands, PredownloadCommands};
 
@@ -311,8 +312,8 @@ pub(crate) enum Commands {
         overrides: InstallProfileOverrideArgs,
 
         /// Bootstrap scope for Persistent materialization
-        #[arg(long, value_enum, default_value_t = BootstrapScope::Initial)]
-        scope: BootstrapScope,
+        #[arg(long, default_value_t = VfsBootstrapScope::Initial)]
+        scope: VfsBootstrapScope,
 
         #[command(flatten)]
         reuse: ReuseSourcesArg,
@@ -373,12 +374,6 @@ pub enum OutputFormat {
 pub enum VfsDiffAgainst {
     Persistent,
     Streamingassets,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
-pub enum BootstrapScope {
-    Initial,
-    Complete,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]

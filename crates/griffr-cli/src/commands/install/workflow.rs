@@ -10,8 +10,8 @@ use griffr_common::runtime::task_pool::{
 };
 use griffr_common::runtime::{directory_has_entries, is_launcher_metadata_path};
 use griffr_common::runtime::{
-    materialize_game_files_with_pool, plan_vfs_tasks, run_integrity_pool, sync_launcher_metadata,
-    FileReuseConfig, SourceInstallInput, VfsMaterializeConfig,
+    materialize_game_files_with_pool, plan_vfs_tasks, run_integrity_pool, streaming_assets_path,
+    sync_launcher_metadata, FileReuseConfig, SourceInstallInput, VfsMaterializeConfig,
 };
 
 use crate::commands::local::detect_local_install;
@@ -324,16 +324,12 @@ pub async fn install(
         ui::print_info(
             "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
         );
-        let streaming_assets = install_path
-            .join(profile.streaming_assets_subdir.clone())
-            .join("StreamingAssets");
+        let streaming_assets =
+            streaming_assets_path(&install_path.join(profile.streaming_assets_subdir.clone()));
         let source_streaming_assets = reuse_paths
             .iter()
             .filter(|path| **path != install_path)
-            .map(|path| {
-                path.join(profile.streaming_assets_subdir.clone())
-                    .join("StreamingAssets")
-            })
+            .map(|path| streaming_assets_path(&path.join(profile.streaming_assets_subdir.clone())))
             .collect::<Vec<_>>();
         let rand_str = version_info.rand_str();
         match plan_vfs_tasks(

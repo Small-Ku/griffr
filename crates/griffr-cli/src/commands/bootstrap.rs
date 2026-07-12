@@ -10,19 +10,12 @@ use griffr_common::runtime::{
 use super::local::detect_local_install;
 use crate::progress::StepProgress;
 use crate::ui;
-use crate::{BootstrapScope, GlobalOptions};
-
-fn map_scope(scope: BootstrapScope) -> VfsBootstrapScope {
-    match scope {
-        BootstrapScope::Initial => VfsBootstrapScope::Initial,
-        BootstrapScope::Complete => VfsBootstrapScope::Complete,
-    }
-}
+use crate::GlobalOptions;
 
 pub async fn bootstrap(
     path: PathBuf,
     overrides: crate::InstallProfileOverrideArgs,
-    scope: BootstrapScope,
+    scope: VfsBootstrapScope,
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
     allow_download: bool,
@@ -60,8 +53,8 @@ pub async fn bootstrap(
     let data_root = local
         .install_path
         .join(profile.streaming_assets_subdir.clone());
-    let streaming_assets_root = data_root.join("StreamingAssets");
-    let persistent_root = data_root.join("Persistent");
+    let streaming_assets_root = griffr_common::runtime::streaming_assets_path(&data_root);
+    let persistent_root = griffr_common::runtime::persistent_path(&data_root);
 
     let mut extra_source_streaming_assets = Vec::new();
     for reuse in &reuse_paths {
@@ -87,7 +80,7 @@ pub async fn bootstrap(
                 source
                     .install_path
                     .join(source_profile.streaming_assets_subdir)
-                    .join("StreamingAssets"),
+                    .join(griffr_common::runtime::STREAMING_ASSETS_DIR),
             );
         }
     }
@@ -156,7 +149,7 @@ pub async fn bootstrap(
         &rand_str,
         &persistent_root,
         &VfsBootstrapConfig {
-            scope: map_scope(scope),
+            scope,
             source_streaming_assets: streaming_assets_root,
             extra_source_streaming_assets,
             allow_copy_fallback: force_copy,

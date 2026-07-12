@@ -5,6 +5,10 @@ use griffr_common::api::crypto;
 
 use super::utils::*;
 use crate::{GlobalOptions, SnapshotHashScope, VfsDiffAgainst};
+use griffr_common::runtime::{
+    persistent_path, resource_manifest_filename, streaming_assets_path, ResourceManifestKind,
+    RESOURCE_GROUP_INITIAL, RESOURCE_GROUP_MAIN,
+};
 
 pub(super) async fn snapshot_root_state(
     root: std::path::PathBuf,
@@ -39,10 +43,38 @@ pub(super) async fn snapshot_root_state(
 
     let manifests = match async {
         Ok::<LocalResManifests, anyhow::Error>(LocalResManifests {
-            index_initial: try_read_local_res_index(&root.join("index_initial.json"), key).await?,
-            index_main: try_read_local_res_index(&root.join("index_main.json"), key).await?,
-            pref_initial: try_read_local_res_index(&root.join("pref_initial.json"), key).await?,
-            pref_main: try_read_local_res_index(&root.join("pref_main.json"), key).await?,
+            index_initial: try_read_local_res_index(
+                &root.join(resource_manifest_filename(
+                    ResourceManifestKind::Index,
+                    RESOURCE_GROUP_INITIAL,
+                )),
+                key,
+            )
+            .await?,
+            index_main: try_read_local_res_index(
+                &root.join(resource_manifest_filename(
+                    ResourceManifestKind::Index,
+                    RESOURCE_GROUP_MAIN,
+                )),
+                key,
+            )
+            .await?,
+            pref_initial: try_read_local_res_index(
+                &root.join(resource_manifest_filename(
+                    ResourceManifestKind::Pref,
+                    RESOURCE_GROUP_INITIAL,
+                )),
+                key,
+            )
+            .await?,
+            pref_main: try_read_local_res_index(
+                &root.join(resource_manifest_filename(
+                    ResourceManifestKind::Pref,
+                    RESOURCE_GROUP_MAIN,
+                )),
+                key,
+            )
+            .await?,
         })
     }
     .await
@@ -187,10 +219,38 @@ pub async fn vfs_diff(
     let key = key.unwrap_or_else(|| crypto::RES_INDEX_KEY.to_string());
 
     let manifests = LocalResManifests {
-        index_initial: try_read_local_res_index(&root.join("index_initial.json"), &key).await?,
-        index_main: try_read_local_res_index(&root.join("index_main.json"), &key).await?,
-        pref_initial: try_read_local_res_index(&root.join("pref_initial.json"), &key).await?,
-        pref_main: try_read_local_res_index(&root.join("pref_main.json"), &key).await?,
+        index_initial: try_read_local_res_index(
+            &root.join(resource_manifest_filename(
+                ResourceManifestKind::Index,
+                RESOURCE_GROUP_INITIAL,
+            )),
+            &key,
+        )
+        .await?,
+        index_main: try_read_local_res_index(
+            &root.join(resource_manifest_filename(
+                ResourceManifestKind::Index,
+                RESOURCE_GROUP_MAIN,
+            )),
+            &key,
+        )
+        .await?,
+        pref_initial: try_read_local_res_index(
+            &root.join(resource_manifest_filename(
+                ResourceManifestKind::Pref,
+                RESOURCE_GROUP_INITIAL,
+            )),
+            &key,
+        )
+        .await?,
+        pref_main: try_read_local_res_index(
+            &root.join(resource_manifest_filename(
+                ResourceManifestKind::Pref,
+                RESOURCE_GROUP_MAIN,
+            )),
+            &key,
+        )
+        .await?,
     };
     let expected = select_expected_vfs_set(against, &manifests)?;
     let actual = collect_actual_vfs_files(&root)?;
@@ -247,7 +307,7 @@ pub async fn snapshot_resource_state(
     let key = crypto::RES_INDEX_KEY;
 
     let persistent = snapshot_root_state(
-        endfield_data_root.join("Persistent"),
+        persistent_path(&endfield_data_root),
         VfsDiffAgainst::Persistent,
         key,
         matches!(
@@ -257,7 +317,7 @@ pub async fn snapshot_resource_state(
     )
     .await;
     let streamingassets = snapshot_root_state(
-        endfield_data_root.join("StreamingAssets"),
+        streaming_assets_path(&endfield_data_root),
         VfsDiffAgainst::Streamingassets,
         key,
         matches!(hash_check, SnapshotHashScope::All),

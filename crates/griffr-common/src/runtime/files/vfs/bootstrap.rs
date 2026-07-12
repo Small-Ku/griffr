@@ -8,7 +8,9 @@ use crate::config::ApiTarget;
 use crate::runtime::task_pool::{ProgressEvent, Task, TaskPoolRunner};
 use crate::runtime::{
     collect_files_recursive, logical_path_from_root, normalize_logical_path,
-    remove_empty_dirs_recursive, PathOutcomeTracker, PathReuseMethod, RunningByteProgress,
+    remove_empty_dirs_recursive, resource_manifest_filename, resource_manifest_url, vfs_path,
+    PathOutcomeTracker, PathReuseMethod, ResourceManifestKind, RunningByteProgress,
+    RESOURCE_GROUP_INITIAL, RESOURCE_GROUP_MAIN,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -64,6 +66,29 @@ pub enum VfsBootstrapScope {
     Complete,
 }
 
+impl std::fmt::Display for VfsBootstrapScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Initial => RESOURCE_GROUP_INITIAL,
+            Self::Complete => "complete",
+        })
+    }
+}
+
+impl std::str::FromStr for VfsBootstrapScope {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            RESOURCE_GROUP_INITIAL => Ok(Self::Initial),
+            "complete" => Ok(Self::Complete),
+            other => Err(Error::Config(format!(
+                "invalid bootstrap scope {other:?}: expected {RESOURCE_GROUP_INITIAL} or complete"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct VfsBootstrapConfig {
     /// Scope for Persistent materialization.
@@ -116,10 +141,10 @@ pub(super) fn should_include_bootstrap_group(
     resource_name: &str,
 ) -> bool {
     match scope {
-        VfsBootstrapScope::Initial => resource_name.eq_ignore_ascii_case("initial"),
+        VfsBootstrapScope::Initial => resource_name.eq_ignore_ascii_case(RESOURCE_GROUP_INITIAL),
         VfsBootstrapScope::Complete => {
-            resource_name.eq_ignore_ascii_case("initial")
-                || resource_name.eq_ignore_ascii_case("main")
+            resource_name.eq_ignore_ascii_case(RESOURCE_GROUP_INITIAL)
+                || resource_name.eq_ignore_ascii_case(RESOURCE_GROUP_MAIN)
         }
     }
 }
@@ -230,10 +255,13 @@ pub async fn plan_persistent_bootstrap_tasks(
             continue;
         }
 
-        let pref_filename = format!("pref_{}.json", resource.name);
-        let index_filename = format!("index_{}.json", resource.name);
-        let pref_url = format!("{}/pref_{}.json", resource.path, resource.name);
-        let index_url = format!("{}/index_{}.json", resource.path, resource.name);
+        let pref_filename = resource_manifest_filename(ResourceManifestKind::Pref, &resource.name);
+        let index_filename =
+            resource_manifest_filename(ResourceManifestKind::Index, &resource.name);
+        let pref_url =
+            resource_manifest_url(&resource.path, ResourceManifestKind::Pref, &resource.name);
+        let index_url =
+            resource_manifest_url(&resource.path, ResourceManifestKind::Index, &resource.name);
 
         let local_pref = read_local_res_index(&persistent_root.join(&pref_filename))
             .await
@@ -390,7 +418,7 @@ pub async fn bootstrap_persistent_vfs_with_runner(
         })?;
 
     if cfg.prune_extra_files {
-        let vfs_root = persistent_root.join("VFS");
+        let vfs_root = vfs_path(persistent_root);
         if vfs_root.is_dir() {
             let files = collect_files_recursive(vfs_root.clone()).await?;
             for file in files {

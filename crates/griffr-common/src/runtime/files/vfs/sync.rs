@@ -7,7 +7,9 @@ use crate::api::client::{ApiClient, ApiError};
 use crate::api::crypto::RES_INDEX_KEY;
 use crate::config::ApiTarget;
 use crate::runtime::task_pool::{ProgressEvent, Task, TaskPoolRunner};
-use crate::runtime::{PathOutcomeTracker, RunningByteProgress};
+use crate::runtime::{
+    resource_manifest_url, PathOutcomeTracker, ResourceManifestKind, RunningByteProgress,
+};
 
 use super::{VfsMaterializeConfig, VfsPlanOutcome, VfsTaskPlan, VfsUpdateOutcome, VfsUpdateResult};
 pub async fn plan_vfs_tasks(
@@ -32,7 +34,8 @@ pub async fn plan_vfs_tasks(
     let mut total_bytes = 0u64;
 
     for resource in &resources.resources {
-        let index_url = format!("{}/index_{}.json", resource.path, resource.name);
+        let index_url =
+            resource_manifest_url(&resource.path, ResourceManifestKind::Index, &resource.name);
         let index = api_client
             .fetch_res_index(&index_url, RES_INDEX_KEY)
             .await
@@ -222,7 +225,8 @@ pub async fn get_vfs_resource_info(
     let mut total_size: u64 = 0;
 
     for resource in &resources.resources {
-        let index_url = format!("{}/index_{}.json", resource.path, resource.name);
+        let index_url =
+            resource_manifest_url(&resource.path, ResourceManifestKind::Index, &resource.name);
         match api_client.fetch_res_index(&index_url, RES_INDEX_KEY).await {
             Ok(index) => {
                 total_files += index.files.len();

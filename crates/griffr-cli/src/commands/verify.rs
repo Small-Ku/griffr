@@ -5,7 +5,7 @@ use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
 use griffr_common::runtime::{
     is_launcher_metadata_path, run_integrity_pool, sync_launcher_metadata,
 };
-use griffr_common::runtime::{plan_vfs_tasks, VfsMaterializeConfig};
+use griffr_common::runtime::{plan_vfs_tasks, streaming_assets_path, VfsMaterializeConfig};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -135,15 +135,15 @@ pub async fn verify(
         if rand_str.is_empty() {
             Vec::new()
         } else {
-            let streaming_assets = local
-                .install_path
-                .join(profile.streaming_assets_subdir.clone())
-                .join("StreamingAssets");
+            let streaming_assets = streaming_assets_path(
+                &local
+                    .install_path
+                    .join(profile.streaming_assets_subdir.clone()),
+            );
             let source_streaming_assets = source_roots
                 .iter()
                 .map(|path| {
-                    path.join(profile.streaming_assets_subdir.clone())
-                        .join("StreamingAssets")
+                    streaming_assets_path(&path.join(profile.streaming_assets_subdir.clone()))
                 })
                 .collect::<Vec<_>>();
             match plan_vfs_tasks(
