@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use griffr_common::api::crypto;
-use griffr_common::config::{ChannelPair, GameId};
+use griffr_common::config::{
+    game_by_appcode, game_by_executable, ChannelPair, GameId, GAME_CATALOG,
+};
 
 #[derive(Debug, Clone)]
 pub struct ParsedConfigIni {
@@ -121,32 +123,19 @@ pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
     let install_path = resolve_install_path(path);
     let config_ini = decrypt_config_ini(&install_path).await?;
 
-    let has_arknights_exe = match compio::fs::metadata(install_path.join("Arknights.exe")).await {
-        Ok(_) => true,
-        Err(err) if err.kind() == ErrorKind::NotFound => false,
-        Err(err) => {
-            return Err(err).with_context(|| {
-                format!(
-                    "Failed to stat {}",
-                    install_path.join("Arknights.exe").display()
-                )
-            })
+    let mut games_with_existing_executable = Vec::new();
+    for game in GAME_CATALOG {
+        let executable = install_path.join(game.executable);
+        match compio::fs::metadata(&executable).await {
+            Ok(_) => games_with_existing_executable.push(game.game_id()),
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("Failed to stat {}", executable.display()))
+            }
         }
-    };
-    let has_endfield_exe = match compio::fs::metadata(install_path.join("Endfield.exe")).await {
-        Ok(_) => true,
-        Err(err) if err.kind() == ErrorKind::NotFound => false,
-        Err(err) => {
-            return Err(err).with_context(|| {
-                format!(
-                    "Failed to stat {}",
-                    install_path.join("Endfield.exe").display()
-                )
-            })
-        }
-    };
+    }
 
-    let game_id = detect_game_id(&config_ini, has_arknights_exe, has_endfield_exe);
+    let game_id = detect_game_id(&config_ini, &games_with_existing_executable);
     let channel_id = detect_channel_id(&config_ini);
 
     Ok(LocalInstall {
@@ -159,28 +148,13 @@ pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
 
 fn detect_game_id(
     config_ini: &ParsedConfigIni,
-    has_arknights_exe: bool,
-    has_endfield_exe: bool,
+    games_with_existing_executable: &[GameId],
 ) -> Option<GameId> {
-    match config_ini.appcode() {
-        Some("GzD1CpaWgmSq1wew") => return Some(GameId::ARKNIGHTS),
-        Some("6LL0KJuqHBVz33WK") | Some("YDUTE5gscDZ229CW") => return Some(GameId::ENDFIELD),
-        _ => {}
-    }
-
-    match config_ini.entry() {
-        Some(entry) if entry.eq_ignore_ascii_case("Arknights.exe") => Some(GameId::ARKNIGHTS),
-        Some(entry) if entry.eq_ignore_ascii_case("Endfield.exe") => Some(GameId::ENDFIELD),
-        _ => {
-            if has_arknights_exe {
-                Some(GameId::ARKNIGHTS)
-            } else if has_endfield_exe {
-                Some(GameId::ENDFIELD)
-            } else {
-                None
-            }
-        }
-    }
+    config_ini
+        .appcode()
+        .and_then(game_by_appcode)
+        .or_else(|| config_ini.entry().and_then(game_by_executable))
+        .or_else(|| games_with_existing_executable.first().cloned())
 }
 
 fn detect_channel_id(config_ini: &ParsedConfigIni) -> Option<ChannelPair> {

@@ -4,28 +4,31 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+const HYPERGRYPH_ID: &str = "1";
+const BILIBILI_ID: &str = "2";
+const GRYPHLINE_ID: &str = "6";
+const EPIC_STORE_ID: &str = "801";
+const GOOGLE_PLAY_ID: &str = "802";
+
+const CHANNEL_ALIASES: &[(&str, &str)] = &[
+    ("hypergryph", HYPERGRYPH_ID),
+    ("bilibili", BILIBILI_ID),
+    ("gryphline", GRYPHLINE_ID),
+    ("epic_store", EPIC_STORE_ID),
+    ("google_play", GOOGLE_PLAY_ID),
+];
+
 fn normalize_value(value: String) -> Result<Cow<'static, str>> {
     let value = value.trim();
     if value.is_empty() {
         return Err(Error::Config("channel id cannot be empty".to_string()));
     }
 
-    let alias = if value.eq_ignore_ascii_case("hypergryph") {
-        Some("1")
-    } else if value.eq_ignore_ascii_case("bilibili") {
-        Some("2")
-    } else if value.eq_ignore_ascii_case("gryphline") {
-        Some("6")
-    } else if value.eq_ignore_ascii_case("epic_store") {
-        Some("801")
-    } else if value.eq_ignore_ascii_case("google_play") {
-        Some("802")
-    } else {
-        None
-    };
-
-    if let Some(value) = alias {
-        return Ok(Cow::Borrowed(value));
+    if let Some((_, id)) = CHANNEL_ALIASES
+        .iter()
+        .find(|(alias, _)| value.eq_ignore_ascii_case(alias))
+    {
+        return Ok(Cow::Borrowed(id));
     }
 
     if value.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -33,7 +36,12 @@ fn normalize_value(value: String) -> Result<Cow<'static, str>> {
     }
 
     Err(Error::Config(format!(
-        "invalid channel id {value:?}: expected a numeric ID or one of hypergryph, bilibili, gryphline, epic_store, google_play"
+        "invalid channel id {value:?}: expected a numeric ID or one of {}",
+        CHANNEL_ALIASES
+            .iter()
+            .map(|(alias, _)| *alias)
+            .collect::<Vec<_>>()
+            .join(", ")
     )))
 }
 
@@ -45,11 +53,11 @@ fn normalize_value(value: String) -> Result<Cow<'static, str>> {
 pub struct ChannelId(Cow<'static, str>);
 
 impl ChannelId {
-    pub const HYPERGRYPH: Self = Self::known("1");
-    pub const BILIBILI: Self = Self::known("2");
-    pub const GRYPHLINE: Self = Self::known("6");
-    pub const EPIC_STORE: Self = Self::known("801");
-    pub const GOOGLE_PLAY: Self = Self::known("802");
+    pub const HYPERGRYPH: Self = Self::known(HYPERGRYPH_ID);
+    pub const BILIBILI: Self = Self::known(BILIBILI_ID);
+    pub const GRYPHLINE: Self = Self::known(GRYPHLINE_ID);
+    pub const EPIC_STORE: Self = Self::known(EPIC_STORE_ID);
+    pub const GOOGLE_PLAY: Self = Self::known(GOOGLE_PLAY_ID);
 
     pub const fn known(value: &'static str) -> Self {
         Self(Cow::Borrowed(value))

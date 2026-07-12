@@ -1,4 +1,5 @@
 use clap::Subcommand;
+use griffr_common::config::{ChannelId, GameId};
 use tracing::debug;
 
 use crate::cli::{
@@ -270,12 +271,11 @@ pub(crate) enum AccountCommands {
     /// Capture current local account state into a directory bundle
     Capture {
         /// Known game id
-        #[arg(value_parser = ["arknights", "endfield"])]
-        game: String,
+        game: GameId,
 
         /// Optional channel hint to narrow default sdk_data discovery roots
         #[arg(long)]
-        channel_hint: Option<String>,
+        channel_hint: Option<ChannelId>,
 
         /// Output bundle directory
         #[arg(long = "to")]
@@ -301,12 +301,11 @@ pub(crate) enum AccountCommands {
     /// Activate account state from a directory bundle
     Activate {
         /// Known game id
-        #[arg(value_parser = ["arknights", "endfield"])]
-        game: String,
+        game: GameId,
 
         /// Optional channel hint to narrow default sdk_data discovery roots
         #[arg(long)]
-        channel_hint: Option<String>,
+        channel_hint: Option<ChannelId>,
 
         /// Input bundle directory
         #[arg(long = "from")]

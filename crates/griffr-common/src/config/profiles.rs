@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ChannelId, ChannelPair, GameAppCode, GameId, LauncherAppCode, LauncherGateway};
+use super::{
+    deployment_region, game_catalog_entry, gateway, launcher_appcode, ChannelId, ChannelPair,
+    GameAppCode, GameId, LauncherAppCode, LauncherGateway,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiTarget {
@@ -24,53 +27,22 @@ pub struct KnownTargets;
 
 impl KnownTargets {
     pub fn resolve(game: &GameId, channels: &ChannelPair) -> Option<InstallProfile> {
-        let game = game.as_str();
-        let channel = channels.channel().as_str();
-        let sub_channel = channels.sub_channel().as_str();
-        let is_cn = matches!(channel, "1" | "2");
-
-        let gateway = if is_cn {
-            "https://launcher.hypergryph.com"
-        } else {
-            "https://launcher.gryphline.com"
-        };
-        let launcher_appcode = if is_cn {
-            "abYeZZ16BPluCFyT"
-        } else if sub_channel == "801" {
-            "BBWoqCzuZ2bZ1Dro"
-        } else {
-            "TiaytKBUIEdoEwRT"
-        };
-
-        let (game_appcode, executable, streaming_assets_subdir) = match (game, is_cn) {
-            ("arknights", _) => (
-                "GzD1CpaWgmSq1wew",
-                PathBuf::from("Arknights.exe"),
-                PathBuf::from("Arknights_Data"),
-            ),
-            ("endfield", true) => (
-                "6LL0KJuqHBVz33WK",
-                PathBuf::from("Endfield.exe"),
-                PathBuf::from("Endfield_Data"),
-            ),
-            ("endfield", false) => (
-                "YDUTE5gscDZ229CW",
-                PathBuf::from("Endfield.exe"),
-                PathBuf::from("Endfield_Data"),
-            ),
-            _ => return None,
-        };
+        let game = game_catalog_entry(game)?;
+        let region = deployment_region(channels.channel());
 
         Some(InstallProfile {
             target: ApiTarget {
-                game_appcode: GameAppCode::new(game_appcode),
-                launcher_appcode: LauncherAppCode::new(launcher_appcode),
-                gateway: LauncherGateway::new(gateway),
+                game_appcode: GameAppCode::new(game.appcode(region)),
+                launcher_appcode: LauncherAppCode::new(launcher_appcode(
+                    region,
+                    channels.sub_channel(),
+                )),
+                gateway: LauncherGateway::new(gateway(region)),
                 channel: channels.channel().clone(),
                 sub_channel: channels.sub_channel().clone(),
             },
-            executable,
-            streaming_assets_subdir,
+            executable: PathBuf::from(game.executable),
+            streaming_assets_subdir: PathBuf::from(game.data_root),
         })
     }
 }

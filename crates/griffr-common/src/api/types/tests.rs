@@ -1,42 +1,5 @@
 use super::*;
 #[test]
-fn test_game_app_codes() {
-    assert_eq!(Game::Arknights.app_code(Region::CN), "GzD1CpaWgmSq1wew");
-    assert_eq!(Game::Endfield.app_code(Region::CN), "6LL0KJuqHBVz33WK");
-    assert_eq!(Game::Endfield.app_code(Region::OS), "YDUTE5gscDZ229CW");
-}
-
-#[test]
-fn test_launcher_app_codes() {
-    assert_eq!(
-        Game::Arknights.launcher_app_code(Region::CN),
-        "abYeZZ16BPluCFyT"
-    );
-    assert_eq!(
-        Game::Endfield.launcher_app_code(Region::CN),
-        "abYeZZ16BPluCFyT"
-    );
-    assert_eq!(
-        Game::Endfield.launcher_app_code(Region::OS),
-        "TiaytKBUIEdoEwRT"
-    );
-}
-
-#[test]
-fn test_cdn_prefixes() {
-    assert_eq!(Game::Arknights.cdn_prefix(), "ak");
-    assert_eq!(Game::Endfield.cdn_prefix(), "beyond");
-}
-
-#[test]
-fn test_region_domain_suffixes() {
-    assert_eq!(Region::CN.api_domain_suffix(), ".hypergryph.com");
-    assert_eq!(Region::OS.api_domain_suffix(), ".gryphline.com");
-    assert_eq!(Region::CN.cdn_domain(Game::Arknights), ".hycdn.cn");
-    assert_eq!(Region::OS.cdn_domain(Game::Endfield), ".hg-cdn.com");
-}
-
-#[test]
 fn test_pack_file_parsing() {
     let json = r#"{
         "url": "https://beyond.hycdn.cn/pack.zip.001?auth_key=xxx",

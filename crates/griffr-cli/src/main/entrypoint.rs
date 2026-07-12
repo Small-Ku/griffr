@@ -3,7 +3,7 @@ use crate::debug_cli::*;
 use crate::{commands, GlobalOptions};
 use anyhow::Result;
 use clap::Parser;
-use griffr_common::config::{ChannelId, ChannelPair, GameId};
+use griffr_common::config::{ChannelPair, GameId};
 use tracing::debug;
 
 fn parse_remote_args(remote: RequiredGameChannelArgs) -> Result<(GameId, ChannelPair)> {
@@ -422,10 +422,8 @@ pub(crate) async fn run() -> Result<()> {
                 include_install_mmkv,
                 force,
             } => {
-                let game_id = game.parse::<GameId>()?;
-                let channel_hint = channel_hint.map(|s| s.parse::<ChannelId>()).transpose()?;
                 commands::account_capture(
-                    game_id,
+                    game,
                     channel_hint,
                     bundle,
                     sdk_dir,
@@ -445,10 +443,8 @@ pub(crate) async fn run() -> Result<()> {
                 include_install_mmkv,
                 force,
             } => {
-                let game_id = game.parse::<GameId>()?;
-                let channel_hint = channel_hint.map(|s| s.parse::<ChannelId>()).transpose()?;
                 commands::account_activate(
-                    game_id,
+                    game,
                     channel_hint,
                     bundle,
                     sdk_dir,

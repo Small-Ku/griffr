@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use griffr_common::config::{ChannelId, GameId};
+use griffr_common::config::{
+    game_catalog_entry, local_low_vendor, ChannelId, GameId, GRYPHLINE_LOCAL_LOW_VENDOR,
+    HYPERGRYPH_LOCAL_LOW_VENDOR,
+};
 use griffr_common::runtime::{copy_dir_recursive, remove_dir_all};
 
 use crate::ui;
@@ -268,13 +271,9 @@ pub(super) fn default_game_local_low_roots(
 ) -> Result<Vec<PathBuf>> {
     let user_profile = std::env::var("USERPROFILE")
         .context("USERPROFILE is not set; this command requires Windows user profile context")?;
-    let game_dir = if game_id == GameId::ARKNIGHTS {
-        "Arknights"
-    } else if game_id == GameId::ENDFIELD {
-        "Endfield"
-    } else {
-        anyhow::bail!("Custom games must provide --sdk-dir; no LocalLow path is inferred")
-    };
+    let game_dir = game_catalog_entry(&game_id)
+        .map(|game| game.local_low_dir)
+        .context("Custom games must provide --sdk-dir; no LocalLow path is inferred")?;
     let base = PathBuf::from(user_profile).join("AppData").join("LocalLow");
     local_low_roots_for_hint(&base, game_dir, channel_hint)
 }
@@ -285,20 +284,18 @@ pub(super) fn local_low_roots_for_hint(
     channel_hint: Option<ChannelId>,
 ) -> Result<Vec<PathBuf>> {
     if let Some(channel) = channel_hint {
-        let chan = channel.as_str();
-        let vendor = match chan {
-            "1" | "2" => "Hypergryph",
-            "6" | "801" | "802" => "Gryphline",
-            custom => anyhow::bail!(
-                "Custom channel {custom} must provide --sdk-dir; no LocalLow vendor is inferred"
-            ),
-        };
+        let vendor = local_low_vendor(&channel).with_context(|| {
+            format!(
+                "Custom channel {} must provide --sdk-dir; no LocalLow vendor is inferred",
+                channel
+            )
+        })?;
         return Ok(vec![base.join(vendor).join(game_dir)]);
     }
 
     Ok(vec![
-        base.join("Hypergryph").join(game_dir),
-        base.join("Gryphline").join(game_dir),
+        base.join(HYPERGRYPH_LOCAL_LOW_VENDOR).join(game_dir),
+        base.join(GRYPHLINE_LOCAL_LOW_VENDOR).join(game_dir),
     ])
 }
 
