@@ -14,7 +14,7 @@ impl ApiClient {
         base_url: &str,
         expected_md5: Option<&str>,
     ) -> Result<Vec<GameFileEntry>> {
-        let url = launcher_metadata_url(base_url, GAME_FILES_NAME);
+        let url = launcher_metadata_url(base_url, GAME_FILES_NAME)?;
 
         let response = self
             .client

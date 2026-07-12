@@ -15,8 +15,8 @@ pub use compat_fs::{
     list_files_with_extension, read_link, remove_dir_all, remove_empty_dirs_recursive, CopyStats,
 };
 pub use files::reuse::{
-    apply_file_reuse_flow, derive_files_base_url, materialize_game_files_with_pool,
-    FileReuseConfig, MaterializeSummary, SourceInstallInput,
+    apply_file_reuse_flow, materialize_game_files_with_pool, FileReuseConfig, MaterializeSummary,
+    SourceInstallInput,
 };
 pub use files::vfs::{
     bootstrap_persistent_vfs_with_runner, download_vfs_resources, get_vfs_resource_info,
@@ -29,12 +29,12 @@ pub use issues::{FileIssue, FileIssueKind};
 pub use launcher::{GameProcess, Launcher};
 pub use launcher_metadata::sync_launcher_metadata;
 pub use paths::{
-    build_cdn_file_url, is_launcher_metadata_path, launcher_files_base_url, launcher_metadata_url,
+    build_cdn_file_url, files_base_url, is_launcher_metadata_path, launcher_metadata_url,
     logical_path_from_root, normalize_logical_path, persistent_path, resource_manifest_filename,
-    resource_manifest_url, streaming_assets_path, vfs_path, ResourceManifestKind, CONFIG_INI_NAME,
-    DELETE_FILES_MANIFEST_NAME, GAME_FILES_NAME, PACKAGE_FILES_NAME, PATCH_DIFF_STAGE_DIR,
-    PATCH_FILES_STAGE_DIR, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR, PERSISTENT_DIR,
-    RESOURCE_GROUP_INITIAL, RESOURCE_GROUP_MAIN, STREAMING_ASSETS_DIR, VFS_DIR,
+    resource_manifest_url, streaming_assets_path, vfs_path, ResourceManifestKind, CDN_FILES_DIR,
+    CONFIG_INI_NAME, DELETE_FILES_MANIFEST_NAME, GAME_FILES_NAME, PACKAGE_FILES_NAME,
+    PATCH_DIFF_STAGE_DIR, PATCH_FILES_STAGE_DIR, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
+    PERSISTENT_DIR, RESOURCE_GROUP_INITIAL, RESOURCE_GROUP_MAIN, STREAMING_ASSETS_DIR, VFS_DIR,
 };
 pub use progress::{
     PathAttemptKind, PathOutcome, PathOutcomeSummary, PathOutcomeTracker, PathReuseMethod,

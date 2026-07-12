@@ -1,8 +1,11 @@
 use std::path::Path;
 
+use crate::error::{Error, Result};
+
 pub const CONFIG_INI_NAME: &str = "config.ini";
 pub const GAME_FILES_NAME: &str = "game_files";
 pub const PACKAGE_FILES_NAME: &str = "package_files";
+pub const CDN_FILES_DIR: &str = "files";
 pub const PATCH_MANIFEST_NAME: &str = "patch.json";
 pub const PATCH_STAGE_DIR: &str = "vfs_files";
 pub const PATCH_FILES_STAGE_DIR: &str = "files";
@@ -58,17 +61,26 @@ pub fn vfs_path(root: &Path) -> std::path::PathBuf {
     root.join(VFS_DIR)
 }
 
-pub fn launcher_files_base_url(file_path: &str) -> &str {
+pub fn files_base_url(file_path: &str) -> Result<&str> {
     let normalized = file_path.trim_end_matches('/');
-    if normalized.rsplit('/').next() == Some(GAME_FILES_NAME) {
-        &normalized[..normalized.len() - GAME_FILES_NAME.len() - 1]
-    } else {
-        normalized
+    let Some((base, final_segment)) = normalized.rsplit_once('/') else {
+        return Err(invalid_files_path(file_path));
+    };
+    match final_segment {
+        GAME_FILES_NAME => Ok(base),
+        CDN_FILES_DIR => Ok(normalized),
+        _ => Err(invalid_files_path(file_path)),
     }
 }
 
-pub fn launcher_metadata_url(file_path: &str, filename: &str) -> String {
-    format!("{}/{}", launcher_files_base_url(file_path), filename)
+fn invalid_files_path(file_path: &str) -> Error {
+    Error::Config(format!(
+        "Expected file_path to end with '/{GAME_FILES_NAME}' or '/{CDN_FILES_DIR}', got: {file_path}"
+    ))
+}
+
+pub fn launcher_metadata_url(file_path: &str, filename: &str) -> Result<String> {
+    Ok(format!("{}/{}", files_base_url(file_path)?, filename))
 }
 
 pub fn normalize_logical_path(path: &str) -> String {
@@ -134,8 +146,8 @@ fn nibble_to_hex(nibble: u8) -> char {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cdn_file_url, is_launcher_metadata_path, launcher_files_base_url,
-        launcher_metadata_url, logical_path_from_root, normalize_logical_path, GAME_FILES_NAME,
+        build_cdn_file_url, files_base_url, is_launcher_metadata_path, launcher_metadata_url,
+        logical_path_from_root, normalize_logical_path, GAME_FILES_NAME,
     };
     use std::path::Path;
 
@@ -187,12 +199,22 @@ mod tests {
     #[test]
     fn launcher_metadata_urls_share_one_base_rule() {
         assert_eq!(
-            launcher_files_base_url("https://cdn.example/files/game_files"),
+            files_base_url("https://cdn.example/files/game_files").unwrap(),
             "https://cdn.example/files"
         );
         assert_eq!(
-            launcher_metadata_url("https://cdn.example/files/game_files", GAME_FILES_NAME),
+            files_base_url("https://cdn.example/files/").unwrap(),
+            "https://cdn.example/files"
+        );
+        assert_eq!(
+            launcher_metadata_url("https://cdn.example/files/game_files", GAME_FILES_NAME).unwrap(),
             "https://cdn.example/files/game_files"
         );
+    }
+
+    #[test]
+    fn files_base_url_rejects_unknown_shapes() {
+        let error = files_base_url("https://cdn.example/packages").unwrap_err();
+        assert!(error.to_string().contains("'/game_files' or '/files'"));
     }
 }

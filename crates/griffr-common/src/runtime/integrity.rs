@@ -8,7 +8,8 @@ use crate::runtime::task_pool::{
     run_tasks_with_progress, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
 use crate::runtime::{
-    build_cdn_file_url, FileIssue, PathOutcomeTracker, PathReuseMethod, RunningByteProgress,
+    build_cdn_file_url, files_base_url, FileIssue, PathOutcomeTracker, PathReuseMethod,
+    RunningByteProgress,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -78,7 +79,7 @@ pub async fn run_integrity_pool(
     let entries = api_client
         .fetch_game_files(&pkg.file_path, pkg.game_files_md5.as_deref())
         .await?;
-    let files_base_url = pkg.file_path.trim_end_matches("/game_files");
+    let files_url_base = files_base_url(&pkg.file_path)?;
 
     let tracked_paths = entries
         .iter()
@@ -118,7 +119,7 @@ pub async fn run_integrity_pool(
                     expected_md5: entry.md5.clone(),
                     expected_size: entry.size,
                     source_candidates,
-                    download_url: Some(build_cdn_file_url(files_base_url, &entry.path)),
+                    download_url: Some(build_cdn_file_url(files_url_base, &entry.path)),
                     allow_copy_fallback,
                     prefer_reuse,
                     retry_count: 0,

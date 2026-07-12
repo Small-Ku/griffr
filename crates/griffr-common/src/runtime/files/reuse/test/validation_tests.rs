@@ -67,26 +67,3 @@ fn test_is_launcher_metadata_path_matches_expected_names() {
     assert!(!plan::is_launcher_metadata_path("Endfield_Data/config.ini"));
     assert!(!plan::is_launcher_metadata_path("SomeGame/game_files.bin"));
 }
-
-#[test]
-fn test_derive_files_base_url_from_game_files_suffix() {
-    let url = "https://cdn.example.com/path/files/game_files";
-    let base = plan::derive_files_base_url(url).unwrap();
-    assert_eq!(base, "https://cdn.example.com/path/files");
-}
-
-#[test]
-fn test_derive_files_base_url_from_files_suffix() {
-    let url = "https://cdn.example.com/path/files";
-    let base = plan::derive_files_base_url(url).unwrap();
-    assert_eq!(base, "https://cdn.example.com/path/files");
-}
-
-#[test]
-fn test_derive_files_base_url_rejects_unknown_shape() {
-    let url = "https://cdn.example.com/path";
-    let err = plan::derive_files_base_url(url).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("Expected file_path to end with '/game_files' or '/files'"));
-}

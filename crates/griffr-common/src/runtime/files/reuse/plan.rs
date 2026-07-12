@@ -1,4 +1,4 @@
-use crate::error::{Error, Result};
+use crate::error::Result;
 use rapidhash::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 
 use crate::api::types::GameFileEntry;
@@ -176,18 +176,4 @@ pub async fn plan_file_reuse(
         download_size,
         requires_copy_fallback,
     })
-}
-
-pub fn derive_files_base_url(file_path: &str) -> Result<String> {
-    let normalized = file_path.trim_end_matches('/');
-    if let Some(base) = normalized.strip_suffix("/game_files") {
-        return Ok(base.to_string());
-    }
-    if normalized.ends_with("/files") {
-        return Ok(normalized.to_string());
-    }
-    Err(Error::Config(format!(
-        "Expected file_path to end with '/game_files' or '/files', got: {}",
-        file_path
-    )))
 }

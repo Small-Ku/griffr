@@ -8,8 +8,8 @@ use tracing::{info, warn};
 use crate::api::types::GameFileEntry;
 use crate::api::ApiClient;
 use crate::runtime::{
-    build_cdn_file_url, is_launcher_metadata_path, logical_path_from_root, PathOutcomeTracker,
-    PathReuseMethod,
+    build_cdn_file_url, files_base_url, is_launcher_metadata_path, logical_path_from_root,
+    PathOutcomeTracker, PathReuseMethod,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -68,7 +68,7 @@ pub async fn materialize_game_files_with_pool(
                 "Failed to fetch target manifest for reuse planning: {e}"
             ))
         })?;
-    let files_base_url = super::plan::derive_files_base_url(file_path)?;
+    let files_url_base = files_base_url(file_path)?;
 
     let source_manifest_results = stream::iter(config.source_installs.iter().cloned())
         .map(|source| {
@@ -143,7 +143,7 @@ pub async fn materialize_game_files_with_pool(
                 expected_md5: entry.md5.clone(),
                 expected_size: entry.size,
                 source_candidates: candidates,
-                download_url: Some(build_cdn_file_url(&files_base_url, &entry.path)),
+                download_url: Some(build_cdn_file_url(files_url_base, &entry.path)),
                 allow_copy_fallback: config.allow_copy_fallback,
                 prefer_reuse: false,
                 retry_count: 0,
