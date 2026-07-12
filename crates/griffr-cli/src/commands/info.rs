@@ -3,48 +3,143 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::{ChannelPair, GameId};
-use serde_json::json;
+use serde::Serialize;
 
 use super::local::{detect_local_install, LocalInstall};
 use crate::{ui, GlobalOptions, OutputFormat};
 
-fn local_rows(local: &LocalInstall) -> Vec<(String, String)> {
-    vec![
-        ("path".to_string(), local.install_path.display().to_string()),
-        (
-            "config_ini".to_string(),
-            local.config_ini.path.display().to_string(),
-        ),
-        (
-            "appcode".to_string(),
-            local.config_ini.appcode().unwrap_or("").to_string(),
-        ),
-        (
-            "region".to_string(),
-            local.config_ini.region().unwrap_or("").to_string(),
-        ),
-        (
-            "channel".to_string(),
-            local.config_ini.channel().unwrap_or("").to_string(),
-        ),
-        (
-            "sub_channel".to_string(),
-            local.config_ini.sub_channel().unwrap_or("").to_string(),
-        ),
-        (
-            "version".to_string(),
-            local.config_ini.version().unwrap_or("").to_string(),
-        ),
-        (
-            "entry".to_string(),
-            local.config_ini.entry().unwrap_or("").to_string(),
-        ),
-        ("known_game".to_string(), format!("{:?}", local.game_id)),
-        (
-            "known_channel".to_string(),
-            format!("{:?}", local.channel_id),
-        ),
-    ]
+#[derive(Debug, Serialize)]
+struct InfoReport {
+    local: Option<LocalReport>,
+    remote: Option<RemoteReport>,
+    media: Option<MediaReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalReport {
+    path: String,
+    config_ini: String,
+    appcode: Option<String>,
+    region: Option<String>,
+    channel: Option<String>,
+    sub_channel: Option<String>,
+    version: Option<String>,
+    entry: Option<String>,
+    known_game: Option<String>,
+    known_channel: Option<String>,
+    known_sub_channel: Option<String>,
+}
+
+impl LocalReport {
+    fn from_install(local: &LocalInstall) -> Self {
+        Self {
+            path: local.install_path.display().to_string(),
+            config_ini: local.config_ini.path.display().to_string(),
+            appcode: local.config_ini.appcode().map(str::to_owned),
+            region: local.config_ini.region().map(str::to_owned),
+            channel: local.config_ini.channel().map(str::to_owned),
+            sub_channel: local.config_ini.sub_channel().map(str::to_owned),
+            version: local.config_ini.version().map(str::to_owned),
+            entry: local.config_ini.entry().map(str::to_owned),
+            known_game: local.game_id.as_ref().map(ToString::to_string),
+            known_channel: local
+                .channel_id
+                .as_ref()
+                .map(|channels| channels.channel().to_string()),
+            known_sub_channel: local
+                .channel_id
+                .as_ref()
+                .map(|channels| channels.sub_channel().to_string()),
+        }
+    }
+
+    fn rows(&self) -> Vec<(String, String)> {
+        vec![
+            row("path", &self.path),
+            row("config_ini", &self.config_ini),
+            optional_row("appcode", self.appcode.as_deref()),
+            optional_row("region", self.region.as_deref()),
+            optional_row("channel", self.channel.as_deref()),
+            optional_row("sub_channel", self.sub_channel.as_deref()),
+            optional_row("version", self.version.as_deref()),
+            optional_row("entry", self.entry.as_deref()),
+            optional_row("known_game", self.known_game.as_deref()),
+            optional_row("known_channel", self.known_channel.as_deref()),
+            optional_row("known_sub_channel", self.known_sub_channel.as_deref()),
+        ]
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteReport {
+    game: String,
+    channel: String,
+    sub_channel: String,
+    version: String,
+    action: i32,
+    request_version: String,
+    has_full_package: bool,
+    has_patch_package: bool,
+    package: Option<PackageReport>,
+}
+
+impl RemoteReport {
+    fn rows(&self) -> Vec<(String, String)> {
+        let mut rows = vec![
+            row("game", &self.game),
+            row("channel", &self.channel),
+            row("sub_channel", &self.sub_channel),
+            row("version", &self.version),
+            row("action", self.action),
+            row("request_version", &self.request_version),
+            row("has_full_package", self.has_full_package),
+            row("has_patch_package", self.has_patch_package),
+        ];
+
+        if let Some(package) = &self.package {
+            rows.extend([
+                row("pkg.file_path", &package.file_path),
+                row("pkg.packs", package.packs),
+                optional_row("pkg.game_files_md5", package.game_files_md5.as_deref()),
+            ]);
+        }
+
+        rows
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct PackageReport {
+    file_path: String,
+    packs: usize,
+    game_files_md5: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MediaReport {
+    language: String,
+    banners: usize,
+    announcement_tabs: usize,
+    sidebar: usize,
+}
+
+impl MediaReport {
+    fn rows(&self) -> Vec<(String, String)> {
+        vec![
+            row("language", &self.language),
+            row("banners", self.banners),
+            row("announcement_tabs", self.announcement_tabs),
+            row("sidebar", self.sidebar),
+        ]
+    }
+}
+
+fn row(key: &str, value: impl ToString) -> (String, String) {
+    (key.to_owned(), value.to_string())
+}
+
+fn optional_row(key: &str, value: Option<&str>) -> (String, String) {
+    row(key, value.unwrap_or_default())
 }
 
 pub async fn show(
@@ -58,24 +153,26 @@ pub async fn show(
     let api_client = ApiClient::new()?;
 
     let mut remote_target: Option<(GameId, ChannelPair)> = None;
-    let mut local_install: Option<LocalInstall> = None;
-
-    if let Some(path) = path {
+    let local_install = if let Some(path) = path {
         let local = detect_local_install(&path).await?;
         if let (Some(game_id), Some(channel_id)) = (local.game_id.clone(), local.channel_id.clone())
         {
             remote_target = Some((game_id, channel_id));
         }
-        local_install = Some(local);
+        Some(local)
     } else if let (Some(game), Some(channel)) = (game, channel) {
-        let channel_id = ChannelPair::parse(channel, sub_channel)?;
-        remote_target = Some((game.parse::<GameId>()?, channel_id));
+        remote_target = Some((
+            game.parse::<GameId>()?,
+            ChannelPair::parse(channel, sub_channel)?,
+        ));
+        None
     } else {
         anyhow::bail!("info requires either --path or both --game and --channel");
-    }
+    };
 
-    let mut remote_json = None;
-    let mut media_json = None;
+    let local = local_install.as_ref().map(LocalReport::from_install);
+    let mut remote = None;
+    let mut media = None;
 
     if let Some((game_id, channel_id)) = remote_target {
         let target =
@@ -93,197 +190,72 @@ pub async fn show(
                 )
             })?;
 
-        remote_json = Some(json!({
-            "game": game_id.to_string(),
-            "channel": channel_id.channel().as_str(),
-            "sub_channel": channel_id.sub_channel().as_str(),
-            "version": info.version,
-            "action": info.action,
-            "request_version": info.request_version,
-            "has_full_package": info.has_full_package(),
-            "has_patch_package": info.has_patch_package(),
-            "package": info.pkg.as_ref().map(|pkg| {
-                json!({
-                    "file_path": pkg.file_path,
-                    "packs": pkg.packs.len(),
-                    "game_files_md5": pkg.game_files_md5
-                })
-            })
-        }));
+        let has_full_package = info.has_full_package();
+        let has_patch_package = info.has_patch_package();
+        let package = info.pkg.as_ref().map(|package| PackageReport {
+            file_path: package.file_path.clone(),
+            packs: package.packs.len(),
+            game_files_md5: package.game_files_md5.clone(),
+        });
+        remote = Some(RemoteReport {
+            game: game_id.to_string(),
+            channel: channel_id.channel().to_string(),
+            sub_channel: channel_id.sub_channel().to_string(),
+            version: info.version,
+            action: info.action,
+            request_version: info.request_version,
+            has_full_package,
+            has_patch_package,
+            package,
+        });
 
         if opts.verbose {
-            let media = api_client.get_media(&target, language).await?;
-            media_json = Some(json!({
-                "language": language,
-                "banners": media.banners.as_ref().map(|v| v.banners.len()).unwrap_or(0),
-                "announcement_tabs": media.announcements.as_ref().map(|v| v.tabs.len()).unwrap_or(0),
-                "sidebar": media.sidebar.as_ref().map(|v| v.sidebars.len()).unwrap_or(0),
-            }));
+            let response = api_client.get_media(&target, language).await?;
+            media = Some(MediaReport {
+                language: language.to_owned(),
+                banners: response
+                    .banners
+                    .as_ref()
+                    .map(|value| value.banners.len())
+                    .unwrap_or_default(),
+                announcement_tabs: response
+                    .announcements
+                    .as_ref()
+                    .map(|value| value.tabs.len())
+                    .unwrap_or_default(),
+                sidebar: response
+                    .sidebar
+                    .as_ref()
+                    .map(|value| value.sidebars.len())
+                    .unwrap_or_default(),
+            });
         }
     }
+
+    let report = InfoReport {
+        local,
+        remote,
+        media,
+    };
 
     if opts.output == OutputFormat::Json {
-        let local_json = local_install.as_ref().map(|local| {
-            json!({
-                "path": local.install_path.display().to_string(),
-                "config_ini": local.config_ini.path.display().to_string(),
-                "appcode": local.config_ini.appcode(),
-                "region": local.config_ini.region(),
-                "channel": local.config_ini.channel(),
-                "sub_channel": local.config_ini.sub_channel(),
-                "version": local.config_ini.version(),
-                "entry": local.config_ini.entry(),
-                "known_game": local.game_id.as_ref().map(|g| g.to_string()),
-                "known_channel": local.channel_id.as_ref().map(|s| s.channel().to_string()),
-                "known_sub_channel": local.channel_id.as_ref().map(|s| s.sub_channel().to_string()),
-            })
-        });
-        return ui::emit_json(&json!({
-            "local": local_json,
-            "remote": remote_json,
-            "media": media_json,
-        }));
+        return ui::emit_json(&report);
     }
 
-    if let Some(local) = local_install.as_ref() {
-        ui::print_kv_section("Local Install", &local_rows(local));
+    if let Some(local) = &report.local {
+        ui::print_kv_section("Local Install", &local.rows());
     }
 
-    if let Some(remote) = remote_json {
-        let mut rows = vec![
-            (
-                "game".to_string(),
-                remote
-                    .get("game")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ),
-            (
-                "channel".to_string(),
-                remote
-                    .get("channel")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ),
-            (
-                "sub_channel".to_string(),
-                remote
-                    .get("sub_channel")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ),
-            (
-                "version".to_string(),
-                remote
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ),
-            (
-                "action".to_string(),
-                remote
-                    .get("action")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or_default()
-                    .to_string(),
-            ),
-            (
-                "request_version".to_string(),
-                remote
-                    .get("request_version")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ),
-            (
-                "has_full_package".to_string(),
-                remote
-                    .get("has_full_package")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                    .to_string(),
-            ),
-            (
-                "has_patch_package".to_string(),
-                remote
-                    .get("has_patch_package")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                    .to_string(),
-            ),
-        ];
-
-        if let Some(pkg) = remote.get("package") {
-            rows.push((
-                "pkg.file_path".to_string(),
-                pkg.get("file_path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ));
-            rows.push((
-                "pkg.packs".to_string(),
-                pkg.get("packs")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or_default()
-                    .to_string(),
-            ));
-            rows.push((
-                "pkg.game_files_md5".to_string(),
-                pkg.get("game_files_md5")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ));
-        }
-
-        if local_install.is_some() {
+    if let Some(remote) = &report.remote {
+        if report.local.is_some() {
             println!();
         }
-        ui::print_kv_section("Remote State", &rows);
+        ui::print_kv_section("Remote State", &remote.rows());
     }
 
-    if let Some(media) = media_json {
+    if let Some(media) = &report.media {
         println!();
-        let rows = vec![
-            (
-                "language".to_string(),
-                media
-                    .get("language")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-            ),
-            (
-                "banners".to_string(),
-                media
-                    .get("banners")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or_default()
-                    .to_string(),
-            ),
-            (
-                "announcement_tabs".to_string(),
-                media
-                    .get("announcement_tabs")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or_default()
-                    .to_string(),
-            ),
-            (
-                "sidebar".to_string(),
-                media
-                    .get("sidebar")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or_default()
-                    .to_string(),
-            ),
-        ];
-        ui::print_kv_section("Remote Media", &rows);
+        ui::print_kv_section("Remote Media", &media.rows());
     }
 
     Ok(())

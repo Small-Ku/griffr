@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use griffr_common::runtime::remove_dir_all;
 
+use super::local::resolve_install_path;
 use crate::ui;
 use crate::GlobalOptions;
 
@@ -13,11 +14,7 @@ pub async fn uninstall(
     yes: bool,
     opts: GlobalOptions,
 ) -> Result<()> {
-    let target = if path.is_dir() {
-        path
-    } else {
-        path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
-    };
+    let target = resolve_install_path(&path);
 
     ui::print_phase(format!("Uninstall target: {}", target.display()));
 

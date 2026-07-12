@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde::Serialize;
 
 pub fn print_phase(message: impl AsRef<str>) {
     println!("==> {}", message.as_ref());
@@ -40,7 +40,7 @@ pub fn render_kv_section(title: &str, rows: &[(String, String)]) -> String {
     out
 }
 
-pub fn emit_json(value: &Value) -> anyhow::Result<()> {
+pub fn emit_json(value: &impl Serialize) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
