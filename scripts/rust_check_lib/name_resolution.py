@@ -102,6 +102,30 @@ RUST_PRELUDE = {
 
 BUILTIN_EXTERNAL_ROOTS = {"std", "core", "alloc", "proc_macro", "test"}
 
+PREDEFINED_GLOB_EXPORTS: dict[tuple[str, ...], set[str]] = {
+    ("winio", "prelude"): {
+        "App",
+        "Child",
+        "Window",
+        "Component",
+        "ComponentSender",
+        "Error",
+        "Size",
+        "WindowEvent",
+        "Grid",
+        "Result",
+        "Layoutable",
+        "Visible",
+        "TextWidget",
+        "init",
+        "start",
+        "update_children",
+        "layout",
+        "widget_tree",
+    }
+}
+
+
 
 class AnalysisHost(Protocol):
     root: Path
@@ -1002,6 +1026,10 @@ class NameResolver:
     def _exported_names_from_glob(
         self, requester: ModuleUnit, glob: UseSpec, condition: CfgExpr
     ) -> tuple[set[str], bool]:
+        path_tuple = tuple(glob.path)
+        if path_tuple in PREDEFINED_GLOB_EXPORTS:
+            return PREDEFINED_GLOB_EXPORTS[path_tuple].copy(), False
+
         result = self.resolve_path(
             glob.module,
             glob.path,
