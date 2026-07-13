@@ -5,11 +5,11 @@ use crate::api::ApiClient;
 use crate::config::InstallTarget;
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::{
-    run_tasks_with_progress, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
+    run_tasks_with_progress, Task, TaskOutcome, TaskPoolConfig, TaskPoolRunner, TaskProgress,
 };
 use crate::runtime::{
     build_cdn_file_url, files_base_url, FileIssue, PathOutcomeTracker, PathReuseMethod,
-    RunningByteProgress,
+    ProgressLane, ProgressSender,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -46,14 +46,6 @@ fn task_progress_path(task: &Task) -> Option<&str> {
     }
 }
 
-fn task_expected_bytes(task: &Task) -> u64 {
-    match task {
-        Task::Download { expected_size, .. } => expected_size.unwrap_or(0),
-        Task::EnsureFile { expected_size, .. } => *expected_size,
-        _ => 0,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn run_integrity_pool(
     api_client: &ApiClient,
@@ -66,8 +58,7 @@ pub async fn run_integrity_pool(
     prefer_reuse: bool,
     extra_tasks: Vec<Task>,
     task_pool_runner: Option<&mut TaskPoolRunner>,
-    progress_callback: Option<impl Fn(usize, usize, &str)>,
-    download_progress_callback: Option<impl Fn(u64, u64, &str)>,
+    progress: ProgressSender,
 ) -> Result<IntegrityRunSummary> {
     let version_info = api_client
         .get_latest_game(&install_target.api, version)
@@ -99,18 +90,6 @@ pub async fn run_integrity_pool(
                 .entry(filename.to_string())
                 .or_insert_with(Vec::new)
                 .push(path.clone());
-        }
-    }
-    let mut expected_download_bytes = entries
-        .iter()
-        .map(|entry| (entry.path.clone(), entry.size))
-        .collect::<HashMap<_, _>>();
-    for task in &extra_tasks {
-        if let Some(path) = task_progress_path(task) {
-            let expected_bytes = task_expected_bytes(task);
-            if expected_bytes > 0 {
-                expected_download_bytes.insert(path.to_owned(), expected_bytes);
-            }
         }
     }
 
@@ -146,112 +125,54 @@ pub async fn run_integrity_pool(
         .collect::<Vec<_>>();
     tasks.extend(extra_tasks);
     let total = tasks.len();
-    if let Some(ref cb) = progress_callback {
-        cb(0, total, "");
-    }
-    let mut issues = Vec::new();
-    let mut finished = 0usize;
-    let mut download_progress = RunningByteProgress::new();
-    let mut discovered_download_totals = RunningByteProgress::new();
-    let mut outcomes = PathOutcomeTracker::new();
-    let mut failed_paths = Vec::new();
-
-    let mut on_event = |event: &ProgressEvent| match event {
-        ProgressEvent::Verified { path, ok, issue } => {
-            if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
-                return;
-            }
-            finished = finished.saturating_add(1);
-            if let Some(ref cb) = progress_callback {
-                cb(finished, total, path);
-            }
-            outcomes.record_verified(path, *ok);
-            if tracked_paths.contains(path) {
-                if let Some(issue) = issue.clone() {
-                    issues.push(issue);
-                }
-            }
-        }
-        ProgressEvent::DownloadStarted { path, total_bytes } => {
-            if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
-                return;
-            }
-            let expected_bytes = if *total_bytes > 0 {
-                *total_bytes
-            } else {
-                expected_download_bytes.get(path).copied().unwrap_or(0)
-            };
-            discovered_download_totals.record(path, expected_bytes);
-            if let Some(ref cb) = download_progress_callback {
-                cb(
-                    download_progress.total_bytes(),
-                    discovered_download_totals.total_bytes(),
-                    path,
-                );
-            }
-        }
-        ProgressEvent::DownloadedBytes {
-            path, total_bytes, ..
-        } => {
-            if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
-                return;
-            }
-            let running_downloaded_bytes = download_progress
-                .handle_download_event(event)
-                .expect("download event");
-            discovered_download_totals.record(path, *total_bytes);
-            if let Some(ref cb) = download_progress_callback {
-                cb(
-                    running_downloaded_bytes,
-                    discovered_download_totals.total_bytes(),
-                    path,
-                );
-            }
-        }
-        ProgressEvent::Downloaded { path, bytes } => {
-            if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
-                return;
-            }
-            outcomes.record_downloaded(path, *bytes);
-            let running_downloaded_bytes = download_progress
-                .handle_download_event(event)
-                .expect("download event");
-            let expected_bytes = expected_download_bytes.get(path).copied().unwrap_or(*bytes);
-            discovered_download_totals.record(path, expected_bytes);
-            if let Some(ref cb) = download_progress_callback {
-                cb(
-                    running_downloaded_bytes,
-                    discovered_download_totals.total_bytes(),
-                    path,
-                );
-            }
-        }
-        ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {
-            if let Some(logical_path) = resolve_reused_logical_path(path, &filename_index) {
-                outcomes.record_reused(
-                    &logical_path,
-                    if matches!(event, ProgressEvent::Hardlinked { .. }) {
-                        PathReuseMethod::Hardlink
-                    } else {
-                        PathReuseMethod::Copy
-                    },
-                );
-            }
-        }
-        ProgressEvent::Retried { path, reason } => {
-            tracing::debug!("retrying {}: {}", path, reason);
-        }
-        ProgressEvent::Failed { path, reason } => {
-            tracing::warn!("integrity task failed for {}: {}", path, reason);
-            failed_paths.push(format!("{path}: {reason}"));
-        }
-        _ => {}
+    let task_progress = TaskProgress::new(progress)
+        .with_verify(ProgressLane::INTEGRITY_VERIFY, total)
+        .with_download(ProgressLane::INTEGRITY_DOWNLOAD);
+    let result = if let Some(runner) = task_pool_runner {
+        runner.run_batch(tasks, task_progress)?
+    } else {
+        run_tasks_with_progress(tasks, TaskPoolConfig::default(), task_progress)?
     };
 
-    if let Some(runner) = task_pool_runner {
-        let _ = runner.run_batch_with_progress(tasks, Some(&mut on_event))?;
-    } else {
-        let _ = run_tasks_with_progress(tasks, TaskPoolConfig::default(), Some(&mut on_event))?;
+    let mut issues = Vec::new();
+    let mut finished = 0usize;
+    let mut outcomes = PathOutcomeTracker::new();
+    let mut failed_paths = Vec::new();
+    for event in result.outcomes {
+        match event {
+            TaskOutcome::Verified { path, ok, issue } => {
+                if !tracked_paths.contains(&path) && !extra_tracked_paths.contains(&path) {
+                    continue;
+                }
+                finished = finished.saturating_add(1);
+                outcomes.record_verified(&path, ok);
+                if tracked_paths.contains(&path) {
+                    if let Some(issue) = issue {
+                        issues.push(issue);
+                    }
+                }
+            }
+            TaskOutcome::Downloaded { path, bytes }
+                if tracked_paths.contains(&path) || extra_tracked_paths.contains(&path) =>
+            {
+                outcomes.record_downloaded(&path, bytes);
+            }
+            TaskOutcome::Hardlinked { path } => {
+                if let Some(logical_path) = resolve_reused_logical_path(&path, &filename_index) {
+                    outcomes.record_reused(&logical_path, PathReuseMethod::Hardlink);
+                }
+            }
+            TaskOutcome::Copied { path } => {
+                if let Some(logical_path) = resolve_reused_logical_path(&path, &filename_index) {
+                    outcomes.record_reused(&logical_path, PathReuseMethod::Copy);
+                }
+            }
+            TaskOutcome::Failed { path, reason } => {
+                tracing::warn!("integrity task failed for {}: {}", path, reason);
+                failed_paths.push(format!("{path}: {reason}"));
+            }
+            _ => {}
+        }
     }
     if !failed_paths.is_empty() {
         return Err(Error::Integrity(format!(

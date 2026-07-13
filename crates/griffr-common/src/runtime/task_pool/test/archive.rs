@@ -65,10 +65,10 @@ fn install_archive_recovers_from_interrupted_partial_part_on_rerun() {
     stop.store(true, Ordering::Release);
 
     let downloaded = result
-        .events
+        .outcomes
         .iter()
         .filter_map(|event| match event {
-            ProgressEvent::Downloaded { path, .. } => Some(path.clone()),
+            TaskOutcome::Downloaded { path, .. } => Some(path.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -79,9 +79,9 @@ fn install_archive_recovers_from_interrupted_partial_part_on_rerun() {
     );
     assert!(
         result
-            .events
+            .outcomes
             .iter()
-            .any(|event| matches!(event, ProgressEvent::Extracted { .. })),
+            .any(|event| matches!(event, TaskOutcome::Extracted { .. })),
         "archive should extract after recovering the missing/corrupt part"
     );
 
@@ -159,34 +159,49 @@ fn extract_task_spawns_vfs_patch_and_delete_manifest_follow_up_tasks() {
         password: None,
     }];
 
-    let result = run_tasks(tasks, TaskPoolConfig::default()).unwrap();
+    let (progress_sender, progress_receiver) = crate::runtime::ProgressSender::channel();
+    let progress = TaskProgress::new(progress_sender)
+        .with_commit(crate::runtime::ProgressLane::ARCHIVE_COMMIT)
+        .with_patch(crate::runtime::ProgressLane::ARCHIVE_PATCH)
+        .with_delete(crate::runtime::ProgressLane::ARCHIVE_DELETE);
+    let result = run_tasks_with_progress(tasks, TaskPoolConfig::default(), progress).unwrap();
+    let mut progress_updates = Vec::new();
+    while let Some(update) = progress_receiver.try_recv() {
+        progress_updates.push(update);
+    }
 
     assert!(
         result
-            .events
+            .outcomes
             .iter()
-            .all(|event| !matches!(event, ProgressEvent::Failed { .. })),
+            .all(|event| !matches!(event, TaskOutcome::Failed { .. })),
         "extract + delete manifest task should finish without failures: {:?}",
-        result.events
+        result.outcomes
     );
-    assert!(result.events.iter().any(|event| matches!(
-        event,
-        ProgressEvent::ArchiveCommitProgress { completed, total, .. }
-            if completed == total && *total > 0
+    assert!(progress_updates.iter().any(|update| matches!(
+        update,
+        crate::runtime::ProgressUpdate::Advanced {
+            lane: crate::runtime::ProgressLane::ARCHIVE_COMMIT,
+            completed,
+            total: Some(total),
+            ..
+        } if completed == total && *total > 0
     )));
-    assert!(result.events.iter().any(|event| matches!(
-        event,
-        ProgressEvent::PatchProgress {
+    assert!(progress_updates.iter().any(|update| matches!(
+        update,
+        crate::runtime::ProgressUpdate::Advanced {
+            lane: crate::runtime::ProgressLane::ARCHIVE_PATCH,
             completed: 1,
-            total: 1,
+            total: Some(1),
             ..
         }
     )));
-    assert!(result.events.iter().any(|event| matches!(
-        event,
-        ProgressEvent::DeleteProgress {
+    assert!(progress_updates.iter().any(|update| matches!(
+        update,
+        crate::runtime::ProgressUpdate::Advanced {
+            lane: crate::runtime::ProgressLane::ARCHIVE_DELETE,
             completed: 1,
-            total: 1,
+            total: Some(1),
             ..
         }
     )));

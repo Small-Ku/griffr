@@ -1,4 +1,5 @@
 use crate::api::protocol::MIN_USER_AGENT;
+use crate::runtime::{ProgressLane, ProgressSender};
 use std::path::PathBuf;
 
 const DEFAULT_PARALLELISM_FALLBACK: usize = 4;
@@ -82,7 +83,7 @@ pub struct ArchivePart {
 }
 
 #[derive(Debug, Clone)]
-pub enum ProgressEvent {
+pub(crate) enum WorkerEvent {
     DownloadStarted {
         path: String,
         total_bytes: u64,
@@ -138,6 +139,122 @@ pub enum ProgressEvent {
         path: String,
         reason: String,
     },
+}
+
+#[derive(Debug, Clone)]
+pub enum TaskOutcome {
+    Downloaded {
+        path: String,
+        bytes: u64,
+    },
+    Verified {
+        path: String,
+        ok: bool,
+        issue: Option<FileIssue>,
+    },
+    Extracted {
+        path: PathBuf,
+    },
+    Hardlinked {
+        path: PathBuf,
+    },
+    Copied {
+        path: PathBuf,
+    },
+    Failed {
+        path: String,
+        reason: String,
+    },
+}
+
+impl WorkerEvent {
+    pub(crate) fn into_outcome(self) -> Option<TaskOutcome> {
+        match self {
+            Self::Downloaded { path, bytes } => Some(TaskOutcome::Downloaded { path, bytes }),
+            Self::Verified { path, ok, issue } => Some(TaskOutcome::Verified { path, ok, issue }),
+            Self::Extracted { path } => Some(TaskOutcome::Extracted { path }),
+            Self::Hardlinked { path } => Some(TaskOutcome::Hardlinked { path }),
+            Self::Copied { path } => Some(TaskOutcome::Copied { path }),
+            Self::Failed { path, reason } => Some(TaskOutcome::Failed { path, reason }),
+            Self::DownloadStarted { .. }
+            | Self::DownloadedBytes { .. }
+            | Self::Retried { .. }
+            | Self::ExtractedBytes { .. }
+            | Self::ArchiveCommitProgress { .. }
+            | Self::PatchProgress { .. }
+            | Self::DeleteProgress { .. } => None,
+        }
+    }
+}
+
+/// Maps task-pool facts onto frontend-neutral progress lanes for one batch.
+///
+/// A disabled sender keeps every lane unset so non-interactive callers pay no
+/// aggregation or allocation cost for transient progress updates.
+#[derive(Clone, Default)]
+pub struct TaskProgress {
+    pub(crate) sender: ProgressSender,
+    pub(crate) verify: Option<(ProgressLane, u64)>,
+    pub(crate) download: Option<ProgressLane>,
+    pub(crate) extract: Option<ProgressLane>,
+    pub(crate) commit: Option<ProgressLane>,
+    pub(crate) patch: Option<ProgressLane>,
+    pub(crate) delete: Option<ProgressLane>,
+}
+
+impl TaskProgress {
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    pub fn new(sender: ProgressSender) -> Self {
+        Self {
+            sender,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_verify(mut self, lane: ProgressLane, total: usize) -> Self {
+        if self.sender.is_enabled() {
+            self.verify = Some((lane, total as u64));
+        }
+        self
+    }
+
+    pub fn with_download(mut self, lane: ProgressLane) -> Self {
+        if self.sender.is_enabled() {
+            self.download = Some(lane);
+        }
+        self
+    }
+
+    pub fn with_extract(mut self, lane: ProgressLane) -> Self {
+        if self.sender.is_enabled() {
+            self.extract = Some(lane);
+        }
+        self
+    }
+
+    pub fn with_commit(mut self, lane: ProgressLane) -> Self {
+        if self.sender.is_enabled() {
+            self.commit = Some(lane);
+        }
+        self
+    }
+
+    pub fn with_patch(mut self, lane: ProgressLane) -> Self {
+        if self.sender.is_enabled() {
+            self.patch = Some(lane);
+        }
+        self
+    }
+
+    pub fn with_delete(mut self, lane: ProgressLane) -> Self {
+        if self.sender.is_enabled() {
+            self.delete = Some(lane);
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -221,10 +338,46 @@ fn available_parallelism() -> usize {
 
 #[derive(Debug)]
 pub struct TaskPoolResult {
-    pub events: Vec<ProgressEvent>,
+    pub outcomes: Vec<TaskOutcome>,
 }
 
 pub struct TaskPoolRunner {
     pub(crate) ctx: crate::runtime::task_pool::scheduler::WorkerContext,
-    pub(crate) event_rx: flume::Receiver<ProgressEvent>,
+    pub(crate) event_rx: flume::Receiver<WorkerEvent>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TaskOutcome, WorkerEvent};
+
+    #[test]
+    fn transient_worker_progress_is_not_retained_as_an_outcome() {
+        assert!(WorkerEvent::DownloadedBytes {
+            path: "asset.bin".to_string(),
+            bytes: 64,
+            total_bytes: 128,
+        }
+        .into_outcome()
+        .is_none());
+        assert!(WorkerEvent::PatchProgress {
+            path: "patch.json".to_string(),
+            completed: 1,
+            total: 2,
+        }
+        .into_outcome()
+        .is_none());
+    }
+
+    #[test]
+    fn durable_worker_facts_become_task_outcomes() {
+        assert!(matches!(
+            WorkerEvent::Downloaded {
+                path: "asset.bin".to_string(),
+                bytes: 128,
+            }
+            .into_outcome(),
+            Some(TaskOutcome::Downloaded { path, bytes })
+                if path == "asset.bin" && bytes == 128
+        ));
+    }
 }

@@ -9,7 +9,7 @@ use crate::api::types::GameFileEntry;
 use crate::api::ApiClient;
 use crate::runtime::{
     build_cdn_file_url, files_base_url, is_launcher_metadata_path, logical_path_from_root,
-    PathOutcomeTracker, PathReuseMethod, RunningByteProgress,
+    PathOutcomeTracker, PathReuseMethod, ProgressLane, ProgressSender,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -21,8 +21,7 @@ pub async fn materialize_game_files_with_pool(
     game_files_md5: Option<&str>,
     config: &super::models::FileReuseConfig,
     task_pool_runner: Option<&mut crate::runtime::task_pool::TaskPoolRunner>,
-    progress_callback: Option<impl Fn(usize, usize, &str)>,
-    download_progress_callback: Option<impl Fn(u64, u64, &str)>,
+    progress: ProgressSender,
 ) -> Result<super::models::MaterializeSummary> {
     let manifest = api_client
         .fetch_game_files(file_path, game_files_md5)
@@ -134,78 +133,24 @@ pub async fn materialize_game_files_with_pool(
     }
 
     let total = tasks.len();
-    if let Some(ref cb) = progress_callback {
-        cb(0, total, "");
-    }
-    let mut finished_stream = 0usize;
-    let mut download_progress = RunningByteProgress::new();
-    let mut discovered_download_totals = RunningByteProgress::new();
-    let mut progress_event_cb = |event: &crate::runtime::task_pool::ProgressEvent| match event {
-        crate::runtime::task_pool::ProgressEvent::Verified { path, .. } => {
-            finished_stream = finished_stream.saturating_add(1);
-            if let Some(ref cb) = progress_callback {
-                cb(finished_stream, total, path);
-            }
-        }
-        crate::runtime::task_pool::ProgressEvent::DownloadStarted { path, total_bytes } => {
-            discovered_download_totals.record(path, *total_bytes);
-            if let Some(ref cb) = download_progress_callback {
-                cb(
-                    download_progress.total_bytes(),
-                    discovered_download_totals.total_bytes(),
-                    path,
-                );
-            }
-        }
-        crate::runtime::task_pool::ProgressEvent::DownloadedBytes {
-            path, total_bytes, ..
-        } => {
-            download_progress
-                .handle_download_event(event)
-                .expect("download event");
-            discovered_download_totals.record(path, *total_bytes);
-            if let Some(ref cb) = download_progress_callback {
-                cb(
-                    download_progress.total_bytes(),
-                    discovered_download_totals.total_bytes(),
-                    path,
-                );
-            }
-        }
-        crate::runtime::task_pool::ProgressEvent::Downloaded { path, bytes } => {
-            download_progress
-                .handle_download_event(event)
-                .expect("download event");
-            discovered_download_totals.record(path, *bytes);
-            if let Some(ref cb) = download_progress_callback {
-                cb(
-                    download_progress.total_bytes(),
-                    discovered_download_totals.total_bytes(),
-                    path,
-                );
-            }
-        }
-        _ => {}
-    };
+    let task_progress = crate::runtime::task_pool::TaskProgress::new(progress)
+        .with_verify(ProgressLane::MATERIALIZE_VERIFY, total)
+        .with_download(ProgressLane::MATERIALIZE_DOWNLOAD);
     let result = if let Some(runner) = task_pool_runner {
         runner
-            .run_batch_with_progress(tasks, Some(&mut progress_event_cb))
+            .run_batch(tasks, task_progress)
             .map_err(|e| Error::TaskPool(format!("File materialization pool failed: {e}")))?
     } else {
         let pool_cfg = crate::runtime::task_pool::TaskPoolConfig::for_file_materialization();
-        crate::runtime::task_pool::run_tasks_with_progress(
-            tasks,
-            pool_cfg,
-            Some(&mut progress_event_cb),
-        )
-        .map_err(|e| Error::TaskPool(format!("File materialization pool failed: {e}")))?
+        crate::runtime::task_pool::run_tasks_with_progress(tasks, pool_cfg, task_progress)
+            .map_err(|e| Error::TaskPool(format!("File materialization pool failed: {e}")))?
     };
 
     let mut issues = Vec::new();
     let mut outcomes = PathOutcomeTracker::new();
-    for event in result.events {
+    for event in result.outcomes {
         match event {
-            crate::runtime::task_pool::ProgressEvent::Verified { path, ok, issue } => {
+            crate::runtime::task_pool::TaskOutcome::Verified { path, ok, issue } => {
                 outcomes.record_verified(&path, ok);
                 if !ok {
                     if let Some(issue) = issue {
@@ -213,20 +158,20 @@ pub async fn materialize_game_files_with_pool(
                     }
                 }
             }
-            crate::runtime::task_pool::ProgressEvent::Hardlinked { path } => {
+            crate::runtime::task_pool::TaskOutcome::Hardlinked { path } => {
                 if let Some(rel) = logical_path_from_root(install_path, &path) {
                     outcomes.record_reused(&rel, PathReuseMethod::Hardlink);
                 }
             }
-            crate::runtime::task_pool::ProgressEvent::Copied { path } => {
+            crate::runtime::task_pool::TaskOutcome::Copied { path } => {
                 if let Some(rel) = logical_path_from_root(install_path, &path) {
                     outcomes.record_reused(&rel, PathReuseMethod::Copy);
                 }
             }
-            crate::runtime::task_pool::ProgressEvent::Downloaded { path, bytes } => {
+            crate::runtime::task_pool::TaskOutcome::Downloaded { path, bytes } => {
                 outcomes.record_downloaded(&path, bytes);
             }
-            crate::runtime::task_pool::ProgressEvent::Failed { path, reason } => {
+            crate::runtime::task_pool::TaskOutcome::Failed { path, reason } => {
                 outcomes.record_failed(&path);
                 warn!("materialize failed for {}: {}", path, reason);
             }

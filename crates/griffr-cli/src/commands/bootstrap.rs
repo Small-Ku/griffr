@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
 use griffr_common::runtime::{
-    bootstrap_persistent_vfs_with_runner, VfsBootstrapConfig, VfsBootstrapScope,
+    bootstrap_persistent_vfs_with_runner, ProgressLane, VfsBootstrapConfig, VfsBootstrapScope,
 };
 
 use super::local::detect_local_install;
@@ -147,7 +147,7 @@ pub async fn bootstrap(
         "bootstrap.persistent-vfs.download",
         opts.verbose,
     );
-    let (progress_cb, download_progress_cb) = progress.split_callbacks();
+    let progress_session = progress.start(ProgressLane::VFS_VERIFY, ProgressLane::VFS_DOWNLOAD);
     let result = bootstrap_persistent_vfs_with_runner(
         &api_client,
         &install_target.api,
@@ -164,11 +164,11 @@ pub async fn bootstrap(
             prune_extra_files,
         },
         &mut task_pool_runner,
-        Some(&progress_cb),
-        Some(&download_progress_cb),
+        progress_session.sender(),
     )
     .await
     .context("Failed to bootstrap Persistent VFS")?;
+    progress_session.finish();
     progress.finish();
 
     if let Some(result) = result {

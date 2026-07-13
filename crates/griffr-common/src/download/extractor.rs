@@ -15,7 +15,7 @@ pub struct MultiVolumeStream {
 
 impl MultiVolumeStream {
     /// Create a new multi-volume stream from a list of volume paths
-    pub fn new(volumes: Vec<PathBuf>) -> Result<Self> {
+    pub(crate) fn new(volumes: Vec<PathBuf>) -> Result<Self> {
         if volumes.is_empty() {
             return Err(Error::Extraction("No volumes provided".to_string()));
         }
@@ -181,13 +181,13 @@ impl Seek for MultiVolumeStream {
 }
 
 /// Multi-volume zip extractor
-pub struct MultiVolumeExtractor {
+pub(crate) struct MultiVolumeExtractor {
     volumes: Vec<PathBuf>,
 }
 
 impl MultiVolumeExtractor {
     /// Create a new extractor from a list of volume paths
-    pub fn new(volumes: Vec<PathBuf>) -> Result<Self> {
+    pub(crate) fn new(volumes: Vec<PathBuf>) -> Result<Self> {
         if volumes.is_empty() {
             return Err(Error::Extraction("No volumes provided".to_string()));
         }
@@ -195,7 +195,7 @@ impl MultiVolumeExtractor {
         Ok(Self { volumes })
     }
 
-    pub fn extract_to_with_progress(
+    pub(crate) fn extract_to_with_progress(
         &self,
         target_dir: &Path,
         password: Option<&str>,
@@ -304,20 +304,6 @@ impl MultiVolumeExtractor {
         }
 
         Ok(())
-    }
-
-    /// Get the list of files in the archive without extracting
-    pub fn list_files(&self) -> Result<Vec<String>> {
-        let stream = MultiVolumeStream::new(self.volumes.clone())?;
-        let mut archive = zip::ZipArchive::new(stream)?;
-
-        let mut files = Vec::new();
-        for i in 0..archive.len() {
-            let file = archive.by_index(i)?;
-            files.push(file.name().to_string());
-        }
-
-        Ok(files)
     }
 
     /// Delete volumes after successful extraction

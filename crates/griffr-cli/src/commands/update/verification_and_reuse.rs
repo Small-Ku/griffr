@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::InstallTarget;
-use griffr_common::runtime::task_pool::{ProgressEvent, Task, TaskPoolRunner};
+use griffr_common::runtime::task_pool::{Task, TaskPoolRunner, TaskProgress};
 use griffr_common::runtime::{
     is_launcher_metadata_path, materialize_game_files_with_pool, run_integrity_pool,
-    sync_launcher_metadata, FileReuseConfig, SourceInstallInput,
+    sync_launcher_metadata, FileReuseConfig, ProgressLane, SourceInstallInput,
 };
 
 use crate::commands::local::detect_local_install;
-use crate::progress::{CountAndByteProgress, DownloadProgressTracker, VerifyTaskProgressTracker};
+use crate::progress::CountAndByteProgress;
 use crate::ui;
 use crate::GlobalOptions;
 
@@ -31,18 +31,16 @@ pub(super) async fn verify_updated_install(
                 "update.vfs-sync.download",
                 opts.verbose,
             );
-            let mut download_progress = DownloadProgressTracker::new(progress.byte_bar());
-            let mut verify_progress =
-                VerifyTaskProgressTracker::new(progress.count_bar(), extra_tasks.len());
+            let verify_lane = ProgressLane::VFS_VERIFY;
+            let download_lane = ProgressLane::VFS_DOWNLOAD;
+            let progress_session = progress.start(verify_lane, download_lane);
+            let task_progress = TaskProgress::new(progress_session.sender())
+                .with_verify(verify_lane, extra_tasks.len())
+                .with_download(download_lane);
             let _ = task_pool_runner
-                .run_batch_with_progress(
-                    extra_tasks,
-                    Some(&mut |event: &ProgressEvent| {
-                        download_progress.handle_event(event);
-                        verify_progress.handle_event(event);
-                    }),
-                )
+                .run_batch(extra_tasks, task_progress)
                 .context("Failed to execute extra DAG tasks during skip-verify")?;
+            progress_session.finish();
             progress.finish();
         }
         ui::print_info("Skipping post-update integrity verification (--skip-verify)");
@@ -59,7 +57,10 @@ pub(super) async fn verify_updated_install(
 
     let verify_progress =
         CountAndByteProgress::new("update.verify", "update.repair.download", opts.verbose);
-    let (cb1, cb2) = verify_progress.split_callbacks();
+    let verify_session = verify_progress.start(
+        ProgressLane::INTEGRITY_VERIFY,
+        ProgressLane::INTEGRITY_DOWNLOAD,
+    );
     let summary = run_integrity_pool(
         api_client,
         install_path,
@@ -71,10 +72,10 @@ pub(super) async fn verify_updated_install(
         false,
         extra_tasks,
         Some(task_pool_runner),
-        Some(cb1),
-        Some(cb2),
+        verify_session.sender(),
     )
     .await?;
+    verify_session.finish();
     verify_progress.finish();
     ui::print_info(format!(
         "Verification summary: issues={} repaired_downloads={}",
@@ -164,7 +165,10 @@ pub(super) async fn update_via_reuse(
         "update.materialize.download",
         opts.verbose,
     );
-    let (materialize_progress_cb, materialize_download_cb) = materialize_progress.split_callbacks();
+    let materialize_session = materialize_progress.start(
+        ProgressLane::MATERIALIZE_VERIFY,
+        ProgressLane::MATERIALIZE_DOWNLOAD,
+    );
     let materialized = materialize_game_files_with_pool(
         api_client,
         game_id,
@@ -177,10 +181,10 @@ pub(super) async fn update_via_reuse(
             source_installs,
         },
         Some(task_pool_runner),
-        Some(materialize_progress_cb),
-        Some(materialize_download_cb),
+        materialize_session.sender(),
     )
     .await?;
+    materialize_session.finish();
     materialize_progress.finish();
 
     ui::print_info(format!(

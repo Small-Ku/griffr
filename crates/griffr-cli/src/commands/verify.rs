@@ -3,7 +3,8 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
 use griffr_common::runtime::{
-    is_launcher_metadata_path, run_integrity_pool, sync_launcher_metadata,
+    is_launcher_metadata_path, run_integrity_pool, sync_launcher_metadata, ProgressLane,
+    ProgressSender,
 };
 use griffr_common::runtime::{plan_vfs_tasks, streaming_assets_path, VfsMaterializeConfig};
 use serde_json::json;
@@ -106,13 +107,18 @@ pub async fn verify(
     ));
     ui::print_info(format!("Installed version: {}", installed_version));
 
-    let progress_cb = if opts.output == OutputFormat::Json {
-        None
-    } else {
-        let progress = CountAndByteProgress::new("verify", "repair.download", opts.verbose);
-        let (cb1, cb2) = progress.split_callbacks();
-        Some((progress, cb1, cb2))
-    };
+    let progress = (opts.output != OutputFormat::Json)
+        .then(|| CountAndByteProgress::new("verify", "repair.download", opts.verbose));
+    let progress_session = progress.as_ref().map(|progress| {
+        progress.start(
+            ProgressLane::INTEGRITY_VERIFY,
+            ProgressLane::INTEGRITY_DOWNLOAD,
+        )
+    });
+    let progress_sender = progress_session
+        .as_ref()
+        .map(|session| session.sender())
+        .unwrap_or_else(ProgressSender::disabled);
 
     let mut source_roots = Vec::new();
     if repair {
@@ -207,12 +213,14 @@ pub async fn verify(
         relink_reuse,
         extra_tasks,
         Some(&mut pool_runner),
-        progress_cb.as_ref().map(|(_, cb, _)| cb),
-        progress_cb.as_ref().map(|(_, _, cb)| cb),
+        progress_sender,
     )
     .await
     .context("run_integrity_pool failed")?;
-    if let Some((progress, _, _)) = progress_cb {
+    if let Some(session) = progress_session {
+        session.finish();
+    }
+    if let Some(progress) = progress {
         progress.finish();
     }
 

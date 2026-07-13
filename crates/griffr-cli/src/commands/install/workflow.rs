@@ -6,12 +6,13 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::PackageInfo;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::{
-    plan_archive_groups, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
+    plan_archive_groups, Task, TaskOutcome, TaskPoolConfig, TaskPoolRunner, TaskProgress,
 };
 use griffr_common::runtime::{directory_has_entries, is_launcher_metadata_path};
 use griffr_common::runtime::{
     materialize_game_files_with_pool, plan_vfs_tasks, run_integrity_pool, streaming_assets_path,
-    sync_launcher_metadata, FileReuseConfig, SourceInstallInput, VfsMaterializeConfig,
+    sync_launcher_metadata, FileReuseConfig, ProgressLane, SourceInstallInput,
+    VfsMaterializeConfig,
 };
 
 use crate::commands::local::detect_local_install;
@@ -208,17 +209,35 @@ pub async fn install(
             });
         }
 
-        let mut progress =
-            ArchivePipelineProgress::new("install", archive_part_count, opts.verbose);
-        let result = task_pool.run_batch_with_progress(
-            tasks,
-            Some(&mut |event: &ProgressEvent| progress.handle_event(event)),
-        )?;
+        let progress = ArchivePipelineProgress::new("install", opts.verbose);
+        let verify_lane = ProgressLane::ARCHIVE_VERIFY;
+        let download_lane = ProgressLane::ARCHIVE_DOWNLOAD;
+        let extract_lane = ProgressLane::ARCHIVE_EXTRACT;
+        let commit_lane = ProgressLane::ARCHIVE_COMMIT;
+        let patch_lane = ProgressLane::ARCHIVE_PATCH;
+        let delete_lane = ProgressLane::ARCHIVE_DELETE;
+        let progress_session = progress.start(
+            verify_lane,
+            download_lane,
+            extract_lane,
+            commit_lane,
+            patch_lane,
+            delete_lane,
+        );
+        let task_progress = TaskProgress::new(progress_session.sender())
+            .with_verify(verify_lane, archive_part_count)
+            .with_download(download_lane)
+            .with_extract(extract_lane)
+            .with_commit(commit_lane)
+            .with_patch(patch_lane)
+            .with_delete(delete_lane);
+        let result = task_pool.run_batch(tasks, task_progress)?;
+        progress_session.finish();
         progress.finish();
 
         let mut failures = Vec::new();
-        for event in result.events {
-            if let ProgressEvent::Failed { path, reason } = event {
+        for event in result.outcomes {
+            if let TaskOutcome::Failed { path, reason } = event {
                 failures.push(format!("{} ({})", path, reason));
             }
         }
@@ -263,8 +282,10 @@ pub async fn install(
             "install.materialize.download",
             opts.verbose,
         );
-        let (materialize_progress_cb, materialize_download_cb) =
-            materialize_progress.split_callbacks();
+        let materialize_session = materialize_progress.start(
+            ProgressLane::MATERIALIZE_VERIFY,
+            ProgressLane::MATERIALIZE_DOWNLOAD,
+        );
         let materialized = materialize_game_files_with_pool(
             &api_client,
             game_id,
@@ -277,11 +298,11 @@ pub async fn install(
                 source_installs,
             },
             Some(&mut task_pool),
-            Some(materialize_progress_cb),
-            Some(materialize_download_cb),
+            materialize_session.sender(),
         )
         .await
         .context("Failed to materialize files during install")?;
+        materialize_session.finish();
         materialize_progress.finish();
         ui::print_info(format!(
             "Materialized files: reused={} downloaded={}",
@@ -344,7 +365,10 @@ pub async fn install(
     };
     let verify_progress =
         CountAndByteProgress::new("install.verify", "install.repair.download", opts.verbose);
-    let (verify_progress_cb, verify_download_cb) = verify_progress.split_callbacks();
+    let verify_session = verify_progress.start(
+        ProgressLane::INTEGRITY_VERIFY,
+        ProgressLane::INTEGRITY_DOWNLOAD,
+    );
     let summary = run_integrity_pool(
         &api_client,
         &install_path,
@@ -356,10 +380,10 @@ pub async fn install(
         false,
         extra_tasks,
         Some(&mut task_pool),
-        Some(verify_progress_cb),
-        Some(verify_download_cb),
+        verify_session.sender(),
     )
     .await?;
+    verify_session.finish();
     verify_progress.finish();
     if !summary.issues.is_empty() {
         let mut repairable_issues = Vec::new();

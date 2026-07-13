@@ -1,6 +1,142 @@
+use std::fmt;
+
 use rapidhash::RapidHashMap as HashMap;
 
-use crate::runtime::task_pool::ProgressEvent;
+/// Stable operation family used to group frontend-neutral progress lanes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProgressScope {
+    Integrity,
+    Materialize,
+    Vfs,
+    Archive,
+    Predownload,
+}
+
+/// Unit-bearing phase within a progress scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProgressPhase {
+    Verify,
+    Download,
+    Extract,
+    Commit,
+    Patch,
+    Delete,
+}
+
+/// Identifies one independently rendered progress stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProgressLane {
+    pub scope: ProgressScope,
+    pub phase: ProgressPhase,
+}
+
+impl ProgressLane {
+    pub const INTEGRITY_VERIFY: Self = Self::new(ProgressScope::Integrity, ProgressPhase::Verify);
+    pub const INTEGRITY_DOWNLOAD: Self =
+        Self::new(ProgressScope::Integrity, ProgressPhase::Download);
+    pub const MATERIALIZE_VERIFY: Self =
+        Self::new(ProgressScope::Materialize, ProgressPhase::Verify);
+    pub const MATERIALIZE_DOWNLOAD: Self =
+        Self::new(ProgressScope::Materialize, ProgressPhase::Download);
+    pub const VFS_VERIFY: Self = Self::new(ProgressScope::Vfs, ProgressPhase::Verify);
+    pub const VFS_DOWNLOAD: Self = Self::new(ProgressScope::Vfs, ProgressPhase::Download);
+    pub const ARCHIVE_VERIFY: Self = Self::new(ProgressScope::Archive, ProgressPhase::Verify);
+    pub const ARCHIVE_DOWNLOAD: Self = Self::new(ProgressScope::Archive, ProgressPhase::Download);
+    pub const ARCHIVE_EXTRACT: Self = Self::new(ProgressScope::Archive, ProgressPhase::Extract);
+    pub const ARCHIVE_COMMIT: Self = Self::new(ProgressScope::Archive, ProgressPhase::Commit);
+    pub const ARCHIVE_PATCH: Self = Self::new(ProgressScope::Archive, ProgressPhase::Patch);
+    pub const ARCHIVE_DELETE: Self = Self::new(ProgressScope::Archive, ProgressPhase::Delete);
+    pub const PREDOWNLOAD_VERIFY: Self =
+        Self::new(ProgressScope::Predownload, ProgressPhase::Verify);
+    pub const PREDOWNLOAD_DOWNLOAD: Self =
+        Self::new(ProgressScope::Predownload, ProgressPhase::Download);
+
+    pub const fn new(scope: ProgressScope, phase: ProgressPhase) -> Self {
+        Self { scope, phase }
+    }
+}
+
+impl fmt::Display for ProgressLane {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}.{:?}", self.scope, self.phase)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressUnit {
+    Items,
+    Bytes,
+}
+
+/// Frontend-neutral progress fact. Renderers own all mutable display state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgressUpdate {
+    Started {
+        lane: ProgressLane,
+        unit: ProgressUnit,
+        total: Option<u64>,
+    },
+    Advanced {
+        lane: ProgressLane,
+        completed: u64,
+        total: Option<u64>,
+        item: Option<String>,
+    },
+    Finished {
+        lane: ProgressLane,
+    },
+    Failed {
+        lane: ProgressLane,
+        item: Option<String>,
+        reason: String,
+    },
+}
+
+/// Cloneable, non-failing producer handle suitable for cross-crate APIs.
+#[derive(Clone, Default)]
+pub struct ProgressSender {
+    tx: Option<flume::Sender<ProgressUpdate>>,
+}
+
+pub struct ProgressReceiver {
+    rx: flume::Receiver<ProgressUpdate>,
+}
+
+impl ProgressSender {
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    pub fn channel() -> (Self, ProgressReceiver) {
+        let (tx, rx) = flume::unbounded();
+        (Self { tx: Some(tx) }, ProgressReceiver { rx })
+    }
+
+    pub fn emit(&self, update: ProgressUpdate) {
+        if let Some(tx) = &self.tx {
+            // A closed renderer must never fail the underlying operation.
+            let _ = tx.send(update);
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.tx.is_some()
+    }
+}
+
+impl ProgressReceiver {
+    pub fn recv(&self) -> Option<ProgressUpdate> {
+        self.rx.recv().ok()
+    }
+
+    pub fn try_recv(&self) -> Option<ProgressUpdate> {
+        self.rx.try_recv().ok()
+    }
+
+    pub async fn recv_async(&self) -> Option<ProgressUpdate> {
+        self.rx.recv_async().await.ok()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathReuseMethod {
@@ -118,7 +254,7 @@ impl PathOutcomeTracker {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct RunningByteProgress {
+pub(crate) struct RunningByteProgress {
     bytes_by_key: HashMap<String, u64>,
     total_bytes: u64,
 }
@@ -145,14 +281,6 @@ impl RunningByteProgress {
         self.record(key, old_bytes.max(bytes))
     }
 
-    pub fn handle_download_event(&mut self, event: &ProgressEvent) -> Option<u64> {
-        match event {
-            ProgressEvent::DownloadedBytes { path, bytes, .. }
-            | ProgressEvent::Downloaded { path, bytes } => Some(self.record_max(path, *bytes)),
-            _ => None,
-        }
-    }
-
     pub fn total_bytes(&self) -> u64 {
         self.total_bytes
     }
@@ -162,9 +290,39 @@ impl RunningByteProgress {
 mod tests {
     use super::{
         PathAttemptKind, PathOutcome, PathOutcomeSummary, PathOutcomeTracker, PathReuseMethod,
-        RunningByteProgress,
+        ProgressLane, ProgressSender, ProgressUnit, ProgressUpdate, RunningByteProgress,
     };
-    use crate::runtime::task_pool::ProgressEvent;
+
+    #[test]
+    fn progress_channel_delivers_updates_and_closes_cleanly() {
+        let lane = ProgressLane::INTEGRITY_VERIFY;
+        let (sender, receiver) = ProgressSender::channel();
+        sender.emit(ProgressUpdate::Started {
+            lane,
+            unit: ProgressUnit::Items,
+            total: Some(3),
+        });
+        drop(sender);
+
+        assert_eq!(
+            receiver.recv(),
+            Some(ProgressUpdate::Started {
+                lane,
+                unit: ProgressUnit::Items,
+                total: Some(3),
+            })
+        );
+        assert_eq!(receiver.recv(), None);
+    }
+
+    #[test]
+    fn disabled_progress_sender_is_a_noop() {
+        let sender = ProgressSender::disabled();
+        assert!(!sender.is_enabled());
+        sender.emit(ProgressUpdate::Finished {
+            lane: ProgressLane::INTEGRITY_VERIFY,
+        });
+    }
 
     #[test]
     fn tracks_running_total_by_latest_value_per_path() {
@@ -183,28 +341,6 @@ mod tests {
         assert_eq!(progress.record_max("a", 90), 90);
         assert_eq!(progress.record_max("a", 10), 90);
         assert_eq!(progress.record_max("a", 100), 100);
-    }
-
-    #[test]
-    fn extracts_download_bytes_from_progress_events() {
-        let mut progress = RunningByteProgress::new();
-
-        let total = progress
-            .handle_download_event(&ProgressEvent::DownloadedBytes {
-                path: "foo".to_string(),
-                bytes: 11,
-                total_bytes: 99,
-            })
-            .unwrap();
-        assert_eq!(total, 11);
-
-        let total = progress
-            .handle_download_event(&ProgressEvent::Downloaded {
-                path: "bar".to_string(),
-                bytes: 5,
-            })
-            .unwrap();
-        assert_eq!(total, 16);
     }
 
     #[test]

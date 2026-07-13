@@ -3,14 +3,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::{GetLatestGameResponse, PackFile, PrePatchInfo};
-use griffr_common::runtime::task_pool::{ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner};
-use griffr_common::runtime::{DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR};
+use griffr_common::runtime::task_pool::{
+    Task, TaskOutcome, TaskPoolConfig, TaskPoolRunner, TaskProgress,
+};
+use griffr_common::runtime::{
+    ProgressLane, DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
+};
 
 use super::local::{detect_local_install, LocalInstall};
-use crate::progress::{
-    ArchivePipelineProgress, CountAndByteProgress, DownloadProgressTracker,
-    VerifyTaskProgressTracker,
-};
+use crate::progress::{ArchivePipelineProgress, CountAndByteProgress};
 use crate::ui;
 use crate::GlobalOptions;
 
@@ -182,27 +183,26 @@ pub async fn fetch(path: PathBuf, output_dir: Option<PathBuf>, opts: GlobalOptio
 
     let progress =
         CountAndByteProgress::new("predownload.verify", "predownload.download", opts.verbose);
-    let mut verify_progress = VerifyTaskProgressTracker::new(progress.count_bar(), tasks.len());
-    let mut download_progress = DownloadProgressTracker::new(progress.byte_bar());
-    let result = task_pool_runner.run_batch_with_progress(
-        tasks,
-        Some(&mut |event: &ProgressEvent| {
-            verify_progress.handle_event(event);
-            download_progress.handle_event(event);
-        }),
-    )?;
+    let verify_lane = ProgressLane::PREDOWNLOAD_VERIFY;
+    let download_lane = ProgressLane::PREDOWNLOAD_DOWNLOAD;
+    let progress_session = progress.start(verify_lane, download_lane);
+    let task_progress = TaskProgress::new(progress_session.sender())
+        .with_verify(verify_lane, tasks.len())
+        .with_download(download_lane);
+    let result = task_pool_runner.run_batch(tasks, task_progress)?;
+    progress_session.finish();
     progress.finish();
 
     let downloaded_parts = result
-        .events
+        .outcomes
         .iter()
-        .filter(|event| matches!(event, ProgressEvent::Downloaded { .. }))
+        .filter(|event| matches!(event, TaskOutcome::Downloaded { .. }))
         .count();
     let failures = result
-        .events
+        .outcomes
         .iter()
         .filter_map(|event| match event {
-            ProgressEvent::Failed { path, reason } => Some(format!("{} ({})", path, reason)),
+            TaskOutcome::Failed { path, reason } => Some(format!("{} ({})", path, reason)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -272,18 +272,33 @@ pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
 
     let task_pool_cfg = TaskPoolConfig::default();
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
-    let mut progress = ArchivePipelineProgress::new("predownload.resume", 0, opts.verbose);
-    let result = task_pool_runner.run_batch_with_progress(
-        vec![initial_task],
-        Some(&mut |event: &ProgressEvent| progress.handle_event(event)),
-    )?;
+    let progress = ArchivePipelineProgress::new("predownload.resume", opts.verbose);
+    let verify_lane = ProgressLane::ARCHIVE_VERIFY;
+    let download_lane = ProgressLane::ARCHIVE_DOWNLOAD;
+    let extract_lane = ProgressLane::ARCHIVE_EXTRACT;
+    let commit_lane = ProgressLane::ARCHIVE_COMMIT;
+    let patch_lane = ProgressLane::ARCHIVE_PATCH;
+    let delete_lane = ProgressLane::ARCHIVE_DELETE;
+    let progress_session = progress.start(
+        verify_lane,
+        download_lane,
+        extract_lane,
+        commit_lane,
+        patch_lane,
+        delete_lane,
+    );
+    let task_progress = TaskProgress::new(progress_session.sender())
+        .with_patch(patch_lane)
+        .with_delete(delete_lane);
+    let result = task_pool_runner.run_batch(vec![initial_task], task_progress)?;
+    progress_session.finish();
     progress.finish();
 
     let failures = result
-        .events
+        .outcomes
         .into_iter()
         .filter_map(|event| match event {
-            ProgressEvent::Failed { path, reason } => Some(format!("{} ({})", path, reason)),
+            TaskOutcome::Failed { path, reason } => Some(format!("{} ({})", path, reason)),
             _ => None,
         })
         .collect::<Vec<_>>();

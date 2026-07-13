@@ -1,5 +1,3 @@
-//! Download management module
+//! Internal download and archive helpers.
 
-pub mod extractor;
-
-pub use extractor::MultiVolumeExtractor;
+pub(crate) mod extractor;

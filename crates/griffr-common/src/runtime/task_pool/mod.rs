@@ -9,7 +9,7 @@ pub mod verify;
 pub use archive_plan::{plan_archive_groups, ArchiveGroup};
 pub use scheduler::{run_tasks, run_tasks_with_progress};
 pub use types::{
-    ArchivePart, ProgressEvent, Task, TaskPoolConfig, TaskPoolResult, TaskPoolRunner,
+    ArchivePart, Task, TaskOutcome, TaskPoolConfig, TaskPoolResult, TaskPoolRunner, TaskProgress,
     DEFAULT_PROGRESS_BUFFER_BYTES,
 };
 

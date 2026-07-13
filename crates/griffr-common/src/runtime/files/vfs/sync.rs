@@ -7,9 +7,9 @@ use crate::api::client::{ApiClient, ApiError};
 use crate::api::crypto::RES_INDEX_KEY;
 use crate::api::protocol::DEFAULT_PLATFORM;
 use crate::config::ApiTarget;
-use crate::runtime::task_pool::{ProgressEvent, Task, TaskPoolRunner};
+use crate::runtime::task_pool::{Task, TaskOutcome, TaskPoolRunner, TaskProgress};
 use crate::runtime::{
-    resource_manifest_url, PathOutcomeTracker, ResourceManifestKind, RunningByteProgress,
+    resource_manifest_url, PathOutcomeTracker, ProgressLane, ProgressSender, ResourceManifestKind,
 };
 
 use super::{VfsMaterializeConfig, VfsPlanOutcome, VfsTaskPlan, VfsUpdateOutcome, VfsUpdateResult};
@@ -106,8 +106,7 @@ pub async fn download_vfs_resources(
     streaming_assets_path: &Path,
     materialize: &VfsMaterializeConfig,
     task_pool_runner: &mut TaskPoolRunner,
-    progress_callback: Option<&dyn Fn(usize, usize, &str)>,
-    download_progress_callback: Option<&dyn Fn(u64, u64, &str)>,
+    progress: ProgressSender,
 ) -> Result<VfsUpdateOutcome> {
     let plan = match plan_vfs_tasks(
         api_client,
@@ -128,10 +127,6 @@ pub async fn download_vfs_resources(
 
     info!("VFS resource version: {}", plan.res_version);
 
-    if let Some(cb) = progress_callback {
-        cb(0, plan.total_files, "");
-    }
-
     let mut total_result = VfsUpdateResult {
         total_files: plan.total_files,
         downloaded_files: 0,
@@ -140,68 +135,31 @@ pub async fn download_vfs_resources(
         res_version: plan.res_version.clone(),
     };
 
-    let mut failed_paths = Vec::<String>::new();
-    let mut finished_files = 0usize;
-    let mut download_progress = RunningByteProgress::new();
-    let mut discovered_download_totals = RunningByteProgress::new();
-    let mut outcomes = PathOutcomeTracker::new();
-    let mut on_event = |event: &ProgressEvent| match event {
-        ProgressEvent::DownloadStarted { path, total_bytes } => {
-            discovered_download_totals.record(path, *total_bytes);
-            if let Some(cb) = download_progress_callback {
-                cb(
-                    download_progress.total_bytes(),
-                    discovered_download_totals.total_bytes(),
-                    path,
-                );
-            }
-        }
-        ProgressEvent::DownloadedBytes {
-            path, total_bytes, ..
-        } => {
-            download_progress
-                .handle_download_event(event)
-                .expect("download event");
-            discovered_download_totals.record(path, *total_bytes);
-            if let Some(cb) = download_progress_callback {
-                cb(
-                    download_progress.total_bytes(),
-                    discovered_download_totals.total_bytes(),
-                    path,
-                );
-            }
-        }
-        ProgressEvent::Downloaded { path, bytes } => {
-            outcomes.record_downloaded(path, *bytes);
-            download_progress
-                .handle_download_event(event)
-                .expect("download event");
-            discovered_download_totals.record(path, *bytes);
-            if let Some(cb) = download_progress_callback {
-                cb(
-                    download_progress.total_bytes(),
-                    discovered_download_totals.total_bytes(),
-                    path,
-                );
-            }
-        }
-        ProgressEvent::Verified { path, ok, .. } => {
-            outcomes.record_verified(path, *ok);
-            finished_files = finished_files.saturating_add(1);
-            if let Some(cb) = progress_callback {
-                cb(finished_files, plan.total_files, path);
-            }
-        }
-        ProgressEvent::Failed { path, reason } => {
-            warn!("Failed to materialize VFS file {}: {}", path, reason);
-            outcomes.record_failed(path);
-            failed_paths.push(path.clone());
-        }
-        _ => {}
-    };
-    let _ = task_pool_runner
-        .run_batch_with_progress(plan.tasks, Some(&mut on_event))
+    let task_progress = TaskProgress::new(progress)
+        .with_verify(ProgressLane::VFS_VERIFY, plan.total_files)
+        .with_download(ProgressLane::VFS_DOWNLOAD);
+    let result = task_pool_runner
+        .run_batch(plan.tasks, task_progress)
         .map_err(|e| Error::TaskPool(format!("Failed to materialize VFS files: {e}")))?;
+
+    let mut failed_paths = Vec::<String>::new();
+    let mut outcomes = PathOutcomeTracker::new();
+    for event in result.outcomes {
+        match event {
+            TaskOutcome::Downloaded { path, bytes } => {
+                outcomes.record_downloaded(&path, bytes);
+            }
+            TaskOutcome::Verified { path, ok, .. } => {
+                outcomes.record_verified(&path, ok);
+            }
+            TaskOutcome::Failed { path, reason } => {
+                warn!("Failed to materialize VFS file {}: {}", path, reason);
+                outcomes.record_failed(&path);
+                failed_paths.push(path);
+            }
+            _ => {}
+        }
+    }
 
     let summary = outcomes.summary();
     total_result.downloaded_files = summary.downloaded_files;

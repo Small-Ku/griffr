@@ -9,7 +9,11 @@ use flume::{Receiver, RecvTimeoutError, Sender};
 use tracing::debug;
 
 use super::executor::execute_task;
-use super::types::{ProgressEvent, Task, TaskPoolConfig, TaskPoolResult, TaskPoolRunner};
+use super::types::{
+    Task, TaskOutcome, TaskPoolConfig, TaskPoolResult, TaskPoolRunner, TaskProgress, WorkerEvent,
+};
+use crate::runtime::progress::RunningByteProgress;
+use crate::runtime::{ProgressUnit, ProgressUpdate};
 
 const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -25,7 +29,7 @@ pub(crate) struct WorkerContext {
     pub(crate) io_tx: Sender<Task>,
     pub(crate) cpu_tx: Sender<Task>,
     pub(crate) extract_tx: Sender<Task>,
-    pub(crate) event_tx: Sender<ProgressEvent>,
+    pub(crate) event_tx: Sender<WorkerEvent>,
     pub(crate) pending: Arc<AtomicUsize>,
     pub(crate) done_pair: Arc<(Mutex<()>, Condvar)>,
     pub(crate) shutdown: Arc<AtomicBool>,
@@ -33,12 +37,277 @@ pub(crate) struct WorkerContext {
     pub(crate) shared_dispatcher: Arc<Dispatcher>,
 }
 
+struct TaskProgressReducer {
+    config: TaskProgress,
+    verify_completed: u64,
+    download_completed: RunningByteProgress,
+    download_totals: RunningByteProgress,
+    extract_completed: RunningByteProgress,
+    extract_totals: RunningByteProgress,
+    download_started: bool,
+    extract_started: bool,
+    commit_started: bool,
+    patch_started: bool,
+    delete_started: bool,
+}
+
+impl TaskProgressReducer {
+    fn new(config: TaskProgress) -> Self {
+        if let Some((lane, total)) = config.verify {
+            if total > 0 {
+                config.sender.emit(ProgressUpdate::Started {
+                    lane,
+                    unit: ProgressUnit::Items,
+                    total: Some(total),
+                });
+            }
+        }
+        Self {
+            config,
+            verify_completed: 0,
+            download_completed: RunningByteProgress::new(),
+            download_totals: RunningByteProgress::new(),
+            extract_completed: RunningByteProgress::new(),
+            extract_totals: RunningByteProgress::new(),
+            download_started: false,
+            extract_started: false,
+            commit_started: false,
+            patch_started: false,
+            delete_started: false,
+        }
+    }
+
+    fn handle(&mut self, event: &WorkerEvent) {
+        match event {
+            WorkerEvent::Verified { path, .. } => {
+                if let Some((lane, total)) = self.config.verify {
+                    self.verify_completed = self.verify_completed.saturating_add(1).min(total);
+                    self.config.sender.emit(ProgressUpdate::Advanced {
+                        lane,
+                        completed: self.verify_completed,
+                        total: Some(total),
+                        item: Some(path.clone()),
+                    });
+                }
+            }
+            WorkerEvent::DownloadStarted { path, total_bytes } => {
+                let Some(lane) = self.config.download else {
+                    return;
+                };
+                self.download_totals.record(path, *total_bytes);
+                self.start_download_lane(lane, self.download_totals.total_bytes());
+                self.emit_bytes(
+                    lane,
+                    self.download_completed.total_bytes(),
+                    self.download_totals.total_bytes(),
+                    path,
+                );
+            }
+            WorkerEvent::DownloadedBytes {
+                path,
+                bytes,
+                total_bytes,
+            } => {
+                let Some(lane) = self.config.download else {
+                    return;
+                };
+                self.download_completed.record_max(path, *bytes);
+                self.download_totals.record(path, *total_bytes);
+                self.start_download_lane(lane, self.download_totals.total_bytes());
+                self.emit_bytes(
+                    lane,
+                    self.download_completed.total_bytes(),
+                    self.download_totals.total_bytes(),
+                    path,
+                );
+            }
+            WorkerEvent::Downloaded { path, bytes } => {
+                let Some(lane) = self.config.download else {
+                    return;
+                };
+                self.download_completed.record_max(path, *bytes);
+                self.download_totals.record_max(path, *bytes);
+                self.start_download_lane(lane, self.download_totals.total_bytes());
+                self.emit_bytes(
+                    lane,
+                    self.download_completed.total_bytes(),
+                    self.download_totals.total_bytes(),
+                    path,
+                );
+            }
+            WorkerEvent::ExtractedBytes {
+                path,
+                bytes,
+                total_bytes,
+            } => {
+                let Some(lane) = self.config.extract else {
+                    return;
+                };
+                self.extract_completed.record_max(path, *bytes);
+                self.extract_totals.record(path, *total_bytes);
+                if !self.extract_started {
+                    self.extract_started = true;
+                    self.config.sender.emit(ProgressUpdate::Started {
+                        lane,
+                        unit: ProgressUnit::Bytes,
+                        total: known_total(self.extract_totals.total_bytes()),
+                    });
+                }
+                self.emit_bytes(
+                    lane,
+                    self.extract_completed.total_bytes(),
+                    self.extract_totals.total_bytes(),
+                    path,
+                );
+            }
+            WorkerEvent::ArchiveCommitProgress {
+                path,
+                completed,
+                total,
+            } => {
+                if let Some(lane) = self.config.commit {
+                    Self::emit_items(
+                        &self.config.sender,
+                        lane,
+                        path,
+                        *completed,
+                        *total,
+                        &mut self.commit_started,
+                    );
+                }
+            }
+            WorkerEvent::PatchProgress {
+                path,
+                completed,
+                total,
+            } => {
+                if let Some(lane) = self.config.patch {
+                    Self::emit_items(
+                        &self.config.sender,
+                        lane,
+                        path,
+                        *completed,
+                        *total,
+                        &mut self.patch_started,
+                    );
+                }
+            }
+            WorkerEvent::DeleteProgress {
+                path,
+                completed,
+                total,
+            } => {
+                if let Some(lane) = self.config.delete {
+                    Self::emit_items(
+                        &self.config.sender,
+                        lane,
+                        path,
+                        *completed,
+                        *total,
+                        &mut self.delete_started,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn start_download_lane(&mut self, lane: crate::runtime::ProgressLane, total: u64) {
+        if !self.download_started {
+            self.download_started = true;
+            self.config.sender.emit(ProgressUpdate::Started {
+                lane,
+                unit: ProgressUnit::Bytes,
+                total: known_total(total),
+            });
+        }
+    }
+
+    fn emit_bytes(
+        &self,
+        lane: crate::runtime::ProgressLane,
+        completed: u64,
+        total: u64,
+        item: &str,
+    ) {
+        self.config.sender.emit(ProgressUpdate::Advanced {
+            lane,
+            completed,
+            total: known_total(total),
+            item: Some(item.to_string()),
+        });
+    }
+
+    fn emit_items(
+        sender: &crate::runtime::ProgressSender,
+        lane: crate::runtime::ProgressLane,
+        item: &str,
+        completed: usize,
+        total: usize,
+        started: &mut bool,
+    ) {
+        if !*started {
+            *started = true;
+            sender.emit(ProgressUpdate::Started {
+                lane,
+                unit: ProgressUnit::Items,
+                total: Some(total as u64),
+            });
+        }
+        sender.emit(ProgressUpdate::Advanced {
+            lane,
+            completed: completed as u64,
+            total: Some(total as u64),
+            item: Some(item.to_string()),
+        });
+    }
+
+    fn finish(&self) {
+        if let Some((lane, total)) = self.config.verify {
+            if total > 0 {
+                self.config.sender.emit(ProgressUpdate::Finished { lane });
+            }
+        }
+        for (started, lane) in [
+            (self.download_started, self.config.download),
+            (self.extract_started, self.config.extract),
+            (self.commit_started, self.config.commit),
+            (self.patch_started, self.config.patch),
+            (self.delete_started, self.config.delete),
+        ] {
+            if started {
+                if let Some(lane) = lane {
+                    self.config.sender.emit(ProgressUpdate::Finished { lane });
+                }
+            }
+        }
+    }
+}
+
+fn record_worker_event(
+    progress: &mut TaskProgressReducer,
+    outcomes: &mut Vec<TaskOutcome>,
+    event: WorkerEvent,
+) {
+    if let WorkerEvent::Retried { path, reason } = &event {
+        debug!(path = %path, reason = %reason, "task retry scheduled");
+    }
+    progress.handle(&event);
+    if let Some(outcome) = event.into_outcome() {
+        outcomes.push(outcome);
+    }
+}
+
+fn known_total(total: u64) -> Option<u64> {
+    (total > 0).then_some(total)
+}
+
 impl TaskPoolRunner {
     pub fn new(config: TaskPoolConfig) -> Result<Self> {
         let (io_tx, io_rx) = flume::unbounded::<Task>();
         let (cpu_tx, cpu_rx) = flume::unbounded::<Task>();
         let (extract_tx, extract_rx) = flume::unbounded::<Task>();
-        let (event_tx, event_rx) = flume::unbounded::<ProgressEvent>();
+        let (event_tx, event_rx) = flume::unbounded::<WorkerEvent>();
         let pending = Arc::new(AtomicUsize::new(0));
         let done_pair = Arc::new((Mutex::new(()), Condvar::new()));
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -75,26 +344,24 @@ impl TaskPoolRunner {
         Ok(Self { ctx, event_rx })
     }
 
-    pub fn run_batch_with_progress(
+    pub fn run_batch(
         &mut self,
         initial_tasks: Vec<Task>,
-        mut on_event: Option<&mut dyn FnMut(&ProgressEvent)>,
+        progress: TaskProgress,
     ) -> Result<TaskPoolResult> {
         while self.event_rx.try_recv().is_ok() {}
         for task in initial_tasks {
             enqueue_task(&self.ctx, task)?;
         }
-        let mut events = Vec::new();
+        let mut progress = TaskProgressReducer::new(progress);
+        let mut outcomes = Vec::new();
         let mut last_heartbeat_at = Instant::now();
         let lock = &self.ctx.done_pair.0;
         let cv = &self.ctx.done_pair.1;
         let mut guard = lock.lock().unwrap();
         loop {
             while let Ok(event) = self.event_rx.try_recv() {
-                if let Some(cb) = on_event.as_mut() {
-                    cb(&event);
-                }
-                events.push(event);
+                record_worker_event(&mut progress, &mut outcomes, event);
                 last_heartbeat_at = Instant::now();
             }
             let pending = self.ctx.pending.load(Ordering::Acquire);
@@ -114,12 +381,10 @@ impl TaskPoolRunner {
         }
         drop(guard);
         while let Ok(event) = self.event_rx.try_recv() {
-            if let Some(cb) = on_event.as_mut() {
-                cb(&event);
-            }
-            events.push(event);
+            record_worker_event(&mut progress, &mut outcomes, event);
         }
-        Ok(TaskPoolResult { events })
+        progress.finish();
+        Ok(TaskPoolResult { outcomes })
     }
 }
 
@@ -134,14 +399,14 @@ impl Drop for TaskPoolRunner {
 pub fn run_tasks_with_progress(
     initial_tasks: Vec<Task>,
     config: TaskPoolConfig,
-    on_event: Option<&mut dyn FnMut(&ProgressEvent)>,
+    progress: TaskProgress,
 ) -> Result<TaskPoolResult> {
     let mut runner = TaskPoolRunner::new(config)?;
-    runner.run_batch_with_progress(initial_tasks, on_event)
+    runner.run_batch(initial_tasks, progress)
 }
 
 pub fn run_tasks(initial_tasks: Vec<Task>, config: TaskPoolConfig) -> Result<TaskPoolResult> {
-    run_tasks_with_progress(initial_tasks, config, None)
+    run_tasks_with_progress(initial_tasks, config, TaskProgress::disabled())
 }
 
 fn spawn_workers(
@@ -220,4 +485,117 @@ pub(crate) fn enqueue_task(ctx: &WorkerContext, task: Task) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use crate::runtime::{ProgressLane, ProgressSender, ProgressUpdate};
+
+    #[test]
+    fn disabled_task_progress_does_not_configure_lanes() {
+        let lane = ProgressLane::INTEGRITY_VERIFY;
+        let progress = TaskProgress::new(ProgressSender::disabled()).with_verify(lane, 2);
+
+        assert!(progress.verify.is_none());
+    }
+
+    #[test]
+    fn worker_events_store_only_durable_task_outcomes() {
+        let mut reducer = TaskProgressReducer::new(TaskProgress::disabled());
+        let mut outcomes = Vec::new();
+
+        record_worker_event(
+            &mut reducer,
+            &mut outcomes,
+            WorkerEvent::DownloadedBytes {
+                path: "a.bin".to_string(),
+                bytes: 32,
+                total_bytes: 64,
+            },
+        );
+        record_worker_event(
+            &mut reducer,
+            &mut outcomes,
+            WorkerEvent::Retried {
+                path: "a.bin".to_string(),
+                reason: "checksum mismatch".to_string(),
+            },
+        );
+        assert!(outcomes.is_empty());
+
+        record_worker_event(
+            &mut reducer,
+            &mut outcomes,
+            WorkerEvent::Downloaded {
+                path: "a.bin".to_string(),
+                bytes: 64,
+            },
+        );
+        assert!(matches!(
+            outcomes.as_slice(),
+            [TaskOutcome::Downloaded { path, bytes: 64 }] if path == "a.bin"
+        ));
+    }
+
+    #[test]
+    fn reducer_emits_scoped_updates_without_regressing_retry_bytes() {
+        let verify_lane = ProgressLane::INTEGRITY_VERIFY;
+        let download_lane = ProgressLane::INTEGRITY_DOWNLOAD;
+        let (sender, receiver) = ProgressSender::channel();
+        let mut reducer = TaskProgressReducer::new(
+            TaskProgress::new(sender)
+                .with_verify(verify_lane, 2)
+                .with_download(download_lane),
+        );
+
+        reducer.handle(&WorkerEvent::DownloadStarted {
+            path: "a.bin".to_string(),
+            total_bytes: 100,
+        });
+        reducer.handle(&WorkerEvent::DownloadedBytes {
+            path: "a.bin".to_string(),
+            bytes: 90,
+            total_bytes: 100,
+        });
+        reducer.handle(&WorkerEvent::DownloadedBytes {
+            path: "a.bin".to_string(),
+            bytes: 10,
+            total_bytes: 100,
+        });
+        reducer.handle(&WorkerEvent::Verified {
+            path: "a.bin".to_string(),
+            ok: true,
+            issue: None,
+        });
+        reducer.finish();
+        drop(reducer);
+
+        let mut updates = Vec::new();
+        while let Some(update) = receiver.try_recv() {
+            updates.push(update);
+        }
+
+        assert!(updates.contains(&ProgressUpdate::Started {
+            lane: verify_lane,
+            unit: ProgressUnit::Items,
+            total: Some(2),
+        }));
+        assert!(updates.contains(&ProgressUpdate::Advanced {
+            lane: verify_lane,
+            completed: 1,
+            total: Some(2),
+            item: Some("a.bin".to_string()),
+        }));
+        let downloaded_positions = updates
+            .iter()
+            .filter_map(|update| match update {
+                ProgressUpdate::Advanced {
+                    lane, completed, ..
+                } if *lane == download_lane => Some(*completed),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(downloaded_positions.last().copied(), Some(90));
+    }
 }

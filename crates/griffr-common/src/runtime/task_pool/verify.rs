@@ -14,12 +14,12 @@ pub(crate) fn execute_verify(
     expected_size: Option<u64>,
     on_fail: Option<Box<super::types::Task>>,
     spawned: &mut Vec<super::types::Task>,
-    event_tx: &flume::Sender<super::types::ProgressEvent>,
+    event_tx: &flume::Sender<super::types::WorkerEvent>,
 ) {
     let issue = build_issue(path, logical_path, expected_md5, expected_size);
     match issue {
         None => {
-            let _ = event_tx.send(super::types::ProgressEvent::Verified {
+            let _ = event_tx.send(super::types::WorkerEvent::Verified {
                 path: logical_path.to_string(),
                 ok: true,
                 issue: None,
@@ -27,7 +27,7 @@ pub(crate) fn execute_verify(
         }
         Some(issue) => {
             if let Some(task) = on_fail {
-                let _ = event_tx.send(super::types::ProgressEvent::Retried {
+                let _ = event_tx.send(super::types::WorkerEvent::Retried {
                     path: logical_path.to_string(),
                     reason: format!("verification failed ({:?})", issue.kind),
                 });
@@ -35,12 +35,12 @@ pub(crate) fn execute_verify(
                 return;
             }
 
-            let _ = event_tx.send(super::types::ProgressEvent::Verified {
+            let _ = event_tx.send(super::types::WorkerEvent::Verified {
                 path: logical_path.to_string(),
                 ok: false,
                 issue: Some(issue.clone()),
             });
-            let _ = event_tx.send(super::types::ProgressEvent::Failed {
+            let _ = event_tx.send(super::types::WorkerEvent::Failed {
                 path: logical_path.to_string(),
                 reason: format!("verification failed ({:?})", issue.kind),
             });

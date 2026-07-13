@@ -2,10 +2,12 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
-use griffr_common::runtime::task_pool::ProgressEvent;
-use griffr_common::runtime::RunningByteProgress;
+use griffr_common::runtime::{
+    ProgressLane, ProgressReceiver, ProgressSender, ProgressUnit, ProgressUpdate,
+};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 /// Lightweight per-step progress bar.
@@ -109,6 +111,14 @@ impl StepProgress {
         self.bar.set_position(clamped);
     }
 
+    pub fn start(&self, lane: ProgressLane, unit: ProgressUnit) -> ProgressSession {
+        ProgressSession::spawn(vec![ProgressRoute {
+            lane,
+            unit,
+            bar: self.clone(),
+        }])
+    }
+
     pub fn finish(&self) {
         if !self.started.load(Ordering::Acquire) {
             return;
@@ -173,6 +183,105 @@ fn grouped_progress() -> Arc<MultiProgress> {
     ))
 }
 
+/// Owns the renderer thread while common crates emit progress through a channel.
+pub struct ProgressSession {
+    sender: Option<ProgressSender>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl ProgressSession {
+    fn spawn(routes: Vec<ProgressRoute>) -> Self {
+        let (sender, receiver) = ProgressSender::channel();
+        let worker = std::thread::spawn(move || render_updates(receiver, routes));
+        Self {
+            sender: Some(sender),
+            worker: Some(worker),
+        }
+    }
+
+    pub fn sender(&self) -> ProgressSender {
+        self.sender
+            .as_ref()
+            .expect("progress session already finished")
+            .clone()
+    }
+
+    pub fn finish(mut self) {
+        self.sender.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for ProgressSession {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+struct ProgressRoute {
+    lane: ProgressLane,
+    unit: ProgressUnit,
+    bar: StepProgress,
+}
+
+fn render_updates(receiver: ProgressReceiver, routes: Vec<ProgressRoute>) {
+    while let Some(update) = receiver.recv() {
+        let lane = match &update {
+            ProgressUpdate::Started { lane, .. }
+            | ProgressUpdate::Advanced { lane, .. }
+            | ProgressUpdate::Finished { lane }
+            | ProgressUpdate::Failed { lane, .. } => *lane,
+        };
+        let Some(route) = routes.iter().find(|route| route.lane == lane) else {
+            continue;
+        };
+        apply_update(route, update);
+    }
+}
+
+fn apply_update(route: &ProgressRoute, update: ProgressUpdate) {
+    match update {
+        ProgressUpdate::Started { unit, total, .. } if unit == route.unit => {
+            if let Some(total) = total {
+                match unit {
+                    ProgressUnit::Items => route.bar.update_count(0, total as usize, ""),
+                    ProgressUnit::Bytes => route.bar.update_bytes(0, total, ""),
+                }
+            }
+        }
+        ProgressUpdate::Advanced {
+            completed,
+            total,
+            item,
+            ..
+        } => {
+            let item = item.as_deref().unwrap_or("");
+            match route.unit {
+                ProgressUnit::Items => {
+                    if let Some(total) = total {
+                        route
+                            .bar
+                            .update_count(completed as usize, total as usize, item);
+                    }
+                }
+                ProgressUnit::Bytes => {
+                    if let Some(total) = total {
+                        route.bar.update_bytes(completed, total, item);
+                    }
+                }
+            }
+        }
+        ProgressUpdate::Finished { .. } => route.bar.finish(),
+        ProgressUpdate::Failed { .. } => route.bar.finish(),
+        ProgressUpdate::Started { .. } => {}
+    }
+}
+
 /// Keeps count-based and byte-based progress on separate terminal rows.
 pub struct CountAndByteProgress {
     count: StepProgress,
@@ -192,26 +301,19 @@ impl CountAndByteProgress {
         }
     }
 
-    pub fn count_bar(&self) -> StepProgress {
-        self.count.clone()
-    }
-
-    pub fn byte_bar(&self) -> StepProgress {
-        self.bytes.clone()
-    }
-
-    pub fn split_callbacks(
-        &self,
-    ) -> (
-        impl Fn(usize, usize, &str) + Clone + 'static,
-        impl Fn(u64, u64, &str) + Clone + 'static,
-    ) {
-        let count = self.count.clone();
-        let bytes = self.bytes.clone();
-        (
-            move |completed, total, file| count.update_count(completed, total, file),
-            move |completed, total, file| bytes.update_bytes(completed, total, file),
-        )
+    pub fn start(&self, count_lane: ProgressLane, byte_lane: ProgressLane) -> ProgressSession {
+        ProgressSession::spawn(vec![
+            ProgressRoute {
+                lane: count_lane,
+                unit: ProgressUnit::Items,
+                bar: self.count.clone(),
+            },
+            ProgressRoute {
+                lane: byte_lane,
+                unit: ProgressUnit::Bytes,
+                bar: self.bytes.clone(),
+            },
+        ])
     }
 
     pub fn finish(&self) {
@@ -220,90 +322,7 @@ impl CountAndByteProgress {
     }
 }
 
-/// Tracks bytes for files that actually entered the download path.
-pub struct DownloadProgressTracker {
-    bar: StepProgress,
-    downloaded_by_path: RunningByteProgress,
-    total_by_path: RunningByteProgress,
-}
-
-impl DownloadProgressTracker {
-    pub fn new(bar: StepProgress) -> Self {
-        Self {
-            bar,
-            downloaded_by_path: RunningByteProgress::new(),
-            total_by_path: RunningByteProgress::new(),
-        }
-    }
-
-    pub fn handle_event(&mut self, event: &ProgressEvent) {
-        let path = match event {
-            ProgressEvent::DownloadStarted { path, total_bytes } => {
-                self.total_by_path.record(path, *total_bytes);
-                path
-            }
-            ProgressEvent::DownloadedBytes {
-                path, total_bytes, ..
-            } => {
-                self.downloaded_by_path
-                    .handle_download_event(event)
-                    .expect("download event");
-                self.total_by_path.record(path, *total_bytes);
-                path
-            }
-            ProgressEvent::Downloaded { path, bytes } => {
-                self.downloaded_by_path
-                    .handle_download_event(event)
-                    .expect("download event");
-                self.total_by_path.record(path, *bytes);
-                path
-            }
-            _ => return,
-        };
-        self.bar.update_bytes(
-            self.downloaded_by_path.total_bytes(),
-            self.total_by_path.total_bytes(),
-            path,
-        );
-    }
-}
-
-/// Tracks aggregate extraction bytes independently from archive downloads.
-pub struct ExtractionProgressTracker {
-    bar: StepProgress,
-    extracted_by_archive: RunningByteProgress,
-    total_by_archive: RunningByteProgress,
-}
-
-impl ExtractionProgressTracker {
-    pub fn new(bar: StepProgress) -> Self {
-        Self {
-            bar,
-            extracted_by_archive: RunningByteProgress::new(),
-            total_by_archive: RunningByteProgress::new(),
-        }
-    }
-
-    pub fn handle_event(&mut self, event: &ProgressEvent) {
-        let ProgressEvent::ExtractedBytes {
-            path,
-            bytes,
-            total_bytes,
-        } = event
-        else {
-            return;
-        };
-        self.extracted_by_archive.record(path, *bytes);
-        self.total_by_archive.record(path, *total_bytes);
-        self.bar.update_bytes(
-            self.extracted_by_archive.total_bytes(),
-            self.total_by_archive.total_bytes(),
-            path,
-        );
-    }
-}
-
-/// Keeps archive verification, network transfer, and extraction on stable rows.
+/// Keeps archive verification, network transfer, extraction, and follow-up work on stable rows.
 pub struct ArchivePipelineProgress {
     part_count: StepProgress,
     download: StepProgress,
@@ -311,75 +330,87 @@ pub struct ArchivePipelineProgress {
     commit: StepProgress,
     patch: StepProgress,
     delete: StepProgress,
-    total_parts: usize,
-    verified_parts: usize,
-    download_tracker: DownloadProgressTracker,
-    extraction_tracker: ExtractionProgressTracker,
 }
 
 impl ArchivePipelineProgress {
-    pub fn new(label: &str, total_parts: usize, verbose: bool) -> Self {
+    pub fn new(label: &str, verbose: bool) -> Self {
         let multi = grouped_progress();
-        let part_count =
-            StepProgress::new_in(multi.clone(), 0, format!("{label}.archive-verify"), verbose);
-        let download = StepProgress::new_in(
-            multi.clone(),
-            1,
-            format!("{label}.archive-download"),
-            verbose,
-        );
-        let extract = StepProgress::new_in(
-            multi.clone(),
-            2,
-            format!("{label}.archive-extract"),
-            verbose,
-        );
-        let commit =
-            StepProgress::new_in(multi.clone(), 3, format!("{label}.archive-commit"), verbose);
-        let patch =
-            StepProgress::new_in(multi.clone(), 4, format!("{label}.archive-patch"), verbose);
-        let delete = StepProgress::new_in(multi, 5, format!("{label}.archive-delete"), verbose);
-        part_count.update_count(0, total_parts, "");
         Self {
-            part_count: part_count.clone(),
-            download: download.clone(),
-            extract: extract.clone(),
-            commit,
-            patch,
-            delete,
-            total_parts,
-            verified_parts: 0,
-            download_tracker: DownloadProgressTracker::new(download),
-            extraction_tracker: ExtractionProgressTracker::new(extract),
+            part_count: StepProgress::new_in(
+                multi.clone(),
+                0,
+                format!("{label}.archive-verify"),
+                verbose,
+            ),
+            download: StepProgress::new_in(
+                multi.clone(),
+                1,
+                format!("{label}.archive-download"),
+                verbose,
+            ),
+            extract: StepProgress::new_in(
+                multi.clone(),
+                2,
+                format!("{label}.archive-extract"),
+                verbose,
+            ),
+            commit: StepProgress::new_in(
+                multi.clone(),
+                3,
+                format!("{label}.archive-commit"),
+                verbose,
+            ),
+            patch: StepProgress::new_in(
+                multi.clone(),
+                4,
+                format!("{label}.archive-patch"),
+                verbose,
+            ),
+            delete: StepProgress::new_in(multi, 5, format!("{label}.archive-delete"), verbose),
         }
     }
 
-    pub fn handle_event(&mut self, event: &ProgressEvent) {
-        if let ProgressEvent::Verified { path, .. } = event {
-            self.verified_parts = self.verified_parts.saturating_add(1);
-            self.part_count
-                .update_count(self.verified_parts, self.total_parts, path);
-        }
-        match event {
-            ProgressEvent::ArchiveCommitProgress {
-                path,
-                completed,
-                total,
-            } => self.commit.update_count(*completed, *total, path),
-            ProgressEvent::PatchProgress {
-                path,
-                completed,
-                total,
-            } => self.patch.update_count(*completed, *total, path),
-            ProgressEvent::DeleteProgress {
-                path,
-                completed,
-                total,
-            } => self.delete.update_count(*completed, *total, path),
-            _ => {}
-        }
-        self.download_tracker.handle_event(event);
-        self.extraction_tracker.handle_event(event);
+    pub fn start(
+        &self,
+        verify_lane: ProgressLane,
+        download_lane: ProgressLane,
+        extract_lane: ProgressLane,
+        commit_lane: ProgressLane,
+        patch_lane: ProgressLane,
+        delete_lane: ProgressLane,
+    ) -> ProgressSession {
+        ProgressSession::spawn(vec![
+            ProgressRoute {
+                lane: verify_lane,
+                unit: ProgressUnit::Items,
+                bar: self.part_count.clone(),
+            },
+            ProgressRoute {
+                lane: download_lane,
+                unit: ProgressUnit::Bytes,
+                bar: self.download.clone(),
+            },
+            ProgressRoute {
+                lane: extract_lane,
+                unit: ProgressUnit::Bytes,
+                bar: self.extract.clone(),
+            },
+            ProgressRoute {
+                lane: commit_lane,
+                unit: ProgressUnit::Items,
+                bar: self.commit.clone(),
+            },
+            ProgressRoute {
+                lane: patch_lane,
+                unit: ProgressUnit::Items,
+                bar: self.patch.clone(),
+            },
+            ProgressRoute {
+                lane: delete_lane,
+                unit: ProgressUnit::Items,
+                bar: self.delete.clone(),
+            },
+        ])
     }
 
     pub fn finish(&self) {
@@ -392,36 +423,9 @@ impl ArchivePipelineProgress {
     }
 }
 
-/// Tracks verify-count progress across a fixed task batch.
-pub struct VerifyTaskProgressTracker {
-    bar: StepProgress,
-    total_tasks: usize,
-    finished_tasks: usize,
-}
-
-impl VerifyTaskProgressTracker {
-    pub fn new(bar: StepProgress, total_tasks: usize) -> Self {
-        bar.update_count(0, total_tasks, "");
-        Self {
-            bar,
-            total_tasks,
-            finished_tasks: 0,
-        }
-    }
-
-    pub fn handle_event(&mut self, event: &ProgressEvent) {
-        if let ProgressEvent::Verified { path, .. } = event {
-            self.finished_tasks = self.finished_tasks.saturating_add(1);
-            self.bar
-                .update_count(self.finished_tasks, self.total_tasks, path);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn hide_group(bar: &StepProgress) {
         bar.multi
             .as_ref()
@@ -433,64 +437,76 @@ mod tests {
     fn count_and_byte_progress_keep_independent_units() {
         let progress = CountAndByteProgress::new("verify", "repair.download", false);
         hide_group(&progress.count);
+        let count_lane = ProgressLane::INTEGRITY_VERIFY;
+        let byte_lane = ProgressLane::INTEGRITY_DOWNLOAD;
+        let session = progress.start(count_lane, byte_lane);
+        let sender = session.sender();
 
-        let (count, bytes) = progress.split_callbacks();
-        count(1, 10, "a.bin");
-        let count_position = progress.count.bar.position();
-        let count_length = progress.count.bar.length();
+        sender.emit(ProgressUpdate::Started {
+            lane: count_lane,
+            unit: ProgressUnit::Items,
+            total: Some(10),
+        });
+        sender.emit(ProgressUpdate::Advanced {
+            lane: count_lane,
+            completed: 1,
+            total: Some(10),
+            item: Some("a.bin".to_string()),
+        });
+        sender.emit(ProgressUpdate::Started {
+            lane: byte_lane,
+            unit: ProgressUnit::Bytes,
+            total: Some(128),
+        });
+        sender.emit(ProgressUpdate::Advanced {
+            lane: byte_lane,
+            completed: 64,
+            total: Some(128),
+            item: Some("b.bin".to_string()),
+        });
+        drop(sender);
+        session.finish();
 
-        bytes(64, 128, "b.bin");
-
-        assert_eq!(progress.count.bar.position(), count_position);
-        assert_eq!(progress.count.bar.length(), count_length);
+        assert_eq!(progress.count.bar.position(), 1);
+        assert_eq!(progress.count.bar.length(), Some(10));
         assert_eq!(progress.bytes.bar.position(), 64);
         assert_eq!(progress.bytes.bar.length(), Some(128));
     }
 
     #[test]
-    fn download_progress_counts_only_started_downloads() {
-        let multi = grouped_progress();
-        multi.set_draw_target(ProgressDrawTarget::hidden());
-        let bar = StepProgress::new_in(multi, 0, "download", false);
-        let mut tracker = DownloadProgressTracker::new(bar.clone());
-
-        tracker.handle_event(&ProgressEvent::DownloadStarted {
-            path: "a.bin".to_string(),
-            total_bytes: 100,
-        });
-        tracker.handle_event(&ProgressEvent::DownloadedBytes {
-            path: "a.bin".to_string(),
-            bytes: 40,
-            total_bytes: 100,
-        });
-        tracker.handle_event(&ProgressEvent::DownloadStarted {
-            path: "b.bin".to_string(),
-            total_bytes: 20,
-        });
-
-        assert_eq!(bar.bar.position(), 40);
-        assert_eq!(bar.bar.length(), Some(120));
-    }
-
-    #[test]
     fn archive_pipeline_keeps_download_and_extract_separate() {
-        let mut progress = ArchivePipelineProgress::new("install", 1, false);
+        let progress = ArchivePipelineProgress::new("install", false);
         hide_group(&progress.part_count);
+        let verify_lane = ProgressLane::ARCHIVE_VERIFY;
+        let download_lane = ProgressLane::ARCHIVE_DOWNLOAD;
+        let extract_lane = ProgressLane::ARCHIVE_EXTRACT;
+        let commit_lane = ProgressLane::ARCHIVE_COMMIT;
+        let patch_lane = ProgressLane::ARCHIVE_PATCH;
+        let delete_lane = ProgressLane::ARCHIVE_DELETE;
+        let session = progress.start(
+            verify_lane,
+            download_lane,
+            extract_lane,
+            commit_lane,
+            patch_lane,
+            delete_lane,
+        );
+        let sender = session.sender();
 
-        progress.handle_event(&ProgressEvent::DownloadStarted {
-            path: "pack.001".to_string(),
-            total_bytes: 100,
+        sender.emit(ProgressUpdate::Advanced {
+            lane: download_lane,
+            completed: 50,
+            total: Some(100),
+            item: Some("pack.001".to_string()),
         });
-        progress.handle_event(&ProgressEvent::DownloadedBytes {
-            path: "pack.001".to_string(),
-            bytes: 50,
-            total_bytes: 100,
+        sender.emit(ProgressUpdate::Advanced {
+            lane: extract_lane,
+            completed: 20,
+            total: Some(200),
+            item: Some("pack".to_string()),
         });
-        progress.handle_event(&ProgressEvent::ExtractedBytes {
-            path: "pack".to_string(),
-            bytes: 20,
-            total_bytes: 200,
-        });
+        drop(sender);
+        session.finish();
 
         assert_eq!(progress.download.bar.position(), 50);
         assert_eq!(progress.download.bar.length(), Some(100));

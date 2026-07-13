@@ -4,7 +4,7 @@ use crate::error::Error;
 use compio::dispatcher::Dispatcher;
 
 use super::super::fs_ops::{commit_staged_extract, make_extract_staging_dir};
-use super::super::types::{ArchivePart, ProgressEvent, Task};
+use super::super::types::{ArchivePart, Task, WorkerEvent};
 
 pub(super) fn execute_install_archive(
     base_name: String,
@@ -17,7 +17,7 @@ pub(super) fn execute_install_archive(
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
     spawned: &mut Vec<Task>,
-    event_tx: &flume::Sender<ProgressEvent>,
+    event_tx: &flume::Sender<WorkerEvent>,
 ) {
     parts.sort_by(|left, right| {
         left.sequence
@@ -36,7 +36,7 @@ pub(super) fn execute_install_archive(
             )
             .is_none()
             {
-                let _ = event_tx.send(ProgressEvent::Verified {
+                let _ = event_tx.send(WorkerEvent::Verified {
                     path: part.logical_path.clone(),
                     ok: true,
                     issue: None,
@@ -48,7 +48,7 @@ pub(super) fn execute_install_archive(
             let event_tx_clone = event_tx.clone();
             let logical_path_clone = part.logical_path.clone();
             let expected_size_val = part.expected_size;
-            let _ = event_tx.send(ProgressEvent::DownloadStarted {
+            let _ = event_tx.send(WorkerEvent::DownloadStarted {
                 path: part.logical_path.clone(),
                 total_bytes: expected_size_val,
             });
@@ -61,7 +61,7 @@ pub(super) fn execute_install_archive(
                 Some(part.expected_size),
                 download_progress_buffer_bytes,
                 Some(move |bytes| {
-                    let _ = event_tx_clone.send(ProgressEvent::DownloadedBytes {
+                    let _ = event_tx_clone.send(WorkerEvent::DownloadedBytes {
                         path: logical_path_clone.clone(),
                         bytes,
                         total_bytes: expected_size_val,
@@ -69,7 +69,7 @@ pub(super) fn execute_install_archive(
                 }),
             ) {
                 Ok(bytes) => {
-                    let _ = event_tx.send(ProgressEvent::Downloaded {
+                    let _ = event_tx.send(WorkerEvent::Downloaded {
                         path: part.logical_path.clone(),
                         bytes,
                     });
@@ -80,7 +80,7 @@ pub(super) fn execute_install_archive(
                         Some(part.expected_size),
                     );
                     if post_issue.is_none() {
-                        let _ = event_tx.send(ProgressEvent::Verified {
+                        let _ = event_tx.send(WorkerEvent::Verified {
                             path: part.logical_path.clone(),
                             ok: true,
                             issue: None,
@@ -89,7 +89,7 @@ pub(super) fn execute_install_archive(
                         break;
                     }
                     if attempt < max_retries {
-                        let _ = event_tx.send(ProgressEvent::Retried {
+                        let _ = event_tx.send(WorkerEvent::Retried {
                             path: part.logical_path.clone(),
                             reason: format!(
                                 "install-archive verify attempt {} failed",
@@ -98,12 +98,12 @@ pub(super) fn execute_install_archive(
                         });
                         continue;
                     }
-                    let _ = event_tx.send(ProgressEvent::Verified {
+                    let _ = event_tx.send(WorkerEvent::Verified {
                         path: part.logical_path.clone(),
                         ok: false,
                         issue: post_issue,
                     });
-                    let _ = event_tx.send(ProgressEvent::Failed {
+                    let _ = event_tx.send(WorkerEvent::Failed {
                         path: part.logical_path.clone(),
                         reason: "install-archive verify failed after retries".to_string(),
                     });
@@ -111,7 +111,7 @@ pub(super) fn execute_install_archive(
                 }
                 Err(err) => {
                     if attempt < max_retries {
-                        let _ = event_tx.send(ProgressEvent::Retried {
+                        let _ = event_tx.send(WorkerEvent::Retried {
                             path: part.logical_path.clone(),
                             reason: format!(
                                 "install-archive download attempt {} failed: {}",
@@ -127,12 +127,12 @@ pub(super) fn execute_install_archive(
                         &part.expected_md5,
                         Some(part.expected_size),
                     );
-                    let _ = event_tx.send(ProgressEvent::Verified {
+                    let _ = event_tx.send(WorkerEvent::Verified {
                         path: part.logical_path.clone(),
                         ok: false,
                         issue,
                     });
-                    let _ = event_tx.send(ProgressEvent::Failed {
+                    let _ = event_tx.send(WorkerEvent::Failed {
                         path: part.logical_path.clone(),
                         reason: format!("install-archive download failed after retries: {}", err),
                     });
@@ -162,7 +162,7 @@ pub(super) fn execute_extract_archive(
     password: Option<String>,
     extraction_progress_buffer_bytes: usize,
     spawned: &mut Vec<Task>,
-    event_tx: &flume::Sender<ProgressEvent>,
+    event_tx: &flume::Sender<WorkerEvent>,
 ) {
     let progress_path = base_name.clone();
     let event_tx_clone = event_tx.clone();
@@ -178,7 +178,7 @@ pub(super) fn execute_extract_archive(
                 password.as_deref(),
                 extraction_progress_buffer_bytes,
                 Some(move |bytes, total_bytes| {
-                    let _ = event_tx_clone.send(ProgressEvent::ExtractedBytes {
+                    let _ = event_tx_clone.send(WorkerEvent::ExtractedBytes {
                         path: progress_path.clone(),
                         bytes,
                         total_bytes,
@@ -189,7 +189,7 @@ pub(super) fn execute_extract_archive(
                 return Err(err);
             }
             let mut on_commit = |path: &std::path::Path, completed: usize, total: usize| {
-                let _ = event_tx.send(ProgressEvent::ArchiveCommitProgress {
+                let _ = event_tx.send(WorkerEvent::ArchiveCommitProgress {
                     path: path.to_string_lossy().replace('\\', "/"),
                     completed,
                     total,
@@ -209,10 +209,10 @@ pub(super) fn execute_extract_archive(
         });
     match result {
         Ok(()) => {
-            let _ = event_tx.send(ProgressEvent::Extracted { path: dest });
+            let _ = event_tx.send(WorkerEvent::Extracted { path: dest });
         }
         Err(err) => {
-            let _ = event_tx.send(ProgressEvent::Failed {
+            let _ = event_tx.send(WorkerEvent::Failed {
                 path: base_name,
                 reason: err.to_string(),
             });

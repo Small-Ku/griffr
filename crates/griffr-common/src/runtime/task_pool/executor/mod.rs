@@ -3,7 +3,7 @@ use compio::dispatcher::Dispatcher;
 use super::fs_ops::{
     apply_delete_files_manifest, apply_extracted_vfs_patch_manifest, create_hardlink,
 };
-use super::types::{ProgressEvent, Task};
+use super::types::{Task, WorkerEvent};
 
 mod archive;
 mod transfer;
@@ -16,7 +16,7 @@ pub(crate) fn execute_task(
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
     spawned: &mut Vec<Task>,
-    event_tx: &flume::Sender<ProgressEvent>,
+    event_tx: &flume::Sender<WorkerEvent>,
 ) {
     match task {
         Task::InstallArchive {
@@ -107,10 +107,10 @@ pub(crate) fn execute_task(
         ),
         Task::Hardlink { src, dest } => match create_hardlink(io_dispatcher, &src, &dest) {
             Ok(()) => {
-                let _ = event_tx.send(ProgressEvent::Hardlinked { path: dest });
+                let _ = event_tx.send(WorkerEvent::Hardlinked { path: dest });
             }
             Err(err) => {
-                let _ = event_tx.send(ProgressEvent::Failed {
+                let _ = event_tx.send(WorkerEvent::Failed {
                     path: dest.display().to_string(),
                     reason: err.to_string(),
                 });
@@ -135,7 +135,7 @@ pub(crate) fn execute_task(
         Task::ApplyExtractedVfsPatchManifest { install_root } => {
             let result = {
                 let mut on_progress = |path: &str, completed: usize, total: usize| {
-                    let _ = event_tx.send(ProgressEvent::PatchProgress {
+                    let _ = event_tx.send(WorkerEvent::PatchProgress {
                         path: path.to_string(),
                         completed,
                         total,
@@ -148,7 +148,7 @@ pub(crate) fn execute_task(
                     spawned.push(Task::ApplyDeleteManifest { install_root });
                 }
                 Err(err) => {
-                    let _ = event_tx.send(ProgressEvent::Failed {
+                    let _ = event_tx.send(WorkerEvent::Failed {
                         path: install_root.display().to_string(),
                         reason: err.to_string(),
                     });
@@ -158,7 +158,7 @@ pub(crate) fn execute_task(
         Task::ApplyDeleteManifest { install_root } => {
             let result = {
                 let mut on_progress = |path: &std::path::Path, completed: usize, total: usize| {
-                    let _ = event_tx.send(ProgressEvent::DeleteProgress {
+                    let _ = event_tx.send(WorkerEvent::DeleteProgress {
                         path: path.to_string_lossy().replace('\\', "/"),
                         completed,
                         total,
@@ -169,7 +169,7 @@ pub(crate) fn execute_task(
             match result {
                 Ok(()) => {}
                 Err(err) => {
-                    let _ = event_tx.send(ProgressEvent::Failed {
+                    let _ = event_tx.send(WorkerEvent::Failed {
                         path: install_root.display().to_string(),
                         reason: err.to_string(),
                     });

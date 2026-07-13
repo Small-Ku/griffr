@@ -102,7 +102,7 @@ on re-queue and fail the session when it exceeds a threshold (e.g. 3):
 
 ```rust
 if retry_count >= 3 {
-    progress_tx.send(ProgressEvent::Failed { path, reason: "MD5 mismatch after retries" });
+    event_tx.send(WorkerEvent::Failed { path, reason: "MD5 mismatch after retries" });
     return;
 }
 queue.push(Task::Download { retry_count: retry_count + 1, .. });
@@ -131,17 +131,52 @@ visible to the Verify stage.
 
 ## Progress Reporting
 
-Each task, on completion or failure, sends a typed event to a shared `mpsc`
-channel. The UI layer consumes this channel independently:
+Cross-crate APIs do not accept renderer callbacks. `griffr-common` exposes a
+cloneable `ProgressSender`; frontends consume its paired `ProgressReceiver` and
+own all mutable display state.
 
 ```rust
-enum ProgressEvent {
-    Downloaded { path: PathBuf, bytes: u64 },
-    Verified   { path: PathBuf, ok: bool },
-    Extracted  { path: PathBuf },
-    Failed     { path: PathBuf, reason: String },
+enum ProgressUpdate {
+    Started {
+        lane: ProgressLane,
+        unit: ProgressUnit,
+        total: Option<u64>,
+    },
+    Advanced {
+        lane: ProgressLane,
+        completed: u64,
+        total: Option<u64>,
+        item: Option<String>,
+    },
+    Finished { lane: ProgressLane },
+    Failed {
+        lane: ProgressLane,
+        item: Option<String>,
+        reason: String,
+    },
 }
 ```
 
-The pool never calls into the UI directly. This keeps the pool logic testable
-in isolation.
+A lane is a typed `(ProgressScope, ProgressPhase)` pair. Shared associated
+constants such as `ProgressLane::INTEGRITY_VERIFY` prevent producers and
+frontends from reconstructing identifiers independently. This keeps integrity,
+materialization, VFS, archive, and predownload streams distinct without
+embedding terminal labels or `indicatif` types in the common crate.
+
+The task pool uses a crate-private `WorkerEvent` stream. `TaskProgress` reduces
+transient byte and phase events into `ProgressUpdate` values and sends them
+through `ProgressSender`. The CLI renders on a dedicated consumer thread; a
+future GUI can consume the same updates into application state or await
+`ProgressReceiver::recv_async`.
+
+`TaskPoolResult` stores only `Vec<TaskOutcome>`. Download byte samples, extract
+byte samples, retries, and commit/patch/delete counters are consumed while the
+batch is running and are never retained as result history. Durable verified,
+downloaded, reused, extracted, and failed outcomes remain available for
+summaries and error reporting.
+
+Private, loop-local callbacks remain acceptable inside implementation details
+such as archive extraction, where they do not cross a crate boundary or own UI
+state. `scripts/rust_check_lib/architecture.py` enforces this boundary together
+with canonical lanes, lane/unit consistency, frontend neutrality, encapsulated
+channel types, and durable-only task-pool results.

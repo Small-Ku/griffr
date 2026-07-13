@@ -419,7 +419,7 @@ pub fn sorted_difference(left: &[String], right: &[String]) -> std::collections:
         .collect::<std::collections::BTreeSet<_>>()
 }
 
-pub fn collect_hash_mismatches(
+pub(super) fn collect_hash_mismatches(
     root: &Path,
     expected_checksums: &std::collections::BTreeMap<String, String>,
     progress_callback: Option<&dyn Fn(usize, usize, &str)>,

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use compio::dispatcher::Dispatcher;
 
 use super::super::fs_ops::{reuse_file, ReuseMethod};
-use super::super::types::{ProgressEvent, Task};
+use super::super::types::{Task, WorkerEvent};
 
 pub(super) struct DownloadExecInput {
     pub(super) url: String,
@@ -34,12 +34,12 @@ pub(super) fn execute_download(
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
     spawned: &mut Vec<Task>,
-    event_tx: &flume::Sender<ProgressEvent>,
+    event_tx: &flume::Sender<WorkerEvent>,
 ) {
     let event_tx_clone = event_tx.clone();
     let logical_path_clone = input.logical_path.clone();
     let expected_size_val = input.expected_size;
-    let _ = event_tx.send(ProgressEvent::DownloadStarted {
+    let _ = event_tx.send(WorkerEvent::DownloadStarted {
         path: input.logical_path.clone(),
         total_bytes: expected_size_val.unwrap_or(0),
     });
@@ -52,7 +52,7 @@ pub(super) fn execute_download(
         input.expected_size,
         download_progress_buffer_bytes,
         Some(move |bytes| {
-            let _ = event_tx_clone.send(ProgressEvent::DownloadedBytes {
+            let _ = event_tx_clone.send(WorkerEvent::DownloadedBytes {
                 path: logical_path_clone.clone(),
                 bytes,
                 total_bytes: expected_size_val.unwrap_or(bytes),
@@ -61,7 +61,7 @@ pub(super) fn execute_download(
     );
     match result {
         Ok(bytes) => {
-            let _ = event_tx.send(ProgressEvent::Downloaded {
+            let _ = event_tx.send(WorkerEvent::Downloaded {
                 path: input.logical_path.clone(),
                 bytes,
             });
@@ -87,7 +87,7 @@ pub(super) fn execute_download(
         }
         Err(err) => {
             if input.retry_count < input.max_retries {
-                let _ = event_tx.send(ProgressEvent::Retried {
+                let _ = event_tx.send(WorkerEvent::Retried {
                     path: input.logical_path.clone(),
                     reason: format!("download attempt {} failed: {}", input.retry_count + 1, err),
                 });
@@ -100,7 +100,7 @@ pub(super) fn execute_download(
                     retry_count: input.retry_count + 1,
                 });
             } else {
-                let _ = event_tx.send(ProgressEvent::Failed {
+                let _ = event_tx.send(WorkerEvent::Failed {
                     path: input.logical_path.clone(),
                     reason: format!("download failed after retries: {}", err),
                 });
@@ -122,7 +122,7 @@ pub(super) fn execute_ensure_file(
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
     spawned: &mut Vec<Task>,
-    event_tx: &flume::Sender<ProgressEvent>,
+    event_tx: &flume::Sender<WorkerEvent>,
 ) {
     let existing_ok = super::super::verify::build_issue(
         &input.dest,
@@ -132,7 +132,7 @@ pub(super) fn execute_ensure_file(
     )
     .is_none();
     if existing_ok && !input.prefer_reuse {
-        let _ = event_tx.send(ProgressEvent::Verified {
+        let _ = event_tx.send(WorkerEvent::Verified {
             path: input.logical_path,
             ok: true,
             issue: None,
@@ -158,7 +158,7 @@ pub(super) fn execute_ensure_file(
             input.allow_copy_fallback,
         ) {
             Ok(ReuseMethod::Hardlink) => {
-                let _ = event_tx.send(ProgressEvent::Hardlinked {
+                let _ = event_tx.send(WorkerEvent::Hardlinked {
                     path: input.dest.clone(),
                 });
                 if super::super::verify::build_issue(
@@ -169,7 +169,7 @@ pub(super) fn execute_ensure_file(
                 )
                 .is_none()
                 {
-                    let _ = event_tx.send(ProgressEvent::Verified {
+                    let _ = event_tx.send(WorkerEvent::Verified {
                         path: input.logical_path,
                         ok: true,
                         issue: None,
@@ -178,7 +178,7 @@ pub(super) fn execute_ensure_file(
                 }
             }
             Ok(ReuseMethod::Copy) => {
-                let _ = event_tx.send(ProgressEvent::Copied {
+                let _ = event_tx.send(WorkerEvent::Copied {
                     path: input.dest.clone(),
                 });
                 if super::super::verify::build_issue(
@@ -189,7 +189,7 @@ pub(super) fn execute_ensure_file(
                 )
                 .is_none()
                 {
-                    let _ = event_tx.send(ProgressEvent::Verified {
+                    let _ = event_tx.send(WorkerEvent::Verified {
                         path: input.logical_path,
                         ok: true,
                         issue: None,
@@ -229,12 +229,12 @@ pub(super) fn execute_ensure_file(
         &input.expected_md5,
         Some(input.expected_size),
     );
-    let _ = event_tx.send(ProgressEvent::Verified {
+    let _ = event_tx.send(WorkerEvent::Verified {
         path: input.logical_path.clone(),
         ok: false,
         issue,
     });
-    let _ = event_tx.send(ProgressEvent::Failed {
+    let _ = event_tx.send(WorkerEvent::Failed {
         path: input.logical_path,
         reason: reuse_error.unwrap_or_else(|| "no usable source candidates".to_string()),
     });

@@ -37,5 +37,6 @@ pub use paths::{
 };
 pub use progress::{
     PathAttemptKind, PathOutcome, PathOutcomeSummary, PathOutcomeTracker, PathReuseMethod,
-    RunningByteProgress,
+    ProgressLane, ProgressPhase, ProgressReceiver, ProgressScope, ProgressSender, ProgressUnit,
+    ProgressUpdate,
 };
