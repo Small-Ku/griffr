@@ -10,7 +10,7 @@ from typing import Any, Sequence
 
 from tree_sitter import Node
 
-from . import baseline, lints, module_graph, name_resolution, tools, workspace
+from . import architecture, baseline, lints, module_graph, name_resolution, tools, workspace
 from .models import (
     CONFIDENCE_ORDER,
     CrateTarget,
@@ -289,6 +289,8 @@ class Checker:
         module_graph.build(self)
         resolver = name_resolution.analyze(self)
         lints.run(self, resolver)
+        architecture.run(self)
+        architecture.run(self)
         self.parsed_file_count = len(self.sources)
         self.free_analysis_memory()
         tools.run(self)

@@ -24,7 +24,10 @@ def run(host: LintHost, resolver: NameResolver) -> None:
             _check_enum_variant_names(host, resolver, module)
             _check_derivable_default(host, resolver, module)
             _check_manual_is_multiple_of(host, resolver, module)
-            _check_import_sorting(host, module)
+            _check_collapsible_match(host, resolver, module)
+            # rustfmt is authoritative for import ordering; the lexical fallback
+            # produced unstable false positives across valid rustfmt groupings.
+            # _check_import_sorting(host, module)
 
 
 def _item_attributes(module: ModuleUnit, item: Node) -> tuple[str, ...]:
@@ -340,3 +343,72 @@ def _check_import_sorting(host: LintHost, module: ModuleUnit) -> None:
                 f"lexical: {' | '.join(sorted(spellings, key=str.casefold))}",
             ),
         )
+
+
+def _check_collapsible_match(
+    host: LintHost, resolver: NameResolver, module: ModuleUnit
+) -> None:
+    for node in walk_named(module.body, skip_inline_modules=True):
+        if node.type != "match_expression":
+            continue
+        body = node.child_by_field_name("body")
+        if body is None or body.type != "match_block":
+            continue
+        for arm in body.named_children:
+            if arm.type != "match_arm":
+                continue
+            
+            pattern = arm.child_by_field_name("pattern")
+            if pattern is None:
+                continue
+            
+            if any(c.type == "if" for c in pattern.children):
+                continue
+                
+            value = arm.child_by_field_name("value")
+            if value is None:
+                continue
+                
+            if value.type != "block":
+                continue
+                
+            statements = [
+                c for c in value.named_children
+                if c.type not in {"attribute_item", "line_comment", "block_comment"}
+            ]
+            if len(statements) != 1:
+                continue
+                
+            statement = statements[0]
+            if_node = None
+            if statement.type == "if_expression":
+                if_node = statement
+            elif statement.type == "expression_statement" and len(statement.named_children) == 1:
+                child = statement.named_children[0]
+                if child.type == "if_expression":
+                    if_node = child
+                    
+            if if_node is None:
+                continue
+
+            cond = if_node.child_by_field_name("condition")
+            if cond is not None and cond.type == "let_condition":
+                continue
+                
+            if if_node.child_by_field_name("alternative") is not None:
+                continue
+                
+            host.add(
+                "CLP004",
+                "warning",
+                "This `if` statement inside the match arm can be collapsed into the outer `match` using a match guard",
+                source=module.source,
+                node=if_node,
+                confidence="probable",
+                hint="Collapse the nested if block into a match guard on the match arm (e.g., `Pattern if condition => { ... }`).",
+                evidence=(
+                    "Match arm contains a block with a single `if` statement and no `else` block.",
+                    f"cfg: {resolver.condition_for_node(module, if_node).describe()}",
+                ),
+            )
+

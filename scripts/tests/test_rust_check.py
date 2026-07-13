@@ -219,6 +219,208 @@ class RustCheckTests(unittest.TestCase):
             self.codes(self.run_checker(root, min_confidence="probable")),
         )
 
+    def test_public_progress_callback_is_rejected(self) -> None:
+        root = self.make_workspace(
+            "pub fn run<F: FnMut(u64)>(progress_callback: F) {}\n"
+            "fn local(progress_callback: impl FnMut(u64)) {}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "PRG001")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("run", diagnostics[0].message)
+
+    def test_progress_lane_must_use_shared_constants(self) -> None:
+        root = self.make_workspace(
+            "mod progress;\nmod consumer;\n",
+            {
+                "src/progress.rs": (
+                    "pub enum ProgressScope { Integrity }\n"
+                    "pub enum ProgressPhase { Verify }\n"
+                    "pub struct ProgressLane;\n"
+                    "impl ProgressLane {\n"
+                    "    pub const INTEGRITY_VERIFY: Self = Self::new(ProgressScope::Integrity, ProgressPhase::Verify);\n"
+                    "    pub const fn new(_: ProgressScope, _: ProgressPhase) -> Self { Self }\n"
+                    "}\n"
+                ),
+                "src/consumer.rs": (
+                    "use crate::progress::{ProgressLane, ProgressPhase, ProgressScope};\n"
+                    "fn bad() { let _ = ProgressLane::new(ProgressScope::Integrity, ProgressPhase::Verify); }\n"
+                    "fn good() { let _ = ProgressLane::INTEGRITY_VERIFY; }\n"
+                ),
+            },
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "PRG002")
+        self.assertEqual(1, len(diagnostics))
+
+    def test_transient_worker_events_cannot_escape_in_results(self) -> None:
+        root = self.make_workspace(
+            "pub enum WorkerEvent { DownloadedBytes { bytes: u64 }, PatchProgress }\n"
+            "pub struct TaskPoolResult { pub events: Vec<WorkerEvent> }\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "PRG003")
+        self.assertEqual(1, len(diagnostics))
+
+    def test_durable_task_outcomes_are_allowed_in_results(self) -> None:
+        root = self.make_workspace(
+            "pub enum WorkerEvent { DownloadedBytes { bytes: u64 } }\n"
+            "pub enum TaskOutcome { Downloaded { bytes: u64 } }\n"
+            "pub struct TaskPoolResult { pub outcomes: Vec<TaskOutcome> }\n"
+        )
+        self.assertNotIn("PRG003", self.codes(self.run_checker(root)))
+
+    def test_common_crate_cannot_depend_on_indicatif(self) -> None:
+        root = self.make_workspace(
+            "pub struct ProgressUpdate;\n",
+            manifest=(
+                '[package]\nname = "griffr-common"\nversion = "0.1.0"\nedition = "2021"\n'
+                '[dependencies]\nindicatif = "0.17"\n'
+            ),
+        )
+        self.assertIn("PRG004", self.codes(self.run_checker(root)))
+
+
+    def test_exported_progress_callback_is_reported(self) -> None:
+        root = self.make_workspace(
+            "pub fn run(progress_callback: Option<impl FnMut(u64)>) {}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "PRG001")
+        self.assertEqual(1, len(diagnostics))
+        self.assertEqual("definite", diagnostics[0].confidence)
+
+    def test_callback_in_private_module_is_allowed(self) -> None:
+        root = self.make_workspace(
+            "mod internal;\n",
+            {
+                "src/internal.rs": (
+                    "pub fn run(progress_callback: Option<impl FnMut(u64)>) {}\n"
+                )
+            },
+        )
+        self.assertNotIn("PRG001", self.codes(self.run_checker(root)))
+
+    def test_progress_protocol_package_must_be_renderer_neutral(self) -> None:
+        root = self.make_workspace(
+            "pub enum ProgressUpdate { Tick }\n"
+            "pub struct ProgressSender;\n",
+            manifest=(
+                '[package]\nname = "sample"\nversion = "0.1.0"\nedition = "2021"\n'
+                '[dependencies]\nindicatif = "0.17"\n'
+            ),
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "PRG004")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("indicatif", diagnostics[0].message)
+
+    def test_raw_progress_channel_in_public_api_is_reported(self) -> None:
+        root = self.make_workspace(
+            "pub enum ProgressUpdate { Tick }\n"
+            "pub struct ProgressSender { tx: Option<flume::Sender<ProgressUpdate>> }\n"
+            "pub fn raw_receiver() -> flume::Receiver<ProgressUpdate> {\n"
+            "    unimplemented!()\n"
+            "}\n",
+            manifest=(
+                '[package]\nname = "sample"\nversion = "0.1.0"\nedition = "2021"\n'
+                '[dependencies]\nflume = "0.11"\n'
+            ),
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "PRG005")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("Raw progress channel", diagnostics[0].message)
+
+    def test_private_raw_channel_field_inside_sender_wrapper_is_allowed(self) -> None:
+        root = self.make_workspace(
+            "pub enum ProgressUpdate { Tick }\n"
+            "pub struct ProgressSender { tx: Option<flume::Sender<ProgressUpdate>> }\n",
+            manifest=(
+                '[package]\nname = "sample"\nversion = "0.1.0"\nedition = "2021"\n'
+                '[dependencies]\nflume = "0.11"\n'
+            ),
+        )
+        self.assertNotIn("PRG005", self.codes(self.run_checker(root)))
+
+    def test_conflicting_units_for_same_progress_lane_are_reported(self) -> None:
+        root = self.make_workspace(
+            "enum ProgressUnit { Items, Bytes }\n"
+            "struct ProgressLane;\n"
+            "struct ProgressRoute { lane: ProgressLane, unit: ProgressUnit }\n"
+            "fn routes(lane: ProgressLane) {\n"
+            "    let _items = ProgressRoute { lane, unit: ProgressUnit::Items };\n"
+            "    let _bytes = ProgressRoute { lane, unit: ProgressUnit::Bytes };\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "PRG006")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("conflicting units", diagnostics[0].message)
+
+    def test_distinct_progress_lanes_can_use_distinct_units(self) -> None:
+        root = self.make_workspace(
+            "enum ProgressUnit { Items, Bytes }\n"
+            "struct ProgressLane;\n"
+            "struct ProgressRoute { lane: ProgressLane, unit: ProgressUnit }\n"
+            "fn routes(item_lane: ProgressLane, byte_lane: ProgressLane) {\n"
+            "    let _items = ProgressRoute { lane: item_lane, unit: ProgressUnit::Items };\n"
+            "    let _bytes = ProgressRoute { lane: byte_lane, unit: ProgressUnit::Bytes };\n"
+            "}\n"
+        )
+        self.assertNotIn("PRG006", self.codes(self.run_checker(root)))
+
+    def test_collapsible_match_is_reported(self) -> None:
+        root = self.make_workspace(
+            "fn main() {\n"
+            "    match x {\n"
+            "        Some(y) => {\n"
+            "            if y > 0 {\n"
+            "                println!(\"{}\", y);\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        self.assertIn("CLP004", self.codes(self.run_checker(root)))
+
+    def test_collapsible_match_negatives(self) -> None:
+        # 1. Has guard already
+        root1 = self.make_workspace(
+            "fn main() {\n"
+            "    match x {\n"
+            "        Some(y) if y > 0 => {\n"
+            "            println!(\"{}\", y);\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        self.assertNotIn("CLP004", self.codes(self.run_checker(root1)))
+
+        # 2. Has else branch
+        root2 = self.make_workspace(
+            "fn main() {\n"
+            "    match x {\n"
+            "        Some(y) => {\n"
+            "            if y > 0 {\n"
+            "                println!(\"{}\", y);\n"
+            "            } else {\n"
+            "                other();\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        self.assertNotIn("CLP004", self.codes(self.run_checker(root2)))
+
+        # 3. Has multiple statements in block
+        root3 = self.make_workspace(
+            "fn main() {\n"
+            "    match x {\n"
+            "        Some(y) => {\n"
+            "            let z = y;\n"
+            "            if z > 0 {\n"
+            "                println!(\"{}\", z);\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+        )
+        self.assertNotIn("CLP004", self.codes(self.run_checker(root3)))
+
 
 if __name__ == "__main__":
     unittest.main()

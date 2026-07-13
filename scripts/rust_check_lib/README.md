@@ -17,7 +17,9 @@ The default policy favors recall:
 - warnings make the command exit non-zero (`--fail-on warning`);
 - every inferred diagnostic includes confidence, evidence, and limitations;
 - cfg compatibility, module reachability, imports/re-exports, selected macro
-  output, lexical scopes, and direct-call arity are analyzed across files.
+  output, lexical scopes, and direct-call arity are analyzed across files;
+- repository architecture checks enforce frontend-neutral progress channels, canonical
+  progress lanes, and durable-only task-pool results.
 
 Useful policy overrides:
 

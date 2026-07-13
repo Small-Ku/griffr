@@ -112,19 +112,16 @@ fn layout_node_children(
 
         match child.layout.sizing {
             SizingPolicy::Flex { .. } => {}
-            SizingPolicy::AspectRatio(ratio) => {
-                if ratio > 0.0 {
-                    match parent_dir {
-                        LayoutDirection::Row => {
-                            child_bounds.size.height = (child_bounds.size.width / ratio)
-                                .min(content.size.height - margin * 2.0);
-                        }
-                        LayoutDirection::Column => {
-                            child_bounds.size.height = child_bounds.size.width / ratio;
-                        }
-                    }
+            SizingPolicy::AspectRatio(ratio) if ratio > 0.0 => match parent_dir {
+                LayoutDirection::Row => {
+                    child_bounds.size.height =
+                        (child_bounds.size.width / ratio).min(content.size.height - margin * 2.0);
                 }
-            }
+                LayoutDirection::Column => {
+                    child_bounds.size.height = child_bounds.size.width / ratio;
+                }
+            },
+            SizingPolicy::AspectRatio(_) => {}
             SizingPolicy::Fixed(size) => {
                 child_bounds.size = size;
             }
