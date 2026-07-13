@@ -45,7 +45,8 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
         .map(|n| {
             let parent = n.parent;
             if parent >= 0 {
-                quote! { Some(::griffr_gui::ui::WidgetId(#parent as u16)) }
+                let u_parent = parent as u16;
+                quote! { Some(::griffr_gui::ui::WidgetId(#u_parent)) }
             } else {
                 quote! { None }
             }
@@ -126,10 +127,16 @@ pub(crate) fn expand_widget_tree(root: ItemStruct, flat: Vec<FlatNode>) -> Token
                 .padding
                 .map(|value| quote! { #value })
                 .unwrap_or_else(|| quote! { ::griffr_gui::ui::LayoutSpec::DEFAULT_PADDING });
+            let parent_opt = if parent >= 0 {
+                let u_parent = parent as u16;
+                quote! { Some(::griffr_gui::ui::WidgetId(#u_parent)) }
+            } else {
+                quote! { None }
+            };
             quote! {
                 ::griffr_gui::ui::WidgetNode {
                     id: ::griffr_gui::ui::WidgetId(#id),
-                    parent: (#parent >= 0).then_some(::griffr_gui::ui::WidgetId(#parent as u16)),
+                    parent: #parent_opt,
                     hoverable: #hoverable,
                     clickable: #clickable,
                     scrollable: #scrollable,
