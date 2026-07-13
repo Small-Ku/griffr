@@ -101,11 +101,18 @@ pub async fn run_integrity_pool(
                 .push(path.clone());
         }
     }
-    let tracked_total_bytes: u64 = entries
+    let mut expected_download_bytes = entries
         .iter()
-        .map(|entry| entry.size)
-        .sum::<u64>()
-        .saturating_add(extra_tasks.iter().map(task_expected_bytes).sum::<u64>());
+        .map(|entry| (entry.path.clone(), entry.size))
+        .collect::<HashMap<_, _>>();
+    for task in &extra_tasks {
+        if let Some(path) = task_progress_path(task) {
+            let expected_bytes = task_expected_bytes(task);
+            if expected_bytes > 0 {
+                expected_download_bytes.insert(path.to_owned(), expected_bytes);
+            }
+        }
+    }
 
     let mut tasks = entries
         .iter()
@@ -139,9 +146,13 @@ pub async fn run_integrity_pool(
         .collect::<Vec<_>>();
     tasks.extend(extra_tasks);
     let total = tasks.len();
+    if let Some(ref cb) = progress_callback {
+        cb(0, total, "");
+    }
     let mut issues = Vec::new();
     let mut finished = 0usize;
     let mut download_progress = RunningByteProgress::new();
+    let mut discovered_download_totals = RunningByteProgress::new();
     let mut outcomes = PathOutcomeTracker::new();
     let mut failed_paths = Vec::new();
 
@@ -150,10 +161,10 @@ pub async fn run_integrity_pool(
             if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
                 return;
             }
+            finished = finished.saturating_add(1);
             if let Some(ref cb) = progress_callback {
                 cb(finished, total, path);
             }
-            finished += 1;
             outcomes.record_verified(path, *ok);
             if tracked_paths.contains(path) {
                 if let Some(issue) = issue.clone() {
@@ -161,15 +172,40 @@ pub async fn run_integrity_pool(
                 }
             }
         }
-        ProgressEvent::DownloadedBytes { path, .. } => {
+        ProgressEvent::DownloadStarted { path, total_bytes } => {
+            if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
+                return;
+            }
+            let expected_bytes = if *total_bytes > 0 {
+                *total_bytes
+            } else {
+                expected_download_bytes.get(path).copied().unwrap_or(0)
+            };
+            discovered_download_totals.record(path, expected_bytes);
+            if let Some(ref cb) = download_progress_callback {
+                cb(
+                    download_progress.total_bytes(),
+                    discovered_download_totals.total_bytes(),
+                    path,
+                );
+            }
+        }
+        ProgressEvent::DownloadedBytes {
+            path, total_bytes, ..
+        } => {
             if !tracked_paths.contains(path) && !extra_tracked_paths.contains(path) {
                 return;
             }
             let running_downloaded_bytes = download_progress
                 .handle_download_event(event)
                 .expect("download event");
+            discovered_download_totals.record(path, *total_bytes);
             if let Some(ref cb) = download_progress_callback {
-                cb(running_downloaded_bytes, tracked_total_bytes, path);
+                cb(
+                    running_downloaded_bytes,
+                    discovered_download_totals.total_bytes(),
+                    path,
+                );
             }
         }
         ProgressEvent::Downloaded { path, bytes } => {
@@ -180,11 +216,14 @@ pub async fn run_integrity_pool(
             let running_downloaded_bytes = download_progress
                 .handle_download_event(event)
                 .expect("download event");
-            if let Some(ref cb) = progress_callback {
-                cb(finished, total, path);
-            }
+            let expected_bytes = expected_download_bytes.get(path).copied().unwrap_or(*bytes);
+            discovered_download_totals.record(path, expected_bytes);
             if let Some(ref cb) = download_progress_callback {
-                cb(running_downloaded_bytes, tracked_total_bytes, path);
+                cb(
+                    running_downloaded_bytes,
+                    discovered_download_totals.total_bytes(),
+                    path,
+                );
             }
         }
         ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {
@@ -201,9 +240,6 @@ pub async fn run_integrity_pool(
         }
         ProgressEvent::Retried { path, reason } => {
             tracing::debug!("retrying {}: {}", path, reason);
-            if let Some(ref cb) = progress_callback {
-                cb(finished, total, path);
-            }
         }
         ProgressEvent::Failed { path, reason } => {
             tracing::warn!("integrity task failed for {}: {}", path, reason);

@@ -5,6 +5,7 @@ use anyhow::Result;
 use griffr_common::runtime::remove_dir_all;
 
 use super::local::resolve_install_path;
+use crate::progress::ActivityProgress;
 use crate::ui;
 use crate::GlobalOptions;
 
@@ -47,7 +48,12 @@ pub async fn uninstall(
         Err(err) => return Err(anyhow::Error::from(err)),
     };
     if exists {
-        remove_dir_all(target.clone()).await?;
+        let progress = ActivityProgress::new(format!("Deleting {}", target.display()));
+        if let Err(err) = remove_dir_all(target.clone()).await {
+            progress.fail();
+            return Err(err.into());
+        }
+        progress.finish();
         ui::print_success(format!("Deleted {}", target.display()));
     } else {
         ui::print_info("Target path does not exist; nothing to remove.");

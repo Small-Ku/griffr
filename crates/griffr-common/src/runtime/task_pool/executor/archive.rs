@@ -48,6 +48,10 @@ pub(super) fn execute_install_archive(
             let event_tx_clone = event_tx.clone();
             let logical_path_clone = part.logical_path.clone();
             let expected_size_val = part.expected_size;
+            let _ = event_tx.send(ProgressEvent::DownloadStarted {
+                path: part.logical_path.clone(),
+                total_bytes: expected_size_val,
+            });
             match super::super::download::do_download(
                 io_dispatcher,
                 user_agent,
@@ -184,7 +188,14 @@ pub(super) fn execute_extract_archive(
                 let _ = std::fs::remove_dir_all(&staging_dir);
                 return Err(err);
             }
-            if let Err(err) = commit_staged_extract(&staging_dir, &dest) {
+            let mut on_commit = |path: &std::path::Path, completed: usize, total: usize| {
+                let _ = event_tx.send(ProgressEvent::ArchiveCommitProgress {
+                    path: path.to_string_lossy().replace('\\', "/"),
+                    completed,
+                    total,
+                });
+            };
+            if let Err(err) = commit_staged_extract(&staging_dir, &dest, Some(&mut on_commit)) {
                 let _ = std::fs::remove_dir_all(&staging_dir);
                 return Err(err);
             }

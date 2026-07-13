@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use griffr_common::api::crypto;
 
 use super::utils::*;
+use crate::progress::StepProgress;
 use crate::{GlobalOptions, SnapshotHashScope, VfsDiffAgainst};
 use griffr_common::runtime::{
     persistent_path, resource_manifest_filename, streaming_assets_path, ResourceManifestKind,
@@ -15,6 +16,7 @@ pub(super) async fn snapshot_root_state(
     against: VfsDiffAgainst,
     key: &str,
     hash_check: bool,
+    hash_progress_callback: Option<&dyn Fn(usize, usize, &str)>,
 ) -> ResourceRootSnapshot {
     if !root.is_dir() {
         return ResourceRootSnapshot {
@@ -165,7 +167,7 @@ pub(super) async fn snapshot_root_state(
     let hash_mismatches = if hash_check {
         expected_with_checksums
             .as_ref()
-            .map(|map| collect_hash_mismatches(&root, &map.entries))
+            .map(|map| collect_hash_mismatches(&root, &map.entries, hash_progress_callback))
             .unwrap_or_default()
     } else {
         Vec::new()
@@ -296,7 +298,7 @@ pub async fn snapshot_resource_state(
     path: PathBuf,
     output: Option<PathBuf>,
     hash_check: SnapshotHashScope,
-    _opts: GlobalOptions,
+    opts: GlobalOptions,
 ) -> Result<()> {
     let source_path = if path.is_absolute() {
         path.clone()
@@ -306,23 +308,48 @@ pub async fn snapshot_resource_state(
     let endfield_data_root = resolve_endfield_data_root(&source_path)?;
     let key = crypto::RES_INDEX_KEY;
 
+    let persistent_hash_check = matches!(
+        hash_check,
+        SnapshotHashScope::Persistent | SnapshotHashScope::All
+    );
+    let persistent_progress = StepProgress::new("snapshot.persistent-hash", opts.verbose);
+    let persistent_progress_cb = |completed, total, file: &str| {
+        persistent_progress.update_count(completed, total, file);
+    };
+    let persistent_hash_progress: Option<&dyn Fn(usize, usize, &str)> = if persistent_hash_check {
+        Some(&persistent_progress_cb)
+    } else {
+        None
+    };
     let persistent = snapshot_root_state(
         persistent_path(&endfield_data_root),
         VfsDiffAgainst::Persistent,
         key,
-        matches!(
-            hash_check,
-            SnapshotHashScope::Persistent | SnapshotHashScope::All
-        ),
+        persistent_hash_check,
+        persistent_hash_progress,
     )
     .await;
+    persistent_progress.finish();
+
+    let streaming_hash_check = matches!(hash_check, SnapshotHashScope::All);
+    let streaming_progress = StepProgress::new("snapshot.streamingassets-hash", opts.verbose);
+    let streaming_progress_cb = |completed, total, file: &str| {
+        streaming_progress.update_count(completed, total, file);
+    };
+    let streaming_hash_progress: Option<&dyn Fn(usize, usize, &str)> = if streaming_hash_check {
+        Some(&streaming_progress_cb)
+    } else {
+        None
+    };
     let streamingassets = snapshot_root_state(
         streaming_assets_path(&endfield_data_root),
         VfsDiffAgainst::Streamingassets,
         key,
-        matches!(hash_check, SnapshotHashScope::All),
+        streaming_hash_check,
+        streaming_hash_progress,
     )
     .await;
+    streaming_progress.finish();
 
     let snapshot = ResourceStateSnapshot {
         schema_version: 1,

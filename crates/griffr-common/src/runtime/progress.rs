@@ -140,10 +140,15 @@ impl RunningByteProgress {
         self.total_bytes
     }
 
+    pub fn record_max(&mut self, key: &str, bytes: u64) -> u64 {
+        let old_bytes = self.bytes_by_key.get(key).copied().unwrap_or(0);
+        self.record(key, old_bytes.max(bytes))
+    }
+
     pub fn handle_download_event(&mut self, event: &ProgressEvent) -> Option<u64> {
         match event {
             ProgressEvent::DownloadedBytes { path, bytes, .. }
-            | ProgressEvent::Downloaded { path, bytes } => Some(self.record(path, *bytes)),
+            | ProgressEvent::Downloaded { path, bytes } => Some(self.record_max(path, *bytes)),
             _ => None,
         }
     }
@@ -169,6 +174,15 @@ mod tests {
         assert_eq!(progress.record("a", 15), 15);
         assert_eq!(progress.record("b", 7), 22);
         assert_eq!(progress.total_bytes(), 22);
+    }
+
+    #[test]
+    fn max_record_does_not_regress_on_download_retry() {
+        let mut progress = RunningByteProgress::new();
+
+        assert_eq!(progress.record_max("a", 90), 90);
+        assert_eq!(progress.record_max("a", 10), 90);
+        assert_eq!(progress.record_max("a", 100), 100);
     }
 
     #[test]

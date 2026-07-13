@@ -257,6 +257,9 @@ impl MultiVolumeExtractor {
             }
         }
         let mut extracted_bytes = 0u64;
+        if let Some(ref mut cb) = progress_callback {
+            cb(0, total_extract_bytes);
+        }
 
         // Extract all files
         for i in 0..archive.len() {

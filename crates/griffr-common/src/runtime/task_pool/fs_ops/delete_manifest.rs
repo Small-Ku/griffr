@@ -18,7 +18,10 @@ fn parse_delete_files_entry(line: &str) -> Result<Option<PathBuf>> {
     )?))
 }
 
-pub(crate) fn apply_delete_files_manifest(dest_root: &Path) -> Result<()> {
+pub(crate) fn apply_delete_files_manifest(
+    dest_root: &Path,
+    mut progress_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
+) -> Result<()> {
     let manifest_path = dest_root.join(DELETE_FILES_MANIFEST_NAME);
     if !manifest_path.is_file() {
         return Ok(());
@@ -28,18 +31,26 @@ pub(crate) fn apply_delete_files_manifest(dest_root: &Path) -> Result<()> {
         path: manifest_path.clone(),
         source: e,
     })?;
-    for (line_idx, line) in manifest.lines().enumerate() {
-        let Some(relative) = parse_delete_files_entry(line).map_err(|e| {
-            Error::Config(format!(
-                "Failed to parse {} line {}: {e}",
+    let entries = manifest
+        .lines()
+        .enumerate()
+        .filter_map(|(line_idx, line)| match parse_delete_files_entry(line) {
+            Ok(Some(relative)) => Some(Ok(relative)),
+            Ok(None) => None,
+            Err(err) => Some(Err(Error::Config(format!(
+                "Failed to parse {} line {}: {err}",
                 DELETE_FILES_MANIFEST_NAME,
                 line_idx + 1
-            ))
-        })?
-        else {
-            continue;
-        };
-
+            )))),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let total_entries = entries.len();
+    if total_entries > 0 {
+        if let Some(cb) = progress_callback.as_deref_mut() {
+            cb(Path::new("."), 0, total_entries);
+        }
+    }
+    for (index, relative) in entries.iter().enumerate() {
         let target_path = dest_root.join(relative);
         match std::fs::symlink_metadata(&target_path) {
             Ok(meta) => {
@@ -63,6 +74,9 @@ pub(crate) fn apply_delete_files_manifest(dest_root: &Path) -> Result<()> {
                 });
             }
         }
+        if let Some(cb) = progress_callback.as_deref_mut() {
+            cb(relative, index + 1, total_entries);
+        }
     }
 
     std::fs::remove_file(&manifest_path).map_err(|e| Error::RemoveFailed {
@@ -74,7 +88,7 @@ pub(crate) fn apply_delete_files_manifest(dest_root: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::{
         apply_delete_files_manifest, parse_delete_files_entry, DELETE_FILES_MANIFEST_NAME,
@@ -111,7 +125,22 @@ mod tests {
         )
         .unwrap();
 
-        apply_delete_files_manifest(&dest_root).unwrap();
+        let mut progress = Vec::new();
+        let mut on_progress = |path: &Path, completed: usize, total: usize| {
+            progress.push((path.to_path_buf(), completed, total));
+        };
+        apply_delete_files_manifest(&dest_root, Some(&mut on_progress)).unwrap();
+        assert_eq!(
+            progress,
+            vec![
+                (PathBuf::from("."), 0, 1),
+                (
+                    PathBuf::from("Endfield_Data/Plugins/x86_64/libHAPI.dll"),
+                    1,
+                    1,
+                ),
+            ]
+        );
         assert!(!obsolete_path.exists());
         assert!(!dest_root.join(DELETE_FILES_MANIFEST_NAME).exists());
     }

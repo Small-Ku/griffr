@@ -39,6 +39,10 @@ pub(super) fn execute_download(
     let event_tx_clone = event_tx.clone();
     let logical_path_clone = input.logical_path.clone();
     let expected_size_val = input.expected_size;
+    let _ = event_tx.send(ProgressEvent::DownloadStarted {
+        path: input.logical_path.clone(),
+        total_bytes: expected_size_val.unwrap_or(0),
+    });
     let result = super::super::download::do_download(
         io_dispatcher,
         user_agent,

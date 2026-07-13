@@ -9,7 +9,7 @@ use crate::api::types::GameFileEntry;
 use crate::api::ApiClient;
 use crate::runtime::{
     build_cdn_file_url, files_base_url, is_launcher_metadata_path, logical_path_from_root,
-    PathOutcomeTracker, PathReuseMethod,
+    PathOutcomeTracker, PathReuseMethod, RunningByteProgress,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -134,24 +134,55 @@ pub async fn materialize_game_files_with_pool(
     }
 
     let total = tasks.len();
-    let total_bytes: u64 = manifest
-        .iter()
-        .filter(|entry| !is_launcher_metadata_path(&entry.path))
-        .map(|entry| entry.size)
-        .sum();
+    if let Some(ref cb) = progress_callback {
+        cb(0, total, "");
+    }
     let mut finished_stream = 0usize;
-    let mut downloaded_bytes = 0u64;
+    let mut download_progress = RunningByteProgress::new();
+    let mut discovered_download_totals = RunningByteProgress::new();
     let mut progress_event_cb = |event: &crate::runtime::task_pool::ProgressEvent| match event {
         crate::runtime::task_pool::ProgressEvent::Verified { path, .. } => {
+            finished_stream = finished_stream.saturating_add(1);
             if let Some(ref cb) = progress_callback {
                 cb(finished_stream, total, path);
             }
-            finished_stream = finished_stream.saturating_add(1);
+        }
+        crate::runtime::task_pool::ProgressEvent::DownloadStarted { path, total_bytes } => {
+            discovered_download_totals.record(path, *total_bytes);
+            if let Some(ref cb) = download_progress_callback {
+                cb(
+                    download_progress.total_bytes(),
+                    discovered_download_totals.total_bytes(),
+                    path,
+                );
+            }
+        }
+        crate::runtime::task_pool::ProgressEvent::DownloadedBytes {
+            path, total_bytes, ..
+        } => {
+            download_progress
+                .handle_download_event(event)
+                .expect("download event");
+            discovered_download_totals.record(path, *total_bytes);
+            if let Some(ref cb) = download_progress_callback {
+                cb(
+                    download_progress.total_bytes(),
+                    discovered_download_totals.total_bytes(),
+                    path,
+                );
+            }
         }
         crate::runtime::task_pool::ProgressEvent::Downloaded { path, bytes } => {
-            downloaded_bytes = downloaded_bytes.saturating_add(*bytes);
+            download_progress
+                .handle_download_event(event)
+                .expect("download event");
+            discovered_download_totals.record(path, *bytes);
             if let Some(ref cb) = download_progress_callback {
-                cb(downloaded_bytes, total_bytes, path);
+                cb(
+                    download_progress.total_bytes(),
+                    discovered_download_totals.total_bytes(),
+                    path,
+                );
             }
         }
         _ => {}

@@ -422,22 +422,30 @@ pub fn sorted_difference(left: &[String], right: &[String]) -> std::collections:
 pub fn collect_hash_mismatches(
     root: &Path,
     expected_checksums: &std::collections::BTreeMap<String, String>,
+    progress_callback: Option<&dyn Fn(usize, usize, &str)>,
 ) -> Vec<VfsHashMismatch> {
+    let total = expected_checksums.len();
+    if let Some(cb) = progress_callback {
+        cb(0, total, "");
+    }
     let mut mismatches = Vec::new();
+    let mut completed = 0usize;
     for (rel_path, expected_md5) in expected_checksums {
         let file_path = root.join(rel_path.replace('/', "\\"));
-        if !file_path.is_file() {
-            continue;
+        if file_path.is_file() {
+            if let Ok(actual_md5) = file_md5(&file_path) {
+                if actual_md5 != *expected_md5 {
+                    mismatches.push(VfsHashMismatch {
+                        path: rel_path.clone(),
+                        expected_md5: expected_md5.clone(),
+                        actual_md5,
+                    });
+                }
+            }
         }
-        let Ok(actual_md5) = file_md5(&file_path) else {
-            continue;
-        };
-        if actual_md5 != *expected_md5 {
-            mismatches.push(VfsHashMismatch {
-                path: rel_path.clone(),
-                expected_md5: expected_md5.clone(),
-                actual_md5,
-            });
+        completed = completed.saturating_add(1);
+        if let Some(cb) = progress_callback {
+            cb(completed, total, rel_path);
         }
     }
     mismatches

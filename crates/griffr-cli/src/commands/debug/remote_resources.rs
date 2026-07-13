@@ -8,6 +8,7 @@ use griffr_common::runtime::{resource_manifest_url, ResourceManifestKind};
 use serde_json::json;
 
 use super::utils::emit_json;
+use crate::progress::ActivityProgress;
 use crate::GlobalOptions;
 
 pub async fn fetch_game_files(
@@ -90,10 +91,16 @@ pub async fn fetch_file(
 
     let base_url = pkg.file_path.trim_end_matches('/');
     let url = format!("{}/{}", base_url, entry.path);
-    api_client
+    let progress = ActivityProgress::new(format!("debug.fetch-file {}", entry.path));
+    let download_result = api_client
         .download_file_with_verify(&url, &output, &entry.md5)
         .await
-        .with_context(|| format!("Failed to download {} to {}", entry.path, output.display()))?;
+        .with_context(|| format!("Failed to download {} to {}", entry.path, output.display()));
+    if let Err(err) = download_result {
+        progress.fail();
+        return Err(err);
+    }
+    progress.finish();
 
     println!("downloaded={} output={}", entry.path, output.display());
     Ok(())

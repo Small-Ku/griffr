@@ -133,7 +133,17 @@ pub(crate) fn execute_task(
             event_tx,
         ),
         Task::ApplyExtractedVfsPatchManifest { install_root } => {
-            match apply_extracted_vfs_patch_manifest(&install_root) {
+            let result = {
+                let mut on_progress = |path: &str, completed: usize, total: usize| {
+                    let _ = event_tx.send(ProgressEvent::PatchProgress {
+                        path: path.to_string(),
+                        completed,
+                        total,
+                    });
+                };
+                apply_extracted_vfs_patch_manifest(&install_root, Some(&mut on_progress))
+            };
+            match result {
                 Ok(()) => {
                     spawned.push(Task::ApplyDeleteManifest { install_root });
                 }
@@ -146,7 +156,17 @@ pub(crate) fn execute_task(
             }
         }
         Task::ApplyDeleteManifest { install_root } => {
-            match apply_delete_files_manifest(&install_root) {
+            let result = {
+                let mut on_progress = |path: &std::path::Path, completed: usize, total: usize| {
+                    let _ = event_tx.send(ProgressEvent::DeleteProgress {
+                        path: path.to_string_lossy().replace('\\', "/"),
+                        completed,
+                        total,
+                    });
+                };
+                apply_delete_files_manifest(&install_root, Some(&mut on_progress))
+            };
+            match result {
                 Ok(()) => {}
                 Err(err) => {
                     let _ = event_tx.send(ProgressEvent::Failed {

@@ -7,7 +7,10 @@ use griffr_common::runtime::task_pool::{ProgressEvent, Task, TaskPoolConfig, Tas
 use griffr_common::runtime::{DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR};
 
 use super::local::{detect_local_install, LocalInstall};
-use crate::progress::{ByteProgressTracker, StepProgress};
+use crate::progress::{
+    ArchivePipelineProgress, CountAndByteProgress, DownloadProgressTracker,
+    VerifyTaskProgressTracker,
+};
 use crate::ui;
 use crate::GlobalOptions;
 
@@ -177,14 +180,18 @@ pub async fn fetch(path: PathBuf, output_dir: Option<PathBuf>, opts: GlobalOptio
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
     let tasks = build_predownload_tasks(&stage_dir, &pre_patch.patches)?;
 
-    let total_size = predownload_total_size(&pre_patch);
-    let bar = StepProgress::new("predownload.download", opts.verbose);
-    let mut progress = ByteProgressTracker::new(bar.clone(), total_size).log_verified_in_verbose();
+    let progress =
+        CountAndByteProgress::new("predownload.verify", "predownload.download", opts.verbose);
+    let mut verify_progress = VerifyTaskProgressTracker::new(progress.count_bar(), tasks.len());
+    let mut download_progress = DownloadProgressTracker::new(progress.byte_bar());
     let result = task_pool_runner.run_batch_with_progress(
         tasks,
-        Some(&mut |event: &ProgressEvent| progress.handle_event(event)),
+        Some(&mut |event: &ProgressEvent| {
+            verify_progress.handle_event(event);
+            download_progress.handle_event(event);
+        }),
     )?;
-    bar.finish();
+    progress.finish();
 
     let downloaded_parts = result
         .events
@@ -233,7 +240,7 @@ pub async fn apply(
     super::update::apply_staged_predownload(path, overrides, output_dir, opts).await
 }
 
-pub async fn resume(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
+pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
     let local = detect_local_install(&path).await?;
     let install_root = local.install_path;
     let patch_manifest = install_root.join(PATCH_MANIFEST_NAME);
@@ -265,7 +272,12 @@ pub async fn resume(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
 
     let task_pool_cfg = TaskPoolConfig::default();
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
-    let result = task_pool_runner.run_batch_with_progress(vec![initial_task], None)?;
+    let mut progress = ArchivePipelineProgress::new("predownload.resume", 0, opts.verbose);
+    let result = task_pool_runner.run_batch_with_progress(
+        vec![initial_task],
+        Some(&mut |event: &ProgressEvent| progress.handle_event(event)),
+    )?;
+    progress.finish();
 
     let failures = result
         .events

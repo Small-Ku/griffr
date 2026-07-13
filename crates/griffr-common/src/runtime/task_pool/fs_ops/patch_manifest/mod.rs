@@ -27,7 +27,10 @@ fn resolve_patch_stage_path(
     Ok(stage_root.join(stage_subdir).join(relative))
 }
 
-pub(crate) fn apply_extracted_vfs_patch_manifest(install_root: &Path) -> Result<()> {
+pub(crate) fn apply_extracted_vfs_patch_manifest(
+    install_root: &Path,
+    mut progress_callback: Option<&mut dyn FnMut(&str, usize, usize)>,
+) -> Result<()> {
     let manifest_path = install_root.join(PATCH_MANIFEST_NAME);
     let stage_root = install_root.join(PATCH_STAGE_DIR);
     if !manifest_path.exists() && !stage_root.exists() {
@@ -52,7 +55,13 @@ pub(crate) fn apply_extracted_vfs_patch_manifest(install_root: &Path) -> Result<
         parse_safe_relative_path("patch.json vfs_base_path", manifest.vfs_base_path.trim())?;
     let dest_root = install_root.join(vfs_base_path);
 
-    for entry in &manifest.files {
+    let total_entries = manifest.files.len();
+    if total_entries > 0 {
+        if let Some(cb) = progress_callback.as_deref_mut() {
+            cb("", 0, total_entries);
+        }
+    }
+    for (index, entry) in manifest.files.iter().enumerate() {
         materialize::materialize_vfs_patch_entry(install_root, &stage_root, &dest_root, entry)
             .map_err(|e| {
                 Error::Other(format!(
@@ -60,6 +69,9 @@ pub(crate) fn apply_extracted_vfs_patch_manifest(install_root: &Path) -> Result<
                     entry.name
                 ))
             })?;
+        if let Some(cb) = progress_callback.as_deref_mut() {
+            cb(&entry.name, index + 1, total_entries);
+        }
     }
 
     std::fs::remove_file(&manifest_path).map_err(|e| Error::RemoveFailed {
@@ -110,8 +122,16 @@ mod tests {
         )
         .unwrap();
 
-        apply_extracted_vfs_patch_manifest(&install_root).unwrap();
+        let mut progress = Vec::new();
+        let mut on_progress = |path: &str, completed: usize, total: usize| {
+            progress.push((path.to_string(), completed, total));
+        };
+        apply_extracted_vfs_patch_manifest(&install_root, Some(&mut on_progress)).unwrap();
 
+        assert_eq!(
+            progress,
+            vec![("".to_string(), 0, 1), ("ui/direct.ab".to_string(), 1, 1),]
+        );
         assert_eq!(
             std::fs::read(
                 install_root.join("Arknights_Data/StreamingAssets/AB/Windows/ui/direct.ab")

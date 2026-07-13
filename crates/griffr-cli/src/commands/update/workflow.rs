@@ -210,7 +210,7 @@ pub(super) async fn update_internal(
         }
     }
 
-    let (extra_tasks, extra_task_total_bytes) = if !opts.skip_vfs {
+    let extra_tasks = if !opts.skip_vfs {
         ui::print_phase("Verifying update + syncing VFS resources (single DAG batch)");
         ui::print_info(
             "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
@@ -238,11 +238,11 @@ pub(super) async fn update_internal(
         .await
         .context("Failed to plan VFS tasks")?
         {
-            griffr_common::runtime::VfsPlanOutcome::Planned(plan) => (plan.tasks, plan.total_bytes),
-            griffr_common::runtime::VfsPlanOutcome::Unsupported => (Vec::new(), 0),
+            griffr_common::runtime::VfsPlanOutcome::Planned(plan) => plan.tasks,
+            griffr_common::runtime::VfsPlanOutcome::Unsupported => Vec::new(),
         }
     } else {
-        (Vec::new(), 0)
+        Vec::new()
     };
     verify_updated_install(
         &api_client,
@@ -251,7 +251,6 @@ pub(super) async fn update_internal(
         &version_info.version,
         opts.skip_verify,
         extra_tasks,
-        extra_task_total_bytes,
         &opts,
         &mut task_pool_runner,
     )

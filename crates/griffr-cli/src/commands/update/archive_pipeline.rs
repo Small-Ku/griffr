@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use griffr_common::runtime::task_pool::{plan_archive_groups, ProgressEvent, Task, TaskPoolRunner};
 
 use super::*;
-use crate::progress::{ByteProgressTracker, StepProgress, VerifyTaskProgressTracker};
+use crate::progress::{ArchivePipelineProgress, StepProgress, VerifyTaskProgressTracker};
 use crate::ui;
 use crate::GlobalOptions;
 
@@ -87,14 +87,13 @@ pub(super) async fn download_and_extract_archives_from_dir(
             );
         }
 
-        let archive_bar =
-            StepProgress::new(format!("update.{}.archive-apply", label), opts.verbose);
-        let mut progress = ByteProgressTracker::new(archive_bar.clone(), 0);
+        let mut progress =
+            ArchivePipelineProgress::new(&format!("update.{label}.apply"), 0, opts.verbose);
         let result = task_pool_runner.run_batch_with_progress(
             extract_tasks,
             Some(&mut |event: &ProgressEvent| progress.handle_event(event)),
         )?;
-        archive_bar.finish();
+        progress.finish();
 
         let failures = result
             .events
@@ -126,13 +125,13 @@ pub(super) async fn download_and_extract_archives_from_dir(
         });
     }
 
-    let archive_bar = StepProgress::new(format!("update.{}.archive-pipeline", label), opts.verbose);
-    let mut progress = ByteProgressTracker::new(archive_bar.clone(), total_size);
+    let mut progress =
+        ArchivePipelineProgress::new(&format!("update.{label}"), archives.len(), opts.verbose);
     let result = task_pool_runner.run_batch_with_progress(
         tasks,
         Some(&mut |event: &ProgressEvent| progress.handle_event(event)),
     )?;
-    archive_bar.finish();
+    progress.finish();
 
     let mut failures = Vec::new();
     for event in result.events {

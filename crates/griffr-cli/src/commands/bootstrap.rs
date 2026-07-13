@@ -8,7 +8,7 @@ use griffr_common::runtime::{
 };
 
 use super::local::detect_local_install;
-use crate::progress::StepProgress;
+use crate::progress::CountAndByteProgress;
 use crate::ui;
 use crate::GlobalOptions;
 
@@ -142,8 +142,12 @@ pub async fn bootstrap(
     );
     let mut task_pool_runner = TaskPoolRunner::new(pool_cfg)?;
 
-    let progress = StepProgress::new("bootstrap.persistent-vfs", opts.verbose);
-    let progress_cb = progress.byte_callback("persistent-vfs");
+    let progress = CountAndByteProgress::new(
+        "bootstrap.persistent-vfs",
+        "bootstrap.persistent-vfs.download",
+        opts.verbose,
+    );
+    let (progress_cb, download_progress_cb) = progress.split_callbacks();
     let result = bootstrap_persistent_vfs_with_runner(
         &api_client,
         &install_target.api,
@@ -161,6 +165,7 @@ pub async fn bootstrap(
         },
         &mut task_pool_runner,
         Some(&progress_cb),
+        Some(&download_progress_cb),
     )
     .await
     .context("Failed to bootstrap Persistent VFS")?;

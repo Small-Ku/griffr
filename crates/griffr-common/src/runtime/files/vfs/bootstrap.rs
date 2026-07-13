@@ -343,7 +343,8 @@ pub async fn bootstrap_persistent_vfs_with_runner(
     persistent_root: &Path,
     cfg: &VfsBootstrapConfig,
     task_pool_runner: &mut TaskPoolRunner,
-    progress_callback: Option<&dyn Fn(u64, u64)>,
+    progress_callback: Option<&dyn Fn(usize, usize, &str)>,
+    download_progress_callback: Option<&dyn Fn(u64, u64, &str)>,
 ) -> Result<Option<VfsBootstrapResult>> {
     let plan = match plan_persistent_bootstrap_tasks(
         api_client,
@@ -366,6 +367,10 @@ pub async fn bootstrap_persistent_vfs_with_runner(
             source: e,
         })?;
 
+    if let Some(cb) = progress_callback {
+        cb(0, plan.total_files, "");
+    }
+
     for manifest in &plan.manifest_downloads {
         let dest = persistent_root.join(&manifest.filename);
         api_client
@@ -374,24 +379,48 @@ pub async fn bootstrap_persistent_vfs_with_runner(
             .map_err(|e| Error::ApiClient(format!("Failed to download {}: {e}", manifest.url)))?;
     }
 
+    let mut finished_files = 0usize;
     let mut download_progress = RunningByteProgress::new();
+    let mut discovered_download_totals = RunningByteProgress::new();
     let mut outcomes = PathOutcomeTracker::new();
     let mut on_event = |event: &ProgressEvent| match event {
-        ProgressEvent::DownloadedBytes { .. } => {
-            let running_downloaded_bytes = download_progress
+        ProgressEvent::DownloadStarted { path, total_bytes } => {
+            discovered_download_totals.record(path, *total_bytes);
+            if let Some(cb) = download_progress_callback {
+                cb(
+                    download_progress.total_bytes(),
+                    discovered_download_totals.total_bytes(),
+                    path,
+                );
+            }
+        }
+        ProgressEvent::DownloadedBytes {
+            path, total_bytes, ..
+        } => {
+            download_progress
                 .handle_download_event(event)
                 .expect("download event");
-            if let Some(cb) = progress_callback {
-                cb(running_downloaded_bytes, plan.total_bytes);
+            discovered_download_totals.record(path, *total_bytes);
+            if let Some(cb) = download_progress_callback {
+                cb(
+                    download_progress.total_bytes(),
+                    discovered_download_totals.total_bytes(),
+                    path,
+                );
             }
         }
         ProgressEvent::Downloaded { path, bytes } => {
             outcomes.record_downloaded(path, *bytes);
-            let running_downloaded_bytes = download_progress
+            download_progress
                 .handle_download_event(event)
                 .expect("download event");
-            if let Some(cb) = progress_callback {
-                cb(running_downloaded_bytes, plan.total_bytes);
+            discovered_download_totals.record(path, *bytes);
+            if let Some(cb) = download_progress_callback {
+                cb(
+                    download_progress.total_bytes(),
+                    discovered_download_totals.total_bytes(),
+                    path,
+                );
             }
         }
         ProgressEvent::Hardlinked { path } | ProgressEvent::Copied { path } => {
@@ -408,8 +437,9 @@ pub async fn bootstrap_persistent_vfs_with_runner(
         }
         ProgressEvent::Verified { path, ok, .. } => {
             outcomes.record_verified(path, *ok);
+            finished_files = finished_files.saturating_add(1);
             if let Some(cb) = progress_callback {
-                cb(download_progress.total_bytes(), plan.total_bytes);
+                cb(finished_files, plan.total_files, path);
             }
         }
         ProgressEvent::Failed { path, .. } => {

@@ -15,7 +15,7 @@ use griffr_common::runtime::{
 };
 
 use crate::commands::local::detect_local_install;
-use crate::progress::{ByteProgressTracker, StepProgress};
+use crate::progress::{ArchivePipelineProgress, CountAndByteProgress};
 use crate::ui;
 use crate::GlobalOptions;
 
@@ -196,7 +196,7 @@ pub async fn install(
             .with_context(|| format!("Failed to create {}", download_dir.display()))?;
 
         let archive_groups = plan_archive_groups(&pkg.packs, &download_dir)?;
-        let total_archive_download_bytes: u64 = pkg.packs.iter().map(|p| p.size()).sum();
+        let archive_part_count = pkg.packs.len();
         let mut tasks = Vec::with_capacity(archive_groups.len());
         for group in archive_groups {
             tasks.push(Task::InstallArchive {
@@ -208,14 +208,13 @@ pub async fn install(
             });
         }
 
-        let archive_bar = StepProgress::new("install.archive-pipeline", opts.verbose);
         let mut progress =
-            ByteProgressTracker::new(archive_bar.clone(), total_archive_download_bytes);
+            ArchivePipelineProgress::new("install", archive_part_count, opts.verbose);
         let result = task_pool.run_batch_with_progress(
             tasks,
             Some(&mut |event: &ProgressEvent| progress.handle_event(event)),
         )?;
-        archive_bar.finish();
+        progress.finish();
 
         let mut failures = Vec::new();
         for event in result.events {
@@ -259,8 +258,13 @@ pub async fn install(
                 install_path: source.install_path.clone(),
             });
         }
-        let materialize_bar = StepProgress::new("install.materialize", opts.verbose);
-        let (materialize_progress_cb, materialize_download_cb) = materialize_bar.split_callbacks();
+        let materialize_progress = CountAndByteProgress::new(
+            "install.materialize",
+            "install.materialize.download",
+            opts.verbose,
+        );
+        let (materialize_progress_cb, materialize_download_cb) =
+            materialize_progress.split_callbacks();
         let materialized = materialize_game_files_with_pool(
             &api_client,
             game_id,
@@ -278,7 +282,7 @@ pub async fn install(
         )
         .await
         .context("Failed to materialize files during install")?;
-        materialize_bar.finish();
+        materialize_progress.finish();
         ui::print_info(format!(
             "Materialized files: reused={} downloaded={}",
             materialized.reused_files, materialized.downloaded_files
@@ -338,8 +342,9 @@ pub async fn install(
         ui::print_phase("Verifying install integrity");
         Vec::new()
     };
-    let verify_bar = StepProgress::new("install.verify+repair", opts.verbose);
-    let (verify_progress_cb, verify_download_cb) = verify_bar.split_callbacks();
+    let verify_progress =
+        CountAndByteProgress::new("install.verify", "install.repair.download", opts.verbose);
+    let (verify_progress_cb, verify_download_cb) = verify_progress.split_callbacks();
     let summary = run_integrity_pool(
         &api_client,
         &install_path,
@@ -355,7 +360,7 @@ pub async fn install(
         Some(verify_download_cb),
     )
     .await?;
-    verify_bar.finish();
+    verify_progress.finish();
     if !summary.issues.is_empty() {
         let mut repairable_issues = Vec::new();
         let mut metadata_issues = Vec::new();

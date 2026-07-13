@@ -16,8 +16,26 @@ pub(crate) fn make_extract_staging_dir(dest: &Path, base_name: &str) -> Result<P
     Ok(parent.join(format!(".griffr.extract.{}.{}", base_name, counter)))
 }
 
-pub(crate) fn commit_staged_extract(staging_root: &Path, dest_root: &Path) -> Result<()> {
-    commit_staged_extract_inner(staging_root, staging_root, dest_root)?;
+pub(crate) fn commit_staged_extract(
+    staging_root: &Path,
+    dest_root: &Path,
+    mut progress_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
+) -> Result<()> {
+    let total_files = count_staged_files(staging_root)?;
+    if total_files > 0 {
+        if let Some(cb) = progress_callback.as_deref_mut() {
+            cb(Path::new("."), 0, total_files);
+        }
+    }
+    let mut completed_files = 0usize;
+    commit_staged_extract_inner(
+        staging_root,
+        staging_root,
+        dest_root,
+        &mut completed_files,
+        total_files,
+        &mut progress_callback,
+    )?;
     std::fs::remove_dir_all(staging_root).map_err(|e| Error::RemoveFailed {
         path: staging_root.to_path_buf(),
         source: e,
@@ -25,10 +43,37 @@ pub(crate) fn commit_staged_extract(staging_root: &Path, dest_root: &Path) -> Re
     Ok(())
 }
 
+fn count_staged_files(current: &Path) -> Result<usize> {
+    let mut total = 0usize;
+    for entry in std::fs::read_dir(current).map_err(|e| Error::ReadDirFailed {
+        path: current.to_path_buf(),
+        source: e,
+    })? {
+        let entry = entry.map_err(|e| Error::ReadDirFailed {
+            path: current.to_path_buf(),
+            source: e,
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| Error::StatFailed {
+            path: path.clone(),
+            source: e,
+        })?;
+        if file_type.is_dir() {
+            total = total.saturating_add(count_staged_files(&path)?);
+        } else {
+            total = total.saturating_add(1);
+        }
+    }
+    Ok(total)
+}
+
 fn commit_staged_extract_inner(
     staging_root: &Path,
     current: &Path,
     dest_root: &Path,
+    completed_files: &mut usize,
+    total_files: usize,
+    progress_callback: &mut Option<&mut dyn FnMut(&Path, usize, usize)>,
 ) -> Result<()> {
     for entry in std::fs::read_dir(current).map_err(|e| Error::ReadDirFailed {
         path: current.to_path_buf(),
@@ -50,7 +95,14 @@ fn commit_staged_extract_inner(
                 path: dest_path.clone(),
                 source: e,
             })?;
-            commit_staged_extract_inner(staging_root, &src_path, dest_root)?;
+            commit_staged_extract_inner(
+                staging_root,
+                &src_path,
+                dest_root,
+                completed_files,
+                total_files,
+                progress_callback,
+            )?;
             continue;
         }
         if let Some(parent) = dest_path.parent() {
@@ -72,6 +124,10 @@ fn commit_staged_extract_inner(
                 dest_path.display()
             ))
         })?;
+        *completed_files = completed_files.saturating_add(1);
+        if let Some(cb) = progress_callback.as_deref_mut() {
+            cb(relative, *completed_files, total_files);
+        }
     }
     Ok(())
 }
@@ -125,6 +181,8 @@ pub(super) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::commit_staged_extract;
     use crate::runtime::DELETE_FILES_MANIFEST_NAME;
 
@@ -141,8 +199,14 @@ mod tests {
         )
         .unwrap();
 
-        commit_staged_extract(&staging_root, &dest_root).unwrap();
+        let mut progress = Vec::new();
+        let mut on_progress = |path: &Path, completed: usize, total: usize| {
+            progress.push((path.to_path_buf(), completed, total));
+        };
+        commit_staged_extract(&staging_root, &dest_root, Some(&mut on_progress)).unwrap();
 
+        assert_eq!(progress.first().map(|item| (item.1, item.2)), Some((0, 2)));
+        assert_eq!(progress.last().map(|item| (item.1, item.2)), Some((2, 2)));
         assert_eq!(
             std::fs::read_to_string(dest_root.join("payload.txt")).unwrap(),
             "updated payload"

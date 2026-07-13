@@ -169,6 +169,27 @@ fn extract_task_spawns_vfs_patch_and_delete_manifest_follow_up_tasks() {
         "extract + delete manifest task should finish without failures: {:?}",
         result.events
     );
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        ProgressEvent::ArchiveCommitProgress { completed, total, .. }
+            if completed == total && *total > 0
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        ProgressEvent::PatchProgress {
+            completed: 1,
+            total: 1,
+            ..
+        }
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        ProgressEvent::DeleteProgress {
+            completed: 1,
+            total: 1,
+            ..
+        }
+    )));
     assert_eq!(
         std::fs::read_to_string(install_dir.join("payload.txt")).unwrap(),
         "updated payload"

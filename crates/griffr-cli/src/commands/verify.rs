@@ -10,7 +10,7 @@ use serde_json::json;
 use std::path::PathBuf;
 
 use super::local::detect_local_install;
-use crate::progress::StepProgress;
+use crate::progress::CountAndByteProgress;
 use crate::ui;
 use crate::{GlobalOptions, OutputFormat};
 
@@ -109,12 +109,9 @@ pub async fn verify(
     let progress_cb = if opts.output == OutputFormat::Json {
         None
     } else {
-        let verify_bar = StepProgress::new(
-            if repair { "verify+repair" } else { "verify" },
-            opts.verbose,
-        );
-        let (cb1, cb2) = verify_bar.split_callbacks();
-        Some((verify_bar, cb1, cb2))
+        let progress = CountAndByteProgress::new("verify", "repair.download", opts.verbose);
+        let (cb1, cb2) = progress.split_callbacks();
+        Some((progress, cb1, cb2))
     };
 
     let mut source_roots = Vec::new();
@@ -215,8 +212,8 @@ pub async fn verify(
     )
     .await
     .context("run_integrity_pool failed")?;
-    if let Some((bar, _, _)) = progress_cb {
-        bar.finish();
+    if let Some((progress, _, _)) = progress_cb {
+        progress.finish();
     }
 
     if opts.output == OutputFormat::Json {

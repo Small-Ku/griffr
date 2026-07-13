@@ -83,6 +83,10 @@ pub struct ArchivePart {
 
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
+    DownloadStarted {
+        path: String,
+        total_bytes: u64,
+    },
     Downloaded {
         path: String,
         bytes: u64,
@@ -108,6 +112,21 @@ pub enum ProgressEvent {
         path: String,
         bytes: u64,
         total_bytes: u64,
+    },
+    ArchiveCommitProgress {
+        path: String,
+        completed: usize,
+        total: usize,
+    },
+    PatchProgress {
+        path: String,
+        completed: usize,
+        total: usize,
+    },
+    DeleteProgress {
+        path: String,
+        completed: usize,
+        total: usize,
     },
     Hardlinked {
         path: PathBuf,
