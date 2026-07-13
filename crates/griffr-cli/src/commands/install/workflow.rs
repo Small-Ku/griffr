@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::PackageInfo;
-use griffr_common::config::{ChannelPair, GameId};
+use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::{
     plan_archive_groups, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
 };
@@ -90,8 +90,9 @@ pub(super) fn validate_install_disk_space(pkg: &PackageInfo, install_path: &Path
 
 pub async fn install(
     game_id: GameId,
+    region_id: RegionId,
     channel_id: ChannelPair,
-    overrides: crate::InstallProfileOverrideArgs,
+    overrides: crate::InstallTargetOverrideArgs,
     install_path: PathBuf,
     force: bool,
     reuse_paths: Vec<PathBuf>,
@@ -116,8 +117,9 @@ pub async fn install(
 
     if opts.is_dry_run() {
         opts.dry_run(format!(
-            "Would install {:?} {:?} into {}",
+            "Would install {:?} region={} {:?} into {}",
             game_id,
+            region_id,
             channel_id,
             install_path.display()
         ));
@@ -144,13 +146,14 @@ pub async fn install(
         .with_context(|| format!("Failed to create {}", install_path.display()))?;
 
     let api_client = ApiClient::new()?;
-    let profile = griffr_common::config::resolve_install_profile(
+    let install_target = griffr_common::config::resolve_install_target(
         &game_id,
+        region_id,
         &channel_id,
         &overrides.clone().into(),
     )?;
     let version_info = api_client
-        .get_latest_game(&profile.target, None)
+        .get_latest_game(&install_target.api, None)
         .await
         .context("Failed to fetch version information")?;
 
@@ -162,8 +165,9 @@ pub async fn install(
     validate_install_disk_space(pkg, &install_path)?;
 
     ui::print_phase(format!(
-        "Installing {} (channel={}, sub-channel={}) into {}",
+        "Installing {} (region={}, channel={}, sub-channel={}) into {}",
         game_id,
+        region_id,
         channel_id.channel(),
         channel_id.sub_channel(),
         install_path.display()
@@ -242,12 +246,14 @@ pub async fn install(
                     game_id
                 );
             }
+            let source_region_id = source.require_known_region()?;
             let source_channel_id = source.require_known_channel()?;
             let source_version = source.require_config_ini_version()?.to_string();
             if source.install_path == install_path {
                 continue;
             }
             source_installs.push(SourceInstallInput {
+                region_id: source_region_id,
                 channel_id: source_channel_id,
                 version: source_version,
                 install_path: source.install_path.clone(),
@@ -288,7 +294,7 @@ pub async fn install(
     sync_launcher_metadata(
         &api_client,
         &install_path,
-        &profile,
+        &install_target,
         Some(&version_info.version),
     )
     .await
@@ -299,16 +305,17 @@ pub async fn install(
         ui::print_info(
             "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
         );
-        let streaming_assets = streaming_assets_path(&install_path.join(profile.data_root.clone()));
+        let streaming_assets =
+            streaming_assets_path(&install_path.join(install_target.data_root.clone()));
         let source_streaming_assets = reuse_paths
             .iter()
             .filter(|path| **path != install_path)
-            .map(|path| streaming_assets_path(&path.join(profile.data_root.clone())))
+            .map(|path| streaming_assets_path(&path.join(install_target.data_root.clone())))
             .collect::<Vec<_>>();
         let rand_str = version_info.rand_str();
         match plan_vfs_tasks(
             &api_client,
-            &profile.target,
+            &install_target.api,
             &version_info.version,
             &rand_str,
             &streaming_assets,
@@ -336,7 +343,7 @@ pub async fn install(
     let summary = run_integrity_pool(
         &api_client,
         &install_path,
-        &profile,
+        &install_target,
         Some(&version_info.version),
         true,
         &[],

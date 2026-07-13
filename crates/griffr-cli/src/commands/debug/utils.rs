@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 use crate::VfsDiffAgainst;
-use griffr_common::config::{game_catalog_entry, GameId};
+use griffr_common::config::{game_definition, GameId};
 use griffr_common::runtime::{
     persistent_path, streaming_assets_path, vfs_path, CONFIG_INI_NAME, PERSISTENT_DIR,
     STREAMING_ASSETS_DIR, VFS_DIR,
@@ -347,7 +347,7 @@ pub fn file_md5(path: &Path) -> Result<String> {
 }
 
 pub fn resolve_endfield_data_root(path: &Path) -> Result<PathBuf> {
-    let data_root_name = game_catalog_entry(&GameId::ENDFIELD)
+    let data_root_name = game_definition(&GameId::ENDFIELD)
         .expect("Endfield must be present in the product catalog")
         .data_root;
     let mut candidate = if path.is_file() {

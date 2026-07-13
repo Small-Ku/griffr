@@ -10,31 +10,31 @@ Both games use a single POST batch endpoint that multiplexes multiple sub-reques
 
 ### Endpoints
 
-**Pattern: OS = `gryphline.com`, CN = `hypergryph.com`**
+**Pattern: SG = `gryphline.com`, CN = `hypergryph.com`**
 
 ```
 Arknights CN:   POST https://launcher.hypergryph.com/api/proxy/batch_proxy   (confirmed from Hi3Helper)
-Arknights OS:   POST https://launcher.gryphline.com/api/proxy/batch_proxy
+Arknights SG:   no known official PC target (the gateway exists, but no preset/appcode is documented)
 Endfield CN:    POST https://launcher.hypergryph.com/api/proxy/batch_proxy   (same endpoint as Arknights CN)
-Endfield OS:    POST https://launcher.gryphline.com/api/proxy/batch_proxy   (confirmed from ak-endfield-api-archive)
+Endfield SG:    POST https://launcher.gryphline.com/api/proxy/batch_proxy   (confirmed from ak-endfield-api-archive)
 ```
 
-**Note**: The implementation uses `launcher.hypergryph.com` for Endfield CN and `launcher.gryphline.com` for Endfield OS.
+**Note**: The implementation uses `launcher.hypergryph.com` for Endfield CN and `launcher.gryphline.com` for Endfield SG.
 
 ### Additional discovered API bases (from `config.ts` base64 values)
 
 | Key | Decoded | Region | Purpose |
 |-----|---------|--------|---------|
-| `launcher` | `launcher.gryphline.com/api` | OS | Endfield Overseas launcher API |
+| `launcher` | `launcher.gryphline.com/api` | SG | Endfield Overseas launcher API |
 | `launcherCN` | `launcher.hypergryph.com/api` | CN | Endfield China launcher API |
-| `u8` | `u8.gryphline.com` | OS | Account-to-game-server token exchange & server list |
-| `accountService` | `as.gryphline.com` | OS | Overseas account service |
-| `gameHub` | `game-hub.gryphline.com` | OS | Game hub (gift code redeem) |
-| `binding` | `binding-api-account-prod.gryphline.com` | OS | Account binding |
-| `webview` | `ef-webview.gryphline.com` | OS | Endfield webview |
-| `zonai` | `zonai.skport.com` | OS | Payment gateway |
+| `u8` | `u8.gryphline.com` | SG | Account-to-game-server token exchange & server list |
+| `accountService` | `as.gryphline.com` | SG | Overseas account service |
+| `gameHub` | `game-hub.gryphline.com` | SG | Game hub (gift code redeem) |
+| `binding` | `binding-api-account-prod.gryphline.com` | SG | Account binding |
+| `webview` | `ef-webview.gryphline.com` | SG | Endfield webview |
+| `zonai` | `zonai.skport.com` | SG | Payment gateway |
 
-**Note**: All `config.ts` base entries are OS (`gryphline.com`). CN equivalents use `hypergryph.com`.
+**Note**: All `config.ts` base entries are SG/overseas (`gryphline.com`). CN equivalents use `hypergryph.com`.
 
 ### Confirmed from Hi3Helper (Arknights CN)
 
@@ -246,6 +246,6 @@ These hold launcher WebView/browser state and cached payloads. They are not a st
 
 For account switching, the safest scoped strategy is snapshot/restore of per-user `LocalLow\Hypergryph\{Game}\sdk_data_*` as opaque blobs, with optional install-local `mmkv\` capture as compatibility fallback. Current `griffr-cli` workflow is explicit path-in/path-out bundles (no central account registry directory yet).
 
-Current `griffr-cli` account command caveat: server identity is not auto-inferred from SDK payload. Commands are game-scoped and can narrow default root selection with `--server-hint` (`cn_*` -> `Hypergryph`, `global_*` -> `Gryphline`); without hint they scan both and pick latest modified `sdk_data_*` unless `--sdk-dir` is provided explicitly.
+Current `griffr-cli` account command caveat: server identity is not auto-inferred from SDK payload. Commands are game-scoped and can narrow default root selection with `--region-hint cn|sg` (`cn` -> `Hypergryph`, `sg` -> `Gryphline`); without a hint they scan both and pick the latest modified `sdk_data_*` unless `--sdk-dir` is provided explicitly.
 
 See [`ACCOUNT_MODEL.md`](ACCOUNT_MODEL.md) for the concrete `griffr` model (storage layout, switching semantics, and security constraints).

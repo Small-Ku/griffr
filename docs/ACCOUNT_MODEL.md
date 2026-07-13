@@ -9,7 +9,7 @@ This document records observed account/session persistence behavior on this mach
 Observed under:
 
 - `%USERPROFILE%\AppData\LocalLow\Hypergryph\Endfield\sdk_data_*`
-- `%USERPROFILE%\AppData\LocalLow\Gryphline\Endfield\sdk_data_*` (observed on OS/global launcher variants)
+- `%USERPROFILE%\AppData\LocalLow\Gryphline\Endfield\sdk_data_*` (observed on SG/global launcher variants)
 - `%USERPROFILE%\AppData\LocalLow\Hypergryph\Arknights\sdk_data_*`
 
 Common files:
@@ -77,13 +77,13 @@ These appear to be launcher UI assets/metadata, not the primary account session 
   - optionally restores `{bundle}\mmkv` into install-root `mmkv\` when requested
 - No stored labels/metadata/index are maintained by `griffr`; users organize bundle locations externally.
 
-Current server-selection behavior:
+Current region-selection behavior:
 
-- `griffr account` commands are game-scoped only; they do not infer launcher server (`cn_official`, `cn_bilibili`, etc.) from SDK payload.
-- If `--sdk-dir` is omitted, source/target defaults to the most recently modified `sdk_data_*` directory in roots selected by `--server-hint`:
-  - `--server-hint cn_official|cn_bilibili` -> `LocalLow\Hypergryph\{Game}`
-  - `--server-hint global_official|global_epic` -> `LocalLow\Gryphline\{Game}`
-  - no `--server-hint` -> scan both roots and pick latest modified
+- `griffr account` commands are game-scoped only; they do not infer launcher region from SDK payload.
+- If `--sdk-dir` is omitted, source/target defaults to the most recently modified `sdk_data_*` directory in roots selected by `--region-hint`:
+  - `--region-hint cn` -> `LocalLow\Hypergryph\{Game}`
+  - `--region-hint sg` -> `LocalLow\Gryphline\{Game}`
+  - no `--region-hint` -> scan both roots and pick latest modified
 - For deterministic per-server workflows on machines with multiple logged-in server profiles, users should pass `--sdk-dir` explicitly and maintain their own bundle naming convention (for example, `endfield_cn_official`, `endfield_cn_bilibili`).
 
 `griffr` will not modify launcher WebView cache buckets by default in this phase.

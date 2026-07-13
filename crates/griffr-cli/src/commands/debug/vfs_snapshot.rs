@@ -12,6 +12,7 @@ pub async fn detect(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
     println!("install_path={}", local.install_path.display());
     println!("config_ini={}", local.config_ini.path.display());
     println!("known_game={:?}", local.game_id);
+    println!("known_region={:?}", local.region_id);
     println!("known_channel={:?}", local.channel_id);
     for (key, value) in &local.config_ini.fields {
         println!("{}={}", key, value);

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::config::{ChannelPair, GameId};
+use griffr_common::config::{ChannelPair, GameId, RegionId};
 use serde::Serialize;
 
 use super::local::{detect_local_install, LocalInstall};
@@ -26,6 +26,7 @@ struct LocalReport {
     version: Option<String>,
     entry: Option<String>,
     known_game: Option<String>,
+    known_region: Option<String>,
     known_channel: Option<String>,
     known_sub_channel: Option<String>,
 }
@@ -42,6 +43,7 @@ impl LocalReport {
             version: local.config_ini.version().map(str::to_owned),
             entry: local.config_ini.entry().map(str::to_owned),
             known_game: local.game_id.as_ref().map(ToString::to_string),
+            known_region: local.region_id.map(|region| region.to_string()),
             known_channel: local
                 .channel_id
                 .as_ref()
@@ -64,6 +66,7 @@ impl LocalReport {
             optional_row("version", self.version.as_deref()),
             optional_row("entry", self.entry.as_deref()),
             optional_row("known_game", self.known_game.as_deref()),
+            optional_row("known_region", self.known_region.as_deref()),
             optional_row("known_channel", self.known_channel.as_deref()),
             optional_row("known_sub_channel", self.known_sub_channel.as_deref()),
         ]
@@ -73,6 +76,7 @@ impl LocalReport {
 #[derive(Debug, Serialize)]
 struct RemoteReport {
     game: String,
+    region: String,
     channel: String,
     sub_channel: String,
     version: String,
@@ -87,6 +91,7 @@ impl RemoteReport {
     fn rows(&self) -> Vec<(String, String)> {
         let mut rows = vec![
             row("game", &self.game),
+            row("region", &self.region),
             row("channel", &self.channel),
             row("sub_channel", &self.sub_channel),
             row("version", &self.version),
@@ -145,6 +150,7 @@ fn optional_row(key: &str, value: Option<&str>) -> (String, String) {
 pub async fn show(
     path: Option<PathBuf>,
     game: Option<String>,
+    region: Option<String>,
     channel: Option<String>,
     sub_channel: Option<String>,
     language: &str,
@@ -152,31 +158,40 @@ pub async fn show(
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
 
-    let mut remote_target: Option<(GameId, ChannelPair)> = None;
+    let mut remote_target: Option<(GameId, RegionId, ChannelPair)> = None;
     let local_install = if let Some(path) = path {
         let local = detect_local_install(&path).await?;
-        if let (Some(game_id), Some(channel_id)) = (local.game_id.clone(), local.channel_id.clone())
-        {
-            remote_target = Some((game_id, channel_id));
+        if let (Some(game_id), Some(region_id), Some(channel_id)) = (
+            local.game_id.clone(),
+            local.region_id,
+            local.channel_id.clone(),
+        ) {
+            remote_target = Some((game_id, region_id, channel_id));
         }
         Some(local)
-    } else if let (Some(game), Some(channel)) = (game, channel) {
+    } else if let (Some(game), Some(region)) = (game, region) {
+        let region = region.parse::<RegionId>()?;
         remote_target = Some((
             game.parse::<GameId>()?,
-            ChannelPair::parse(channel, sub_channel)?,
+            region,
+            ChannelPair::parse(region, channel, sub_channel)?,
         ));
         None
     } else {
-        anyhow::bail!("info requires either --path or both --game and --channel");
+        anyhow::bail!("info requires either --path or both --game and --region");
     };
 
     let local = local_install.as_ref().map(LocalReport::from_install);
     let mut remote = None;
     let mut media = None;
 
-    if let Some((game_id, channel_id)) = remote_target {
-        let target =
-            griffr_common::config::resolve_api_target(&game_id, &channel_id, &Default::default())?;
+    if let Some((game_id, region_id, channel_id)) = remote_target {
+        let target = griffr_common::config::resolve_api_target(
+            &game_id,
+            region_id,
+            &channel_id,
+            &Default::default(),
+        )?;
 
         let info = api_client
             .get_latest_game(&target, None)
@@ -199,6 +214,7 @@ pub async fn show(
         });
         remote = Some(RemoteReport {
             game: game_id.to_string(),
+            region: region_id.to_string(),
             channel: channel_id.channel().to_string(),
             sub_channel: channel_id.sub_channel().to_string(),
             version: info.version,

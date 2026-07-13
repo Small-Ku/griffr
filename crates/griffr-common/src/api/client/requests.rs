@@ -100,7 +100,7 @@ impl ApiClient {
     ) -> Result<GetLatestGameResponse> {
         let request = latest_game_batch(target, current_version);
 
-        let response = self.batch_request(&target.gateway.0, &request).await?;
+        let response = self.batch_request(&target.gateway, &request).await?;
 
         response
             .responses
@@ -118,7 +118,7 @@ impl ApiClient {
         let request = media_batch(target, language);
 
         // Use web batch URL for media APIs
-        let url = web_batch_proxy_url(&target.gateway.0);
+        let url = web_batch_proxy_url(&target.gateway);
         let response: BatchResponse = self
             .batch_request_with_url(&url, &request)
             .await
@@ -147,7 +147,7 @@ impl ApiClient {
     ) -> Result<serde_json::Value> {
         let request = media_batch(target, language);
 
-        let url = web_batch_proxy_url(&target.gateway.0);
+        let url = web_batch_proxy_url(&target.gateway);
         self.batch_request_with_url::<serde_json::Value>(&url, &request)
             .await
             .map_err(|e| Error::ApiClient(format!("Media API request failed: {e}")))
@@ -161,7 +161,7 @@ impl ApiClient {
         rand_str: &str,
         platform: &str,
     ) -> Result<GetLatestResourcesResponse, ApiError> {
-        let url = latest_resources_url(&target.gateway.0);
+        let url = latest_resources_url(&target.gateway);
 
         // Derive the version minor (major.minor) from the full version
         let version_minor = game_version
@@ -172,7 +172,7 @@ impl ApiClient {
 
         let url = format!(
             "{}?appcode={}&game_version={}&version={}&platform={}&rand_str={}",
-            url, target.game_appcode.0, version_minor, game_version, platform, rand_str
+            url, target.game_appcode, version_minor, game_version, platform, rand_str
         );
 
         let response = self

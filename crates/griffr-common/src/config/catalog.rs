@@ -1,30 +1,25 @@
-use super::{ChannelId, GameId};
+use super::{ChannelId, GameId, RegionId};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeploymentRegion {
-    Cn,
-    Global,
-}
-
+/// Static facts that are intrinsic to a supported game.
 #[derive(Debug, Clone)]
-pub struct GameCatalogEntry {
+pub struct GameDefinition {
     pub id: GameId,
     pub executable: &'static str,
     pub data_root: &'static str,
     pub local_low_dir: &'static str,
     pub cn_appcode: &'static str,
-    pub global_appcode: &'static str,
+    pub sg_appcode: Option<&'static str>,
 }
 
-impl GameCatalogEntry {
+impl GameDefinition {
     pub fn game_id(&self) -> GameId {
         self.id.clone()
     }
 
-    pub fn appcode(&self, region: DeploymentRegion) -> &'static str {
+    pub fn appcode(&self, region: RegionId) -> Option<&'static str> {
         match region {
-            DeploymentRegion::Cn => self.cn_appcode,
-            DeploymentRegion::Global => self.global_appcode,
+            RegionId::Cn => Some(self.cn_appcode),
+            RegionId::Sg => self.sg_appcode,
         }
     }
 }
@@ -37,75 +32,64 @@ pub const EPIC_LAUNCHER_APPCODE: &str = "BBWoqCzuZ2bZ1Dro";
 pub const HYPERGRYPH_LOCAL_LOW_VENDOR: &str = "Hypergryph";
 pub const GRYPHLINE_LOCAL_LOW_VENDOR: &str = "Gryphline";
 
-pub static GAME_CATALOG: &[GameCatalogEntry] = &[
-    GameCatalogEntry {
+pub static GAME_DEFINITIONS: &[GameDefinition] = &[
+    GameDefinition {
         id: GameId::ARKNIGHTS,
         executable: "Arknights.exe",
         data_root: "Arknights_Data",
         local_low_dir: "Arknights",
         cn_appcode: "GzD1CpaWgmSq1wew",
-        global_appcode: "GzD1CpaWgmSq1wew",
+        // No official SG PC target is currently exposed by the launcher API.
+        sg_appcode: None,
     },
-    GameCatalogEntry {
+    GameDefinition {
         id: GameId::ENDFIELD,
         executable: "Endfield.exe",
         data_root: "Endfield_Data",
         local_low_dir: "Endfield",
         cn_appcode: "6LL0KJuqHBVz33WK",
-        global_appcode: "YDUTE5gscDZ229CW",
+        sg_appcode: Some("YDUTE5gscDZ229CW"),
     },
 ];
 
-pub fn game_catalog_entry(game: &GameId) -> Option<&'static GameCatalogEntry> {
-    GAME_CATALOG.iter().find(|entry| &entry.id == game)
+pub fn game_definition(game: &GameId) -> Option<&'static GameDefinition> {
+    GAME_DEFINITIONS.iter().find(|entry| &entry.id == game)
 }
 
 pub fn game_by_appcode(appcode: &str) -> Option<GameId> {
-    GAME_CATALOG
+    GAME_DEFINITIONS
         .iter()
-        .find(|entry| entry.cn_appcode == appcode || entry.global_appcode == appcode)
-        .map(GameCatalogEntry::game_id)
+        .find(|entry| {
+            entry.cn_appcode == appcode || entry.sg_appcode.is_some_and(|value| value == appcode)
+        })
+        .map(GameDefinition::game_id)
 }
 
 pub fn game_by_executable(executable: &str) -> Option<GameId> {
-    GAME_CATALOG
+    GAME_DEFINITIONS
         .iter()
         .find(|entry| entry.executable.eq_ignore_ascii_case(executable))
-        .map(GameCatalogEntry::game_id)
+        .map(GameDefinition::game_id)
 }
 
-pub fn deployment_region(channel: &ChannelId) -> DeploymentRegion {
-    if channel == &ChannelId::HYPERGRYPH || channel == &ChannelId::BILIBILI {
-        DeploymentRegion::Cn
-    } else {
-        DeploymentRegion::Global
-    }
-}
-
-pub fn gateway(region: DeploymentRegion) -> &'static str {
+pub const fn gateway(region: RegionId) -> &'static str {
     match region {
-        DeploymentRegion::Cn => HYPERGRYPH_GATEWAY,
-        DeploymentRegion::Global => GRYPHLINE_GATEWAY,
+        RegionId::Cn => HYPERGRYPH_GATEWAY,
+        RegionId::Sg => GRYPHLINE_GATEWAY,
     }
 }
 
-pub fn launcher_appcode(region: DeploymentRegion, sub_channel: &ChannelId) -> &'static str {
+pub fn launcher_appcode(region: RegionId, sub_channel: &ChannelId) -> &'static str {
     match region {
-        DeploymentRegion::Cn => HYPERGRYPH_LAUNCHER_APPCODE,
-        DeploymentRegion::Global if sub_channel == &ChannelId::EPIC_STORE => EPIC_LAUNCHER_APPCODE,
-        DeploymentRegion::Global => GRYPHLINE_LAUNCHER_APPCODE,
+        RegionId::Cn => HYPERGRYPH_LAUNCHER_APPCODE,
+        RegionId::Sg if sub_channel == &ChannelId::EPIC => EPIC_LAUNCHER_APPCODE,
+        RegionId::Sg => GRYPHLINE_LAUNCHER_APPCODE,
     }
 }
 
-pub fn local_low_vendor(channel: &ChannelId) -> Option<&'static str> {
-    if channel == &ChannelId::HYPERGRYPH || channel == &ChannelId::BILIBILI {
-        Some(HYPERGRYPH_LOCAL_LOW_VENDOR)
-    } else if channel == &ChannelId::GRYPHLINE
-        || channel == &ChannelId::EPIC_STORE
-        || channel == &ChannelId::GOOGLE_PLAY
-    {
-        Some(GRYPHLINE_LOCAL_LOW_VENDOR)
-    } else {
-        None
+pub const fn local_low_vendor(region: RegionId) -> &'static str {
+    match region {
+        RegionId::Cn => HYPERGRYPH_LOCAL_LOW_VENDOR,
+        RegionId::Sg => GRYPHLINE_LOCAL_LOW_VENDOR,
     }
 }

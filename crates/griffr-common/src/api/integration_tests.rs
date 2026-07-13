@@ -12,7 +12,7 @@
 use crate::api::client::{ApiClient, MediaResponse};
 use crate::api::protocol::DEFAULT_LANGUAGE;
 use crate::api::types::{GameFileEntry, GetLatestGameResponse};
-use crate::config::{ChannelPair, GameId};
+use crate::config::{ChannelPair, GameId, RegionId};
 
 fn assert_non_empty(label: &str, value: &str) {
     assert!(!value.trim().is_empty(), "{label} should not be empty");
@@ -64,12 +64,10 @@ fn assert_latest_payload_shape(info: &GetLatestGameResponse) {
     }
 }
 
-fn expected_cdn_fragment(channel: &ChannelPair) -> &'static str {
-    let chan = channel.channel().as_str();
-    if chan == "1" || chan == "2" {
-        ".hycdn.cn"
-    } else {
-        ".hg-cdn.com"
+fn expected_cdn_fragment(region: RegionId) -> &'static str {
+    match region {
+        RegionId::Cn => ".hycdn.cn",
+        RegionId::Sg => ".hg-cdn.com",
     }
 }
 
@@ -132,10 +130,21 @@ fn assert_media_payload_shape(media: &MediaResponse) {
     }
 }
 
-async fn assert_latest_for_channel(client: &ApiClient, game: GameId, channel: ChannelPair) {
-    let preset = crate::config::KnownTargets::resolve(&game, &channel).unwrap();
+async fn assert_latest_for_channel(
+    client: &ApiClient,
+    game: GameId,
+    region: RegionId,
+    channel: ChannelPair,
+) {
+    let target = crate::config::resolve_api_target(
+        &game,
+        region,
+        &channel,
+        &crate::config::ApiTargetOverrides::default(),
+    )
+    .unwrap();
     let info = client
-        .get_latest_game(&preset.target, None)
+        .get_latest_game(&target, None)
         .await
         .unwrap_or_else(|err| {
             panic!(
@@ -154,7 +163,7 @@ async fn assert_latest_for_channel(client: &ApiClient, game: GameId, channel: Ch
     if let Some(pkg) = &info.pkg {
         if let Some(first_pack) = pkg.packs.first() {
             assert!(
-                first_pack.url.contains(expected_cdn_fragment(&channel)),
+                first_pack.url.contains(expected_cdn_fragment(region)),
                 "pkg pack URL should use the expected CDN family for game={:?} channel={:?}, got {}",
                 game,
                 channel,
@@ -166,7 +175,7 @@ async fn assert_latest_for_channel(client: &ApiClient, game: GameId, channel: Ch
     if let Some(patch) = &info.patch {
         if let Some(first_patch) = patch.patches.first() {
             assert!(
-                first_patch.url.contains(expected_cdn_fragment(&channel)),
+                first_patch.url.contains(expected_cdn_fragment(region)),
                 "patch URL should use the expected CDN family for game={:?} channel={:?}, got {}",
                 game,
                 channel,
@@ -179,12 +188,19 @@ async fn assert_latest_for_channel(client: &ApiClient, game: GameId, channel: Ch
 async fn assert_media_for_channel(
     client: &ApiClient,
     game: GameId,
+    region: RegionId,
     channel: ChannelPair,
     language: &str,
 ) {
-    let preset = crate::config::KnownTargets::resolve(&game, &channel).unwrap();
+    let target = crate::config::resolve_api_target(
+        &game,
+        region,
+        &channel,
+        &crate::config::ApiTargetOverrides::default(),
+    )
+    .unwrap();
     let media = client
-        .get_media(&preset.target, language)
+        .get_media(&target, language)
         .await
         .unwrap_or_else(|err| {
             panic!(
@@ -195,7 +211,7 @@ async fn assert_media_for_channel(
 
     assert_media_payload_shape(&media);
 
-    let cdn = expected_cdn_fragment(&channel);
+    let cdn = expected_cdn_fragment(region);
 
     if let Some(banners) = &media.banners {
         if let Some(first) = banners.banners.first() {
@@ -234,10 +250,21 @@ async fn assert_media_for_channel(
     }
 }
 
-async fn assert_game_files_for_channel(client: &ApiClient, game: GameId, channel: ChannelPair) {
-    let preset = crate::config::KnownTargets::resolve(&game, &channel).unwrap();
+async fn assert_game_files_for_channel(
+    client: &ApiClient,
+    game: GameId,
+    region: RegionId,
+    channel: ChannelPair,
+) {
+    let target = crate::config::resolve_api_target(
+        &game,
+        region,
+        &channel,
+        &crate::config::ApiTargetOverrides::default(),
+    )
+    .unwrap();
     let info = client
-        .get_latest_game(&preset.target, None)
+        .get_latest_game(&target, None)
         .await
         .unwrap_or_else(|err| {
             panic!(
@@ -281,41 +308,48 @@ async fn test_real_api_latest_matrix() {
     let matrix = [
         (
             GameId::ARKNIGHTS,
-            ChannelPair::parse("1", None::<String>).unwrap(),
+            RegionId::Cn,
+            ChannelPair::from_api("1", None::<String>).unwrap(),
         ),
         (
             GameId::ARKNIGHTS,
-            ChannelPair::parse("2", None::<String>).unwrap(),
+            RegionId::Cn,
+            ChannelPair::from_api("2", None::<String>).unwrap(),
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("1", None::<String>).unwrap(),
+            RegionId::Cn,
+            ChannelPair::from_api("1", None::<String>).unwrap(),
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("2", None::<String>).unwrap(),
+            RegionId::Cn,
+            ChannelPair::from_api("2", None::<String>).unwrap(),
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("6", None::<String>).unwrap(),
+            RegionId::Sg,
+            ChannelPair::from_api("6", None::<String>).unwrap(),
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("6", Some("801")).unwrap(),
+            RegionId::Sg,
+            ChannelPair::from_api("6", Some("801")).unwrap(),
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("6", Some("802")).unwrap(),
+            RegionId::Sg,
+            ChannelPair::from_api("6", Some("802")).unwrap(),
         ),
     ];
     assert_eq!(
         matrix.len(),
         7,
-        "latest matrix should cover all requested CN/OS combinations"
+        "latest matrix should cover all known CN/SG combinations"
     );
 
-    for (game, channel) in matrix {
-        assert_latest_for_channel(&client, game, channel).await;
+    for (game, region, channel) in matrix {
+        assert_latest_for_channel(&client, game, region, channel).await;
     }
 }
 
@@ -327,48 +361,55 @@ async fn test_real_api_media_matrix() {
     let matrix = [
         (
             GameId::ARKNIGHTS,
-            ChannelPair::parse("1", None::<String>).unwrap(),
+            RegionId::Cn,
+            ChannelPair::from_api("1", None::<String>).unwrap(),
             DEFAULT_LANGUAGE,
         ),
         (
             GameId::ARKNIGHTS,
-            ChannelPair::parse("2", None::<String>).unwrap(),
+            RegionId::Cn,
+            ChannelPair::from_api("2", None::<String>).unwrap(),
             DEFAULT_LANGUAGE,
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("1", None::<String>).unwrap(),
+            RegionId::Cn,
+            ChannelPair::from_api("1", None::<String>).unwrap(),
             DEFAULT_LANGUAGE,
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("2", None::<String>).unwrap(),
+            RegionId::Cn,
+            ChannelPair::from_api("2", None::<String>).unwrap(),
             DEFAULT_LANGUAGE,
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("6", None::<String>).unwrap(),
+            RegionId::Sg,
+            ChannelPair::from_api("6", None::<String>).unwrap(),
             "en-us",
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("6", Some("801")).unwrap(),
+            RegionId::Sg,
+            ChannelPair::from_api("6", Some("801")).unwrap(),
             "en-us",
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("6", Some("802")).unwrap(),
+            RegionId::Sg,
+            ChannelPair::from_api("6", Some("802")).unwrap(),
             "en-us",
         ),
     ];
     assert_eq!(
         matrix.len(),
         7,
-        "media matrix should cover all requested CN/OS combinations"
+        "media matrix should cover all known CN/SG combinations"
     );
 
-    for (game, channel, language) in matrix {
-        assert_media_for_channel(&client, game, channel, language).await;
+    for (game, region, channel, language) in matrix {
+        assert_media_for_channel(&client, game, region, channel, language).await;
     }
 }
 
@@ -380,61 +421,70 @@ async fn test_real_api_game_files_matrix() {
     let matrix = [
         (
             GameId::ARKNIGHTS,
-            ChannelPair::parse("1", None::<String>).unwrap(),
+            RegionId::Cn,
+            ChannelPair::from_api("1", None::<String>).unwrap(),
         ),
         (
             GameId::ARKNIGHTS,
-            ChannelPair::parse("2", None::<String>).unwrap(),
+            RegionId::Cn,
+            ChannelPair::from_api("2", None::<String>).unwrap(),
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("1", None::<String>).unwrap(),
+            RegionId::Cn,
+            ChannelPair::from_api("1", None::<String>).unwrap(),
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("2", None::<String>).unwrap(),
+            RegionId::Cn,
+            ChannelPair::from_api("2", None::<String>).unwrap(),
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("6", None::<String>).unwrap(),
+            RegionId::Sg,
+            ChannelPair::from_api("6", None::<String>).unwrap(),
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("6", Some("801")).unwrap(),
+            RegionId::Sg,
+            ChannelPair::from_api("6", Some("801")).unwrap(),
         ),
         (
             GameId::ENDFIELD,
-            ChannelPair::parse("6", Some("802")).unwrap(),
+            RegionId::Sg,
+            ChannelPair::from_api("6", Some("802")).unwrap(),
         ),
     ];
     assert_eq!(
         matrix.len(),
         7,
-        "game_files matrix should cover all requested CN/OS combinations"
+        "game_files matrix should cover all known CN/SG combinations"
     );
 
-    for (game, channel) in matrix {
-        assert_game_files_for_channel(&client, game, channel).await;
+    for (game, region, channel) in matrix {
+        assert_game_files_for_channel(&client, game, region, channel).await;
     }
 }
 
 #[compio::test]
 #[ignore = "Makes real network request"]
-async fn test_real_endfield_os_known_versions_return_full_or_patch_payloads() {
+async fn test_real_endfield_sg_known_versions_return_full_or_patch_payloads() {
     let client = ApiClient::new().expect("Failed to create API client");
 
-    let preset = crate::config::KnownTargets::resolve(
+    let target = crate::config::resolve_api_target(
         &GameId::ENDFIELD,
-        &ChannelPair::parse("6", None::<String>).unwrap(),
+        RegionId::Sg,
+        &ChannelPair::from_api("6", None::<String>).unwrap(),
+        &crate::config::ApiTargetOverrides::default(),
     )
     .unwrap();
     for requested_version in ["1.0.13", "1.0.14", "1.1.9"] {
         let info = client
-            .get_latest_game(&preset.target, Some(requested_version))
+            .get_latest_game(&target, Some(requested_version))
             .await
             .unwrap_or_else(|err| {
                 panic!(
-                    "failed get_latest_game for Endfield OS requested_version={}: {err}",
+                    "failed get_latest_game for Endfield SG requested_version={}: {err}",
                     requested_version
                 )
             });

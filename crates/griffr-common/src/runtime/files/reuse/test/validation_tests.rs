@@ -6,7 +6,7 @@ use std::path::PathBuf;
 fn test_reuse_plan_with_mixed_files() {
     let plan = ReusePlan {
         source_channels: vec![SourceChannel {
-            channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
+            channel_id: ChannelPair::from_api("1", None::<String>).unwrap(),
             version: "2.0.0".to_string(),
             install_path: PathBuf::from("/games/source"),
             file_count: 100,
@@ -16,7 +16,7 @@ fn test_reuse_plan_with_mixed_files() {
                 path: format!("assets/file_{:03}.bin", i),
                 md5: format!("md5_{:03}", i),
                 size: 1024 * 1024,
-                source_channel_id: ChannelPair::parse("1", None::<String>).unwrap(),
+                source_channel_id: ChannelPair::from_api("1", None::<String>).unwrap(),
                 source_path: PathBuf::from("/games/source"),
             })
             .collect(),
@@ -46,11 +46,11 @@ fn test_reuse_plan_with_mixed_files() {
 fn test_game_id_channel_id_variants() {
     let games = [GameId::ARKNIGHTS, GameId::ENDFIELD];
     let channels = [
-        ChannelPair::parse("1", None::<String>).unwrap(),
-        ChannelPair::parse("2", None::<String>).unwrap(),
-        ChannelPair::parse("6", None::<String>).unwrap(),
-        ChannelPair::parse("6", Some("801")).unwrap(),
-        ChannelPair::parse("6", Some("802")).unwrap(),
+        ChannelPair::from_api("1", None::<String>).unwrap(),
+        ChannelPair::from_api("2", None::<String>).unwrap(),
+        ChannelPair::from_api("6", None::<String>).unwrap(),
+        ChannelPair::from_api("6", Some("801")).unwrap(),
+        ChannelPair::from_api("6", Some("802")).unwrap(),
     ];
     for _game in &games {
         for _channel in &channels {}

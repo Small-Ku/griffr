@@ -12,7 +12,7 @@ use crate::GlobalOptions;
 
 pub(super) async fn update_internal(
     path: PathBuf,
-    overrides: crate::InstallProfileOverrideArgs,
+    overrides: crate::InstallTargetOverrideArgs,
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
     use_predownload: bool,
@@ -22,10 +22,12 @@ pub(super) async fn update_internal(
 ) -> Result<()> {
     let local = detect_local_install(&path).await?;
     let game_id = local.require_known_game()?;
+    let region_id = local.require_known_region()?;
     let channel_id = local.require_known_channel()?;
     let current_version = local.require_config_ini_version()?.to_string();
-    let profile = griffr_common::config::resolve_install_profile(
+    let install_target = griffr_common::config::resolve_install_target(
         &game_id,
+        region_id,
         &channel_id,
         &overrides.clone().into(),
     )?;
@@ -37,12 +39,13 @@ pub(super) async fn update_internal(
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
 
     let version_info = api_client
-        .get_latest_game(&profile.target, Some(&current_version))
+        .get_latest_game(&install_target.api, Some(&current_version))
         .await?;
 
     ui::print_phase(format!(
-        "Updating {} (channel={}, sub-channel={}) at {}",
+        "Updating {} (region={}, channel={}, sub-channel={}) at {}",
         game_id,
+        region_id,
         channel_id.channel(),
         channel_id.sub_channel(),
         local.install_path.display(),
@@ -152,7 +155,7 @@ pub(super) async fn update_internal(
     if reuse_paths.is_empty() {
         match package_kind {
             UpdatePackageKind::Patch => {
-                validate_patch_target(&profile.executable, &local.install_path).await?;
+                validate_patch_target(&install_target.executable, &local.install_path).await?;
                 let patch = version_info
                     .patch
                     .as_ref()
@@ -213,16 +216,16 @@ pub(super) async fn update_internal(
             "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
         );
         let streaming_assets =
-            streaming_assets_path(&local.install_path.join(profile.data_root.clone()));
+            streaming_assets_path(&local.install_path.join(install_target.data_root.clone()));
         let source_streaming_assets = reuse_paths
             .iter()
             .filter(|path| **path != local.install_path)
-            .map(|path| streaming_assets_path(&path.join(profile.data_root.clone())))
+            .map(|path| streaming_assets_path(&path.join(install_target.data_root.clone())))
             .collect::<Vec<_>>();
         let rand_str = version_info.rand_str();
         match plan_vfs_tasks(
             &api_client,
-            &profile.target,
+            &install_target.api,
             &version_info.version,
             &rand_str,
             &streaming_assets,
@@ -244,7 +247,7 @@ pub(super) async fn update_internal(
     verify_updated_install(
         &api_client,
         &local.install_path,
-        &profile,
+        &install_target,
         &version_info.version,
         opts.skip_verify,
         extra_tasks,
@@ -260,7 +263,7 @@ pub(super) async fn update_internal(
 
 pub async fn update(
     path: PathBuf,
-    overrides: crate::InstallProfileOverrideArgs,
+    overrides: crate::InstallTargetOverrideArgs,
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
     use_predownload: bool,
@@ -281,7 +284,7 @@ pub async fn update(
 
 pub(crate) async fn apply_staged_predownload(
     path: PathBuf,
-    overrides: crate::InstallProfileOverrideArgs,
+    overrides: crate::InstallTargetOverrideArgs,
     predownload_dir_override: Option<PathBuf>,
     opts: GlobalOptions,
 ) -> Result<()> {

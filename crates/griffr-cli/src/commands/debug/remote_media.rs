@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use griffr_common::api::client::ApiClient;
-use griffr_common::config::{ChannelPair, GameId};
+use griffr_common::config::{ChannelPair, GameId, RegionId};
 use serde_json::{json, Value};
 
 use super::utils::emit_json;
@@ -10,14 +10,16 @@ use crate::GlobalOptions;
 
 fn media_to_json(
     game_id: GameId,
+    region_id: RegionId,
     channel_id: ChannelPair,
     language: &str,
     media: &griffr_common::api::client::MediaResponse,
 ) -> Value {
     json!({
         "game": game_id.to_string(),
+        "region": region_id.to_string(),
         "channel": channel_id.channel().to_string(),
-            "sub_channel": channel_id.sub_channel().to_string(),
+        "sub_channel": channel_id.sub_channel().to_string(),
         "language": language,
         "banners": media.banners.as_ref().map(|b| {
             json!({
@@ -92,6 +94,7 @@ fn media_to_json(
 
 pub async fn api_get_media(
     game_id: GameId,
+    region_id: RegionId,
     channel_id: ChannelPair,
     overrides: crate::ApiTargetOverrideArgs,
     language: String,
@@ -99,14 +102,19 @@ pub async fn api_get_media(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target =
-        griffr_common::config::resolve_api_target(&game_id, &channel_id, &overrides.into())?;
+    let target = griffr_common::config::resolve_api_target(
+        &game_id,
+        region_id,
+        &channel_id,
+        &overrides.into(),
+    )?;
     let payload = api_client.get_media_raw(&target, &language).await?;
     emit_json(output, payload).await
 }
 
 pub async fn fetch_media(
     game_id: GameId,
+    region_id: RegionId,
     channel_id: ChannelPair,
     overrides: crate::ApiTargetOverrideArgs,
     language: String,
@@ -114,9 +122,13 @@ pub async fn fetch_media(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target =
-        griffr_common::config::resolve_api_target(&game_id, &channel_id, &overrides.into())?;
+    let target = griffr_common::config::resolve_api_target(
+        &game_id,
+        region_id,
+        &channel_id,
+        &overrides.into(),
+    )?;
     let media = api_client.get_media(&target, &language).await?;
-    let payload = media_to_json(game_id, channel_id, &language, &media);
+    let payload = media_to_json(game_id, region_id, channel_id, &language, &media);
     emit_json(output, payload).await
 }

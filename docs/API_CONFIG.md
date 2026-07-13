@@ -6,8 +6,8 @@ Part of the Hypergryph Official API Reference. See [`API.md`](API.md) for the fu
 
 ## 1. Domain Convention
 
-**OS (Overseas/Global)** → domains use `gryphline.com`
-**CN (China)** → domains use `hypergryph.com`
+**SG** (the official `config.ini` region value for overseas/global builds) → domains use `gryphline.com`
+**CN** → domains use `hypergryph.com`
 
 This is the single most important naming convention to get right. Every `*gryphline.com` endpoint has a `*hypergryph.com` CN equivalent.
 
@@ -15,18 +15,18 @@ This is the single most important naming convention to get right. Every `*gryphl
 
 ## 2. Discovered API Base URLs (from `config.ts` base64 values)
 
-All `config.ts` base entries resolve to OS (`gryphline.com`) domains. CN equivalents use `hypergryph.com`.
+All `config.ts` base entries resolve to SG/overseas (`gryphline.com`) domains. CN equivalents use `hypergryph.com`.
 
 | Key | Decoded | Region | Purpose |
 |-----|---------|--------|---------|
-| `launcher` | `launcher.gryphline.com/api` | OS | Endfield Overseas launcher API |
+| `launcher` | `launcher.gryphline.com/api` | SG | Endfield Overseas launcher API |
 | `launcherCN` | `launcher.hypergryph.com/api` | CN | Endfield CN launcher API |
-| `u8` | `u8.gryphline.com` | OS | Account-to-game-server token exchange & server list |
-| `accountService` | `as.gryphline.com` | OS | Overseas account service |
-| `gameHub` | `game-hub.gryphline.com` | OS | Game hub (gift code redeem) |
-| `binding` | `binding-api-account-prod.gryphline.com` | OS | Account binding/linking API |
-| `webview` | `ef-webview.gryphline.com` | OS | Endfield webview content |
-| `zonai` | `zonai.skport.com` | OS | Payment gateway |
+| `u8` | `u8.gryphline.com` | SG | Account-to-game-server token exchange & server list |
+| `accountService` | `as.gryphline.com` | SG | Overseas account service |
+| `gameHub` | `game-hub.gryphline.com` | SG | Game hub (gift code redeem) |
+| `binding` | `binding-api-account-prod.gryphline.com` | SG | Account binding/linking API |
+| `webview` | `ef-webview.gryphline.com` | SG | Endfield webview content |
+| `zonai` | `zonai.skport.com` | SG | Payment gateway |
 
 ---
 
@@ -48,26 +48,26 @@ These values are **verified from `ArknightsCnPresetConfig.cs`** in the Collapse 
 |--------|-----------|---------------|-------|
 | CN Official (官服) | `1` | `1` | Confirmed from local install metadata |
 | CN Bilibili (B服) | `2` | `2` | Confirmed from local install metadata |
-| Global/OS | `1` | `1` | Assumed same as CN (no OS-specific code found) |
+| SG | — | — | No official Arknights PC target is currently known |
 
 ### Endfield — Confirmed from `config.ts`, decrypted local `config.ini`, and `ak-endfield-api-archive`
 
 #### Game App Codes
 ```
-osWinRel  = "YDUTE5gscDZ229CW"   (OS Windows Release)
+osWinRel  = "YDUTE5gscDZ229CW"   (SG/overseas Windows Release)
 cnWinRel  = "6LL0KJuqHBVz33WK"   (CN Windows Release)
 ```
 
 #### Launcher App Codes
 ```
-osWinRel     = "TiaytKBUIEdoEwRT"  (OS)
-osWinRelEpic = "BBWoqCzuZ2bZ1Dro"  (OS Epic)
+osWinRel     = "TiaytKBUIEdoEwRT"  (SG)
+osWinRelEpic = "BBWoqCzuZ2bZ1Dro"  (SG Epic)
 cnWinRel     = "abYeZZ16BPluCFyT"  (CN — shared with Arknights CN)
 ```
 
 #### Account App Codes
 ```
-osWinRel = "d9f6dbb6bbd6bb33"    (OS)
+osWinRel = "d9f6dbb6bbd6bb33"    (SG)
 skport   = "6eb76d4e13aa36e6"    (SK Port / Zenless)
 binding  = "3dacefa138426cfe"    (Account binding)
 ```
@@ -114,7 +114,7 @@ This is **NOT** the batch API app code. The u8 service handles authentication to
 }
 ```
 
-**Note**: Only OS (`gryphline.com`) — no CN variant has been discovered for u8.
+**Note**: Only SG (`gryphline.com`) — no CN variant has been discovered for u8.
 
 ---
 
@@ -126,11 +126,11 @@ This is **NOT** the batch API app code. The u8 service handles authentication to
 |--------|-----------|---------------|----------------|--------------------|-------|
 | CN Official | `1` | `1` | `6LL0KJuqHBVz33WK` | `abYeZZ16BPluCFyT` | Standard CN |
 | CN Bilibili | `2` | `2` | `6LL0KJuqHBVz33WK` | `abYeZZ16BPluCFyT` | Confirmed by local Bilibili `config.ini` and `.../update/2/2/...` archive URLs |
-| OS Official | `6` | `6` | `YDUTE5gscDZ229CW` | `TiaytKBUIEdoEwRT` | Standard OS |
-| OS Epic | `6` | `801` | `YDUTE5gscDZ229CW` | `BBWoqCzuZ2bZ1Dro` | Epic Games Store |
-| OS Google Play | `6` | `802` | `YDUTE5gscDZ229CW` | `TiaytKBUIEdoEwRT` | Google Play cross |
+| SG Official | `6` | `6` | `YDUTE5gscDZ229CW` | `TiaytKBUIEdoEwRT` | Standard SG |
+| SG Epic | `6` | `801` | `YDUTE5gscDZ229CW` | `BBWoqCzuZ2bZ1Dro` | Epic Games Store |
+| SG Google Play | `6` | `802` | `YDUTE5gscDZ229CW` | `TiaytKBUIEdoEwRT` | Google Play cross |
 
-**Note on sub_channel discrepancy**: The C# reference (`Hi3Helper`) uses `sub_channel=8` for Google Play and `sub_channel=7` for Epic. The archive uses `801`/`802`. Both may work — the API may normalize these. Needs verification.
+**Observed native values**: decrypted local `config.ini` uses `6/802` for Google Play. Current built-in aliases therefore resolve SG Epic to `6/801` and SG Google Play to `6/802`.
 
 ### Arknights (明日方舟) — Confirmed from Hi3Helper and decrypted local `config.ini`
 
@@ -138,7 +138,7 @@ This is **NOT** the batch API app code. The u8 service handles authentication to
 |--------|-----------|---------------|----------------|-------|
 | CN Official (官服) | `1` | `1` | `GzD1CpaWgmSq1wew` | Verified from Hi3Helper and local install metadata |
 | CN Bilibili (B服) | `2` | `2` | `GzD1CpaWgmSq1wew` | Verified from Hi3Helper and local install metadata |
-| Global/OS | `1` | `1` | `GzD1CpaWgmSq1wew` | Assumed same as CN (code uses same value) |
+| SG | — | — | — | No official Arknights PC target is currently known |
 
 ---
 

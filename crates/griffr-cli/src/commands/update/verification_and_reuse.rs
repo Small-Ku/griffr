@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::config::InstallProfile;
+use griffr_common::config::InstallTarget;
 use griffr_common::runtime::task_pool::{ProgressEvent, Task, TaskPoolRunner};
 use griffr_common::runtime::{
     is_launcher_metadata_path, materialize_game_files_with_pool, run_integrity_pool,
@@ -17,7 +17,7 @@ use crate::GlobalOptions;
 pub(super) async fn verify_updated_install(
     api_client: &ApiClient,
     install_path: &Path,
-    profile: &InstallProfile,
+    install_target: &InstallTarget,
     target_version: &str,
     skip_verify: bool,
     extra_tasks: Vec<Task>,
@@ -43,9 +43,14 @@ pub(super) async fn verify_updated_install(
             bar.finish();
         }
         ui::print_info("Skipping post-update integrity verification (--skip-verify)");
-        sync_launcher_metadata(api_client, install_path, profile, Some(target_version))
-            .await
-            .context("Failed to sync launcher metadata after update")?;
+        sync_launcher_metadata(
+            api_client,
+            install_path,
+            install_target,
+            Some(target_version),
+        )
+        .await
+        .context("Failed to sync launcher metadata after update")?;
         return Ok(());
     }
 
@@ -54,7 +59,7 @@ pub(super) async fn verify_updated_install(
     let summary = run_integrity_pool(
         api_client,
         install_path,
-        profile,
+        install_target,
         Some(target_version),
         true,
         &[],
@@ -89,9 +94,14 @@ pub(super) async fn verify_updated_install(
         );
     }
 
-    sync_launcher_metadata(api_client, install_path, profile, Some(target_version))
-        .await
-        .context("Failed to sync launcher metadata after update")?;
+    sync_launcher_metadata(
+        api_client,
+        install_path,
+        install_target,
+        Some(target_version),
+    )
+    .await
+    .context("Failed to sync launcher metadata after update")?;
     Ok(())
 }
 
@@ -126,12 +136,14 @@ pub(super) async fn update_via_reuse(
                 game_id
             );
         }
+        let source_region_id = source.require_known_region()?;
         let source_channel_id = source.require_known_channel()?;
         let source_version = source.require_config_ini_version()?.to_string();
         if source.install_path == local.install_path {
             continue;
         }
         source_installs.push(SourceInstallInput {
+            region_id: source_region_id,
             channel_id: source_channel_id,
             version: source_version,
             install_path: source.install_path.clone(),

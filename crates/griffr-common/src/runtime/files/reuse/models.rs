@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 
-use crate::config::ChannelPair;
+use crate::config::{ChannelPair, RegionId};
 use crate::runtime::issues::FileIssue;
 
 /// Explicit source installation input for file reuse.
 #[derive(Debug, Clone)]
 pub struct SourceInstallInput {
+    /// Region declared by the source installation metadata.
+    pub region_id: RegionId,
     /// Channel values declared by the source installation metadata.
     pub channel_id: ChannelPair,
     /// Installed version string of the source installation.

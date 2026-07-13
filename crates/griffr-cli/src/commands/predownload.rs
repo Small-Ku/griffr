@@ -82,12 +82,17 @@ async fn resolve_predownload_payload(
     let current_version = local.require_config_ini_version()?.to_string();
 
     let game_id = local.require_known_game()?;
+    let region_id = local.require_known_region()?;
     let channel_id = local.require_known_channel()?;
-    let profile =
-        griffr_common::config::resolve_install_profile(&game_id, &channel_id, &Default::default())?;
+    let install_target = griffr_common::config::resolve_install_target(
+        &game_id,
+        region_id,
+        &channel_id,
+        &Default::default(),
+    )?;
     let api_client = ApiClient::new()?;
     let version_info = api_client
-        .get_latest_game(&profile.target, Some(&current_version))
+        .get_latest_game(&install_target.api, Some(&current_version))
         .await?;
 
     let pre_patch = version_info
@@ -106,6 +111,7 @@ async fn print_predownload_status(
     let (local, _api_client, version_info, pre_patch, current_version) =
         resolve_predownload_payload(path).await?;
     let game_id = local.require_known_game()?;
+    let region_id = local.require_known_region()?;
     let channel_id = local.require_known_channel()?;
     let stage_dir = stage_dir_for_request(
         &local.install_path,
@@ -115,8 +121,9 @@ async fn print_predownload_status(
     );
 
     ui::print_phase(format!(
-        "Checking predownload for {} (channel={}, sub-channel={}) at {}",
+        "Checking predownload for {} (region={}, channel={}, sub-channel={}) at {}",
         game_id,
+        region_id,
         channel_id.channel(),
         channel_id.sub_channel(),
         local.install_path.display()
@@ -213,7 +220,7 @@ pub async fn fetch(path: PathBuf, output_dir: Option<PathBuf>, opts: GlobalOptio
 
 pub async fn apply(
     path: PathBuf,
-    overrides: crate::InstallProfileOverrideArgs,
+    overrides: crate::InstallTargetOverrideArgs,
     output_dir: Option<PathBuf>,
     opts: GlobalOptions,
 ) -> Result<()> {

@@ -15,7 +15,7 @@ use std::time::Duration;
 use crate::error::{Error, Result};
 use tracing::{debug, info, warn};
 
-use crate::config::{GameId, InstallProfile};
+use crate::config::{GameId, InstallTarget};
 
 /// Information about a running game process
 #[derive(Debug, Clone)]
@@ -36,23 +36,23 @@ pub struct GameProcess {
 #[derive(Debug)]
 pub struct Launcher {
     game_id: GameId,
-    profile: InstallProfile,
+    target: InstallTarget,
     install_path: PathBuf,
 }
 
 impl Launcher {
-    /// Create a new launcher for the given game, installation profile, and path
-    pub fn new(game_id: GameId, profile: InstallProfile, install_path: impl Into<PathBuf>) -> Self {
+    /// Create a new launcher for the given game, resolved install target, and path
+    pub fn new(game_id: GameId, target: InstallTarget, install_path: impl Into<PathBuf>) -> Self {
         Self {
             game_id,
-            profile,
+            target,
             install_path: install_path.into(),
         }
     }
 
     /// Get the main game executable name for this game
     fn main_exe_name(&self) -> &Path {
-        &self.profile.executable
+        &self.target.executable
     }
 
     /// Get the full path to the main game executable
@@ -475,26 +475,31 @@ mod tests {
 
     #[test]
     fn test_main_exe_names() {
-        use crate::config::{ChannelPair, KnownTargets};
-        let ark_profile = KnownTargets::resolve(
+        use crate::config::{
+            resolve_install_target, ChannelPair, InstallTargetOverrides, RegionId,
+        };
+        let ark_target = resolve_install_target(
             &GameId::ARKNIGHTS,
-            &ChannelPair::parse("1", None::<String>).unwrap(),
+            RegionId::Cn,
+            &ChannelPair::from_api("1", None::<String>).unwrap(),
+            &InstallTargetOverrides::default(),
         )
         .unwrap();
         let ark_launcher =
-            Launcher::new(GameId::ARKNIGHTS, ark_profile, PathBuf::from("/games/ark"));
+            Launcher::new(GameId::ARKNIGHTS, ark_target, PathBuf::from("/games/ark"));
         assert_eq!(
             ark_launcher.main_exe_name().to_string_lossy(),
             "Arknights.exe"
         );
 
-        let end_profile = KnownTargets::resolve(
+        let end_target = resolve_install_target(
             &GameId::ENDFIELD,
-            &ChannelPair::parse("1", None::<String>).unwrap(),
+            RegionId::Cn,
+            &ChannelPair::from_api("1", None::<String>).unwrap(),
+            &InstallTargetOverrides::default(),
         )
         .unwrap();
-        let end_launcher =
-            Launcher::new(GameId::ENDFIELD, end_profile, PathBuf::from("/games/end"));
+        let end_launcher = Launcher::new(GameId::ENDFIELD, end_target, PathBuf::from("/games/end"));
         assert_eq!(
             end_launcher.main_exe_name().to_string_lossy(),
             "Endfield.exe"

@@ -14,7 +14,7 @@ use crate::GlobalOptions;
 
 pub async fn bootstrap(
     path: PathBuf,
-    overrides: crate::InstallProfileOverrideArgs,
+    overrides: crate::InstallTargetOverrideArgs,
     scope: VfsBootstrapScope,
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
@@ -25,32 +25,35 @@ pub async fn bootstrap(
 ) -> Result<()> {
     let local = detect_local_install(&path).await?;
     let game_id = local.require_known_game()?;
+    let region_id = local.require_known_region()?;
     let channel_id = local.require_known_channel()?;
     let installed_version = local.require_config_ini_version()?.to_string();
 
-    let profile = griffr_common::config::resolve_install_profile(
+    let install_target = griffr_common::config::resolve_install_target(
         &game_id,
+        region_id,
         &channel_id,
         &overrides.clone().into(),
     )?;
     let api_client = ApiClient::new()?;
     let version_info = api_client
-        .get_latest_game(&profile.target, Some(&installed_version))
+        .get_latest_game(&install_target.api, Some(&installed_version))
         .await
         .context("Failed to fetch version information for bootstrap")?;
 
     let rand_str = version_info.rand_str();
     if rand_str.is_empty() {
         anyhow::bail!(
-            "Could not resolve rand_str for {} (channel={}, sub-channel={}) version {}",
+            "Could not resolve rand_str for {} (region={}, channel={}, sub-channel={}) version {}",
             game_id,
+            region_id,
             channel_id.channel(),
             channel_id.sub_channel(),
             installed_version
         );
     }
 
-    let data_root = local.install_path.join(profile.data_root.clone());
+    let data_root = local.install_path.join(install_target.data_root.clone());
     let streaming_assets_root = griffr_common::runtime::streaming_assets_path(&data_root);
     let persistent_root = griffr_common::runtime::persistent_path(&data_root);
 
@@ -69,15 +72,16 @@ pub async fn bootstrap(
             );
         }
         if source.install_path != local.install_path {
-            let source_profile = griffr_common::config::resolve_install_profile(
+            let source_target = griffr_common::config::resolve_install_target(
                 &source.require_known_game()?,
+                source.require_known_region()?,
                 &source.require_known_channel()?,
                 &Default::default(),
             )?;
             extra_source_streaming_assets.push(
                 source
                     .install_path
-                    .join(source_profile.data_root)
+                    .join(source_target.data_root)
                     .join(griffr_common::runtime::STREAMING_ASSETS_DIR),
             );
         }
@@ -85,8 +89,9 @@ pub async fn bootstrap(
 
     if opts.is_dry_run() {
         opts.dry_run(format!(
-            "Would bootstrap Persistent VFS for {} (channel={}, sub-channel={}) at {} with scope={:?}",
+            "Would bootstrap Persistent VFS for {} (region={}, channel={}, sub-channel={}) at {} with scope={:?}",
             game_id,
+            region_id,
             channel_id.channel(),
             channel_id.sub_channel(),
             local.install_path.display(),
@@ -118,9 +123,10 @@ pub async fn bootstrap(
     }
 
     ui::print_phase(format!(
-        "Bootstrapping Persistent VFS ({:?}) for {} (channel={}, sub-channel={})",
+        "Bootstrapping Persistent VFS ({:?}) for {} (region={}, channel={}, sub-channel={})",
         scope,
         game_id,
+        region_id,
         channel_id.channel(),
         channel_id.sub_channel()
     ));
@@ -140,7 +146,7 @@ pub async fn bootstrap(
     let progress_cb = progress.byte_callback("persistent-vfs");
     let result = bootstrap_persistent_vfs_with_runner(
         &api_client,
-        &profile.target,
+        &install_target.api,
         &version_info.version,
         &rand_str,
         &persistent_root,

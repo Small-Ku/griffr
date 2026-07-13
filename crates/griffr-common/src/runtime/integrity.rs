@@ -2,7 +2,7 @@ use rapidhash::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::api::ApiClient;
-use crate::config::InstallProfile;
+use crate::config::InstallTarget;
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::{
     run_tasks_with_progress, ProgressEvent, Task, TaskPoolConfig, TaskPoolRunner,
@@ -58,7 +58,7 @@ fn task_expected_bytes(task: &Task) -> u64 {
 pub async fn run_integrity_pool(
     api_client: &ApiClient,
     install_path: &Path,
-    profile: &InstallProfile,
+    install_target: &InstallTarget,
     version: Option<&str>,
     repair: bool,
     source_roots: &[PathBuf],
@@ -69,7 +69,9 @@ pub async fn run_integrity_pool(
     progress_callback: Option<impl Fn(usize, usize, &str)>,
     download_progress_callback: Option<impl Fn(u64, u64, &str)>,
 ) -> Result<IntegrityRunSummary> {
-    let version_info = api_client.get_latest_game(&profile.target, version).await?;
+    let version_info = api_client
+        .get_latest_game(&install_target.api, version)
+        .await?;
 
     let pkg = version_info
         .pkg

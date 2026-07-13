@@ -23,13 +23,18 @@ pub async fn plan_file_reuse(
         let channel_id = source.channel_id.clone();
         let version = &source.version;
 
-        let preset = match crate::config::KnownTargets::resolve(&game_id, &channel_id) {
-            Some(p) => p,
-            None => continue,
+        let target = match crate::config::resolve_api_target(
+            &game_id,
+            source.region_id,
+            &channel_id,
+            &crate::config::ApiTargetOverrides::default(),
+        ) {
+            Ok(target) => target,
+            Err(_) => continue,
         };
 
         let version_info = match api_client
-            .get_latest_game(&preset.target, Some(version))
+            .get_latest_game(&target, Some(version))
             .await
         {
             Ok(info) => info,

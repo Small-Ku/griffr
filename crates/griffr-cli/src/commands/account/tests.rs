@@ -1,5 +1,5 @@
 use super::operations::*;
-use griffr_common::config::ChannelId;
+use griffr_common::config::RegionId;
 use griffr_common::runtime::copy_dir_recursive;
 use std::io::Write;
 use std::path::PathBuf;
@@ -36,27 +36,19 @@ fn select_latest_sdk_dir_from_roots_prefers_newest_across_roots() {
 }
 
 #[test]
-fn local_low_roots_for_hint_cn_prefers_hypergryph() {
+fn local_low_roots_for_cn_prefers_hypergryph() {
     let base = PathBuf::from("C:\\Users\\Test\\AppData\\LocalLow");
-    let roots = local_low_roots_for_hint(&base, "Endfield", Some(ChannelId::HYPERGRYPH)).unwrap();
+    let roots = local_low_roots_for_hint(&base, "Endfield", Some(RegionId::Cn)).unwrap();
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0], base.join("Hypergryph").join("Endfield"));
 }
 
 #[test]
-fn local_low_roots_for_hint_global_prefers_gryphline() {
+fn local_low_roots_for_sg_prefers_gryphline() {
     let base = PathBuf::from("C:\\Users\\Test\\AppData\\LocalLow");
-    let roots = local_low_roots_for_hint(&base, "Endfield", Some(ChannelId::GRYPHLINE)).unwrap();
+    let roots = local_low_roots_for_hint(&base, "Endfield", Some(RegionId::Sg)).unwrap();
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0], base.join("Gryphline").join("Endfield"));
-}
-
-#[test]
-fn local_low_roots_for_hint_rejects_invalid_channel_for_game() {
-    let base = PathBuf::from("C:\\Users\\Test\\AppData\\LocalLow");
-    let channel = ChannelId::new("999").unwrap();
-    let err = local_low_roots_for_hint(&base, "FutureGame", Some(channel)).unwrap_err();
-    assert!(err.to_string().contains("must provide --sdk-dir"));
 }
 
 #[compio::test]

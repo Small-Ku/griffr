@@ -1,17 +1,19 @@
 use std::path::Path;
 
 use crate::api::ApiClient;
-use crate::config::InstallProfile;
+use crate::config::InstallTarget;
 use crate::error::{Error, Result};
 use crate::runtime::{launcher_metadata_url, CONFIG_INI_NAME, GAME_FILES_NAME, PACKAGE_FILES_NAME};
 
 pub async fn sync_launcher_metadata(
     api_client: &ApiClient,
     install_path: &Path,
-    profile: &InstallProfile,
+    install_target: &InstallTarget,
     version: Option<&str>,
 ) -> Result<()> {
-    let version_info = api_client.get_latest_game(&profile.target, version).await?;
+    let version_info = api_client
+        .get_latest_game(&install_target.api, version)
+        .await?;
     let pkg = version_info
         .pkg
         .as_ref()

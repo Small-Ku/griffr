@@ -38,9 +38,15 @@ pub async fn materialize_game_files_with_pool(
         .map(|source| {
             let game_id = game_id.clone();
             async move {
-                let preset = crate::config::KnownTargets::resolve(&game_id, &source.channel_id)?;
+                let target = crate::config::resolve_api_target(
+                    &game_id,
+                    source.region_id,
+                    &source.channel_id,
+                    &crate::config::ApiTargetOverrides::default(),
+                )
+                .ok()?;
                 let version_info = api_client
-                    .get_latest_game(&preset.target, Some(&source.version))
+                    .get_latest_game(&target, Some(&source.version))
                     .await
                     .ok()?;
                 let pkg = version_info.pkg.as_ref()?;

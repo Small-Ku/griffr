@@ -79,7 +79,7 @@ pub struct ApiTargetOverrideArgs {
 }
 
 #[derive(Args, Debug, Clone)]
-pub struct InstallProfileOverrideArgs {
+pub struct InstallTargetOverrideArgs {
     #[command(flatten)]
     pub api: ApiTargetOverrideArgs,
 
@@ -92,23 +92,20 @@ pub struct InstallProfileOverrideArgs {
     pub data_root: Option<String>,
 }
 
-impl From<ApiTargetOverrideArgs> for griffr_common::config::TargetOverride {
+impl From<ApiTargetOverrideArgs> for griffr_common::config::ApiTargetOverrides {
     fn from(args: ApiTargetOverrideArgs) -> Self {
         Self {
             gateway: args.gateway,
             game_appcode: args.game_appcode,
             launcher_appcode: args.launcher_appcode,
-            ..Default::default()
         }
     }
 }
 
-impl From<InstallProfileOverrideArgs> for griffr_common::config::TargetOverride {
-    fn from(args: InstallProfileOverrideArgs) -> Self {
+impl From<InstallTargetOverrideArgs> for griffr_common::config::InstallTargetOverrides {
+    fn from(args: InstallTargetOverrideArgs) -> Self {
         Self {
-            gateway: args.api.gateway,
-            game_appcode: args.api.game_appcode,
-            launcher_appcode: args.api.launcher_appcode,
+            api: args.api.into(),
             executable: args.executable,
             data_root: args.data_root,
         }
@@ -117,49 +114,63 @@ impl From<InstallProfileOverrideArgs> for griffr_common::config::TargetOverride 
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct GameArg {
-    /// Known game id or custom game
-    #[arg(long, requires = "channel")]
+    /// Game ID (`arknights` or `endfield`)
+    #[arg(long, requires = "region")]
     pub(crate) game: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
-pub(crate) struct ChannelArg {
-    /// API channel ID or friendly alias
+pub(crate) struct RegionArg {
+    /// Launcher config/API region (`cn` or `sg`; aliases accepted)
     #[arg(long, requires = "game")]
+    pub(crate) region: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub(crate) struct ChannelArg {
+    /// API channel ID or alias (`official`, `bilibili`/`bili`); omitted means official
+    #[arg(long, requires = "region")]
     pub(crate) channel: Option<String>,
 
-    /// API sub-channel ID or friendly alias; defaults to --channel
-    #[arg(long = "sub-channel", alias = "subchannel", requires = "channel")]
+    /// API sub-channel ID or alias (`official`, `bilibili`, `epic`, `google-play`); omitted copies channel
+    #[arg(long = "sub-channel", aliases = ["subchannel", "sub_channel"], requires = "region")]
     pub(crate) sub_channel: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
-pub(crate) struct GameChannelArgs {
+pub(crate) struct GameRegionChannelArgs {
     #[command(flatten)]
     pub(crate) game: GameArg,
+
+    #[command(flatten)]
+    pub(crate) region: RegionArg,
 
     #[command(flatten)]
     pub(crate) channel: ChannelArg,
 }
 
 #[derive(Args, Debug, Clone)]
-pub(crate) struct RequiredGameChannelArgs {
-    /// Known game id or custom game
+pub(crate) struct RequiredGameRegionChannelArgs {
+    /// Game ID (`arknights` or `endfield`)
     #[arg(long)]
     pub(crate) game: String,
 
-    /// API channel ID or friendly alias
+    /// Launcher config/API region (`cn` or `sg`; aliases accepted)
     #[arg(long)]
-    pub(crate) channel: String,
+    pub(crate) region: String,
 
-    /// API sub-channel ID or friendly alias; defaults to --channel
-    #[arg(long = "sub-channel", alias = "subchannel")]
+    /// API channel ID or alias (`official`, `bilibili`/`bili`); omitted means official
+    #[arg(long)]
+    pub(crate) channel: Option<String>,
+
+    /// API sub-channel ID or alias (`official`, `bilibili`, `epic`, `google-play`); omitted copies channel
+    #[arg(long = "sub-channel", aliases = ["subchannel", "sub_channel"])]
     pub(crate) sub_channel: Option<String>,
 }
 
-impl RequiredGameChannelArgs {
-    pub(crate) fn into_parts(self) -> (String, String, Option<String>) {
-        (self.game, self.channel, self.sub_channel)
+impl RequiredGameRegionChannelArgs {
+    pub(crate) fn into_parts(self) -> (String, String, Option<String>, Option<String>) {
+        (self.game, self.region, self.channel, self.sub_channel)
     }
 }
 
@@ -171,11 +182,11 @@ impl RequiredGameChannelArgs {
 ))]
 pub(crate) struct InfoSelectorArgs {
     /// Install root or config.ini path
-    #[arg(long, conflicts_with_all = ["game", "channel"])]
+    #[arg(long, conflicts_with_all = ["game", "region", "channel", "sub_channel"])]
     pub(crate) path: Option<std::path::PathBuf>,
 
     #[command(flatten)]
-    pub(crate) game_channel: GameChannelArgs,
+    pub(crate) remote: GameRegionChannelArgs,
 
     /// Launcher language
     #[arg(long, default_value = DEFAULT_LANGUAGE)]
@@ -187,10 +198,10 @@ pub(crate) enum Commands {
     /// Download and install a game to an explicit path
     Install {
         #[command(flatten)]
-        remote: RequiredGameChannelArgs,
+        remote: RequiredGameRegionChannelArgs,
 
         #[command(flatten)]
-        overrides: InstallProfileOverrideArgs,
+        overrides: InstallTargetOverrideArgs,
 
         #[command(flatten)]
         path: PathArg,
@@ -232,7 +243,7 @@ pub(crate) enum Commands {
         path: PathArg,
 
         #[command(flatten)]
-        overrides: InstallProfileOverrideArgs,
+        overrides: InstallTargetOverrideArgs,
 
         #[command(flatten)]
         reuse: ReuseSourcesArg,
@@ -281,10 +292,10 @@ pub(crate) enum Commands {
         path: PathArg,
 
         #[command(flatten)]
-        remote: GameChannelArgs,
+        remote: GameRegionChannelArgs,
 
         #[command(flatten)]
-        overrides: InstallProfileOverrideArgs,
+        overrides: InstallTargetOverrideArgs,
 
         /// Repair corrupt or missing files and resync launcher metadata
         #[arg(short, long)]
@@ -301,8 +312,8 @@ pub(crate) enum Commands {
         #[arg(long)]
         skip_vfs: bool,
 
-        /// Do not read game/channel from local install metadata; requires --game and --channel
-        #[arg(long, requires = "game", requires = "channel")]
+        /// Do not read game/region/channel from local install metadata; requires --game and --region
+        #[arg(long, requires = "game", requires = "region")]
         skip_local_detect: bool,
     },
     /// Bootstrap Persistent VFS state from StreamingAssets with launcher-parity scopes
@@ -311,7 +322,7 @@ pub(crate) enum Commands {
         path: PathArg,
 
         #[command(flatten)]
-        overrides: InstallProfileOverrideArgs,
+        overrides: InstallTargetOverrideArgs,
 
         /// Bootstrap scope for Persistent materialization
         #[arg(long, default_value_t = VfsBootstrapScope::Initial)]
@@ -339,10 +350,10 @@ pub(crate) enum Commands {
         selector: InfoSelectorArgs,
     },
 
-    /// Fetch launcher news/media for a known game/channel
+    /// Fetch launcher news/media for a known game/region/channel
     News {
         #[command(flatten)]
-        remote: RequiredGameChannelArgs,
+        remote: RequiredGameRegionChannelArgs,
 
         #[command(flatten)]
         overrides: ApiTargetOverrideArgs,

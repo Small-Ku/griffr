@@ -1,16 +1,16 @@
 use clap::Subcommand;
 use griffr_common::api::protocol::{DEFAULT_LANGUAGE, DEFAULT_PLATFORM};
-use griffr_common::config::{ChannelId, GameId};
+use griffr_common::config::{GameId, RegionId};
 use tracing::debug;
 
 use crate::cli::{
-    ApiTargetOverrideArgs, InstallProfileOverrideArgs, OutputFormat, PathArg,
-    RequiredGameChannelArgs, SnapshotHashScope, VfsDiffAgainst,
+    ApiTargetOverrideArgs, InstallTargetOverrideArgs, OutputFormat, PathArg,
+    RequiredGameRegionChannelArgs, SnapshotHashScope, VfsDiffAgainst,
 };
 
 #[derive(Subcommand)]
 pub(crate) enum DebugCommands {
-    /// Detect known game/channel/version from encrypted config.ini
+    /// Detect known game/region/channel/version from encrypted config.ini
     DetectConfigIni {
         #[arg(long)]
         path: std::path::PathBuf,
@@ -84,7 +84,7 @@ pub(crate) enum DebugCommands {
     /// Call get_latest_game and print raw response JSON
     GetRawLatestGame {
         #[command(flatten)]
-        remote: RequiredGameChannelArgs,
+        remote: RequiredGameRegionChannelArgs,
 
         #[command(flatten)]
         overrides: ApiTargetOverrideArgs,
@@ -100,7 +100,7 @@ pub(crate) enum DebugCommands {
     /// Call get_latest_resources and print raw response JSON
     GetRawLatestResources {
         #[command(flatten)]
-        remote: RequiredGameChannelArgs,
+        remote: RequiredGameRegionChannelArgs,
 
         #[command(flatten)]
         overrides: ApiTargetOverrideArgs,
@@ -127,7 +127,7 @@ pub(crate) enum DebugCommands {
     /// Fetch and print the remote game_files manifest
     ListGameFiles {
         #[command(flatten)]
-        remote: RequiredGameChannelArgs,
+        remote: RequiredGameRegionChannelArgs,
 
         #[command(flatten)]
         overrides: ApiTargetOverrideArgs,
@@ -143,7 +143,7 @@ pub(crate) enum DebugCommands {
     /// List files from latest resource indexes (index_main/index_initial)
     ListResourceFiles {
         #[command(flatten)]
-        remote: RequiredGameChannelArgs,
+        remote: RequiredGameRegionChannelArgs,
 
         #[command(flatten)]
         overrides: ApiTargetOverrideArgs,
@@ -170,7 +170,7 @@ pub(crate) enum DebugCommands {
     /// Fetch one file referenced by the latest remote game_files manifest
     GetFile {
         #[command(flatten)]
-        remote: RequiredGameChannelArgs,
+        remote: RequiredGameRegionChannelArgs,
 
         #[command(flatten)]
         overrides: ApiTargetOverrideArgs,
@@ -189,7 +189,7 @@ pub(crate) enum DebugCommands {
     /// Fetch raw media/news payload as JSON
     GetRawMedia {
         #[command(flatten)]
-        remote: RequiredGameChannelArgs,
+        remote: RequiredGameRegionChannelArgs,
 
         #[command(flatten)]
         overrides: ApiTargetOverrideArgs,
@@ -205,7 +205,7 @@ pub(crate) enum DebugCommands {
     /// Fetch normalized media/news payload as JSON
     GetMedia {
         #[command(flatten)]
-        remote: RequiredGameChannelArgs,
+        remote: RequiredGameRegionChannelArgs,
 
         #[command(flatten)]
         overrides: ApiTargetOverrideArgs,
@@ -242,7 +242,7 @@ pub(crate) enum PredownloadCommands {
         path: PathArg,
 
         #[command(flatten)]
-        overrides: InstallProfileOverrideArgs,
+        overrides: InstallTargetOverrideArgs,
 
         /// Override the staging directory used for staged predownload archives
         #[arg(long)]
@@ -274,9 +274,9 @@ pub(crate) enum AccountCommands {
         /// Known game id
         game: GameId,
 
-        /// Optional channel hint to narrow default sdk_data discovery roots
+        /// Optional launcher region hint to narrow default sdk_data discovery roots
         #[arg(long)]
-        channel_hint: Option<ChannelId>,
+        region_hint: Option<RegionId>,
 
         /// Output bundle directory
         #[arg(long = "to")]
@@ -304,9 +304,9 @@ pub(crate) enum AccountCommands {
         /// Known game id
         game: GameId,
 
-        /// Optional channel hint to narrow default sdk_data discovery roots
+        /// Optional launcher region hint to narrow default sdk_data discovery roots
         #[arg(long)]
-        channel_hint: Option<ChannelId>,
+        region_hint: Option<RegionId>,
 
         /// Input bundle directory
         #[arg(long = "from")]

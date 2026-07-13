@@ -42,21 +42,21 @@ pub fn latest_resources_url(gateway: &str) -> String {
 pub fn latest_game_batch(target: &ApiTarget, current_version: Option<&str>) -> BatchRequest {
     BatchRequest::new(vec![ProxyRequest::GetLatestGame {
         req: GetLatestGameRequest {
-            appcode: target.game_appcode.0.clone(),
-            channel: target.channel.as_str().to_owned(),
-            sub_channel: target.sub_channel.as_str().to_owned(),
+            appcode: target.game_appcode.clone(),
+            channel: target.channels.channel().as_str().to_owned(),
+            sub_channel: target.channels.sub_channel().as_str().to_owned(),
             version: current_version.unwrap_or_default().to_owned(),
-            launcher_appcode: target.launcher_appcode.0.clone(),
+            launcher_appcode: target.launcher_appcode.clone(),
         },
     }])
 }
 
 pub fn media_batch(target: &ApiTarget, language: &str) -> BatchRequest {
     let common = CommonRequest::new(
-        target.game_appcode.0.clone(),
+        target.game_appcode.clone(),
         language,
-        target.channel.as_str().to_owned(),
-        target.sub_channel.as_str().to_owned(),
+        target.channels.channel().as_str().to_owned(),
+        target.channels.sub_channel().as_str().to_owned(),
     );
 
     BatchRequest::new(vec![

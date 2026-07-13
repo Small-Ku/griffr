@@ -3,14 +3,18 @@ use crate::debug_cli::*;
 use crate::{commands, GlobalOptions};
 use anyhow::Result;
 use clap::Parser;
-use griffr_common::config::{ChannelPair, GameId};
+use griffr_common::config::{ChannelPair, GameId, RegionId};
 use tracing::debug;
 
-fn parse_remote_args(remote: RequiredGameChannelArgs) -> Result<(GameId, ChannelPair)> {
-    let (game, channel, sub_channel) = remote.into_parts();
+fn parse_remote_args(
+    remote: RequiredGameRegionChannelArgs,
+) -> Result<(GameId, RegionId, ChannelPair)> {
+    let (game, region, channel, sub_channel) = remote.into_parts();
+    let region = region.parse::<RegionId>()?;
     Ok((
         game.parse::<GameId>()?,
-        ChannelPair::parse(channel, sub_channel)?,
+        region,
+        ChannelPair::parse(region, channel, sub_channel)?,
     ))
 }
 
@@ -59,7 +63,7 @@ pub(crate) async fn run() -> Result<()> {
             skip_vfs,
             keep_pack_archives,
         } => {
-            let (game_id, channel_id) = parse_remote_args(remote)?;
+            let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
             let PathArg { path } = path;
             let ReuseSourcesArg {
                 reuse_from,
@@ -73,11 +77,12 @@ pub(crate) async fn run() -> Result<()> {
             };
 
             opts.verbose(format!(
-                "Install command: game={:?}, channel={:?}, path={:?}, reuse_from={:?}, force_copy={}, skip_vfs={}, keep_pack_archives={}",
-                game_id, channel_id, path, reuse_from, force_copy, skip_vfs, keep_pack_archives
+                "Install command: game={:?}, region={}, channel={:?}, path={:?}, reuse_from={:?}, force_copy={}, skip_vfs={}, keep_pack_archives={}",
+                game_id, region_id, channel_id, path, reuse_from, force_copy, skip_vfs, keep_pack_archives
             ));
             commands::install(
-                game_id, channel_id, overrides, path, force, reuse_from, force_copy, opts,
+                game_id, region_id, channel_id, overrides, path, force, reuse_from, force_copy,
+                opts,
             )
             .await?;
         }
@@ -193,8 +198,9 @@ pub(crate) async fn run() -> Result<()> {
                 reuse_from,
                 force_copy,
             } = reuse;
-            let GameChannelArgs {
+            let GameRegionChannelArgs {
                 game: GameArg { game },
+                region: RegionArg { region },
                 channel:
                     ChannelArg {
                         channel,
@@ -202,16 +208,18 @@ pub(crate) async fn run() -> Result<()> {
                     },
             } = remote;
             let game = game.map(|value| value.parse::<GameId>()).transpose()?;
-            let channel = channel
-                .map(|value| ChannelPair::parse(value, sub_channel))
+            let region = region.map(|value| value.parse::<RegionId>()).transpose()?;
+            let channel = region
+                .map(|region| ChannelPair::parse(region, channel, sub_channel))
                 .transpose()?;
             opts.verbose(format!(
-                "Verify path: {:?}, game={:?}, channel={:?}, repair={}, reuse_from={:?}, force_copy={}, relink_reuse={}, skip_vfs={}, skip_local_detect={}",
-                path, game, channel, repair, reuse_from, force_copy, relink_reuse, skip_vfs, skip_local_detect
+                "Verify path: {:?}, game={:?}, region={:?}, channel={:?}, repair={}, reuse_from={:?}, force_copy={}, relink_reuse={}, skip_vfs={}, skip_local_detect={}",
+                path, game, region, channel, repair, reuse_from, force_copy, relink_reuse, skip_vfs, skip_local_detect
             ));
             commands::verify(
                 path,
                 game,
+                region,
                 channel,
                 overrides,
                 skip_local_detect,
@@ -260,9 +268,10 @@ pub(crate) async fn run() -> Result<()> {
             opts.verbose("Info query");
             commands::info_show(
                 selector.path,
-                selector.game_channel.game.game,
-                selector.game_channel.channel.channel,
-                selector.game_channel.channel.sub_channel,
+                selector.remote.game.game,
+                selector.remote.region.region,
+                selector.remote.channel.channel,
+                selector.remote.channel.sub_channel,
                 &selector.language,
                 opts,
             )
@@ -274,9 +283,9 @@ pub(crate) async fn run() -> Result<()> {
             overrides,
             language,
         } => {
-            let (game_id, channel_id) = parse_remote_args(remote)?;
+            let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
             opts.verbose(format!("News: {:?} {:?}", game_id, channel_id));
-            commands::news_show(game_id, channel_id, overrides, &language, opts).await?;
+            commands::news_show(game_id, region_id, channel_id, overrides, &language, opts).await?;
         }
 
         Commands::Debug { command } => match command {
@@ -312,9 +321,9 @@ pub(crate) async fn run() -> Result<()> {
                 version,
                 output,
             } => {
-                let (game_id, channel_id) = parse_remote_args(remote)?;
+                let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
                 commands::debug_api_get_latest_game(
-                    game_id, channel_id, overrides, version, output, opts,
+                    game_id, region_id, channel_id, overrides, version, output, opts,
                 )
                 .await?;
             }
@@ -327,9 +336,10 @@ pub(crate) async fn run() -> Result<()> {
                 platform,
                 output,
             } => {
-                let (game_id, channel_id) = parse_remote_args(remote)?;
+                let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
                 commands::debug_api_get_latest_resources(
                     game_id,
+                    region_id,
                     channel_id,
                     overrides,
                     version,
@@ -347,9 +357,9 @@ pub(crate) async fn run() -> Result<()> {
                 version,
                 output,
             } => {
-                let (game_id, channel_id) = parse_remote_args(remote)?;
+                let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
                 commands::debug_fetch_game_files(
-                    game_id, channel_id, overrides, version, output, opts,
+                    game_id, region_id, channel_id, overrides, version, output, opts,
                 )
                 .await?;
             }
@@ -362,9 +372,10 @@ pub(crate) async fn run() -> Result<()> {
                 platform,
                 output,
             } => {
-                let (game_id, channel_id) = parse_remote_args(remote)?;
+                let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
                 commands::debug_list_resource_files(
                     game_id,
+                    region_id,
                     channel_id,
                     overrides,
                     version,
@@ -383,9 +394,9 @@ pub(crate) async fn run() -> Result<()> {
                 file,
                 output,
             } => {
-                let (game_id, channel_id) = parse_remote_args(remote)?;
+                let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
                 commands::debug_fetch_file(
-                    game_id, channel_id, overrides, version, file, output, opts,
+                    game_id, region_id, channel_id, overrides, version, file, output, opts,
                 )
                 .await?;
             }
@@ -395,9 +406,9 @@ pub(crate) async fn run() -> Result<()> {
                 language,
                 output,
             } => {
-                let (game_id, channel_id) = parse_remote_args(remote)?;
+                let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
                 commands::debug_api_get_media(
-                    game_id, channel_id, overrides, language, output, opts,
+                    game_id, region_id, channel_id, overrides, language, output, opts,
                 )
                 .await?;
             }
@@ -407,15 +418,17 @@ pub(crate) async fn run() -> Result<()> {
                 language,
                 output,
             } => {
-                let (game_id, channel_id) = parse_remote_args(remote)?;
-                commands::debug_fetch_media(game_id, channel_id, overrides, language, output, opts)
-                    .await?;
+                let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
+                commands::debug_fetch_media(
+                    game_id, region_id, channel_id, overrides, language, output, opts,
+                )
+                .await?;
             }
         },
         Commands::Account { command } => match command {
             AccountCommands::Capture {
                 game,
-                channel_hint,
+                region_hint,
                 bundle,
                 sdk_dir,
                 install_path,
@@ -424,7 +437,7 @@ pub(crate) async fn run() -> Result<()> {
             } => {
                 commands::account_capture(
                     game,
-                    channel_hint,
+                    region_hint,
                     bundle,
                     sdk_dir,
                     install_path,
@@ -436,7 +449,7 @@ pub(crate) async fn run() -> Result<()> {
             }
             AccountCommands::Activate {
                 game,
-                channel_hint,
+                region_hint,
                 bundle,
                 sdk_dir,
                 install_path,
@@ -445,7 +458,7 @@ pub(crate) async fn run() -> Result<()> {
             } => {
                 commands::account_activate(
                     game,
-                    channel_hint,
+                    region_hint,
                     bundle,
                     sdk_dir,
                     install_path,
@@ -466,29 +479,75 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_args_normalize_channel_fields_independently() {
-        let remote = RequiredGameChannelArgs {
-            game: "endfield".to_string(),
-            channel: "hypergryph".to_string(),
-            sub_channel: Some("google_play".to_string()),
+    fn clap_accepts_native_region_defaults_and_sub_channel_alias() {
+        let cli = Cli::try_parse_from([
+            "griffr",
+            "install",
+            "--game",
+            "endfield",
+            "--region",
+            "sg",
+            "--sub_channel",
+            "gplay",
+            "--path",
+            r"C:\Games\Endfield",
+        ])
+        .unwrap();
+        let Commands::Install { remote, .. } = cli.command else {
+            panic!("expected install command");
         };
 
-        let (game, channel) = parse_remote_args(remote).unwrap();
+        let (game, region, channel) = parse_remote_args(remote).unwrap();
         assert_eq!(game, GameId::ENDFIELD);
-        assert_eq!(channel.channel().as_str(), "1");
+        assert_eq!(region, RegionId::Sg);
+        assert_eq!(channel.channel().as_str(), "6");
         assert_eq!(channel.sub_channel().as_str(), "802");
     }
 
     #[test]
-    fn remote_args_default_sub_channel_to_channel() {
-        let remote = RequiredGameChannelArgs {
+    fn remote_args_use_native_region_and_scoped_aliases() {
+        let remote = RequiredGameRegionChannelArgs {
             game: "endfield".to_string(),
-            channel: "epic_store".to_string(),
+            region: "sg".to_string(),
+            channel: None,
+            sub_channel: Some("google-play".to_string()),
+        };
+
+        let (game, region, channel) = parse_remote_args(remote).unwrap();
+        assert_eq!(game, GameId::ENDFIELD);
+        assert_eq!(region, RegionId::Sg);
+        assert_eq!(channel.channel().as_str(), "6");
+        assert_eq!(channel.sub_channel().as_str(), "802");
+    }
+
+    #[test]
+    fn remote_parser_does_not_reject_arknights_sg_combination() {
+        let remote = RequiredGameRegionChannelArgs {
+            game: "arknights".to_string(),
+            region: "sg".to_string(),
+            channel: None,
             sub_channel: None,
         };
 
-        let (_, channel) = parse_remote_args(remote).unwrap();
-        assert_eq!(channel.channel().as_str(), "801");
-        assert_eq!(channel.sub_channel().as_str(), "801");
+        let (game, region, channel) = parse_remote_args(remote).unwrap();
+        assert_eq!(game, GameId::ARKNIGHTS);
+        assert_eq!(region, RegionId::Sg);
+        assert_eq!(channel.channel().as_str(), "6");
+        assert_eq!(channel.sub_channel().as_str(), "6");
+    }
+
+    #[test]
+    fn remote_args_default_to_region_official_channel() {
+        let remote = RequiredGameRegionChannelArgs {
+            game: "endfield".to_string(),
+            region: "cn".to_string(),
+            channel: None,
+            sub_channel: None,
+        };
+
+        let (_, region, channel) = parse_remote_args(remote).unwrap();
+        assert_eq!(region, RegionId::Cn);
+        assert_eq!(channel.channel().as_str(), "1");
+        assert_eq!(channel.sub_channel().as_str(), "1");
     }
 }

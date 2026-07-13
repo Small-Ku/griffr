@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::crypto;
-use griffr_common::config::{ChannelPair, GameId};
+use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::{resource_manifest_url, ResourceManifestKind};
 use serde_json::json;
 
@@ -12,6 +12,7 @@ use crate::GlobalOptions;
 
 pub async fn fetch_game_files(
     game_id: GameId,
+    region_id: RegionId,
     channel_id: ChannelPair,
     overrides: crate::ApiTargetOverrideArgs,
     version: Option<String>,
@@ -19,8 +20,12 @@ pub async fn fetch_game_files(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target =
-        griffr_common::config::resolve_api_target(&game_id, &channel_id, &overrides.into())?;
+    let target = griffr_common::config::resolve_api_target(
+        &game_id,
+        region_id,
+        &channel_id,
+        &overrides.into(),
+    )?;
     let version_info = api_client
         .get_latest_game(&target, version.as_deref())
         .await?;
@@ -53,6 +58,7 @@ pub async fn fetch_game_files(
 
 pub async fn fetch_file(
     game_id: GameId,
+    region_id: RegionId,
     channel_id: ChannelPair,
     overrides: crate::ApiTargetOverrideArgs,
     version: Option<String>,
@@ -61,8 +67,12 @@ pub async fn fetch_file(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target =
-        griffr_common::config::resolve_api_target(&game_id, &channel_id, &overrides.into())?;
+    let target = griffr_common::config::resolve_api_target(
+        &game_id,
+        region_id,
+        &channel_id,
+        &overrides.into(),
+    )?;
     let version_info = api_client
         .get_latest_game(&target, version.as_deref())
         .await?;
@@ -91,6 +101,7 @@ pub async fn fetch_file(
 
 pub async fn api_get_latest_game(
     game_id: GameId,
+    region_id: RegionId,
     channel_id: ChannelPair,
     overrides: crate::ApiTargetOverrideArgs,
     version: Option<String>,
@@ -98,15 +109,20 @@ pub async fn api_get_latest_game(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target =
-        griffr_common::config::resolve_api_target(&game_id, &channel_id, &overrides.into())?;
+    let target = griffr_common::config::resolve_api_target(
+        &game_id,
+        region_id,
+        &channel_id,
+        &overrides.into(),
+    )?;
     let latest = api_client
         .get_latest_game(&target, version.as_deref())
         .await?;
     let payload = json!({
         "game": game_id.to_string(),
+        "region": region_id.to_string(),
         "channel": channel_id.channel().to_string(),
-            "sub_channel": channel_id.sub_channel().to_string(),
+        "sub_channel": channel_id.sub_channel().to_string(),
         "request_version": version,
         "response": {
             "action": latest.action,
@@ -129,6 +145,7 @@ pub async fn api_get_latest_game(
 
 pub async fn api_get_latest_resources(
     game_id: GameId,
+    region_id: RegionId,
     channel_id: ChannelPair,
     overrides: crate::ApiTargetOverrideArgs,
     version: Option<String>,
@@ -139,8 +156,12 @@ pub async fn api_get_latest_resources(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target =
-        griffr_common::config::resolve_api_target(&game_id, &channel_id, &overrides.into())?;
+    let target = griffr_common::config::resolve_api_target(
+        &game_id,
+        region_id,
+        &channel_id,
+        &overrides.into(),
+    )?;
     let latest = api_client
         .get_latest_game(&target, version.as_deref())
         .await?;
@@ -167,8 +188,9 @@ pub async fn api_get_latest_resources(
 
     let payload = json!({
         "game": game_id.to_string(),
+        "region": region_id.to_string(),
         "channel": channel_id.channel().to_string(),
-            "sub_channel": channel_id.sub_channel().to_string(),
+        "sub_channel": channel_id.sub_channel().to_string(),
         "latest_game": {
             "requested_version": version,
             "resolved_version": latest.version,
@@ -192,6 +214,7 @@ pub async fn api_get_latest_resources(
 
 pub async fn list_resource_files(
     game_id: GameId,
+    region_id: RegionId,
     channel_id: ChannelPair,
     overrides: crate::ApiTargetOverrideArgs,
     version: Option<String>,
@@ -202,8 +225,12 @@ pub async fn list_resource_files(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target =
-        griffr_common::config::resolve_api_target(&game_id, &channel_id, &overrides.into())?;
+    let target = griffr_common::config::resolve_api_target(
+        &game_id,
+        region_id,
+        &channel_id,
+        &overrides.into(),
+    )?;
     let latest = api_client
         .get_latest_game(&target, version.as_deref())
         .await?;
@@ -264,8 +291,9 @@ pub async fn list_resource_files(
 
     let payload = json!({
         "game": game_id.to_string(),
+        "region": region_id.to_string(),
         "channel": channel_id.channel().to_string(),
-            "sub_channel": channel_id.sub_channel().to_string(),
+        "sub_channel": channel_id.sub_channel().to_string(),
         "request": {
             "requested_version": version,
             "resource_version": effective_resource_version,

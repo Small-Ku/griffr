@@ -15,10 +15,15 @@ pub async fn launch(path: PathBuf, force: bool, opts: GlobalOptions) -> Result<(
 
     let local = detect_local_install(&path).await?;
     let game_id = local.require_known_game()?;
+    let region_id = local.require_known_region()?;
     let channel_id = local.require_known_channel()?;
-    let profile =
-        griffr_common::config::resolve_install_profile(&game_id, &channel_id, &Default::default())?;
-    let launcher = Launcher::new(game_id.clone(), profile, &local.install_path);
+    let install_target = griffr_common::config::resolve_install_target(
+        &game_id,
+        region_id,
+        &channel_id,
+        &Default::default(),
+    )?;
+    let launcher = Launcher::new(game_id.clone(), install_target, &local.install_path);
     let exe_path = launcher.game_exe_path()?;
 
     ui::print_phase(format!("Launching {} from {}", game_id, exe_path.display()));

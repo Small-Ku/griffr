@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use griffr_common::api::crypto;
 use griffr_common::config::{
-    game_by_appcode, game_by_executable, ChannelPair, GameId, GAME_CATALOG,
+    game_by_appcode, game_by_executable, ChannelPair, GameId, RegionId, GAME_DEFINITIONS,
 };
 use griffr_common::runtime::CONFIG_INI_NAME;
 
@@ -47,6 +47,7 @@ pub struct LocalInstall {
     pub install_path: PathBuf,
     pub config_ini: ParsedConfigIni,
     pub game_id: Option<GameId>,
+    pub region_id: Option<RegionId>,
     pub channel_id: Option<ChannelPair>,
 }
 
@@ -54,6 +55,13 @@ impl LocalInstall {
     pub fn require_known_game(&self) -> Result<GameId> {
         self.game_id.clone().context(format!(
             "Could not map local install to a supported game from {}",
+            self.install_path.display()
+        ))
+    }
+
+    pub fn require_known_region(&self) -> Result<RegionId> {
+        self.region_id.context(format!(
+            "Could not map local install to a supported region from {}",
             self.install_path.display()
         ))
     }
@@ -125,7 +133,7 @@ pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
     let config_ini = decrypt_config_ini(&install_path).await?;
 
     let mut games_with_existing_executable = Vec::new();
-    for game in GAME_CATALOG {
+    for game in GAME_DEFINITIONS {
         let executable = install_path.join(game.executable);
         match compio::fs::metadata(&executable).await {
             Ok(_) => games_with_existing_executable.push(game.game_id()),
@@ -137,12 +145,14 @@ pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
     }
 
     let game_id = detect_game_id(&config_ini, &games_with_existing_executable);
+    let region_id = detect_region_id(&config_ini);
     let channel_id = detect_channel_id(&config_ini);
 
     Ok(LocalInstall {
         install_path,
         config_ini,
         game_id,
+        region_id,
         channel_id,
     })
 }
@@ -158,9 +168,13 @@ fn detect_game_id(
         .or_else(|| games_with_existing_executable.first().cloned())
 }
 
+fn detect_region_id(config_ini: &ParsedConfigIni) -> Option<RegionId> {
+    config_ini.region()?.parse().ok()
+}
+
 fn detect_channel_id(config_ini: &ParsedConfigIni) -> Option<ChannelPair> {
     let channel = config_ini.channel()?;
-    ChannelPair::parse(channel, config_ini.sub_channel()).ok()
+    ChannelPair::from_api(channel, config_ini.sub_channel()).ok()
 }
 
 #[cfg(test)]
@@ -207,7 +221,8 @@ mod tests {
                 fields,
             },
             game_id: Some(GameId::ENDFIELD),
-            channel_id: Some(ChannelPair::parse("1", None::<String>).unwrap()),
+            region_id: Some(RegionId::Cn),
+            channel_id: Some(ChannelPair::from_api("1", None::<String>).unwrap()),
         };
 
         assert_eq!(local.require_config_ini_version().unwrap(), "1.1.9");
@@ -223,7 +238,8 @@ mod tests {
                 fields: BTreeMap::new(),
             },
             game_id: Some(GameId::ENDFIELD),
-            channel_id: Some(ChannelPair::parse("1", None::<String>).unwrap()),
+            region_id: Some(RegionId::Cn),
+            channel_id: Some(ChannelPair::from_api("1", None::<String>).unwrap()),
         };
 
         let err = local.require_config_ini_version().unwrap_err();

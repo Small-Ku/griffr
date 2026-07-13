@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::config::{ChannelPair, GameId};
+use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
 use griffr_common::runtime::{
     is_launcher_metadata_path, run_integrity_pool, sync_launcher_metadata,
@@ -17,8 +17,9 @@ use crate::{GlobalOptions, OutputFormat};
 pub async fn verify(
     path: PathBuf,
     game_override: Option<GameId>,
+    region_override: Option<RegionId>,
     channel_override: Option<ChannelPair>,
-    overrides: crate::InstallProfileOverrideArgs,
+    overrides: crate::InstallTargetOverrideArgs,
     skip_local_detect: bool,
     repair: bool,
     reuse_paths: Vec<PathBuf>,
@@ -33,17 +34,23 @@ pub async fn verify(
     if relink_reuse && reuse_paths.is_empty() {
         anyhow::bail!("--relink-reuse requires at least one --reuse-from source");
     }
-    if skip_local_detect && (game_override.is_none() || channel_override.is_none()) {
-        anyhow::bail!("--skip-local-detect requires both --game and --channel");
+    if skip_local_detect && (game_override.is_none() || region_override.is_none()) {
+        anyhow::bail!("--skip-local-detect requires both --game and --region");
     }
 
     let local = detect_local_install(&path).await?;
     let detected_game = local.game_id.as_ref();
+    let detected_region = local.region_id;
     let detected_channel = local.channel_id.as_ref();
     let game_id = if skip_local_detect {
         game_override.expect("validated above")
     } else {
         game_override.unwrap_or(local.require_known_game()?)
+    };
+    let region_id = if skip_local_detect {
+        region_override.expect("validated above")
+    } else {
+        region_override.unwrap_or(local.require_known_region()?)
     };
     let channel_id = if skip_local_detect {
         channel_override.expect("validated above")
@@ -51,8 +58,9 @@ pub async fn verify(
         channel_override.unwrap_or(local.require_known_channel()?)
     };
     let installed_version = local.require_config_ini_version()?.to_string();
-    let profile = griffr_common::config::resolve_install_profile(
+    let install_target = griffr_common::config::resolve_install_target(
         &game_id,
+        region_id,
         &channel_id,
         &overrides.clone().into(),
     )?;
@@ -64,6 +72,14 @@ pub async fn verify(
                 ui::print_warning(format!(
                     "Overriding detected game {} with CLI --game {}",
                     detected_game, game_id
+                ));
+            }
+        }
+        if let Some(detected_region) = detected_region {
+            if detected_region != region_id && opts.output != OutputFormat::Json {
+                ui::print_warning(format!(
+                    "Overriding detected region {} with CLI --region {}",
+                    detected_region, region_id
                 ));
             }
         }
@@ -81,8 +97,9 @@ pub async fn verify(
     }
 
     ui::print_phase(format!(
-        "Verifying {} (channel={}, sub-channel={}) at {}",
+        "Verifying {} (region={}, channel={}, sub-channel={}) at {}",
         game_id,
+        region_id,
         channel_id.channel(),
         channel_id.sub_channel(),
         local.install_path.display(),
@@ -128,7 +145,7 @@ pub async fn verify(
             );
         }
         let version_info = api_client
-            .get_latest_game(&profile.target, Some(&installed_version))
+            .get_latest_game(&install_target.api, Some(&installed_version))
             .await
             .context("Failed to fetch version information for VFS planning")?;
         let rand_str = version_info.rand_str();
@@ -136,14 +153,14 @@ pub async fn verify(
             Vec::new()
         } else {
             let streaming_assets =
-                streaming_assets_path(&local.install_path.join(profile.data_root.clone()));
+                streaming_assets_path(&local.install_path.join(install_target.data_root.clone()));
             let source_streaming_assets = source_roots
                 .iter()
-                .map(|path| streaming_assets_path(&path.join(profile.data_root.clone())))
+                .map(|path| streaming_assets_path(&path.join(install_target.data_root.clone())))
                 .collect::<Vec<_>>();
             match plan_vfs_tasks(
                 &api_client,
-                &profile.target,
+                &install_target.api,
                 &version_info.version,
                 &rand_str,
                 &streaming_assets,
@@ -185,7 +202,7 @@ pub async fn verify(
     let summary = run_integrity_pool(
         &api_client,
         &local.install_path,
-        &profile,
+        &install_target,
         Some(&installed_version),
         repair,
         &source_roots,
@@ -221,6 +238,7 @@ pub async fn verify(
         ui::emit_json(&json!({
             "path": local.install_path.display().to_string(),
             "game": game_id.to_string(),
+            "region": region_id.to_string(),
             "channel": channel_id.channel().to_string(),
             "sub_channel": channel_id.sub_channel().to_string(),
             "version": installed_version,
@@ -244,7 +262,7 @@ pub async fn verify(
             sync_launcher_metadata(
                 &api_client,
                 &local.install_path,
-                &profile,
+                &install_target,
                 Some(&installed_version),
             )
             .await
@@ -290,7 +308,7 @@ pub async fn verify(
         sync_launcher_metadata(
             &api_client,
             &local.install_path,
-            &profile,
+            &install_target,
             Some(&installed_version),
         )
         .await
