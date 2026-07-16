@@ -1,9 +1,12 @@
 //! Multi-volume zip extraction
 
+use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 
+use crate::api::types::ResourcePatch;
 use crate::error::{Error, Result};
+use crate::runtime::{DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME};
 
 /// Multi-volume stream that reads split zip files as a single stream
 pub struct MultiVolumeStream {
@@ -180,6 +183,63 @@ impl Seek for MultiVolumeStream {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ArchiveInspection {
+    pub entries: BTreeMap<String, u64>,
+    pub total_uncompressed_bytes: u64,
+    pub patch_manifest: Option<ResourcePatch>,
+    pub delete_manifest: Option<String>,
+}
+
+fn open_archive_entry<'a, R: Read + Seek>(
+    archive: &'a mut zip::ZipArchive<R>,
+    index: usize,
+    password: Option<&str>,
+) -> Result<zip::read::ZipFile<'a>> {
+    match password {
+        Some(password) => archive
+            .by_index_decrypt(index, password.as_bytes())
+            .map_err(|err| {
+                Error::Extraction(format!(
+                    "Failed to decrypt archive entry {index}; archive password may be missing or incorrect: {err}"
+                ))
+            }),
+        None => archive.by_index(index).map_err(|err| {
+            Error::Extraction(format!(
+                "Failed to open archive entry {index}; if the archive is password-protected, provide its package key: {err}"
+            ))
+        }),
+    }
+}
+
+fn safe_relative_archive_path(name: &str) -> Result<PathBuf> {
+    let rel = Path::new(name);
+    if rel.is_absolute() {
+        return Err(Error::InvalidPath(format!(
+            "Zip entry has absolute path: {name}"
+        )));
+    }
+    for component in rel.components() {
+        match component {
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
+                return Err(Error::InvalidPath(format!(
+                    "Zip entry has unsafe path: {name}"
+                )))
+            }
+            _ => {}
+        }
+    }
+    Ok(rel.to_path_buf())
+}
+
+fn normalized_archive_name(name: &str) -> Result<String> {
+    Ok(safe_relative_archive_path(name)?
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string())
+}
+
 /// Multi-volume zip extractor
 pub(crate) struct MultiVolumeExtractor {
     volumes: Vec<PathBuf>,
@@ -195,6 +255,60 @@ impl MultiVolumeExtractor {
         Ok(Self { volumes })
     }
 
+    pub(crate) fn inspect_patch_payload(
+        &self,
+        password: Option<&str>,
+    ) -> Result<ArchiveInspection> {
+        const MAX_CONTROL_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+        let stream = MultiVolumeStream::new(self.volumes.clone())?;
+        let mut archive = zip::ZipArchive::new(stream)?;
+        let mut entries = BTreeMap::new();
+        let mut total_uncompressed_bytes = 0u64;
+        let mut patch_manifest = None;
+        let mut delete_manifest = None;
+
+        for index in 0..archive.len() {
+            let mut file = open_archive_entry(&mut archive, index, password)?;
+            let name = normalized_archive_name(file.name())?;
+            if name.is_empty() || file.is_dir() {
+                continue;
+            }
+            let size = file.size();
+            total_uncompressed_bytes = total_uncompressed_bytes.saturating_add(size);
+            if entries.insert(name.clone(), size).is_some() {
+                return Err(Error::Extraction(format!(
+                    "Archive contains duplicate entry {name}"
+                )));
+            }
+            if name == PATCH_MANIFEST_NAME || name == DELETE_FILES_MANIFEST_NAME {
+                if size > MAX_CONTROL_FILE_BYTES {
+                    return Err(Error::Extraction(format!(
+                        "Archive control file {name} is unexpectedly large ({size} bytes)"
+                    )));
+                }
+                let mut payload = Vec::with_capacity(size as usize);
+                file.read_to_end(&mut payload)?;
+                if name == PATCH_MANIFEST_NAME {
+                    patch_manifest = Some(serde_json::from_slice(&payload)?);
+                } else {
+                    delete_manifest = Some(String::from_utf8(payload).map_err(|err| {
+                        Error::Extraction(format!(
+                            "{DELETE_FILES_MANIFEST_NAME} is not UTF-8: {err}"
+                        ))
+                    })?);
+                }
+            }
+        }
+
+        Ok(ArchiveInspection {
+            entries,
+            total_uncompressed_bytes,
+            patch_manifest,
+            delete_manifest,
+        })
+    }
+
     pub(crate) fn extract_to_with_progress(
         &self,
         target_dir: &Path,
@@ -202,51 +316,6 @@ impl MultiVolumeExtractor {
         progress_buffer_bytes: usize,
         mut progress_callback: Option<impl FnMut(u64, u64)>,
     ) -> Result<()> {
-        fn open_archive_entry<'a, R: Read + Seek>(
-            archive: &'a mut zip::ZipArchive<R>,
-            index: usize,
-            password: Option<&str>,
-        ) -> Result<zip::read::ZipFile<'a>> {
-            match password {
-                Some(password) => archive.by_index_decrypt(index, password.as_bytes()).map_err(
-                    |err| Error::Extraction(format!(
-                        "Failed to decrypt archive entry {index}; archive password may be missing or incorrect: {err}"
-                    )),
-                ),
-                None => archive.by_index(index).map_err(|err| {
-                    Error::Extraction(format!(
-                        "Failed to open archive entry {index}; if the archive is password-protected, pass --archive-password: {err}"
-                    ))
-                }),
-            }
-        }
-
-        fn safe_join(target_dir: &Path, name: &str) -> Result<PathBuf> {
-            let rel = Path::new(name);
-
-            if rel.is_absolute() {
-                return Err(Error::InvalidPath(format!(
-                    "Zip entry has absolute path: {}",
-                    name
-                )));
-            }
-
-            // Prevent Zip Slip: reject any path containing '..', root dir, or Windows prefixes.
-            for c in rel.components() {
-                match c {
-                    Component::ParentDir | Component::Prefix(_) | Component::RootDir => {
-                        return Err(Error::InvalidPath(format!(
-                            "Zip entry has unsafe path: {}",
-                            name
-                        )));
-                    }
-                    _ => {}
-                }
-            }
-
-            Ok(target_dir.join(rel))
-        }
-
         let stream = MultiVolumeStream::new(self.volumes.clone())?;
         let mut archive = zip::ZipArchive::new(stream)?;
         let mut total_extract_bytes = 0u64;
@@ -264,7 +333,7 @@ impl MultiVolumeExtractor {
         // Extract all files
         for i in 0..archive.len() {
             let mut file = open_archive_entry(&mut archive, i, password)?;
-            let file_path = safe_join(target_dir, file.name())?;
+            let file_path = target_dir.join(safe_relative_archive_path(file.name())?);
 
             if file.is_dir() {
                 std::fs::create_dir_all(&file_path).map_err(|e| Error::CreateDirFailed {
