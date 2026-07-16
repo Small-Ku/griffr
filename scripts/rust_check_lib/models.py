@@ -41,6 +41,36 @@ class Diagnostic:
         return dataclasses.asdict(self)
 
 
+@dataclass(frozen=True)
+class TextEdit:
+    code: str
+    path: Path
+    start_byte: int
+    end_byte: int
+    replacement: bytes
+    description: str
+    priority: int = 100
+
+    def key(self) -> tuple[Any, ...]:
+        return (
+            str(self.path),
+            self.start_byte,
+            self.end_byte,
+            self.replacement,
+            self.code,
+        )
+
+
+@dataclass(frozen=True)
+class AppliedFix:
+    code: str
+    path: str
+    description: str
+
+    def as_dict(self) -> dict[str, str]:
+        return dataclasses.asdict(self)
+
+
 @dataclass
 class SourceFile:
     path: Path

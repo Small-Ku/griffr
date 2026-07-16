@@ -37,10 +37,18 @@ class RustCheckTests(unittest.TestCase):
         return root
 
     def run_checker(
-        self, root: Path, *, min_confidence: str = "speculative"
+        self,
+        root: Path,
+        *,
+        min_confidence: str = "speculative",
+        fix: bool = False,
     ) -> Checker:
         checker = Checker(
-            root, run_tools="never", min_confidence=min_confidence, max_width=200
+            root,
+            run_tools="never",
+            min_confidence=min_confidence,
+            max_width=200,
+            fix=fix,
         )
         checker.run()
         return checker
@@ -173,6 +181,80 @@ class RustCheckTests(unittest.TestCase):
         )
         self.assertNotIn("LINT001", self.codes(self.run_checker(root)))
 
+    def test_grouped_import_name_does_not_count_itself_as_usage(self) -> None:
+        root = self.make_workspace(
+            "mod values { pub fn used() {} pub fn unused() {} }\n"
+            "use values::{used, unused};\n"
+            "fn call() { used(); }\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "LINT002")
+        self.assertEqual(
+            ["Likely unused import: unused"], [d.message for d in diagnostics]
+        )
+
+    def test_fix_removes_unused_grouped_import(self) -> None:
+        root = self.make_workspace(
+            "mod values { pub fn used() {} pub fn unused() {} }\n"
+            "use values::{used, unused};\n"
+            "fn call() { used(); }\n"
+        )
+        checker = self.run_checker(root, fix=True)
+        self.assertNotIn("LINT002", self.codes(checker))
+        text = (root / "src/lib.rs").read_text("utf-8")
+        self.assertIn("use values::{used};", text)
+        self.assertNotIn("used, unused", text)
+
+    def test_restricted_reexport_requires_usage_through_reexport_path(self) -> None:
+        root = self.make_workspace(
+            "mod inner { pub fn value() {} }\n"
+            "pub(crate) use inner::value;\n"
+            "mod consumer { use crate::inner::value; fn call() { value(); } }\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "LINT002")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("restricted re-export", diagnostics[0].message)
+
+    def test_restricted_reexport_usage_through_binding_is_allowed(self) -> None:
+        root = self.make_workspace(
+            "mod inner { pub fn value() {} }\n"
+            "pub(crate) use inner::value;\n"
+            "mod consumer { use crate::value; fn call() { value(); } }\n"
+        )
+        self.assertNotIn("LINT002", self.codes(self.run_checker(root)))
+
+    def test_missing_parent_scope_import_is_reported_for_value_and_type_names(
+        self,
+    ) -> None:
+        root = self.make_workspace(
+            "use std::path::Path;\n"
+            "fn helper() {}\n"
+            "mod child { fn run(_: &Path) { helper(); } }\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "RES007")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("Path", diagnostics[0].evidence[0])
+        self.assertIn("helper", diagnostics[0].evidence[0])
+
+    def test_fix_adds_parent_scope_import(self) -> None:
+        root = self.make_workspace(
+            "use std::path::Path;\n"
+            "fn helper() {}\n"
+            "mod child {\n"
+            "    fn run(_: &Path) { helper(); }\n"
+            "}\n"
+        )
+        checker = self.run_checker(root, fix=True)
+        self.assertNotIn("RES007", self.codes(checker))
+        self.assertIn("use super::*;", (root / "src/lib.rs").read_text("utf-8"))
+
+    def test_qualified_type_path_is_not_reported_as_missing_import(self) -> None:
+        root = self.make_workspace(
+            "pub struct Thing;\nmod child { fn run(_: crate::Thing) {} }\n"
+        )
+        codes = self.codes(self.run_checker(root))
+        self.assertNotIn("RES006", codes)
+        self.assertNotIn("RES007", codes)
+
     def test_direct_scoped_call_arity_mismatch_is_reported(self) -> None:
         root = self.make_workspace(
             "fn target(a: u8, b: u8) {}\nfn caller() { crate::target(1); }\n"
@@ -277,7 +359,6 @@ class RustCheckTests(unittest.TestCase):
         )
         self.assertIn("PRG004", self.codes(self.run_checker(root)))
 
-
     def test_exported_progress_callback_is_reported(self) -> None:
         root = self.make_workspace(
             "pub fn run(progress_callback: Option<impl FnMut(u64)>) {}\n"
@@ -299,8 +380,7 @@ class RustCheckTests(unittest.TestCase):
 
     def test_progress_protocol_package_must_be_renderer_neutral(self) -> None:
         root = self.make_workspace(
-            "pub enum ProgressUpdate { Tick }\n"
-            "pub struct ProgressSender;\n",
+            "pub enum ProgressUpdate { Tick }\npub struct ProgressSender;\n",
             manifest=(
                 '[package]\nname = "sample"\nversion = "0.1.0"\nedition = "2021"\n'
                 '[dependencies]\nindicatif = "0.17"\n'
@@ -369,7 +449,7 @@ class RustCheckTests(unittest.TestCase):
             "    match x {\n"
             "        Some(y) => {\n"
             "            if y > 0 {\n"
-            "                println!(\"{}\", y);\n"
+            '                println!("{}", y);\n'
             "            }\n"
             "        }\n"
             "    }\n"
@@ -377,13 +457,165 @@ class RustCheckTests(unittest.TestCase):
         )
         self.assertIn("CLP004", self.codes(self.run_checker(root)))
 
+    def test_items_after_inline_test_module_is_reported_and_fixed(self) -> None:
+        root = self.make_workspace(
+            "mod support { pub fn run() {} }\n"
+            "#[cfg(test)]\nmod tests { #[test] fn smoke() {} }\n"
+            "use support::run;\n"
+            "fn call() { run(); }\n"
+        )
+        self.assertIn("CLP005", self.codes(self.run_checker(root)))
+        checker = self.run_checker(root, fix=True)
+        self.assertNotIn("CLP005", self.codes(checker))
+        text = (root / "src/lib.rs").read_text("utf-8")
+        self.assertLess(text.index("use support::run;"), text.index("#[cfg(test)]"))
+
+    def test_out_of_line_test_module_declaration_is_not_reported(self) -> None:
+        root = self.make_workspace(
+            "#[cfg(test)]\nmod tests;\npub fn live() {}\n",
+            {"src/tests.rs": "#[test] fn smoke() {}\n"},
+        )
+        self.assertNotIn("CLP005", self.codes(self.run_checker(root)))
+
+    def test_useless_chain_into_iter_is_reported_and_fixed(self) -> None:
+        root = self.make_workspace(
+            "fn collect<I: Iterator<Item = u8>>(iter: I, tail: Option<u8>) {\n"
+            "    let _ = iter.chain(tail.into_iter());\n"
+            "}\n"
+        )
+        self.assertIn("CLP006", self.codes(self.run_checker(root)))
+        checker = self.run_checker(root, fix=True)
+        self.assertNotIn("CLP006", self.codes(checker))
+        self.assertIn("iter.chain(tail)", (root / "src/lib.rs").read_text("utf-8"))
+
+    def test_into_iter_before_adapter_is_not_reported(self) -> None:
+        root = self.make_workspace(
+            "fn collect<I: Iterator<Item = u8>>(iter: I, tail: Option<u8>) {\n"
+            "    let _ = iter.chain(tail.into_iter().map(|x| x));\n"
+            "}\n"
+        )
+        self.assertNotIn("CLP006", self.codes(self.run_checker(root)))
+
+    def test_needless_option_as_deref_mut_is_reported_and_fixed(self) -> None:
+        root = self.make_workspace(
+            "fn sink(_: Option<&mut dyn FnMut(u8)>) {}\n"
+            "fn run(mut callback: Option<&mut dyn FnMut(u8)>) {\n"
+            "    sink(callback.as_deref_mut());\n"
+            "}\n"
+        )
+        self.assertIn("CLP007", self.codes(self.run_checker(root)))
+        checker = self.run_checker(root, fix=True)
+        self.assertNotIn("CLP007", self.codes(checker))
+        text = (root / "src/lib.rs").read_text("utf-8")
+        self.assertIn("fn run(callback:", text)
+        self.assertIn("sink(callback);", text)
+
+    def test_reborrowed_option_as_deref_mut_is_not_reported(self) -> None:
+        root = self.make_workspace(
+            "fn sink(_: Option<&mut dyn FnMut(u8)>) {}\n"
+            "fn run(mut callback: Option<&mut dyn FnMut(u8)>) {\n"
+            "    sink(callback.as_deref_mut());\n"
+            "    sink(callback.as_deref_mut());\n"
+            "}\n"
+        )
+        self.assertNotIn("CLP007", self.codes(self.run_checker(root)))
+
+    def test_manual_checked_division_is_reported_and_fixed(self) -> None:
+        root = self.make_workspace(
+            "fn bucket(completed: u64, total: u64) -> u64 {\n"
+            "    if total == 0 {\n"
+            "        0\n"
+            "    } else {\n"
+            "        ((completed.saturating_mul(100) / total) / 5) * 5\n"
+            "    }\n"
+            "}\n"
+        )
+        self.assertIn("CLP008", self.codes(self.run_checker(root)))
+        checker = self.run_checker(root, fix=True)
+        self.assertNotIn("CLP008", self.codes(checker))
+        text = (root / "src/lib.rs").read_text("utf-8")
+        self.assertIn(".checked_div(total)", text)
+        self.assertIn(".map_or(0, |quotient|", text)
+
+    def test_manual_checked_division_accepts_reversed_zero_guard(self) -> None:
+        root = self.make_workspace(
+            "fn ratio(value: u64, total: u64) -> u64 {\n"
+            "    if 0 == total { 0 } else { value / total }\n"
+            "}\n"
+        )
+        checker = self.run_checker(root, fix=True)
+        self.assertNotIn("CLP008", self.codes(checker))
+        text = (root / "src/lib.rs").read_text("utf-8")
+        self.assertIn("value", text)
+        self.assertIn(".checked_div(total)", text)
+
+    def test_nonzero_fallback_is_not_reported_as_manual_checked_division(self) -> None:
+        root = self.make_workspace(
+            "fn ratio(value: u64, total: u64) -> u64 {\n"
+            "    if total == 0 { 1 } else { value / total }\n"
+            "}\n"
+        )
+        self.assertNotIn("CLP008", self.codes(self.run_checker(root)))
+
+    def test_manual_checked_division_with_effectful_numerator_is_not_fixed(
+        self,
+    ) -> None:
+        root = self.make_workspace(
+            "fn next() -> u64 { 1 }\n"
+            "fn bucket(total: u64) -> u64 {\n"
+            "    if total == 0 { 0 } else { next() / total }\n"
+            "}\n"
+        )
+        checker = self.run_checker(root, fix=True)
+        self.assertIn("CLP008", self.codes(checker))
+        self.assertIn("next() / total", (root / "src/lib.rs").read_text("utf-8"))
+
+    def test_manual_checked_ops_allow_is_respected(self) -> None:
+        root = self.make_workspace(
+            "#[allow(clippy::manual_checked_ops)]\n"
+            "fn bucket(completed: u64, total: u64) -> u64 {\n"
+            "    if total == 0 { 0 } else { completed / total }\n"
+            "}\n"
+        )
+        self.assertNotIn("CLP008", self.codes(self.run_checker(root)))
+
+    def test_consecutive_blank_lines_are_reported_and_fixed(self) -> None:
+        root = self.make_workspace("fn one() {}\n\n\nfn two() {}\n")
+        self.assertIn("FMT005", self.codes(self.run_checker(root)))
+        checker = self.run_checker(root, fix=True)
+        self.assertNotIn("FMT005", self.codes(checker))
+        self.assertEqual(
+            "fn one() {}\n\nfn two() {}\n",
+            (root / "src/lib.rs").read_text("utf-8"),
+        )
+
+    def test_same_root_imports_are_sorted_and_fixed(self) -> None:
+        root = self.make_workspace(
+            "mod values { pub fn a() {} pub fn b() {} }\n"
+            "use values::b;\n"
+            "use values::a;\n"
+            "fn call() { a(); b(); }\n"
+        )
+        self.assertIn("FMT007", self.codes(self.run_checker(root)))
+        checker = self.run_checker(root, fix=True)
+        self.assertNotIn("FMT007", self.codes(checker))
+        text = (root / "src/lib.rs").read_text("utf-8")
+        self.assertLess(text.index("use values::a;"), text.index("use values::b;"))
+
+    def test_different_root_imports_are_not_sorted_by_fallback(self) -> None:
+        root = self.make_workspace(
+            "mod alpha { pub fn a() {} }\nmod beta { pub fn b() {} }\n"
+            "use beta::b;\nuse alpha::a;\nfn call() { a(); b(); }\n"
+        )
+        self.assertNotIn("FMT007", self.codes(self.run_checker(root)))
+
     def test_collapsible_match_negatives(self) -> None:
         # 1. Has guard already
         root1 = self.make_workspace(
             "fn main() {\n"
             "    match x {\n"
             "        Some(y) if y > 0 => {\n"
-            "            println!(\"{}\", y);\n"
+            '            println!("{}", y);\n'
             "        }\n"
             "    }\n"
             "}\n"
@@ -396,7 +628,7 @@ class RustCheckTests(unittest.TestCase):
             "    match x {\n"
             "        Some(y) => {\n"
             "            if y > 0 {\n"
-            "                println!(\"{}\", y);\n"
+            '                println!("{}", y);\n'
             "            } else {\n"
             "                other();\n"
             "            }\n"
@@ -413,7 +645,7 @@ class RustCheckTests(unittest.TestCase):
             "        Some(y) => {\n"
             "            let z = y;\n"
             "            if z > 0 {\n"
-            "                println!(\"{}\", z);\n"
+            '                println!("{}", z);\n'
             "            }\n"
             "        }\n"
             "    }\n"

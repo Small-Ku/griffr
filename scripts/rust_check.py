@@ -92,6 +92,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Apply conservative AST-backed fixes, then re-run analysis on the changed files",
+    )
+    parser.add_argument(
         "--fail-on",
         choices=("error", "warning", "note", "never"),
         default="warning",
@@ -116,6 +121,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_tool_output=args.max_tool_output,
         max_width=args.max_width,
         min_confidence=args.min_confidence,
+        fix=args.fix,
     )
     try:
         checker.run()

@@ -31,10 +31,24 @@ def render_text(checker: Checker, *, verbose_tools: bool = False) -> str:
             f"{confidence.get('probable', 0)} probable, "
             f"{confidence.get('speculative', 0)} speculative."
         ),
+        (
+            f"Fixes: {summary['applied_fixes']} applied, "
+            f"{summary['fixable_edits']} remaining fixable edits."
+        ),
     ]
     if checker.baseline:
         lines.append(f"Baseline diff entries: {len(checker.diff_entries)}")
     lines.append("")
+
+    if checker.applied_fixes:
+        lines.extend(["Applied fixes", "-------------"])
+        for fix in checker.applied_fixes:
+            lines.append(f"{fix.code:8} {fix.path}: {fix.description}")
+        lines.append("")
+    if checker.skipped_fix_conflicts:
+        lines.extend(["Skipped fix conflicts", "---------------------"])
+        lines.extend(checker.skipped_fix_conflicts)
+        lines.append("")
 
     for diagnostic in sorted(checker.diagnostics, key=Diagnostic.sort_key):
         location = diagnostic.path
@@ -85,6 +99,8 @@ def write_json(checker: Checker, path: Path) -> None:
             diagnostic.as_dict()
             for diagnostic in sorted(checker.diagnostics, key=Diagnostic.sort_key)
         ],
+        "applied_fixes": [fix.as_dict() for fix in checker.applied_fixes],
+        "skipped_fix_conflicts": checker.skipped_fix_conflicts,
         "baseline_diff": [dataclasses.asdict(entry) for entry in checker.diff_entries],
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", "utf-8")
@@ -109,10 +125,26 @@ def write_markdown(checker: Checker, path: Path) -> None:
             f"{confidence.get('probable', 0)} probable, "
             f"{confidence.get('speculative', 0)} speculative"
         ),
+        (
+            f"- Fixes: {summary['applied_fixes']} applied, "
+            f"{summary['fixable_edits']} remaining fixable edits"
+        ),
         "",
-        "## Diagnostics",
+        "## Applied fixes",
         "",
     ]
+    if not checker.applied_fixes:
+        lines.append("No fixes were applied.")
+    for fix in checker.applied_fixes:
+        lines.append(f"- **`{fix.code}`** `{fix.path}` — {fix.description}")
+
+    lines.extend(
+        [
+            "",
+            "## Diagnostics",
+            "",
+        ]
+    )
     if not checker.diagnostics:
         lines.append("No diagnostics.")
     for diagnostic in sorted(checker.diagnostics, key=Diagnostic.sort_key):

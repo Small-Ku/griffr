@@ -10,14 +10,24 @@ from typing import Any, Sequence
 
 from tree_sitter import Node
 
-from . import architecture, baseline, lints, module_graph, name_resolution, tools, workspace
+from . import (
+    architecture,
+    baseline,
+    lints,
+    module_graph,
+    name_resolution,
+    tools,
+    workspace,
+)
 from .models import (
+    AppliedFix,
     CONFIDENCE_ORDER,
     CrateTarget,
     Diagnostic,
     DiffEntry,
     Package,
     SourceFile,
+    TextEdit,
     ToolResult,
 )
 from .parsing import parse
@@ -35,6 +45,7 @@ class Checker:
         max_tool_output: int = 4 * 1024 * 1024,
         max_width: int = 100,
         min_confidence: str = "speculative",
+        fix: bool = False,
     ) -> None:
         self.root = root.resolve()
         self.baseline = baseline_path.resolve() if baseline_path else None
@@ -44,6 +55,7 @@ class Checker:
         self.max_tool_output = max(64 * 1024, max_tool_output)
         self.max_width = max(40, max_width)
         self.min_confidence = min_confidence
+        self.fix = fix
 
         self.root_manifest_path = self.root / "Cargo.toml"
         self.root_manifest: dict[str, Any] | None = None
@@ -55,6 +67,9 @@ class Checker:
         self.diff_entries: list[DiffEntry] = []
         self.parsed_file_count = 0
         self._diagnostic_keys: set[tuple[Any, ...]] = set()
+        self.fix_candidates: list[TextEdit] = []
+        self.applied_fixes: list[AppliedFix] = []
+        self.skipped_fix_conflicts: list[str] = []
 
     def add(
         self,
@@ -110,6 +125,34 @@ class Checker:
             return
         self._diagnostic_keys.add(key)
         self.diagnostics.append(diagnostic)
+
+    def add_fix(
+        self,
+        code: str,
+        description: str,
+        *,
+        source: SourceFile,
+        start_byte: int,
+        end_byte: int,
+        replacement: str | bytes,
+        priority: int = 100,
+    ) -> None:
+        if start_byte < 0 or end_byte < start_byte or end_byte > len(source.data):
+            return
+        payload = (
+            replacement.encode("utf-8") if isinstance(replacement, str) else replacement
+        )
+        self.fix_candidates.append(
+            TextEdit(
+                code=code,
+                path=source.path,
+                start_byte=start_byte,
+                end_byte=end_byte,
+                replacement=payload,
+                description=description,
+                priority=priority,
+            )
+        )
 
     def excluded(self, path: Path) -> bool:
         try:
@@ -204,6 +247,17 @@ class Checker:
             )
         if data and not data.endswith(b"\n"):
             self.add("FMT002", "warning", "File has no final newline", path=source.path)
+            self.add_fix(
+                "FMT002",
+                "add final newline",
+                source=source,
+                start_byte=len(data),
+                end_byte=len(data),
+                replacement=b"\r\n"
+                if b"\r\n" in data and b"\n" not in data.replace(b"\r\n", b"")
+                else b"\n",
+                priority=20,
+            )
         protected_lines: set[int] = set()
         stack = [source.tree.root_node]
         protected_types = {
@@ -223,9 +277,14 @@ class Checker:
             stack.extend(node.named_children)
 
         blank_run = 0
-        for line_number, line in enumerate(
-            data.decode("utf-8", "replace").splitlines(), start=1
-        ):
+        byte_offset = 0
+        decoded_lines = data.decode("utf-8", "replace").splitlines(keepends=True)
+        for line_number, raw_line in enumerate(decoded_lines, start=1):
+            line = raw_line.rstrip("\r\n")
+            encoded_line = raw_line.encode("utf-8")
+            line_start = byte_offset
+            line_end = byte_offset + len(encoded_line)
+            byte_offset = line_end
             stripped = line.rstrip(" \t")
             if stripped != line:
                 self.add(
@@ -236,6 +295,18 @@ class Checker:
                     confidence="definite",
                     evidence=(f"line {line_number}, column {len(stripped) + 1}",),
                 )
+                if line_number not in protected_lines:
+                    trailing_start = line_start + len(stripped.encode("utf-8"))
+                    trailing_end = line_start + len(line.encode("utf-8"))
+                    self.add_fix(
+                        "FMT003",
+                        "remove trailing whitespace",
+                        source=source,
+                        start_byte=trailing_start,
+                        end_byte=trailing_end,
+                        replacement=b"",
+                        priority=30,
+                    )
             if line.startswith("\t"):
                 self.add(
                     "FMT004",
@@ -249,14 +320,24 @@ class Checker:
                 blank_run = 0
             else:
                 blank_run += 1
-                if blank_run == 3:
+                if blank_run == 2:
                     self.add(
                         "FMT005",
                         "note",
-                        "More than two consecutive blank lines",
+                        "More than one consecutive blank line",
                         path=source.path,
                         confidence="probable",
                         evidence=(f"run reaches line {line_number}",),
+                    )
+                if blank_run >= 2 and line_number not in protected_lines:
+                    self.add_fix(
+                        "FMT005",
+                        "collapse consecutive blank lines",
+                        source=source,
+                        start_byte=line_start,
+                        end_byte=line_end,
+                        replacement=b"",
+                        priority=10,
                     )
             if (
                 len(line) > self.max_width
@@ -283,15 +364,119 @@ class Checker:
         self.sources.clear()
         gc.collect()
 
-    def run(self) -> None:
+    def _reset_pass_state(self) -> None:
+        self.root_manifest = None
+        self.packages.clear()
+        self.targets.clear()
+        self.sources.clear()
+        self.diagnostics.clear()
+        self.tool_results.clear()
+        self.diff_entries.clear()
+        self._diagnostic_keys.clear()
+        self.fix_candidates.clear()
+        gc.collect()
+
+    def _apply_fix_candidates(self) -> int:
+        unique: dict[tuple[Any, ...], TextEdit] = {
+            edit.key(): edit for edit in self.fix_candidates
+        }
+        grouped: dict[Path, list[TextEdit]] = {}
+        for edit in unique.values():
+            grouped.setdefault(edit.path, []).append(edit)
+
+        applied = 0
+        for path, edits in grouped.items():
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+
+            selected: list[TextEdit] = []
+            for edit in sorted(
+                edits,
+                key=lambda item: (
+                    item.start_byte,
+                    item.end_byte,
+                    -item.priority,
+                    item.code,
+                ),
+            ):
+                overlap = next(
+                    (
+                        existing
+                        for existing in selected
+                        if not (
+                            edit.end_byte <= existing.start_byte
+                            or edit.start_byte >= existing.end_byte
+                        )
+                        and not (
+                            edit.start_byte
+                            == edit.end_byte
+                            == existing.start_byte
+                            == existing.end_byte
+                        )
+                    ),
+                    None,
+                )
+                if overlap is not None:
+                    winner, loser = (
+                        (edit, overlap)
+                        if edit.priority > overlap.priority
+                        else (overlap, edit)
+                    )
+                    if winner is edit:
+                        selected.remove(overlap)
+                        selected.append(edit)
+                    self.skipped_fix_conflicts.append(
+                        f"{path}: skipped {loser.code} because it overlaps {winner.code}"
+                    )
+                    continue
+                selected.append(edit)
+
+            for edit in sorted(
+                selected,
+                key=lambda item: (item.start_byte, item.end_byte, item.priority),
+                reverse=True,
+            ):
+                data = (
+                    data[: edit.start_byte] + edit.replacement + data[edit.end_byte :]
+                )
+                try:
+                    rel = path.resolve().relative_to(self.root).as_posix()
+                except (OSError, ValueError):
+                    rel = str(path)
+                self.applied_fixes.append(AppliedFix(edit.code, rel, edit.description))
+                applied += 1
+            if selected:
+                path.write_bytes(data)
+        return applied
+
+    def _analyze_once(self) -> None:
         baseline.compare(self)
         workspace.discover(self)
         module_graph.build(self)
         resolver = name_resolution.analyze(self)
         lints.run(self, resolver)
         architecture.run(self)
-        architecture.run(self)
-        self.parsed_file_count = len(self.sources)
+        self.parsed_file_count = max(self.parsed_file_count, len(self.sources))
+
+    def run(self) -> None:
+        for _ in range(4):
+            self._reset_pass_state()
+            self._analyze_once()
+            if not self.fix or not self.fix_candidates:
+                break
+            if self._apply_fix_candidates() == 0:
+                break
+        else:
+            self.add(
+                "FIX001",
+                "warning",
+                "Autofix reached the four-pass safety limit",
+                path=self.root,
+                confidence="probable",
+                hint="Run the checker again and inspect any remaining fixable diagnostics.",
+            )
         self.free_analysis_memory()
         tools.run(self)
 
@@ -306,6 +491,9 @@ class Checker:
             "diagnostics": dict(counts),
             "confidence": dict(confidence),
             "baseline_diff_entries": len(self.diff_entries),
+            "fixable_edits": len(self.fix_candidates),
+            "applied_fixes": len(self.applied_fixes),
+            "skipped_fix_conflicts": len(self.skipped_fix_conflicts),
             "tools": [
                 {
                     "label": result.label,

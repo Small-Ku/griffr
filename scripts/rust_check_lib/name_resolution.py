@@ -126,13 +126,14 @@ PREDEFINED_GLOB_EXPORTS: dict[tuple[str, ...], set[str]] = {
 }
 
 
-
 class AnalysisHost(Protocol):
     root: Path
     packages: list[Package]
     targets: list[CrateTarget]
 
     def add(self, code: str, severity: str, message: str, **kwargs: Any) -> None: ...
+
+    def add_fix(self, code: str, description: str, **kwargs: Any) -> None: ...
 
 
 class NameResolver:
@@ -945,6 +946,21 @@ class NameResolver:
             module.walk_cache = tuple(walk_named(module.body, skip_inline_modules=True))
         return iter(module.walk_cache)
 
+    def _walk_module_nodes_pruned(
+        self, module: ModuleUnit, blocked_types: set[str]
+    ) -> Iterator[Node]:
+        stack = list(reversed(module.body.named_children))
+        while stack:
+            node = stack.pop()
+            if node.type in blocked_types:
+                continue
+            yield node
+            if node.type == "mod_item" and any(
+                child.type == "declaration_list" for child in node.named_children
+            ):
+                continue
+            stack.extend(reversed(node.named_children))
+
     def _top_level_item(self, module: ModuleUnit, node: Node) -> Node | None:
         current = node
         while current.parent is not None and current.parent != module.body:
@@ -1086,9 +1102,32 @@ class NameResolver:
         parent = node.parent
         if parent is None:
             return False
-        for field in ("name", "alias", "pattern"):
-            if parent.child_by_field_name(field) == node:
-                return True
+        declaration_name_parents = {
+            "const_item",
+            "const_parameter",
+            "enum_item",
+            "enum_variant",
+            "field_declaration",
+            "function_item",
+            "macro_definition",
+            "macro_rules_definition",
+            "mod_item",
+            "static_item",
+            "struct_item",
+            "trait_item",
+            "type_item",
+            "type_parameter",
+            "union_item",
+        }
+        if (
+            parent.type in declaration_name_parents
+            and parent.child_by_field_name("name") == node
+        ):
+            return True
+        if parent.child_by_field_name("alias") == node:
+            return True
+        if parent.child_by_field_name("pattern") == node:
+            return True
         return parent.type in {
             "type_parameter",
             "const_parameter",
@@ -1099,9 +1138,9 @@ class NameResolver:
 
     def _reference_candidates(self, module: ModuleUnit) -> dict[str, tuple[Node, bool]]:
         references: dict[str, tuple[Node, bool]] = {}
-        for node in self._walk_module_nodes(module):
-            if node.type in {"use_declaration", "attribute_item"}:
-                continue
+        for node in self._walk_module_nodes_pruned(
+            module, {"use_declaration", "attribute_item"}
+        ):
             if node.type in {"scoped_identifier", "scoped_type_identifier"}:
                 if node.parent and node.parent.type in {
                     "scoped_identifier",
@@ -1109,12 +1148,35 @@ class NameResolver:
                 }:
                     continue
                 first = re.split(r"\s*::\s*", module.source.text(node))[0]
-                if re.fullmatch(r"[A-Z][A-Za-z0-9_]*", first):
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", first) and first not in {
+                    "crate",
+                    "self",
+                    "super",
+                    "Self",
+                }:
                     references.setdefault(first, (node, False))
             elif node.type == "type_identifier" and not self._is_declaration_name(node):
+                if node.parent and node.parent.type in {
+                    "scoped_identifier",
+                    "scoped_type_identifier",
+                }:
+                    continue
                 name = module.source.text(node)
                 if re.fullmatch(r"[A-Z][A-Za-z0-9_]*", name):
                     references.setdefault(name, (node, False))
+            elif node.type == "identifier" and not self._is_declaration_name(node):
+                parent = node.parent
+                if parent and parent.type in {
+                    "scoped_identifier",
+                    "scoped_type_identifier",
+                }:
+                    continue
+                if parent is not None and parent.type == "call_expression":
+                    function = parent.child_by_field_name("function")
+                    if function == node:
+                        name = module.source.text(node)
+                        if re.fullmatch(r"[a-z_][A-Za-z0-9_]*", name):
+                            references.setdefault(name, (node, False))
             elif node.type == "macro_invocation":
                 token_tree = next(
                     (
@@ -1131,6 +1193,115 @@ class NameResolver:
                     ):
                         references.setdefault(match.group(1), (node, True))
         return references
+
+    def _module_scope_names(
+        self, module: ModuleUnit, requester: ModuleUnit, condition: CfgExpr
+    ) -> tuple[set[str], bool]:
+        names: set[str] = set()
+        uncertain = False
+        modules, maybe = self._modules_for(module.target, module.path, condition)
+        uncertain = uncertain or maybe
+        for current in modules:
+            for name, symbols in current.symbols.items():
+                if any(
+                    compatibility(symbol.condition, condition) is not False
+                    and self._visible(symbol, requester)
+                    for symbol in symbols
+                ):
+                    names.add(name)
+            if current.unknown_item_macros:
+                uncertain = True
+            for glob in current.glob_imports:
+                exported, maybe = self._exported_names_from_glob(
+                    requester, glob, condition
+                )
+                names.update(exported)
+                uncertain = uncertain or maybe
+        return names, uncertain
+
+    def _imports_direct_parent_glob(self, module: ModuleUnit) -> bool:
+        parent = module.parent
+        if parent is None:
+            return False
+        for glob in module.glob_imports:
+            result = self.resolve_path(
+                module,
+                glob.path,
+                condition=glob.condition,
+                exclude_symbol=glob.symbol,
+            )
+            if any(
+                target.target.key == parent.target.key and target.path == parent.path
+                for target in result.modules
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _line_ending(source: SourceFile) -> str:
+        return "\r\n" if b"\r\n" in source.data else "\n"
+
+    def _parent_glob_insertion(self, module: ModuleUnit) -> tuple[int, str]:
+        newline = self._line_ending(module.source)
+        children = list(module.body.named_children)
+        first_item = next(
+            (
+                child
+                for child in children
+                if child.type
+                not in {
+                    "attribute_item",
+                    "line_comment",
+                    "block_comment",
+                }
+            ),
+            None,
+        )
+        if module.body.type == "source_file":
+            offset = first_item.start_byte if first_item is not None else 0
+            return offset, f"use super::*;{newline}"
+
+        offset = (
+            first_item.start_byte
+            if first_item is not None
+            else module.body.end_byte - 1
+        )
+        if first_item is not None:
+            line_start = module.source.data.rfind(b"\n", 0, first_item.start_byte) + 1
+            indent = module.source.data[line_start : first_item.start_byte].decode(
+                "utf-8", "replace"
+            )
+            return offset, f"use super::*;{newline}{indent}"
+        parent_indent = " " * (module.body.start_point.column + 4)
+        return offset, f"{newline}{parent_indent}use super::*;{newline}"
+
+    def _missing_parent_scope_names(
+        self,
+        module: ModuleUnit,
+        references: dict[str, tuple[Node, bool]],
+    ) -> dict[str, Node]:
+        parent = module.parent
+        if parent is None or self._imports_direct_parent_glob(module):
+            return {}
+        missing: dict[str, Node] = {}
+        for name, (node, macro_context) in references.items():
+            if macro_context:
+                continue
+            condition = self.condition_for_node(module, node)
+            available, uncertain_available = self._available_names(module, condition)
+            available.update(self._local_names_for_node(module, node))
+            available.update(self._local_value_bindings_before(module, node))
+            if name in available or name in self._generic_names_for_node(module, node):
+                continue
+            parent_names, uncertain_parent = self._module_scope_names(
+                parent, module, condition
+            )
+            if uncertain_available or uncertain_parent or name not in parent_names:
+                continue
+            result = self.resolve_path(module, (name,), condition=condition)
+            if not result.resolved and not result.external_unknown:
+                missing[name] = node
+        return missing
 
     def _candidate_symbols(
         self, module: ModuleUnit, name: str, condition: CfgExpr
@@ -1188,16 +1359,51 @@ class NameResolver:
 
     def _check_likely_missing_imports(self, module: ModuleUnit) -> None:
         references = self._reference_candidates(module)
+        parent_missing = self._missing_parent_scope_names(module, references)
+        grouped_parent_names: set[str] = set()
+        if len(parent_missing) >= 2:
+            grouped_parent_names = set(parent_missing)
+            first_name = sorted(parent_missing)[0]
+            first_node = parent_missing[first_name]
+            names = ", ".join(sorted(parent_missing))
+            self.host.add(
+                "RES007",
+                "error",
+                "Child module is missing its parent-scope import",
+                source=module.source,
+                node=first_node,
+                confidence="probable",
+                hint="Add `use super::*;` or import the listed parent names explicitly.",
+                evidence=(
+                    f"unresolved names available from direct parent: {names}",
+                    f"parent module: {module.parent.display if module.parent else '<none>'}",
+                    "no existing glob import resolves to the direct parent module",
+                ),
+            )
+            offset, insertion = self._parent_glob_insertion(module)
+            self.host.add_fix(
+                "RES007",
+                "import the direct parent scope with `use super::*;`",
+                source=module.source,
+                start_byte=offset,
+                end_byte=offset,
+                replacement=insertion,
+                priority=90,
+            )
         for name, (node, macro_context) in references.items():
+            if name in grouped_parent_names:
+                continue
             condition = self.condition_for_node(module, node)
             available, uncertain_available = self._available_names(module, condition)
             available.update(self._local_names_for_node(module, node))
+            available.update(self._local_value_bindings_before(module, node))
             if name in available or name in self._generic_names_for_node(module, node):
                 continue
             candidates = _dedupe_symbols(
                 self._candidate_symbols(module, name, condition)
             )
-            if not candidates:
+            parent_path = "super::" + name if name in parent_missing else ""
+            if not candidates and not parent_path:
                 continue
             paths = sorted(
                 {
@@ -1205,6 +1411,9 @@ class NameResolver:
                     for candidate in candidates
                 }
             )
+            if parent_path:
+                paths.append(parent_path)
+                paths = sorted(set(paths))
             definite_choice = (
                 len(paths) == 1 and not macro_context and not uncertain_available
             )
@@ -1231,9 +1440,7 @@ class NameResolver:
 
     def _identifier_usage(self, module: ModuleUnit) -> Counter[str]:
         usage: Counter[str] = Counter()
-        for node in self._walk_module_nodes(module):
-            if node.type == "use_declaration":
-                continue
+        for node in self._walk_module_nodes_pruned(module, {"use_declaration"}):
             if node.type in {
                 "identifier",
                 "type_identifier",
@@ -1247,6 +1454,207 @@ class NameResolver:
                 ):
                     usage[name] += 1
         return usage
+
+    @staticmethod
+    def _absolute_path(
+        module: ModuleUnit, path: Sequence[str]
+    ) -> tuple[str, ...] | None:
+        parts = tuple(part for part in path if part)
+        if not parts:
+            return module.path
+        if parts[0] == "crate":
+            return parts[1:]
+        if parts[0] in {"self", "Self"}:
+            return module.path + parts[1:]
+        if parts[0] == "super":
+            cursor = module.path
+            index = 0
+            while index < len(parts) and parts[index] == "super":
+                if not cursor:
+                    return None
+                cursor = cursor[:-1]
+                index += 1
+            return cursor + parts[index:]
+        return module.path + parts
+
+    def _visibility_contains_module(
+        self, visibility: Visibility, defining: ModuleUnit, candidate: ModuleUnit
+    ) -> bool:
+        if candidate.target.key != defining.target.key:
+            return False
+        if visibility.kind == "public" or visibility.kind == "crate":
+            return True
+        if visibility.kind == "private":
+            return candidate.path[: len(defining.path)] == defining.path
+        if visibility.kind == "in":
+            root = visibility.module_path
+            return candidate.path[: len(root)] == root
+        return candidate.path[: len(defining.path)] == defining.path
+
+    def _restricted_import_used(self, spec: UseSpec, alias: str) -> bool:
+        binding_path = spec.module.path + (alias,)
+        for candidate in spec.module.target.iter_modules():
+            if not self._visibility_contains_module(
+                spec.visibility, spec.module, candidate
+            ):
+                continue
+            if (
+                candidate is spec.module
+                and self._identifier_usage(candidate)[alias] > 0
+            ):
+                return True
+
+            for other in candidate.imports:
+                if other is spec:
+                    continue
+                absolute = self._absolute_path(candidate, other.path)
+                if absolute == binding_path:
+                    return True
+                if other.glob and absolute == spec.module.path:
+                    if self._identifier_usage(candidate)[alias] > 0:
+                        return True
+
+            for node in self._walk_module_nodes_pruned(
+                candidate, {"use_declaration", "attribute_item"}
+            ):
+                if node.type not in {
+                    "scoped_identifier",
+                    "scoped_type_identifier",
+                }:
+                    continue
+                if node.parent and node.parent.type in {
+                    "scoped_identifier",
+                    "scoped_type_identifier",
+                }:
+                    continue
+                parts = tuple(
+                    part
+                    for part in re.split(r"\s*::\s*", candidate.source.text(node))
+                    if part
+                )
+                if self._absolute_path(candidate, parts) == binding_path:
+                    return True
+        return False
+
+    @staticmethod
+    def _use_declaration_for(node: Node) -> Node | None:
+        current: Node | None = node
+        while current is not None and current.type != "use_declaration":
+            current = current.parent
+        return current
+
+    @staticmethod
+    def _direct_use_list_child(node: Node) -> tuple[Node, Node] | None:
+        current: Node | None = node
+        while current is not None and current.parent is not None:
+            if current.parent.type == "use_list":
+                return current.parent, current
+            if current.type == "use_declaration":
+                break
+            current = current.parent
+        return None
+
+    def _declaration_has_attributes(
+        self, module: ModuleUnit, declaration: Node
+    ) -> bool:
+        children = list(module.body.named_children)
+        try:
+            index = children.index(declaration)
+        except ValueError:
+            return False
+        return bool(preceding_attributes(module, children, index))
+
+    def _remove_entire_use_fix(
+        self, module: ModuleUnit, declaration: Node, aliases: Sequence[str]
+    ) -> None:
+        if self._declaration_has_attributes(module, declaration):
+            return
+        data = module.source.data
+        end = declaration.end_byte
+        while end < len(data) and data[end : end + 1] in {b" ", b"\t"}:
+            end += 1
+        if data[end : end + 2] == b"\r\n":
+            end += 2
+        elif data[end : end + 1] == b"\n":
+            end += 1
+        self.host.add_fix(
+            "LINT002",
+            f"remove unused import declaration ({', '.join(sorted(aliases))})",
+            source=module.source,
+            start_byte=declaration.start_byte,
+            end_byte=end,
+            replacement=b"",
+            priority=80,
+        )
+
+    def _rewrite_use_list_fix(
+        self,
+        module: ModuleUnit,
+        declaration: Node,
+        unused_specs: Sequence[UseSpec],
+    ) -> None:
+        direct: dict[tuple[int, int], tuple[Node, Node]] = {}
+        for spec in unused_specs:
+            pair = self._direct_use_list_child(spec.node)
+            if pair is None:
+                return
+            use_list, child = pair
+            direct[(child.start_byte, child.end_byte)] = (use_list, child)
+        use_lists = {pair[0].start_byte for pair in direct.values()}
+        if len(use_lists) != 1:
+            return
+        use_list = next(iter(direct.values()))[0]
+        text = module.source.text(use_list)
+        if "//" in text or "/*" in text or "#[" in text:
+            return
+
+        unused_ranges = set(direct)
+        kept = [
+            child
+            for child in use_list.named_children
+            if (child.start_byte, child.end_byte) not in unused_ranges
+        ]
+        if not kept:
+            aliases = [spec.alias or "*" for spec in unused_specs]
+            self._remove_entire_use_fix(module, declaration, aliases)
+            return
+
+        child_texts = [module.source.text(child).strip() for child in kept]
+        compact = "{" + ", ".join(child_texts) + "}"
+        compact_line_width = use_list.start_point.column + len(compact)
+        if compact_line_width <= 100:
+            replacement = compact
+        else:
+            newline = self._line_ending(module.source)
+            first = kept[0]
+            line_start = module.source.data.rfind(b"\n", 0, first.start_byte) + 1
+            indent = module.source.data[line_start : first.start_byte].decode(
+                "utf-8", "replace"
+            )
+            close_start = module.source.data.rfind(b"\n", 0, use_list.end_byte) + 1
+            close_indent = module.source.data[
+                close_start : use_list.end_byte - 1
+            ].decode("utf-8", "replace")
+            replacement = (
+                "{"
+                + newline
+                + indent
+                + ("," + newline + indent).join(child_texts)
+                + ","
+                + newline
+                + close_indent
+                + "}"
+            )
+        aliases = [spec.alias or "*" for spec in unused_specs]
+        self.host.add_fix(
+            "LINT002",
+            f"remove unused grouped imports ({', '.join(sorted(aliases))})",
+            source=module.source,
+            start_byte=use_list.start_byte,
+            end_byte=use_list.end_byte,
+            replacement=replacement,
+            priority=80,
+        )
 
     def _downstream_glob_usage(self, module: ModuleUnit) -> Counter[str]:
         usage: Counter[str] = Counter()
@@ -1274,11 +1682,23 @@ class NameResolver:
                 usage.update(self._identifier_usage(candidate))
         return usage
 
+    def _downstream_missing_parent_usage(self, module: ModuleUnit) -> Counter[str]:
+        usage: Counter[str] = Counter()
+        for candidate in module.target.iter_modules():
+            if candidate.parent is not module:
+                continue
+            references = self._reference_candidates(candidate)
+            missing = self._missing_parent_scope_names(candidate, references)
+            usage.update(missing.keys())
+        return usage
+
     def _check_unused_imports(self, module: ModuleUnit) -> None:
         usage = self._identifier_usage(module)
         usage.update(self._downstream_glob_usage(module))
+        usage.update(self._downstream_missing_parent_usage(module))
+        fixable_by_declaration: dict[tuple[int, int], list[UseSpec]] = defaultdict(list)
         for spec in module.imports:
-            if spec.visibility.kind != "private":
+            if spec.visibility.kind == "public":
                 continue
             if spec.glob:
                 exported, uncertain = self._exported_names_from_glob(
@@ -1296,7 +1716,11 @@ class NameResolver:
                     ),
                     source=module.source,
                     node=spec.node,
-                    confidence="speculative" if uncertain else "probable",
+                    confidence=(
+                        "speculative"
+                        if uncertain or spec.visibility.kind != "private"
+                        else "probable"
+                    ),
                     hint="Glob use can hide trait/macro resolution; confirm with rustc before removal.",
                     evidence=(
                         f"resolved exported names: {len(exported)}",
@@ -1307,7 +1731,14 @@ class NameResolver:
                 )
                 continue
             alias = spec.alias
-            if not alias or alias == "_" or usage[alias] > 0:
+            if not alias or alias == "_":
+                continue
+            used = (
+                usage[alias] > 0
+                if spec.visibility.kind == "private"
+                else self._restricted_import_used(spec, alias)
+            )
+            if used:
                 continue
             result = self.resolve_path(
                 module,
@@ -1321,7 +1752,11 @@ class NameResolver:
             self.host.add(
                 "LINT002",
                 "warning",
-                f"Likely unused import: {alias}",
+                (
+                    f"Likely unused import: {alias}"
+                    if spec.visibility.kind == "private"
+                    else f"Likely unused restricted re-export: {alias}"
+                ),
                 source=module.source,
                 node=spec.node,
                 confidence="speculative" if trait_or_external else "probable",
@@ -1335,6 +1770,38 @@ class NameResolver:
                     f"identifier occurrences outside use declarations: {usage[alias]}",
                 ),
             )
+            if not trait_or_external:
+                declaration = self._use_declaration_for(spec.node)
+                if declaration is not None:
+                    fixable_by_declaration[
+                        (declaration.start_byte, declaration.end_byte)
+                    ].append(spec)
+
+        declarations = {
+            (node.start_byte, node.end_byte): node
+            for node in module.body.named_children
+            if node.type == "use_declaration"
+        }
+        specs_by_declaration: dict[tuple[int, int], list[UseSpec]] = defaultdict(list)
+        for spec in module.imports:
+            declaration = self._use_declaration_for(spec.node)
+            if declaration is not None:
+                specs_by_declaration[
+                    (declaration.start_byte, declaration.end_byte)
+                ].append(spec)
+        for key, unused_specs in fixable_by_declaration.items():
+            declaration = declarations.get(key)
+            if declaration is None:
+                continue
+            all_specs = specs_by_declaration[key]
+            if len(unused_specs) == len(all_specs):
+                self._remove_entire_use_fix(
+                    module,
+                    declaration,
+                    [spec.alias or "*" for spec in unused_specs],
+                )
+            else:
+                self._rewrite_use_list_fix(module, declaration, unused_specs)
 
     # ---------- call arity ----------
     def _pattern_bindings(self, source: SourceFile, pattern: Node | None) -> set[str]:

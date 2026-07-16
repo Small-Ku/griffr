@@ -82,7 +82,9 @@ def _module_is_exported(module: ModuleUnit) -> bool:
     current = module
     while current.parent is not None:
         declaration = current.declaration_node
-        if declaration is not None and not _is_public(current.parent.source, declaration):
+        if declaration is not None and not _is_public(
+            current.parent.source, declaration
+        ):
             return False
         current = current.parent
     return True
@@ -105,7 +107,9 @@ def _public_type_names(module: ModuleUnit) -> set[str]:
     return names
 
 
-def _impl_public_type(module: ModuleUnit, impl_item: Node, public_types: set[str]) -> bool:
+def _impl_public_type(
+    module: ModuleUnit, impl_item: Node, public_types: set[str]
+) -> bool:
     type_node = impl_item.child_by_field_name("type")
     if type_node is None:
         return False
@@ -121,10 +125,12 @@ def _callable_name(source: SourceFile, node: Node) -> str:
 def _signature_text(source: SourceFile, node: Node) -> str:
     body = node.child_by_field_name("body")
     end = body.start_byte if body is not None else node.end_byte
-    return source.data[node.start_byte:end].decode("utf-8", "replace")
+    return source.data[node.start_byte : end].decode("utf-8", "replace")
 
 
-def _parameter_uses_callback_bound(source: SourceFile, callable_node: Node, parameter: Node) -> bool:
+def _parameter_uses_callback_bound(
+    source: SourceFile, callable_node: Node, parameter: Node
+) -> bool:
     type_node = parameter.child_by_field_name("type")
     if type_node is None:
         return False
@@ -192,7 +198,9 @@ def _check_callable_callback(
         )
 
 
-def _check_exported_progress_callbacks(host: ArchitectureHost, target: CrateTarget) -> None:
+def _check_exported_progress_callbacks(
+    host: ArchitectureHost, target: CrateTarget
+) -> None:
     seen: set[tuple[Path, int]] = set()
     for module in target.iter_modules():
         if not _module_is_exported(module):
@@ -205,7 +213,9 @@ def _check_exported_progress_callbacks(host: ArchitectureHost, target: CrateTarg
                     seen.add(key)
                     _check_callable_callback(host, module, item)
                 continue
-            if item.type == "impl_item" and _impl_public_type(module, item, public_types):
+            if item.type == "impl_item" and _impl_public_type(
+                module, item, public_types
+            ):
                 body = item.child_by_field_name("body")
                 if body is None:
                     continue
@@ -358,13 +368,19 @@ def _field_values(source: SourceFile, expression: Node) -> dict[str, tuple[str, 
 def _enclosing_callable(node: Node) -> Node | None:
     current = node.parent
     while current is not None:
-        if current.type in {"function_item", "function_signature_item", "closure_expression"}:
+        if current.type in {
+            "function_item",
+            "function_signature_item",
+            "closure_expression",
+        }:
             return current
         current = current.parent
     return None
 
 
-def _lane_key(source: SourceFile, expression: Node, lane: str) -> tuple[str, str, int] | None:
+def _lane_key(
+    source: SourceFile, expression: Node, lane: str
+) -> tuple[str, str, int] | None:
     normalized = re.sub(r"\s+", "", lane)
     if "ProgressLane::" in normalized:
         return ("constant", normalized, 0)
@@ -509,9 +525,7 @@ def _check_transient_outcome_leaks(host: ArchitectureHost) -> None:
 
 
 def _check_lane_unit_conflicts(host: ArchitectureHost) -> None:
-    mappings: dict[
-        tuple[str, str, int], tuple[str, SourceFile, Node, str]
-    ] = {}
+    mappings: dict[tuple[str, str, int], tuple[str, SourceFile, Node, str]] = {}
     seen_nodes: set[tuple[Path, int]] = set()
     for target in host.targets:
         for module in target.iter_modules():
@@ -545,7 +559,9 @@ def _check_lane_unit_conflicts(host: ArchitectureHost) -> None:
                 if previous is None:
                     mappings[key] = (unit, module.source, unit_node, expression_name)
                     continue
-                previous_unit, previous_source, previous_node, previous_expression = previous
+                previous_unit, previous_source, previous_node, previous_expression = (
+                    previous
+                )
                 if previous_unit == unit:
                     continue
                 previous_line, _ = previous_source.location(previous_node)

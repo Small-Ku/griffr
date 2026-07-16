@@ -1,15 +1,28 @@
 ## Python Rust Static Analysis
 
 `scripts/rust_check.py` is an aggressive, tree-sitter-based review pass. It is
-not a replacement for rustc, rustfmt, or Clippy; when Cargo is available it can
-run those tools as authoritative checks as well.
+not a replacement for rustc, rustfmt, Clippy, or tests. When Cargo is available,
+those tools remain authoritative; the Python pass provides a useful fallback
+and enforces repository-specific architecture rules that Cargo does not know.
 
-Run the Python-only analysis with pinned parser versions:
+Run the Python-only analysis with the pinned parser versions:
 
 ```bash
 uv run --with tree-sitter==0.23.2 --with tree-sitter-rust==0.23.2 \
   scripts/rust_check.py . --run-tools never
 ```
+
+Apply conservative fixes and then re-run analysis on the changed tree:
+
+```bash
+uv run --with tree-sitter==0.23.2 --with tree-sitter-rust==0.23.2 \
+  scripts/rust_check.py . --run-tools never --fix
+```
+
+`--fix` is intentionally narrower than the diagnostics. Edits are collected as
+byte ranges, conflicting or overlapping edits are skipped, changed files are
+reparsed, and analysis is repeated until no further safe edit is available.
+Running `--fix` a second time should apply zero edits.
 
 The default policy favors recall:
 
@@ -29,6 +42,10 @@ uv run scripts/rust_check.py . --run-tools never --fail-on never
 
 # Keep only diagnostics at least as strong as probable.
 uv run scripts/rust_check.py . --min-confidence probable
+
+# Treat the Python pass as a no-Cargo gate while excluding speculative findings.
+uv run scripts/rust_check.py . --run-tools never \
+  --min-confidence probable --fail-on warning
 
 # Delegate to Cargo tools and fail when they are unavailable.
 uv run scripts/rust_check.py . --run-tools required --cargo-test
