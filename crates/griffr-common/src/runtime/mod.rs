@@ -5,6 +5,7 @@ mod integrity;
 pub mod issues;
 pub mod launcher;
 mod launcher_metadata;
+mod patch_transaction;
 mod paths;
 mod progress;
 pub mod task_pool;
@@ -27,6 +28,15 @@ pub use integrity::{run_integrity_pool, IntegrityRunSummary};
 pub use issues::{FileIssue, FileIssueKind};
 pub use launcher::{GameProcess, Launcher};
 pub use launcher_metadata::sync_launcher_metadata;
+pub(crate) use patch_transaction::build_patch_execution_plan;
+pub use patch_transaction::{
+    available_space, classify_patch_recovery, preflight_patch_archives,
+    read_patch_storage_topology, read_predownload_stage_metadata, write_predownload_stage_metadata,
+    PatchApplyOptions, PatchExecutionPlan, PatchPreflightReport, PatchRecoveryState,
+    PatchStorageTopology, PlannedPatchEntry, PlannedPatchSource, PredownloadStageMetadata,
+    StagedArchivePart, PATCH_DEFERRED_DIR, PATCH_PLAN_NAME, PATCH_STORAGE_METADATA_NAME,
+    PATCH_TRANSACTION_DIR, PREDOWNLOAD_STAGE_METADATA_NAME,
+};
 pub use paths::{
     build_cdn_file_url, files_base_url, is_launcher_metadata_path, launcher_metadata_url,
     logical_path_from_root, normalize_logical_path, persistent_path, resource_manifest_filename,
