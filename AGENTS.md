@@ -72,10 +72,11 @@ Shared APIs must expose domain semantics, not frontend mechanics.
    - archive/materialization completion before dependent verification;
    - no verification race against files that have not been materialized unless dependencies are represented in the same DAG.
 9. New install/update/verify phases should integrate with the shared runner and DAG model by default. Additional pools require a code comment explaining why the shared runner cannot be used.
-10. Preserve patch ordering:
-    - extract and commit top-level files;
-    - apply the extracted VFS patch manifest;
-    - apply the delete manifest last.
+10. Preserve forward-only patch transaction barriers:
+    - preflight the archive and persist the selected plan before staged files mutate the install;
+    - defer `config.ini` and other completion markers until VFS materialization and cleanup succeed;
+    - release a patch base only after its final consumer commits;
+    - delete-only paths may be removed early, but planned outputs and still-referenced bases must remain protected.
 
 ## Static Analysis Policy
 
