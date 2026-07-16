@@ -205,6 +205,7 @@ pub async fn install(
                 dest: install_path.clone(),
                 cleanup: !opts.keep_pack_archives,
                 password: None,
+                patch_options: griffr_common::runtime::PatchApplyOptions::default(),
                 parts: group.parts,
             });
         }
@@ -234,6 +235,12 @@ pub async fn install(
         let result = task_pool.run_batch(tasks, task_progress)?;
         progress_session.finish();
         progress.finish();
+
+        for outcome in &result.outcomes {
+            if let TaskOutcome::ArchivePreflight { report, .. } = outcome {
+                ui::print_patch_preflight(report);
+            }
+        }
 
         let mut failures = Vec::new();
         for event in result.outcomes {

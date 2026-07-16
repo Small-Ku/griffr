@@ -7,7 +7,9 @@ use griffr_common::runtime::task_pool::{
     Task, TaskOutcome, TaskPoolConfig, TaskPoolRunner, TaskProgress,
 };
 use griffr_common::runtime::{
-    ProgressLane, DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
+    classify_patch_recovery, write_predownload_stage_metadata, PatchRecoveryState,
+    PredownloadStageMetadata, ProgressLane, StagedArchivePart, DELETE_FILES_MANIFEST_NAME,
+    PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
 };
 
 use super::local::{detect_local_install, LocalInstall};
@@ -45,6 +47,41 @@ fn predownload_total_size(pre_patch: &PrePatchInfo) -> u64 {
         .package_size
         .parse::<u64>()
         .unwrap_or_else(|_| pre_patch.patches.iter().map(PackFile::size).sum())
+}
+
+fn build_stage_metadata(
+    local: &LocalInstall,
+    pre_patch: &PrePatchInfo,
+    source_version: &str,
+) -> Result<PredownloadStageMetadata> {
+    let game = local.require_known_game()?;
+    let region = local.require_known_region()?;
+    let channel = local.require_known_channel()?;
+    let archives = pre_patch
+        .patches
+        .iter()
+        .map(|patch| {
+            Ok(StagedArchivePart {
+                filename: patch
+                    .filename()
+                    .context("Failed to extract predownload archive filename")?
+                    .to_string(),
+                md5: patch.md5.clone(),
+                size: patch.size(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PredownloadStageMetadata {
+        schema_version: PredownloadStageMetadata::SCHEMA_VERSION,
+        game: game.to_string(),
+        region: region.to_string(),
+        channel: channel.channel().to_string(),
+        sub_channel: channel.sub_channel().to_string(),
+        source_version: source_version.to_string(),
+        target_version: pre_patch.version.clone(),
+        archives,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    })
 }
 
 fn build_predownload_tasks(stage_dir: &Path, patches: &[PackFile]) -> Result<Vec<Task>> {
@@ -214,6 +251,10 @@ pub async fn fetch(path: PathBuf, output_dir: Option<PathBuf>, opts: GlobalOptio
         );
     }
 
+    let metadata = build_stage_metadata(&local, &pre_patch, &current_version)?;
+    write_predownload_stage_metadata(&stage_dir, &metadata)
+        .context("Failed to persist predownload stage metadata")?;
+
     ui::print_success(format!(
         "Predownload staged: target={} parts={} downloaded_now={} stage_dir={}",
         pre_patch.version,
@@ -229,6 +270,7 @@ pub async fn apply(
     path: PathBuf,
     overrides: crate::InstallTargetOverrideArgs,
     output_dir: Option<PathBuf>,
+    patch_options: griffr_common::runtime::PatchApplyOptions,
     opts: GlobalOptions,
 ) -> Result<()> {
     if let Some(output_dir) = output_dir.as_ref() {
@@ -237,32 +279,40 @@ pub async fn apply(
             output_dir.display()
         ));
     }
-    super::update::apply_staged_predownload(path, overrides, output_dir, opts).await
+    super::update::apply_staged_predownload(path, overrides, output_dir, patch_options, opts).await
 }
 
 pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
     let local = detect_local_install(&path).await?;
     let install_root = local.install_path;
-    let patch_manifest = install_root.join(PATCH_MANIFEST_NAME);
-    let patch_stage_dir = install_root.join(PATCH_STAGE_DIR);
-    let delete_manifest = install_root.join(DELETE_FILES_MANIFEST_NAME);
-
-    let initial_task = if patch_manifest.is_file() || patch_stage_dir.exists() {
-        Task::ApplyExtractedVfsPatchManifest {
+    let initial_task = match classify_patch_recovery(&install_root, None)? {
+        PatchRecoveryState::ExtractedReady => Task::ApplyExtractedVfsPatchManifest {
             install_root: install_root.clone(),
-        }
-    } else if delete_manifest.is_file() {
-        Task::ApplyDeleteManifest {
+        },
+        PatchRecoveryState::DeletePending => Task::ApplyDeleteManifest {
             install_root: install_root.clone(),
-        }
-    } else {
-        anyhow::bail!(
+        },
+        PatchRecoveryState::ExtractedIncomplete { missing } => anyhow::bail!(
+            "Extracted patch state is incomplete under {}. Missing recoverable payload/base for: {}",
+            install_root.display(),
+            missing.join(", ")
+        ),
+        PatchRecoveryState::Inconsistent { reasons } => anyhow::bail!(
+            "Extracted patch state is inconsistent under {}: {}",
+            install_root.display(),
+            reasons.join("; ")
+        ),
+        PatchRecoveryState::ArchiveReady { stage_dir } => anyhow::bail!(
+            "Archive-only state at {} must be applied with `predownload apply --output-dir`, not resume.",
+            stage_dir.display()
+        ),
+        PatchRecoveryState::Complete => anyhow::bail!(
             "No extracted local patch state found under {} (expected {}, {}, or {}).",
             install_root.display(),
             PATCH_MANIFEST_NAME,
             PATCH_STAGE_DIR,
             DELETE_FILES_MANIFEST_NAME
-        );
+        ),
     };
 
     ui::print_phase(format!(
@@ -288,6 +338,7 @@ pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
         delete_lane,
     );
     let task_progress = TaskProgress::new(progress_session.sender())
+        .with_commit(commit_lane)
         .with_patch(patch_lane)
         .with_delete(delete_lane);
     let result = task_pool_runner.run_batch(vec![initial_task], task_progress)?;

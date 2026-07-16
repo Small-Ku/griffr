@@ -267,6 +267,14 @@ pub(crate) enum Commands {
         /// Keep downloaded package archives after successful extraction
         #[arg(long)]
         keep_pack_archives: bool,
+
+        /// Put extraction staging and patch temporary files under this directory
+        #[arg(long)]
+        work_dir: Option<std::path::PathBuf>,
+
+        /// Persist the VFS tree under this directory and link it into the install root
+        #[arg(long)]
+        external_vfs_root: Option<std::path::PathBuf>,
     },
 
     /// Predownload patch archive operations

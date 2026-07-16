@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use griffr_common::runtime::{read_predownload_stage_metadata, PREDOWNLOAD_STAGE_METADATA_NAME};
 
 use crate::ui;
 
@@ -14,6 +15,81 @@ pub(super) enum UpdatePackageKind {
 pub(super) enum ArchiveAcquireMode {
     DownloadIfMissing,
     RequireExisting,
+}
+
+pub(super) fn staged_patch_request_version(
+    stage_dir: &Path,
+    target_version: &str,
+) -> Result<String> {
+    let metadata = read_predownload_stage_metadata(stage_dir).with_context(|| {
+        format!(
+            "Predownload stage {} is missing valid {} metadata",
+            stage_dir.display(),
+            PREDOWNLOAD_STAGE_METADATA_NAME
+        )
+    })?;
+    if metadata.target_version != target_version {
+        anyhow::bail!(
+            "Predownload stage {} targets {}, not installed target {}",
+            stage_dir.display(),
+            metadata.target_version,
+            target_version
+        );
+    }
+    if !metadata.archives_complete(stage_dir)? {
+        anyhow::bail!(
+            "Predownload stage {} does not contain every archive recorded in metadata",
+            stage_dir.display()
+        );
+    }
+    Ok(metadata.source_version)
+}
+
+pub(super) fn resolve_staged_patch_recovery_dir(
+    install_path: &Path,
+    explicit_stage_dir: Option<&Path>,
+    target_version: &str,
+) -> Result<(PathBuf, String)> {
+    if let Some(stage_dir) = explicit_stage_dir {
+        let request_version = staged_patch_request_version(stage_dir, target_version)?;
+        return Ok((stage_dir.to_path_buf(), request_version));
+    }
+
+    let root = install_path.join("downloads").join("predownload");
+    let mut candidates = std::fs::read_dir(&root)
+        .map_err(|err| anyhow::anyhow!("Failed to inspect {}: {err}", root.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            path.is_dir()
+                .then(|| {
+                    staged_patch_request_version(&path, target_version)
+                        .ok()
+                        .map(|version| (path, version))
+                })
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+
+    match candidates.len() {
+        1 => Ok(candidates.remove(0)),
+        0 => anyhow::bail!(
+            "No complete staged predownload metadata targeting installed version {} was found under {}. Pass --output-dir explicitly.",
+            target_version,
+            root.display()
+        ),
+        _ => anyhow::bail!(
+            "Multiple complete staged predownload directories target installed version {} under {}: {}. Pass --output-dir explicitly.",
+            target_version,
+            root.display(),
+            candidates
+                .iter()
+                .map(|(path, _)| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 pub(super) fn choose_update_package(

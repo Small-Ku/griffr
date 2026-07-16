@@ -1,4 +1,64 @@
 use super::*;
+use crate::commands::update::package_selection::UpdatePackageKind;
+
+fn write_stage_metadata(stage_dir: &Path, source: &str, target: &str) {
+    std::fs::create_dir_all(stage_dir).unwrap();
+    std::fs::write(stage_dir.join("bundle.zip.001"), b"x").unwrap();
+    griffr_common::runtime::write_predownload_stage_metadata(
+        stage_dir,
+        &griffr_common::runtime::PredownloadStageMetadata {
+            schema_version: griffr_common::runtime::PredownloadStageMetadata::SCHEMA_VERSION,
+            game: "endfield".to_string(),
+            region: "sg".to_string(),
+            channel: "6".to_string(),
+            sub_channel: "6".to_string(),
+            source_version: source.to_string(),
+            target_version: target.to_string(),
+            archives: vec![griffr_common::runtime::StagedArchivePart {
+                filename: "bundle.zip.001".to_string(),
+                md5: "9dd4e461268c8034f5c8564e155c67a6".to_string(),
+                size: 1,
+            }],
+            created_at: "2026-07-16T00:00:00Z".to_string(),
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn staged_patch_request_version_reads_persisted_transition() {
+    let temp = tempdir().unwrap();
+    let stage_dir = temp.path().join("opaque-stage-name");
+    write_stage_metadata(&stage_dir, "1.3.3", "1.4.4");
+    assert_eq!(
+        staged_patch_request_version(&stage_dir, "1.4.4").unwrap(),
+        "1.3.3"
+    );
+}
+
+#[test]
+fn staged_patch_request_version_rejects_different_target() {
+    let temp = tempdir().unwrap();
+    let stage_dir = temp.path().join("opaque-stage-name");
+    write_stage_metadata(&stage_dir, "1.3.3", "1.4.4");
+    let error = staged_patch_request_version(&stage_dir, "1.5.0").unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("targets 1.4.4, not installed target 1.5.0"));
+}
+
+#[test]
+fn staged_patch_recovery_discovers_unique_matching_directory() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("downloads").join("predownload");
+    write_stage_metadata(&root.join("first"), "1.3.3", "1.4.4");
+    write_stage_metadata(&root.join("second"), "1.4.4", "1.5.0");
+
+    let (path, request_version) =
+        resolve_staged_patch_recovery_dir(temp.path(), None, "1.4.4").unwrap();
+    assert_eq!(path, root.join("first"));
+    assert_eq!(request_version, "1.3.3");
+}
 #[test]
 fn archive_base_name_is_extracted() {
     let url = "https://example.com/path/Beyond_Release_v1d1.zip.001?token=abc";

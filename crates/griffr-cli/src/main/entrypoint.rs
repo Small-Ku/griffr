@@ -108,6 +108,8 @@ pub(crate) async fn run() -> Result<()> {
             use_predownload,
             skip_vfs,
             keep_pack_archives,
+            work_dir,
+            external_vfs_root,
         } => {
             let PathArg { path } = path;
             let ReuseSourcesArg {
@@ -131,6 +133,10 @@ pub(crate) async fn run() -> Result<()> {
                 reuse_from,
                 force_copy,
                 use_predownload,
+                griffr_common::runtime::PatchApplyOptions {
+                    work_dir,
+                    external_vfs_root,
+                },
                 opts,
             )
             .await?;
@@ -157,6 +163,8 @@ pub(crate) async fn run() -> Result<()> {
                 skip_verify,
                 skip_vfs,
                 keep_pack_archives,
+                work_dir,
+                external_vfs_root,
             } => {
                 let PathArg { path } = path;
                 let opts = GlobalOptions {
@@ -169,7 +177,17 @@ pub(crate) async fn run() -> Result<()> {
                     "Predownload apply path: {:?}, output_dir={:?}",
                     path, output_dir
                 ));
-                commands::predownload_apply(path, overrides, output_dir, opts).await?;
+                commands::predownload_apply(
+                    path,
+                    overrides,
+                    output_dir,
+                    griffr_common::runtime::PatchApplyOptions {
+                        work_dir,
+                        external_vfs_root,
+                    },
+                    opts,
+                )
+                .await?;
             }
             PredownloadCommands::Resume { path } => {
                 let PathArg { path } = path;

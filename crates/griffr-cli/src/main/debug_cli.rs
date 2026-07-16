@@ -259,8 +259,16 @@ pub(crate) enum PredownloadCommands {
         /// Keep archive files after successful extraction
         #[arg(long)]
         keep_pack_archives: bool,
+
+        /// Put extraction staging and patch temporary files under this directory
+        #[arg(long)]
+        work_dir: Option<std::path::PathBuf>,
+
+        /// Persist the VFS tree under this directory and link it into the install root
+        #[arg(long)]
+        external_vfs_root: Option<std::path::PathBuf>,
     },
-    /// Resume a previously extracted local patch state from `patch.json` + `vfs_files`
+    /// Resume a persisted forward patch transaction or legacy extracted patch state
     Resume {
         #[command(flatten)]
         path: PathArg,

@@ -16,15 +16,66 @@ pub(super) async fn update_internal(
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
     use_predownload: bool,
+    patch_options: griffr_common::runtime::PatchApplyOptions,
     predownload_dir_override: Option<PathBuf>,
     require_staged_predownload: bool,
     opts: GlobalOptions,
 ) -> Result<()> {
-    let local = detect_local_install(&path).await?;
+    let mut local = detect_local_install(&path).await?;
+    let mut resumed_pending_transaction = false;
+    match griffr_common::runtime::classify_patch_recovery(&local.install_path, None)? {
+        griffr_common::runtime::PatchRecoveryState::ExtractedReady
+        | griffr_common::runtime::PatchRecoveryState::DeletePending => {
+            if opts.is_dry_run() {
+                opts.dry_run(format!(
+                    "Would resume pending patch transaction under {} before checking for another update",
+                    local.install_path.display()
+                ));
+                return Ok(());
+            }
+            crate::commands::predownload::resume(local.install_path.clone(), opts).await?;
+            local = detect_local_install(&path).await?;
+            resumed_pending_transaction = true;
+        }
+        griffr_common::runtime::PatchRecoveryState::ExtractedIncomplete { missing } => {
+            if !require_staged_predownload {
+                anyhow::bail!(
+                    "Pending patch transaction under {} is incomplete: {}. Replay its staged archives with `predownload apply --output-dir`.",
+                    local.install_path.display(),
+                    missing.join(", ")
+                );
+            }
+            ui::print_info(format!(
+                "Pending extracted patch state is incomplete; replaying staged archives: {}",
+                missing.join(", ")
+            ));
+        }
+        griffr_common::runtime::PatchRecoveryState::Inconsistent { reasons } => {
+            if !require_staged_predownload {
+                anyhow::bail!(
+                    "Pending patch state under {} is inconsistent: {}",
+                    local.install_path.display(),
+                    reasons.join("; ")
+                );
+            }
+            ui::print_info(format!(
+                "Pending patch state is inconsistent; replaying staged archives: {}",
+                reasons.join("; ")
+            ));
+        }
+        griffr_common::runtime::PatchRecoveryState::ArchiveReady { .. }
+        | griffr_common::runtime::PatchRecoveryState::Complete => {}
+    }
+    if resumed_pending_transaction && require_staged_predownload {
+        ui::print_success("Pending staged predownload transaction completed");
+        return Ok(());
+    }
+
     let game_id = local.require_known_game()?;
     let region_id = local.require_known_region()?;
     let channel_id = local.require_known_channel()?;
     let current_version = local.require_config_ini_version()?.to_string();
+    let mut package_request_version = current_version.clone();
     let install_target = griffr_common::config::resolve_install_target(
         &game_id,
         region_id,
@@ -38,9 +89,41 @@ pub(super) async fn update_internal(
     );
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
 
-    let version_info = api_client
+    let mut version_info = api_client
         .get_latest_game(&install_target.api, Some(&current_version))
         .await?;
+    let mut recovery_stage_dir = None;
+
+    if require_staged_predownload
+        && (current_version == version_info.version || !version_info.has_update())
+    {
+        let (stage_dir, request_version) = resolve_staged_patch_recovery_dir(
+            &local.install_path,
+            predownload_dir_override.as_deref(),
+            &current_version,
+        )?;
+        let recovery_version_info = api_client
+            .get_latest_game(&install_target.api, Some(&request_version))
+            .await?;
+        if recovery_version_info.version != current_version || !recovery_version_info.has_update() {
+            anyhow::bail!(
+                "Staged predownload recovery {} resolves {} to target {}, not installed target {}.",
+                stage_dir.display(),
+                request_version,
+                recovery_version_info.version,
+                current_version
+            );
+        }
+        ui::print_info(format!(
+            "Recovering staged predownload transition {} -> {} from {}",
+            request_version,
+            current_version,
+            stage_dir.display()
+        ));
+        package_request_version = request_version;
+        version_info = recovery_version_info;
+        recovery_stage_dir = Some(stage_dir);
+    }
 
     ui::print_phase(format!(
         "Updating {} (region={}, channel={}, sub-channel={}) at {}",
@@ -57,11 +140,13 @@ pub(super) async fn update_internal(
     if opts.verbose {
         ui::print_info(format!(
             "Update API versions: request_version='{}' response.request_version='{}' target_version='{}'",
-            current_version, version_info.request_version, version_info.version
+            package_request_version, version_info.request_version, version_info.version
         ));
     }
 
-    if current_version == version_info.version || !version_info.has_update() {
+    if current_version == version_info.version && recovery_stage_dir.is_none()
+        || !version_info.has_update()
+    {
         if require_staged_predownload {
             anyhow::bail!(
                 "Predownload apply requires the live release patch to be available; current version {} is still reported as up to date.",
@@ -75,24 +160,28 @@ pub(super) async fn update_internal(
     let package_kind = if opts.force_full_package {
         UpdatePackageKind::Full
     } else {
-        choose_update_package(&version_info, Some(&current_version))?
+        choose_update_package(&version_info, Some(&package_request_version))?
     };
     let predownload_stage_dir = if use_predownload && package_kind == UpdatePackageKind::Patch {
-        Some(predownload_dir_override.unwrap_or_else(|| {
-            crate::commands::predownload::stage_dir_for_request(
-                &local.install_path,
-                &version_info,
-                &current_version,
-                &version_info.version,
-            )
-        }))
+        Some(
+            recovery_stage_dir
+                .or(predownload_dir_override)
+                .unwrap_or_else(|| {
+                    crate::commands::predownload::stage_dir_for_request(
+                        &local.install_path,
+                        &version_info,
+                        &package_request_version,
+                        &version_info.version,
+                    )
+                }),
+        )
     } else {
         None
     };
 
     ui::print_info(describe_update_package_selection(
         &version_info,
-        Some(&current_version),
+        Some(&package_request_version),
         package_kind,
         opts.force_full_package,
     ));
@@ -119,7 +208,7 @@ pub(super) async fn update_internal(
     if opts.is_dry_run() {
         for line in build_update_dry_run_plan(
             &local.install_path,
-            &current_version,
+            &package_request_version,
             &version_info,
             package_kind,
             &reuse_paths,
@@ -174,6 +263,7 @@ pub(super) async fn update_internal(
                         } else {
                             ArchiveAcquireMode::DownloadIfMissing
                         },
+                        &patch_options,
                         &opts,
                         &mut task_pool_runner,
                     )
@@ -185,6 +275,7 @@ pub(super) async fn update_internal(
                         "patch",
                         opts.keep_pack_archives,
                         patch_password,
+                        &patch_options,
                         &opts,
                         &mut task_pool_runner,
                     )
@@ -202,6 +293,7 @@ pub(super) async fn update_internal(
                     "full",
                     opts.keep_pack_archives,
                     None,
+                    &patch_options,
                     &opts,
                     &mut task_pool_runner,
                 )
@@ -266,6 +358,7 @@ pub async fn update(
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
     use_predownload: bool,
+    patch_options: griffr_common::runtime::PatchApplyOptions,
     opts: GlobalOptions,
 ) -> Result<()> {
     update_internal(
@@ -274,6 +367,7 @@ pub async fn update(
         reuse_paths,
         force_copy,
         use_predownload,
+        patch_options,
         None,
         false,
         opts,
@@ -285,6 +379,7 @@ pub(crate) async fn apply_staged_predownload(
     path: PathBuf,
     overrides: crate::InstallTargetOverrideArgs,
     predownload_dir_override: Option<PathBuf>,
+    patch_options: griffr_common::runtime::PatchApplyOptions,
     opts: GlobalOptions,
 ) -> Result<()> {
     update_internal(
@@ -293,6 +388,7 @@ pub(crate) async fn apply_staged_predownload(
         Vec::new(),
         false,
         true,
+        patch_options,
         predownload_dir_override,
         true,
         opts,

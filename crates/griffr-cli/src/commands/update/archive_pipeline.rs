@@ -10,7 +10,7 @@ use super::*;
 use crate::progress::{ArchivePipelineProgress, StepProgress};
 use crate::ui;
 use crate::GlobalOptions;
-use griffr_common::runtime::{ProgressLane, ProgressUnit};
+use griffr_common::runtime::{PatchApplyOptions, ProgressLane, ProgressUnit};
 
 pub(super) async fn download_and_extract_archives_from_dir(
     archives: &[griffr_common::api::types::PackFile],
@@ -20,6 +20,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
     keep_pack_archives: bool,
     archive_password: Option<&str>,
     mode: ArchiveAcquireMode,
+    patch_options: &PatchApplyOptions,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<()> {
@@ -62,6 +63,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
                 dest: install_path.to_path_buf(),
                 cleanup: !keep_pack_archives,
                 password: archive_password.map(str::to_owned),
+                patch_options: patch_options.clone(),
             });
         }
 
@@ -115,6 +117,12 @@ pub(super) async fn download_and_extract_archives_from_dir(
         progress_session.finish();
         progress.finish();
 
+        for outcome in &result.outcomes {
+            if let TaskOutcome::ArchivePreflight { report, .. } = outcome {
+                ui::print_patch_preflight(report);
+            }
+        }
+
         let failures = result
             .outcomes
             .into_iter()
@@ -141,6 +149,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
             dest: install_path.to_path_buf(),
             cleanup: !keep_pack_archives,
             password: archive_password.map(str::to_owned),
+            patch_options: patch_options.clone(),
             parts: group.parts,
         });
     }
@@ -171,6 +180,12 @@ pub(super) async fn download_and_extract_archives_from_dir(
     progress_session.finish();
     progress.finish();
 
+    for outcome in &result.outcomes {
+        if let TaskOutcome::ArchivePreflight { report, .. } = outcome {
+            ui::print_patch_preflight(report);
+        }
+    }
+
     let mut failures = Vec::new();
     for event in result.outcomes {
         if let TaskOutcome::Failed { path, reason } = event {
@@ -194,6 +209,7 @@ pub(super) async fn download_and_extract_archives(
     label: &str,
     keep_pack_archives: bool,
     archive_password: Option<&str>,
+    patch_options: &PatchApplyOptions,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<()> {
@@ -206,6 +222,7 @@ pub(super) async fn download_and_extract_archives(
         keep_pack_archives,
         archive_password,
         ArchiveAcquireMode::DownloadIfMissing,
+        patch_options,
         opts,
         task_pool_runner,
     )

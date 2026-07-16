@@ -127,6 +127,7 @@ async fn download_and_extract_archives_recovers_partial_part_on_rerun() {
         "patch",
         false,
         None,
+        &griffr_common::runtime::PatchApplyOptions::default(),
         &opts,
         &mut pool_runner,
     )
@@ -199,6 +200,7 @@ async fn download_and_extract_archives_applies_delete_files_manifest() {
         "patch",
         false,
         None,
+        &griffr_common::runtime::PatchApplyOptions::default(),
         &opts,
         &mut pool_runner,
     )

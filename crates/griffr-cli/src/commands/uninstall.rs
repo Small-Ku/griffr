@@ -2,7 +2,7 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use griffr_common::runtime::remove_dir_all;
+use griffr_common::runtime::{read_patch_storage_topology, remove_dir_all};
 
 use super::local::resolve_install_path;
 use crate::progress::ActivityProgress;
@@ -37,8 +37,17 @@ pub async fn uninstall(
         }
     }
 
+    let external_vfs_root =
+        read_patch_storage_topology(&target)?.map(|topology| topology.external_vfs_root);
+
     if opts.is_dry_run() {
         opts.dry_run(format!("Would delete {}", target.display()));
+        if let Some(external) = external_vfs_root.as_ref() {
+            opts.dry_run(format!(
+                "Would also delete external VFS root {}",
+                external.display()
+            ));
+        }
         return Ok(());
     }
 
@@ -54,6 +63,17 @@ pub async fn uninstall(
             return Err(err.into());
         }
         progress.finish();
+        if let Some(external) = external_vfs_root {
+            if external.exists() && !external.starts_with(&target) {
+                let external_progress =
+                    ActivityProgress::new(format!("Deleting external VFS {}", external.display()));
+                if let Err(err) = remove_dir_all(external.clone()).await {
+                    external_progress.fail();
+                    return Err(err.into());
+                }
+                external_progress.finish();
+            }
+        }
         ui::print_success(format!("Deleted {}", target.display()));
     } else {
         ui::print_info("Target path does not exist; nothing to remove.");
