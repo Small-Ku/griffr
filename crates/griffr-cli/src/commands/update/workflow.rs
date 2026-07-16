@@ -3,12 +3,15 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
-use griffr_common::runtime::{plan_vfs_tasks, streaming_assets_path, VfsMaterializeConfig};
+use griffr_common::runtime::{
+    plan_vfs_tasks, resolve_staged_patch_recovery_dir, select_update_package,
+    streaming_assets_path, UpdatePackageKind, VfsFilePlanOptions,
+};
 
 use super::*;
-use crate::commands::local::detect_local_install;
 use crate::ui;
 use crate::GlobalOptions;
+use griffr_common::runtime::detect_local_install;
 
 pub(super) async fn update_internal(
     path: PathBuf,
@@ -160,7 +163,7 @@ pub(super) async fn update_internal(
     let package_kind = if opts.force_full_package {
         UpdatePackageKind::Full
     } else {
-        choose_update_package(&version_info, Some(&package_request_version))?
+        select_update_package(&version_info, Some(&package_request_version))?
     };
     let predownload_stage_dir = if use_predownload && package_kind == UpdatePackageKind::Patch {
         Some(
@@ -321,7 +324,7 @@ pub(super) async fn update_internal(
             &version_info.version,
             &rand_str,
             &streaming_assets,
-            &VfsMaterializeConfig {
+            &VfsFilePlanOptions {
                 source_streaming_assets,
                 allow_copy_fallback: force_copy,
                 prefer_reuse: !reuse_paths.is_empty(),
