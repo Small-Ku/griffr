@@ -1,6 +1,7 @@
 //! Progress bar implementation using indicatif.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -17,6 +18,8 @@ pub struct StepProgress {
     label: String,
     verbose: bool,
     started: Arc<AtomicBool>,
+    plain: bool,
+    last_plain: Arc<AtomicU64>,
     multi: Option<Arc<MultiProgress>>,
     multi_index: Option<usize>,
 }
@@ -57,6 +60,8 @@ impl StepProgress {
             label: label.into(),
             verbose,
             started: Arc::new(AtomicBool::new(false)),
+            plain: !std::io::stderr().is_terminal(),
+            last_plain: Arc::new(AtomicU64::new(u64::MAX)),
             multi,
             multi_index,
         }
@@ -78,6 +83,28 @@ impl StepProgress {
             return;
         }
 
+        if self.plain {
+            let completed = completed as u64;
+            let total = total as u64;
+            let marker = if self.verbose {
+                completed
+            } else {
+                completed
+                    .saturating_mul(100)
+                    .checked_div(total)
+                    .map(|pct| (pct / 5) * 5)
+                    .unwrap_or(0)
+            };
+            if self.last_plain.swap(marker, Ordering::AcqRel) != marker {
+                if self.verbose && !file.is_empty() {
+                    eprintln!("{}: {}/{} {}", self.label, completed, total, file);
+                } else {
+                    eprintln!("{}: {}/{}", self.label, completed, total);
+                }
+            }
+            self.bar.set_position(completed);
+            return;
+        }
         if self.verbose && !file.is_empty() {
             self.bar
                 .set_message(format!("{} {}", self.label.as_str(), file));
@@ -92,6 +119,29 @@ impl StepProgress {
         self.ensure_started(total);
 
         let clamped = completed.min(total);
+        if self.plain {
+            let bucket = ((clamped.saturating_mul(100) / total) / 5) * 5;
+            if self.last_plain.swap(bucket, Ordering::AcqRel) != bucket {
+                if self.verbose && !file.is_empty() {
+                    eprintln!(
+                        "{}: {}/{} {}",
+                        self.label,
+                        HumanBytes(clamped),
+                        HumanBytes(total),
+                        file
+                    );
+                } else {
+                    eprintln!(
+                        "{}: {}/{}",
+                        self.label,
+                        HumanBytes(clamped),
+                        HumanBytes(total)
+                    );
+                }
+            }
+            self.bar.set_position(clamped);
+            return;
+        }
         if self.verbose {
             self.bar.set_message(format!(
                 "{} {} ({}/{})",
@@ -125,12 +175,20 @@ impl StepProgress {
         }
         let done = self.bar.position();
         let total = self.bar.length().unwrap_or(done);
+        if self.plain {
+            eprintln!("{}: done ({}/{})", self.label, done, total);
+            return;
+        }
         self.bar
             .finish_with_message(format!("{} done ({}/{})", self.label, done, total));
     }
 
     fn ensure_started(&self, total: u64) {
         if !self.started.swap(true, Ordering::AcqRel) {
+            if self.plain {
+                self.bar.set_length(total);
+                return;
+            }
             if let Some(multi) = &self.multi {
                 let index = self.multi_index.expect("grouped progress index");
                 let _ = multi.insert(index, self.bar.clone());
@@ -150,30 +208,45 @@ impl StepProgress {
 pub struct ActivityProgress {
     bar: ProgressBar,
     label: String,
+    plain: bool,
 }
 
 impl ActivityProgress {
     pub fn new(label: impl Into<String>) -> Self {
         let label = label.into();
+        let plain = !std::io::stderr().is_terminal();
         let bar = ProgressBar::new_spinner();
-        bar.set_draw_target(ProgressDrawTarget::stderr_with_hz(20));
-        bar.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.cyan} {msg}")
-                .unwrap(),
-        );
-        bar.set_message(label.clone());
-        bar.enable_steady_tick(Duration::from_millis(120));
-        Self { bar, label }
+        if plain {
+            bar.set_draw_target(ProgressDrawTarget::hidden());
+            eprintln!("{}: started", label);
+        } else {
+            bar.set_draw_target(ProgressDrawTarget::stderr_with_hz(20));
+            bar.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.cyan} {msg}")
+                    .unwrap(),
+            );
+            bar.set_message(label.clone());
+            bar.enable_steady_tick(Duration::from_millis(120));
+        }
+        Self { bar, label, plain }
     }
 
     pub fn finish(&self) {
-        self.bar.finish_with_message(format!("{} done", self.label));
+        if self.plain {
+            eprintln!("{}: done", self.label);
+        } else {
+            self.bar.finish_with_message(format!("{} done", self.label));
+        }
     }
 
     pub fn fail(&self) {
-        self.bar
-            .finish_with_message(format!("{} failed", self.label));
+        if self.plain {
+            eprintln!("{}: failed", self.label);
+        } else {
+            self.bar
+                .finish_with_message(format!("{} failed", self.label));
+        }
     }
 }
 

@@ -62,6 +62,56 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+pub fn print_patch_preflight(report: &griffr_common::runtime::PatchPreflightReport) {
+    let available_install = report
+        .available_install_bytes
+        .map(format_bytes)
+        .unwrap_or_else(|| "unknown".to_string());
+    let available_vfs = report
+        .available_vfs_bytes
+        .map(format_bytes)
+        .unwrap_or_else(|| "unknown".to_string());
+    let available_work = report
+        .available_work_bytes
+        .map(format_bytes)
+        .unwrap_or_else(|| "unknown".to_string());
+    print_kv_section(
+        "Patch Preflight",
+        &[
+            (
+                "archive expanded".to_string(),
+                format_bytes(report.archive_uncompressed_bytes),
+            ),
+            (
+                "final growth".to_string(),
+                format_bytes(report.estimated_final_growth_bytes),
+            ),
+            (
+                "install peak".to_string(),
+                format_bytes(report.estimated_install_peak_bytes),
+            ),
+            (
+                "VFS peak".to_string(),
+                format_bytes(report.estimated_vfs_peak_bytes),
+            ),
+            (
+                "work space".to_string(),
+                format_bytes(report.estimated_work_bytes),
+            ),
+            ("install available".to_string(), available_install),
+            ("VFS available".to_string(), available_vfs),
+            ("work available".to_string(), available_work),
+            (
+                "manifest work".to_string(),
+                format!(
+                    "{} patch entries, {} delete entries",
+                    report.patch_entries, report.delete_entries
+                ),
+            ),
+        ],
+    );
+}
+
 pub fn strip_html_tags(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut in_tag = false;
