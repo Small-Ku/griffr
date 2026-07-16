@@ -10,68 +10,23 @@ use griffr_common::runtime::task_pool::{
 };
 use griffr_common::runtime::{directory_has_entries, is_launcher_metadata_path};
 use griffr_common::runtime::{
-    materialize_game_files_with_pool, plan_vfs_tasks, run_integrity_pool, streaming_assets_path,
-    sync_launcher_metadata, FileReuseConfig, ProgressLane, SourceInstallInput,
-    VfsMaterializeConfig,
+    ensure_game_files_with_pool, plan_vfs_tasks, resolve_file_reuse_sources, run_integrity_pool,
+    streaming_assets_path, sync_launcher_metadata, FileReuseConfig, ProgressLane,
+    VfsFilePlanOptions,
 };
 
-use crate::commands::local::detect_local_install;
 use crate::progress::{ArchivePipelineProgress, CountAndByteProgress};
 use crate::ui;
 use crate::GlobalOptions;
 
-pub(super) fn parse_package_total_size(pkg: &PackageInfo) -> u64 {
-    pkg.total_size.parse::<u64>().unwrap_or(0)
-}
-
-pub(super) fn required_install_bytes(pkg: &PackageInfo) -> u64 {
-    let archive_bytes: u64 = pkg.packs.iter().map(|p| p.size()).sum();
-    let package_total = parse_package_total_size(pkg);
-    archive_bytes.max(package_total)
-}
-
-#[cfg(windows)]
-pub(super) fn disk_available_bytes(path: &Path) -> Result<u64> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-
-    let query_path = path
-        .ancestors()
-        .find(|candidate| candidate.exists())
-        .unwrap_or(path);
-    let path_wide: Vec<u16> = query_path
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-
-    let mut free_bytes_available_to_caller = 0u64;
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(
-            path_wide.as_ptr(),
-            &mut free_bytes_available_to_caller as *mut u64,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
+pub(super) fn validate_install_disk_space(
+    package: &PackageInfo,
+    install_path: &Path,
+) -> Result<()> {
+    let required_bytes = griffr_common::runtime::required_install_bytes(package);
+    let Some(available_bytes) = griffr_common::runtime::available_space(install_path)? else {
+        return Ok(());
     };
-    if ok == 0 {
-        anyhow::bail!(
-            "Failed to query free disk space for {}",
-            query_path.display()
-        );
-    }
-
-    Ok(free_bytes_available_to_caller)
-}
-
-#[cfg(not(windows))]
-pub(super) fn disk_available_bytes(_path: &Path) -> Result<u64> {
-    Ok(u64::MAX)
-}
-
-pub(super) fn validate_install_disk_space(pkg: &PackageInfo, install_path: &Path) -> Result<()> {
-    let required_bytes = required_install_bytes(pkg);
-    let available_bytes = disk_available_bytes(install_path)?;
 
     if available_bytes < required_bytes {
         anyhow::bail!(
@@ -256,44 +211,19 @@ pub async fn install(
             );
         }
     } else {
-        ui::print_phase("Materializing files from reuse sources");
-        let mut source_installs = Vec::new();
-        for reuse_path in &reuse_paths {
-            let source = detect_local_install(reuse_path).await.with_context(|| {
-                format!("Failed to inspect reuse source {}", reuse_path.display())
-            })?;
-            let source_game_id = source.require_known_game()?;
-            if source_game_id != game_id {
-                anyhow::bail!(
-                    "Reuse source {} is {:?}, expected {:?}",
-                    source.install_path.display(),
-                    source_game_id,
-                    game_id
-                );
-            }
-            let source_region_id = source.require_known_region()?;
-            let source_channel_id = source.require_known_channel()?;
-            let source_version = source.require_config_ini_version()?.to_string();
-            if source.install_path == install_path {
-                continue;
-            }
-            source_installs.push(SourceInstallInput {
-                region_id: source_region_id,
-                channel_id: source_channel_id,
-                version: source_version,
-                install_path: source.install_path.clone(),
-            });
-        }
-        let materialize_progress = CountAndByteProgress::new(
-            "install.materialize",
-            "install.materialize.download",
+        ui::print_phase("Ensuring files from reuse sources");
+        let source_installs =
+            resolve_file_reuse_sources(&game_id, &install_path, &reuse_paths).await?;
+        let ensure_progress = CountAndByteProgress::new(
+            "install.ensure_files",
+            "install.ensure_files.download",
             opts.verbose,
         );
-        let materialize_session = materialize_progress.start(
-            ProgressLane::MATERIALIZE_VERIFY,
-            ProgressLane::MATERIALIZE_DOWNLOAD,
+        let ensure_session = ensure_progress.start(
+            ProgressLane::FILE_ENSURE_VERIFY,
+            ProgressLane::FILE_ENSURE_DOWNLOAD,
         );
-        let materialized = materialize_game_files_with_pool(
+        let ensured = ensure_game_files_with_pool(
             &api_client,
             game_id,
             &install_path,
@@ -305,20 +235,20 @@ pub async fn install(
                 source_installs,
             },
             Some(&mut task_pool),
-            materialize_session.sender(),
+            ensure_session.sender(),
         )
         .await
-        .context("Failed to materialize files during install")?;
-        materialize_session.finish();
-        materialize_progress.finish();
+        .context("Failed to ensure files during install")?;
+        ensure_session.finish();
+        ensure_progress.finish();
         ui::print_info(format!(
-            "Materialized files: reused={} downloaded={}",
-            materialized.reused_files, materialized.downloaded_files
+            "Ensured files: reused={} downloaded={}",
+            ensured.reused_files, ensured.downloaded_files
         ));
-        if !materialized.issues.is_empty() {
+        if !ensured.issues.is_empty() {
             anyhow::bail!(
-                "Install materialization finished with {} issue(s)",
-                materialized.issues.len()
+                "Install file ensure operation finished with {} issue(s)",
+                ensured.issues.len()
             );
         }
     }
@@ -351,7 +281,7 @@ pub async fn install(
             &version_info.version,
             &rand_str,
             &streaming_assets,
-            &VfsMaterializeConfig {
+            &VfsFilePlanOptions {
                 source_streaming_assets,
                 allow_copy_fallback: force_copy,
                 prefer_reuse: !reuse_paths.is_empty(),

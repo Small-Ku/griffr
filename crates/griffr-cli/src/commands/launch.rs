@@ -5,9 +5,9 @@ use anyhow::{Context, Result};
 use griffr_common::runtime::admin::ensure_admin;
 use griffr_common::runtime::Launcher;
 
-use super::local::detect_local_install;
 use crate::ui;
 use crate::GlobalOptions;
+use griffr_common::runtime::detect_local_install;
 
 pub async fn launch(path: PathBuf, force: bool, opts: GlobalOptions) -> Result<()> {
     ensure_admin()

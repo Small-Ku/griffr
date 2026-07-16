@@ -12,10 +12,10 @@ use griffr_common::runtime::{
     PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
 };
 
-use super::local::{detect_local_install, LocalInstall};
 use crate::progress::{ArchivePipelineProgress, CountAndByteProgress};
 use crate::ui;
 use crate::GlobalOptions;
+use griffr_common::runtime::{detect_local_install, LocalInstall};
 
 pub(crate) fn default_stage_dir(
     install_path: &Path,

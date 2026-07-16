@@ -3,17 +3,17 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
 use griffr_common::runtime::{
-    is_launcher_metadata_path, run_integrity_pool, sync_launcher_metadata, ProgressLane,
-    ProgressSender,
+    inspect_reuse_installations, is_launcher_metadata_path, run_integrity_pool,
+    sync_launcher_metadata, ProgressLane, ProgressSender,
 };
-use griffr_common::runtime::{plan_vfs_tasks, streaming_assets_path, VfsMaterializeConfig};
+use griffr_common::runtime::{plan_vfs_tasks, streaming_assets_path, VfsFilePlanOptions};
 use serde_json::json;
 use std::path::PathBuf;
 
-use super::local::detect_local_install;
 use crate::progress::CountAndByteProgress;
 use crate::ui;
 use crate::{GlobalOptions, OutputFormat};
+use griffr_common::runtime::detect_local_install;
 
 pub async fn verify(
     path: PathBuf,
@@ -120,26 +120,15 @@ pub async fn verify(
         .map(|session| session.sender())
         .unwrap_or_else(ProgressSender::disabled);
 
-    let mut source_roots = Vec::new();
-    if repair {
-        for reuse_path in &reuse_paths {
-            let source = detect_local_install(reuse_path).await.with_context(|| {
-                format!("Failed to inspect reuse source {}", reuse_path.display())
-            })?;
-            let source_game_id = source.require_known_game()?;
-            if source_game_id != game_id {
-                anyhow::bail!(
-                    "Reuse source {} is {:?}, expected {:?}",
-                    source.install_path.display(),
-                    source_game_id,
-                    &game_id
-                );
-            }
-            if source.install_path != local.install_path {
-                source_roots.push(source.install_path.clone());
-            }
-        }
-    }
+    let source_roots = if repair {
+        inspect_reuse_installations(&game_id, &local.install_path, &reuse_paths)
+            .await?
+            .into_iter()
+            .map(|source| source.install_path)
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let extra_tasks = if repair && !skip_vfs {
         if opts.output != OutputFormat::Json {
@@ -167,7 +156,7 @@ pub async fn verify(
                 &version_info.version,
                 &rand_str,
                 &streaming_assets,
-                &VfsMaterializeConfig {
+                &VfsFilePlanOptions {
                     source_streaming_assets,
                     allow_copy_fallback: force_copy,
                     prefer_reuse: relink_reuse,

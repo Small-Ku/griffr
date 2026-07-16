@@ -6,7 +6,6 @@ pub mod debug;
 pub mod info;
 pub mod install;
 pub mod launch;
-mod local;
 pub mod news;
 pub mod predownload;
 pub mod uninstall;

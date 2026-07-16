@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use griffr_common::runtime::{read_patch_storage_topology, remove_dir_all};
 
-use super::local::resolve_install_path;
 use crate::progress::ActivityProgress;
 use crate::ui;
 use crate::GlobalOptions;
+use griffr_common::runtime::resolve_install_path;
 
 pub async fn uninstall(
     path: PathBuf,

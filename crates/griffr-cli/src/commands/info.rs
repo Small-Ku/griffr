@@ -5,8 +5,8 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use serde::Serialize;
 
-use super::local::{detect_local_install, LocalInstall};
 use crate::{ui, GlobalOptions, OutputFormat};
+use griffr_common::runtime::{detect_local_install, LocalInstall};
 
 #[derive(Debug, Serialize)]
 struct InfoReport {

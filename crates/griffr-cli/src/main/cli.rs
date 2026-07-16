@@ -332,7 +332,7 @@ pub(crate) enum Commands {
         #[command(flatten)]
         overrides: InstallTargetOverrideArgs,
 
-        /// Bootstrap scope for Persistent materialization
+        /// Bootstrap scope for ensuring Persistent files
         #[arg(long, default_value_t = VfsBootstrapScope::Initial)]
         scope: VfsBootstrapScope,
 

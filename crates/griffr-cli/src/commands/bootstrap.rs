@@ -4,13 +4,14 @@ use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
 use griffr_common::runtime::{
-    bootstrap_persistent_vfs_with_runner, ProgressLane, VfsBootstrapConfig, VfsBootstrapScope,
+    bootstrap_persistent_vfs_with_runner, inspect_reuse_installations, ProgressLane,
+    VfsBootstrapConfig, VfsBootstrapScope,
 };
 
-use super::local::detect_local_install;
 use crate::progress::CountAndByteProgress;
 use crate::ui;
 use crate::GlobalOptions;
+use griffr_common::runtime::detect_local_install;
 
 pub async fn bootstrap(
     path: PathBuf,
@@ -57,34 +58,22 @@ pub async fn bootstrap(
     let streaming_assets_root = griffr_common::runtime::streaming_assets_path(&data_root);
     let persistent_root = griffr_common::runtime::persistent_path(&data_root);
 
-    let mut extra_source_streaming_assets = Vec::new();
-    for reuse in &reuse_paths {
-        let source = detect_local_install(reuse)
-            .await
-            .with_context(|| format!("Failed to inspect reuse source {}", reuse.display()))?;
-        let source_game_id = source.require_known_game()?;
-        if source_game_id != game_id {
-            anyhow::bail!(
-                "Reuse source {} is {:?}, expected {:?}",
-                source.install_path.display(),
-                source_game_id,
-                &game_id
-            );
-        }
-        if source.install_path != local.install_path {
-            let source_target = griffr_common::config::resolve_install_target(
-                &source.require_known_game()?,
-                source.require_known_region()?,
-                &source.require_known_channel()?,
-                &Default::default(),
-            )?;
-            extra_source_streaming_assets.push(
-                source
-                    .install_path
-                    .join(source_target.data_root)
-                    .join(griffr_common::runtime::STREAMING_ASSETS_DIR),
-            );
-        }
+    let reuse_sources =
+        inspect_reuse_installations(&game_id, &local.install_path, &reuse_paths).await?;
+    let mut extra_source_streaming_assets = Vec::with_capacity(reuse_sources.len());
+    for source in reuse_sources {
+        let source_target = griffr_common::config::resolve_install_target(
+            &source.require_known_game()?,
+            source.require_known_region()?,
+            &source.require_known_channel()?,
+            &Default::default(),
+        )?;
+        extra_source_streaming_assets.push(
+            source
+                .install_path
+                .join(source_target.data_root)
+                .join(griffr_common::runtime::STREAMING_ASSETS_DIR),
+        );
     }
 
     if opts.is_dry_run() {
@@ -112,7 +101,7 @@ pub async fn bootstrap(
             ));
         }
         opts.dry_run(format!(
-            "Would materialize into Persistent root: {}",
+            "Would ensure files in Persistent root: {}",
             persistent_root.display()
         ));
         opts.dry_run(format!(
