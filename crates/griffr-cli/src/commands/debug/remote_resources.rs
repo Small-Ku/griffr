@@ -7,7 +7,7 @@ use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::{resource_manifest_url, ResourceManifestKind};
 use serde_json::json;
 
-use super::utils::emit_json;
+use super::vfs_support::emit_json;
 use crate::progress::ActivityProgress;
 use crate::GlobalOptions;
 

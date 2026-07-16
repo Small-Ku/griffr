@@ -5,7 +5,7 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use serde_json::{json, Value};
 
-use super::utils::emit_json;
+use super::vfs_support::emit_json;
 use crate::GlobalOptions;
 
 fn media_to_json(

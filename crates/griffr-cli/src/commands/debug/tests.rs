@@ -1,4 +1,4 @@
-use super::utils::{
+use super::vfs_support::{
     select_expected_vfs_map, select_expected_vfs_set, sorted_difference, LocalResManifests,
     VfsExpectedScope,
 };

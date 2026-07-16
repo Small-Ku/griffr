@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use griffr_common::api::crypto;
 use griffr_common::runtime::{list_files_with_extension, GAME_FILES_NAME};
 
-use crate::commands::local::{decrypt_config_ini, detect_local_install, resolve_named_path};
 use crate::GlobalOptions;
+use griffr_common::runtime::{decrypt_config_ini, detect_local_install, resolve_named_path};
 
 pub async fn detect(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
     let local = detect_local_install(&path).await?;
