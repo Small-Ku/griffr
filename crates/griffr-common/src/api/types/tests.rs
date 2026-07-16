@@ -328,3 +328,32 @@ fn test_game_file_entry() {
     assert_eq!(entry.md5, "abc123");
     assert_eq!(entry.size, 826424);
 }
+
+#[test]
+fn resource_patch_normalizes_empty_alternate_paths() {
+    let patch: super::ResourcePatch = serde_json::from_str(
+        r#"{
+          "vfs_base_path": "Data/VFS",
+          "files": [{
+            "name": "new.chk",
+            "md5": "abc",
+            "size": 1,
+            "local_path": "   ",
+            "patch": [{
+              "base_file": "old.chk",
+              "base_file_path": "",
+              "base_md5": "def",
+              "base_size": 1,
+              "patch": "delta.chk_patch",
+              "patch_path": "  ",
+              "patch_size": 1
+            }]
+          }]
+        }"#,
+    )
+    .unwrap();
+    let entry = &patch.files[0];
+    assert_eq!(entry.effective_local_path(), None);
+    assert_eq!(entry.patch[0].effective_base_file(), "old.chk");
+    assert_eq!(entry.patch[0].effective_patch_path(), "delta.chk_patch");
+}

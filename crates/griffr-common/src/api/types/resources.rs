@@ -273,6 +273,19 @@ pub struct GameResource {
     pub path: String,
 }
 
+fn deserialize_non_empty_option<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }))
+}
+
 /// Patch manifest (patch.json) for incremental VFS updates
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourcePatch {
@@ -293,7 +306,7 @@ pub struct ResourcePatchEntry {
     /// New file size
     pub size: u64,
     /// Extracted local file path within the patch payload, when the file ships directly.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_non_empty_option")]
     pub local_path: Option<String>,
     /// Diff type (1 = binary diff)
     #[serde(rename = "diffType", default)]
@@ -310,7 +323,11 @@ pub struct ResourcePatchDiff {
     #[serde(rename = "base_file")]
     pub base_file: String,
     /// Alternate old file relative path, when the manifest uses `base_file_path`.
-    #[serde(rename = "base_file_path", default)]
+    #[serde(
+        rename = "base_file_path",
+        default,
+        deserialize_with = "deserialize_non_empty_option"
+    )]
     pub base_file_path: Option<String>,
     /// Old file MD5
     #[serde(rename = "base_md5")]
@@ -321,9 +338,31 @@ pub struct ResourcePatchDiff {
     /// Patch filename (relative to {path}/Patch/)
     pub patch: String,
     /// Alternate patch payload path, when the manifest uses `patch_path`.
-    #[serde(rename = "patch_path", default)]
+    #[serde(
+        rename = "patch_path",
+        default,
+        deserialize_with = "deserialize_non_empty_option"
+    )]
     pub patch_path: Option<String>,
     /// Patch file size
     #[serde(rename = "patch_size")]
     pub patch_size: u64,
+}
+
+impl ResourcePatchEntry {
+    pub fn effective_local_path(&self) -> Option<&str> {
+        self.local_path.as_deref()
+    }
+}
+
+impl ResourcePatchDiff {
+    pub fn effective_base_file(&self) -> &str {
+        self.base_file_path
+            .as_deref()
+            .unwrap_or(self.base_file.as_str())
+    }
+
+    pub fn effective_patch_path(&self) -> &str {
+        self.patch_path.as_deref().unwrap_or(self.patch.as_str())
+    }
 }
