@@ -37,6 +37,7 @@ fn install_archive_recovers_from_interrupted_partial_part_on_rerun() {
         dest: install_dir.clone(),
         cleanup: false,
         password: None,
+        patch_options: crate::runtime::PatchApplyOptions::default(),
         parts: vec![
             ArchivePart {
                 sequence: 1,
@@ -157,6 +158,7 @@ fn extract_task_spawns_vfs_patch_and_delete_manifest_follow_up_tasks() {
         dest: install_dir.clone(),
         cleanup: false,
         password: None,
+        patch_options: crate::runtime::PatchApplyOptions::default(),
     }];
 
     let (progress_sender, progress_receiver) = crate::runtime::ProgressSender::channel();

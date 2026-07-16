@@ -8,6 +8,9 @@ use crate::api::types::ResourcePatch;
 use super::path_safety::parse_safe_relative_path;
 
 mod materialize;
+mod transaction;
+
+pub(crate) use transaction::{execute_patch_transaction, resume_patch_transaction};
 
 fn resolve_patch_stage_path(
     install_root: &Path,

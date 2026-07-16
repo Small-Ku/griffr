@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
-pub(super) fn parse_safe_relative_path(label: &str, raw: &str) -> Result<PathBuf> {
+pub(crate) fn parse_safe_relative_path(label: &str, raw: &str) -> Result<PathBuf> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(Error::InvalidPath(format!(

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{Error, Result};
+use crate::runtime::task_pool::verify::file_md5;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
@@ -9,10 +10,14 @@ use windows_sys::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
-pub(crate) fn make_extract_staging_dir(dest: &Path, base_name: &str) -> Result<PathBuf> {
+pub(crate) fn make_extract_staging_dir(
+    dest: &Path,
+    base_name: &str,
+    work_dir: Option<&Path>,
+) -> Result<PathBuf> {
     static EXTRACT_STAGING_COUNTER: AtomicUsize = AtomicUsize::new(0);
     let counter = EXTRACT_STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let parent = dest.parent().unwrap_or(dest);
+    let parent = work_dir.unwrap_or_else(|| dest.parent().unwrap_or(dest));
     Ok(parent.join(format!(".griffr.extract.{}.{}", base_name, counter)))
 }
 
@@ -117,7 +122,7 @@ fn commit_staged_extract_inner(
                 source: e,
             })?;
         }
-        move_path_replace(&src_path, &dest_path).map_err(|e| {
+        move_path_replace_cross_volume(&src_path, &dest_path).map_err(|e| {
             Error::Other(format!(
                 "Failed to move extracted file {} -> {}: {e}",
                 src_path.display(),
@@ -132,7 +137,7 @@ fn commit_staged_extract_inner(
     Ok(())
 }
 
-pub(super) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         let mut src_wide: Vec<u16> = src.as_os_str().encode_wide().collect();
@@ -157,18 +162,11 @@ pub(super) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
     }
     #[cfg(not(windows))]
     {
-        if dest.exists() {
-            if dest.is_dir() {
-                std::fs::remove_dir_all(dest).map_err(|e| Error::RemoveFailed {
-                    path: dest.to_path_buf(),
-                    source: e,
-                })?;
-            } else {
-                std::fs::remove_file(dest).map_err(|e| Error::RemoveFailed {
-                    path: dest.to_path_buf(),
-                    source: e,
-                })?;
-            }
+        if dest.is_dir() {
+            std::fs::remove_dir_all(dest).map_err(|e| Error::RemoveFailed {
+                path: dest.to_path_buf(),
+                source: e,
+            })?;
         }
         std::fs::rename(src, dest).map_err(|e| Error::RenameFailed {
             src: src.to_path_buf(),
@@ -177,6 +175,55 @@ pub(super) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
         })?;
         Ok(())
     }
+}
+
+pub(crate) fn move_path_replace_cross_volume(src: &Path, dest: &Path) -> Result<()> {
+    match move_path_replace(src, dest) {
+        Ok(()) => return Ok(()),
+        Err(Error::RenameFailed { .. }) => {}
+        Err(error) => return Err(error),
+    }
+
+    let source_metadata = std::fs::metadata(src).map_err(|source| Error::StatFailed {
+        path: src.to_path_buf(),
+        source,
+    })?;
+    if !source_metadata.is_file() {
+        return Err(Error::Other(format!(
+            "Cross-volume replacement only supports files: {}",
+            src.display()
+        )));
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirFailed {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let temp = super::reuse::make_temp_write_path(dest)?;
+    let _ = std::fs::remove_file(&temp);
+    std::fs::copy(src, &temp).map_err(|source| Error::CopyFailed {
+        src: src.to_path_buf(),
+        dest: temp.clone(),
+        source,
+    })?;
+    let copied_metadata = std::fs::metadata(&temp).map_err(|source| Error::StatFailed {
+        path: temp.clone(),
+        source,
+    })?;
+    if copied_metadata.len() != source_metadata.len() || file_md5(src)? != file_md5(&temp)? {
+        let _ = std::fs::remove_file(&temp);
+        return Err(Error::Other(format!(
+            "Cross-volume copy verification failed for {} -> {}",
+            src.display(),
+            dest.display()
+        )));
+    }
+    move_path_replace(&temp, dest)?;
+    std::fs::remove_file(src).map_err(|source| Error::RemoveFailed {
+        path: src.to_path_buf(),
+        source,
+    })
 }
 
 #[cfg(test)]

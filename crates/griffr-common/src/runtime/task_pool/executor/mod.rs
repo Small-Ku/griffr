@@ -2,6 +2,7 @@ use compio::dispatcher::Dispatcher;
 
 use super::fs_ops::{
     apply_delete_files_manifest, apply_extracted_vfs_patch_manifest, create_hardlink,
+    resume_patch_transaction,
 };
 use super::types::{Task, WorkerEvent};
 
@@ -24,12 +25,14 @@ pub(crate) fn execute_task(
             dest,
             cleanup,
             password,
+            patch_options,
             parts,
         } => archive::execute_install_archive(
             base_name,
             dest,
             cleanup,
             password,
+            patch_options,
             parts,
             max_retries,
             download_progress_buffer_bytes,
@@ -122,18 +125,52 @@ pub(crate) fn execute_task(
             dest,
             cleanup,
             password,
+            patch_options,
         } => archive::execute_extract_archive(
             base_name,
             volumes,
             dest,
             cleanup,
             password,
+            patch_options,
             extraction_progress_buffer_bytes,
             spawned,
             event_tx,
         ),
         Task::ApplyExtractedVfsPatchManifest { install_root } => {
-            let result = {
+            let plan_path = install_root
+                .join(crate::runtime::PATCH_TRANSACTION_DIR)
+                .join(crate::runtime::PATCH_PLAN_NAME);
+            let has_transaction_plan = plan_path.is_file();
+            let result = if has_transaction_plan {
+                let mut on_commit = |path: &std::path::Path, completed: usize, total: usize| {
+                    let _ = event_tx.send(WorkerEvent::ArchiveCommitProgress {
+                        path: path.to_string_lossy().replace('\\', "/"),
+                        completed,
+                        total,
+                    });
+                };
+                let mut on_patch = |path: &str, completed: usize, total: usize| {
+                    let _ = event_tx.send(WorkerEvent::PatchProgress {
+                        path: path.to_string(),
+                        completed,
+                        total,
+                    });
+                };
+                let mut on_delete = |path: &std::path::Path, completed: usize, total: usize| {
+                    let _ = event_tx.send(WorkerEvent::DeleteProgress {
+                        path: path.to_string_lossy().replace('\\', "/"),
+                        completed,
+                        total,
+                    });
+                };
+                resume_patch_transaction(
+                    &install_root,
+                    Some(&mut on_commit),
+                    Some(&mut on_patch),
+                    Some(&mut on_delete),
+                )
+            } else {
                 let mut on_progress = |path: &str, completed: usize, total: usize| {
                     let _ = event_tx.send(WorkerEvent::PatchProgress {
                         path: path.to_string(),
@@ -144,9 +181,10 @@ pub(crate) fn execute_task(
                 apply_extracted_vfs_patch_manifest(&install_root, Some(&mut on_progress))
             };
             match result {
-                Ok(()) => {
+                Ok(()) if !has_transaction_plan => {
                     spawned.push(Task::ApplyDeleteManifest { install_root });
                 }
+                Ok(()) => {}
                 Err(err) => {
                     let _ = event_tx.send(WorkerEvent::Failed {
                         path: install_root.display().to_string(),

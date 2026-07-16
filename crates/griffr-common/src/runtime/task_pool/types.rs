@@ -1,5 +1,5 @@
 use crate::api::protocol::MIN_USER_AGENT;
-use crate::runtime::{ProgressLane, ProgressSender};
+use crate::runtime::{PatchApplyOptions, PatchPreflightReport, ProgressLane, ProgressSender};
 use std::path::PathBuf;
 
 const DEFAULT_PARALLELISM_FALLBACK: usize = 4;
@@ -25,6 +25,7 @@ pub enum Task {
         dest: PathBuf,
         cleanup: bool,
         password: Option<String>,
+        patch_options: PatchApplyOptions,
         parts: Vec<ArchivePart>,
     },
     Download {
@@ -59,6 +60,7 @@ pub enum Task {
         dest: PathBuf,
         cleanup: bool,
         password: Option<String>,
+        patch_options: PatchApplyOptions,
     },
     ApplyExtractedVfsPatchManifest {
         install_root: PathBuf,
@@ -119,6 +121,10 @@ pub(crate) enum WorkerEvent {
         completed: usize,
         total: usize,
     },
+    ArchivePreflight {
+        path: String,
+        report: PatchPreflightReport,
+    },
     PatchProgress {
         path: String,
         completed: usize,
@@ -143,6 +149,10 @@ pub(crate) enum WorkerEvent {
 
 #[derive(Debug, Clone)]
 pub enum TaskOutcome {
+    ArchivePreflight {
+        path: String,
+        report: PatchPreflightReport,
+    },
     Downloaded {
         path: String,
         bytes: u64,
@@ -170,6 +180,9 @@ pub enum TaskOutcome {
 impl WorkerEvent {
     pub(crate) fn into_outcome(self) -> Option<TaskOutcome> {
         match self {
+            Self::ArchivePreflight { path, report } => {
+                Some(TaskOutcome::ArchivePreflight { path, report })
+            }
             Self::Downloaded { path, bytes } => Some(TaskOutcome::Downloaded { path, bytes }),
             Self::Verified { path, ok, issue } => Some(TaskOutcome::Verified { path, ok, issue }),
             Self::Extracted { path } => Some(TaskOutcome::Extracted { path }),

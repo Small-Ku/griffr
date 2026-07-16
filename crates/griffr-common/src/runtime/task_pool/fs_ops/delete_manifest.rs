@@ -18,6 +18,22 @@ fn parse_delete_files_entry(line: &str) -> Result<Option<PathBuf>> {
     )?))
 }
 
+pub(crate) fn parse_delete_files_manifest(manifest: &str) -> Result<Vec<PathBuf>> {
+    manifest
+        .lines()
+        .enumerate()
+        .filter_map(|(line_idx, line)| match parse_delete_files_entry(line) {
+            Ok(Some(relative)) => Some(Ok(relative)),
+            Ok(None) => None,
+            Err(err) => Some(Err(Error::Config(format!(
+                "Failed to parse {} line {}: {err}",
+                DELETE_FILES_MANIFEST_NAME,
+                line_idx + 1
+            )))),
+        })
+        .collect()
+}
+
 pub(crate) fn apply_delete_files_manifest(
     dest_root: &Path,
     mut progress_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
@@ -31,19 +47,7 @@ pub(crate) fn apply_delete_files_manifest(
         path: manifest_path.clone(),
         source: e,
     })?;
-    let entries = manifest
-        .lines()
-        .enumerate()
-        .filter_map(|(line_idx, line)| match parse_delete_files_entry(line) {
-            Ok(Some(relative)) => Some(Ok(relative)),
-            Ok(None) => None,
-            Err(err) => Some(Err(Error::Config(format!(
-                "Failed to parse {} line {}: {err}",
-                DELETE_FILES_MANIFEST_NAME,
-                line_idx + 1
-            )))),
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let entries = parse_delete_files_manifest(&manifest)?;
     let total_entries = entries.len();
     if total_entries > 0 {
         if let Some(cb) = progress_callback.as_deref_mut() {
