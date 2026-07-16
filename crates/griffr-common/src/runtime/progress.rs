@@ -6,7 +6,7 @@ use rapidhash::RapidHashMap as HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProgressScope {
     Integrity,
-    Materialize,
+    FileEnsure,
     Vfs,
     Archive,
     Predownload,
@@ -34,10 +34,10 @@ impl ProgressLane {
     pub const INTEGRITY_VERIFY: Self = Self::new(ProgressScope::Integrity, ProgressPhase::Verify);
     pub const INTEGRITY_DOWNLOAD: Self =
         Self::new(ProgressScope::Integrity, ProgressPhase::Download);
-    pub const MATERIALIZE_VERIFY: Self =
-        Self::new(ProgressScope::Materialize, ProgressPhase::Verify);
-    pub const MATERIALIZE_DOWNLOAD: Self =
-        Self::new(ProgressScope::Materialize, ProgressPhase::Download);
+    pub const FILE_ENSURE_VERIFY: Self =
+        Self::new(ProgressScope::FileEnsure, ProgressPhase::Verify);
+    pub const FILE_ENSURE_DOWNLOAD: Self =
+        Self::new(ProgressScope::FileEnsure, ProgressPhase::Download);
     pub const VFS_VERIFY: Self = Self::new(ProgressScope::Vfs, ProgressPhase::Verify);
     pub const VFS_DOWNLOAD: Self = Self::new(ProgressScope::Vfs, ProgressPhase::Download);
     pub const ARCHIVE_VERIFY: Self = Self::new(ProgressScope::Archive, ProgressPhase::Verify);

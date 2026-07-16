@@ -12,14 +12,14 @@ use crate::runtime::{
     resource_manifest_url, PathOutcomeTracker, ProgressLane, ProgressSender, ResourceManifestKind,
 };
 
-use super::{VfsMaterializeConfig, VfsPlanOutcome, VfsTaskPlan, VfsUpdateOutcome, VfsUpdateResult};
+use super::{VfsFilePlanOptions, VfsPlanOutcome, VfsTaskPlan, VfsUpdateOutcome, VfsUpdateResult};
 pub async fn plan_vfs_tasks(
     api_client: &ApiClient,
     target: &ApiTarget,
     game_version: &str,
     rand_str: &str,
     streaming_assets_path: &Path,
-    materialize: &VfsMaterializeConfig,
+    options: &VfsFilePlanOptions,
 ) -> Result<VfsPlanOutcome> {
     let resources = match api_client
         .get_latest_resources(target, game_version, rand_str, DEFAULT_PLATFORM)
@@ -68,7 +68,7 @@ pub async fn plan_vfs_tasks(
                 );
                 continue;
             }
-            let source_candidates = materialize
+            let source_candidates = options
                 .source_streaming_assets
                 .iter()
                 .map(|root| root.join(&file.name))
@@ -82,8 +82,8 @@ pub async fn plan_vfs_tasks(
                 expected_size: file.size,
                 source_candidates,
                 download_url: Some(format!("{}/{}", resource.path, file.name)),
-                allow_copy_fallback: materialize.allow_copy_fallback,
-                prefer_reuse: materialize.prefer_reuse,
+                allow_copy_fallback: options.allow_copy_fallback,
+                prefer_reuse: options.prefer_reuse,
                 retry_count: 0,
             });
         }
@@ -104,7 +104,7 @@ pub async fn download_vfs_resources(
     game_version: &str,
     rand_str: &str,
     streaming_assets_path: &Path,
-    materialize: &VfsMaterializeConfig,
+    options: &VfsFilePlanOptions,
     task_pool_runner: &mut TaskPoolRunner,
     progress: ProgressSender,
 ) -> Result<VfsUpdateOutcome> {
@@ -114,7 +114,7 @@ pub async fn download_vfs_resources(
         game_version,
         rand_str,
         streaming_assets_path,
-        materialize,
+        options,
     )
     .await?
     {
@@ -140,7 +140,7 @@ pub async fn download_vfs_resources(
         .with_download(ProgressLane::VFS_DOWNLOAD);
     let result = task_pool_runner
         .run_batch(plan.tasks, task_progress)
-        .map_err(|e| Error::TaskPool(format!("Failed to materialize VFS files: {e}")))?;
+        .map_err(|e| Error::TaskPool(format!("Failed to ensure VFS files: {e}")))?;
 
     let mut failed_paths = Vec::<String>::new();
     let mut outcomes = PathOutcomeTracker::new();
@@ -153,7 +153,7 @@ pub async fn download_vfs_resources(
                 outcomes.record_verified(&path, ok);
             }
             TaskOutcome::Failed { path, reason } => {
-                warn!("Failed to materialize VFS file {}: {}", path, reason);
+                warn!("Failed to ensure VFS file {}: {}", path, reason);
                 outcomes.record_failed(&path);
                 failed_paths.push(path);
             }

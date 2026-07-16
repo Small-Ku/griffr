@@ -14,7 +14,7 @@ with a VFS-specific payload:
 - `vfs_files/vfs_patch/...`
 - `delete_files.txt`
 
-`patch.json` is the control file for the VFS transaction. The materialization
+`patch.json` is the control file for the VFS transaction. The patch-output
 destination is `install_root / vfs_base_path / files[].name` unless the user
 selects an external VFS root.
 
@@ -51,7 +51,7 @@ verifies the staged archive identity before extraction.
 ## Preflight
 
 Before extraction mutates the install, the archive is inspected without
-materializing its contents. Preflight:
+applying its contents. Preflight:
 
 1. validates every ZIP entry path and rejects duplicates;
 2. parses `patch.json` and `delete_files.txt`;

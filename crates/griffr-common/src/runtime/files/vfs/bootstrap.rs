@@ -15,7 +15,7 @@ use crate::runtime::{
 };
 
 #[derive(Debug, Clone, Default)]
-pub struct VfsMaterializeConfig {
+pub struct VfsFilePlanOptions {
     /// Candidate StreamingAssets roots from other installs for VFS file reuse.
     pub source_streaming_assets: Vec<std::path::PathBuf>,
     /// Allow copy fallback when hardlinking from source installs fails.
@@ -61,9 +61,9 @@ pub enum VfsUpdateOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VfsBootstrapScope {
-    /// Materialize only initial pref set into Persistent.
+    /// Ensure only the initial pref set in Persistent.
     Initial,
-    /// Materialize initial+main pref sets into Persistent.
+    /// Ensure the initial and main pref sets in Persistent.
     Complete,
 }
 
@@ -100,9 +100,9 @@ impl std::str::FromStr for VfsBootstrapScope {
 
 #[derive(Debug, Clone)]
 pub struct VfsBootstrapConfig {
-    /// Scope for Persistent materialization.
+    /// Scope for ensuring Persistent files.
     pub scope: VfsBootstrapScope,
-    /// Primary StreamingAssets root for local materialization.
+    /// Primary StreamingAssets root for local file reuse.
     pub source_streaming_assets: std::path::PathBuf,
     /// Additional StreamingAssets roots from other installs for reuse.
     pub extra_source_streaming_assets: Vec<std::path::PathBuf>,
@@ -381,7 +381,7 @@ pub async fn bootstrap_persistent_vfs_with_runner(
         .run_batch(plan.tasks, task_progress)
         .map_err(|e| {
             Error::TaskPool(format!(
-                "Failed to materialize Persistent VFS bootstrap files: {e}"
+                "Failed to ensure Persistent VFS bootstrap files: {e}"
             ))
         })?;
 

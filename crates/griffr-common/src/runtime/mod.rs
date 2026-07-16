@@ -1,14 +1,17 @@
 pub mod admin;
 mod compat_fs;
 pub mod files;
+mod install_plan;
 mod integrity;
 pub mod issues;
 pub mod launcher;
 mod launcher_metadata;
+mod local_install;
 mod patch_transaction;
 mod paths;
 mod progress;
 pub mod task_pool;
+mod update_plan;
 
 pub use admin::{ensure_admin, is_running_as_admin, restart_as_admin};
 pub use compat_fs::{
@@ -16,18 +19,24 @@ pub use compat_fs::{
     list_files_with_extension, read_link, remove_dir_all, remove_empty_dirs_recursive, CopyStats,
 };
 pub use files::reuse::{
-    materialize_game_files_with_pool, FileReuseConfig, MaterializeSummary, SourceInstallInput,
+    ensure_game_files_with_pool, inspect_reuse_installations, resolve_file_reuse_sources,
+    FileEnsureSummary, FileReuseConfig, SourceInstallInput,
 };
 pub use files::vfs::{
     bootstrap_persistent_vfs_with_runner, download_vfs_resources, get_vfs_resource_info,
     plan_persistent_bootstrap_tasks, plan_vfs_tasks, VfsBootstrapConfig, VfsBootstrapPlan,
-    VfsBootstrapResult, VfsBootstrapScope, VfsMaterializeConfig, VfsPlanOutcome, VfsTaskPlan,
+    VfsBootstrapResult, VfsBootstrapScope, VfsFilePlanOptions, VfsPlanOutcome, VfsTaskPlan,
     VfsUpdateOutcome, VfsUpdateResult,
 };
+pub use install_plan::required_install_bytes;
 pub use integrity::{run_integrity_pool, IntegrityRunSummary};
 pub use issues::{FileIssue, FileIssueKind};
 pub use launcher::{GameProcess, Launcher};
 pub use launcher_metadata::sync_launcher_metadata;
+pub use local_install::{
+    decrypt_config_ini, detect_local_install, resolve_install_path, resolve_named_path,
+    LocalInstall, ParsedConfigIni,
+};
 pub(crate) use patch_transaction::build_patch_execution_plan;
 pub use patch_transaction::{
     available_space, classify_patch_recovery, preflight_patch_archives,
@@ -49,4 +58,8 @@ pub use progress::{
     PathAttemptKind, PathOutcome, PathOutcomeSummary, PathOutcomeTracker, PathReuseMethod,
     ProgressLane, ProgressPhase, ProgressReceiver, ProgressScope, ProgressSender, ProgressUnit,
     ProgressUpdate,
+};
+pub use update_plan::{
+    resolve_staged_patch_recovery_dir, select_update_package, selected_archive_plan,
+    staged_patch_request_version, ArchivePlanSummary, UpdatePackageKind,
 };

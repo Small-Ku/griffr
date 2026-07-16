@@ -16,7 +16,7 @@ pub struct SourceInstallInput {
     pub install_path: PathBuf,
 }
 
-/// Configuration for manifest-driven file materialization.
+/// Configuration for the manifest-driven game-file ensure operation.
 #[derive(Debug, Clone)]
 pub struct FileReuseConfig {
     /// Allow copying files when hardlink creation fails.
@@ -28,7 +28,7 @@ pub struct FileReuseConfig {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct MaterializeSummary {
+pub struct FileEnsureSummary {
     pub reused_files: usize,
     pub downloaded_files: usize,
     pub issues: Vec<FileIssue>,

@@ -19,7 +19,7 @@ fn manifest_path<'a>(alternate: Option<&'a str>, primary: &'a str) -> &'a str {
         .unwrap_or(primary)
 }
 
-pub(super) fn verify_materialized_file(
+pub(super) fn verify_patch_output(
     path: &Path,
     logical_path: &str,
     expected_md5: &str,
@@ -27,7 +27,7 @@ pub(super) fn verify_materialized_file(
 ) -> Result<()> {
     if let Some(issue) = build_issue(path, logical_path, expected_md5, Some(expected_size)) {
         return Err(Error::Vfs(format!(
-            "Materialized {} failed verification: kind={:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
+            "Patch output {} failed verification: kind={:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
             logical_path,
             issue.kind,
             issue.expected_size,
@@ -39,7 +39,7 @@ pub(super) fn verify_materialized_file(
     Ok(())
 }
 
-fn materialize_local_patch_entry(
+fn apply_local_patch_entry(
     install_root: &Path,
     stage_root: &Path,
     dest_root: &Path,
@@ -72,12 +72,12 @@ fn materialize_local_patch_entry(
     }
     move_path_replace(&source_path, &dest_path).map_err(|e| {
         Error::Other(format!(
-            "Failed to materialize local patch payload {} -> {}: {e}",
+            "Failed to apply local patch payload {} -> {}: {e}",
             source_path.display(),
             dest_path.display()
         ))
     })?;
-    verify_materialized_file(&dest_path, &logical_path, &entry.md5, entry.size)
+    verify_patch_output(&dest_path, &logical_path, &entry.md5, entry.size)
 }
 
 fn make_patch_work_path(work_dir: &Path, destination: &Path) -> Result<PathBuf> {
@@ -127,9 +127,7 @@ pub(super) fn apply_hdiff_patch(
             base_path.display()
         )));
     }
-    if let Err(err) =
-        verify_materialized_file(&temp_path, logical_path, expected_md5, expected_size)
-    {
+    if let Err(err) = verify_patch_output(&temp_path, logical_path, expected_md5, expected_size) {
         let _ = std::fs::remove_file(&temp_path);
         return Err(err);
     }
@@ -146,7 +144,7 @@ pub(super) fn apply_hdiff_patch(
             });
         }
         if let Err(error) =
-            verify_materialized_file(&local_temp, logical_path, expected_md5, expected_size)
+            verify_patch_output(&local_temp, logical_path, expected_md5, expected_size)
         {
             let _ = std::fs::remove_file(&temp_path);
             let _ = std::fs::remove_file(&local_temp);
@@ -247,7 +245,7 @@ fn apply_patch_entry(
     )))
 }
 
-pub(super) fn materialize_vfs_patch_entry(
+pub(super) fn apply_vfs_patch_entry(
     install_root: &Path,
     stage_root: &Path,
     dest_root: &Path,
@@ -266,13 +264,7 @@ pub(super) fn materialize_vfs_patch_entry(
         .map(str::trim)
         .filter(|path| !path.is_empty())
     {
-        return materialize_local_patch_entry(
-            install_root,
-            stage_root,
-            dest_root,
-            entry,
-            local_path,
-        );
+        return apply_local_patch_entry(install_root, stage_root, dest_root, entry, local_path);
     }
     apply_patch_entry(install_root, stage_root, dest_root, entry)
 }

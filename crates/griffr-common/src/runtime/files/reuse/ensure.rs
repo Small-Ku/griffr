@@ -13,7 +13,7 @@ use crate::runtime::{
 };
 
 #[allow(clippy::too_many_arguments)]
-pub async fn materialize_game_files_with_pool(
+pub async fn ensure_game_files_with_pool(
     api_client: &ApiClient,
     game_id: crate::config::GameId,
     install_path: &Path,
@@ -22,7 +22,7 @@ pub async fn materialize_game_files_with_pool(
     config: &super::models::FileReuseConfig,
     task_pool_runner: Option<&mut crate::runtime::task_pool::TaskPoolRunner>,
     progress: ProgressSender,
-) -> Result<super::models::MaterializeSummary> {
+) -> Result<super::models::FileEnsureSummary> {
     let manifest = api_client
         .fetch_game_files(file_path, game_files_md5)
         .await
@@ -122,10 +122,10 @@ pub async fn materialize_game_files_with_pool(
 
     if config.dry_run {
         info!(
-            "File materialization dry-run: would_reuse={} would_download={}",
+            "Game-file ensure dry-run: would_reuse={} would_download={}",
             dry_run_reused, dry_run_downloaded
         );
-        return Ok(super::models::MaterializeSummary {
+        return Ok(super::models::FileEnsureSummary {
             reused_files: dry_run_reused,
             downloaded_files: dry_run_downloaded,
             issues: Vec::new(),
@@ -134,16 +134,16 @@ pub async fn materialize_game_files_with_pool(
 
     let total = tasks.len();
     let task_progress = crate::runtime::task_pool::TaskProgress::new(progress)
-        .with_verify(ProgressLane::MATERIALIZE_VERIFY, total)
-        .with_download(ProgressLane::MATERIALIZE_DOWNLOAD);
+        .with_verify(ProgressLane::FILE_ENSURE_VERIFY, total)
+        .with_download(ProgressLane::FILE_ENSURE_DOWNLOAD);
     let result = if let Some(runner) = task_pool_runner {
         runner
             .run_batch(tasks, task_progress)
-            .map_err(|e| Error::TaskPool(format!("File materialization pool failed: {e}")))?
+            .map_err(|e| Error::TaskPool(format!("Game-file ensure pool failed: {e}")))?
     } else {
-        let pool_cfg = crate::runtime::task_pool::TaskPoolConfig::for_file_materialization();
+        let pool_cfg = crate::runtime::task_pool::TaskPoolConfig::for_file_ensure();
         crate::runtime::task_pool::run_tasks_with_progress(tasks, pool_cfg, task_progress)
-            .map_err(|e| Error::TaskPool(format!("File materialization pool failed: {e}")))?
+            .map_err(|e| Error::TaskPool(format!("Game-file ensure pool failed: {e}")))?
     };
 
     let mut issues = Vec::new();
@@ -173,7 +173,7 @@ pub async fn materialize_game_files_with_pool(
             }
             crate::runtime::task_pool::TaskOutcome::Failed { path, reason } => {
                 outcomes.record_failed(&path);
-                warn!("materialize failed for {}: {}", path, reason);
+                warn!("Failed to ensure game file {}: {}", path, reason);
             }
             _ => {}
         }
@@ -182,14 +182,14 @@ pub async fn materialize_game_files_with_pool(
 
     if !config.dry_run {
         info!(
-            "File materialization complete: reused={} downloaded={} issues={}",
+            "Game-file ensure complete: reused={} downloaded={} issues={}",
             summary.reused_files,
             summary.downloaded_files,
             issues.len()
         );
     }
 
-    Ok(super::models::MaterializeSummary {
+    Ok(super::models::FileEnsureSummary {
         reused_files: summary.reused_files,
         downloaded_files: summary.downloaded_files,
         issues,

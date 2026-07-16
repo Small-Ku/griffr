@@ -7,7 +7,7 @@ use crate::api::types::ResourcePatch;
 
 use super::path_safety::parse_safe_relative_path;
 
-mod materialize;
+mod apply;
 mod transaction;
 
 pub(crate) use transaction::{execute_patch_transaction, resume_patch_transaction};
@@ -65,13 +65,9 @@ pub(crate) fn apply_extracted_vfs_patch_manifest(
         }
     }
     for (index, entry) in manifest.files.iter().enumerate() {
-        materialize::materialize_vfs_patch_entry(install_root, &stage_root, &dest_root, entry)
-            .map_err(|e| {
-                Error::Other(format!(
-                    "Failed to materialize patch entry {}: {e}",
-                    entry.name
-                ))
-            })?;
+        apply::apply_vfs_patch_entry(install_root, &stage_root, &dest_root, entry).map_err(
+            |e| Error::Other(format!("Failed to apply patch entry {}: {e}", entry.name)),
+        )?;
         if let Some(cb) = progress_callback.as_deref_mut() {
             cb(&entry.name, index + 1, total_entries);
         }

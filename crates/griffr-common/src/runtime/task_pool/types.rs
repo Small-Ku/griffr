@@ -12,8 +12,8 @@ const MIN_CPU_SLOTS: usize = 1;
 const MAX_CPU_SLOTS: usize = 16;
 const MIN_EXTRACT_SLOTS: usize = 1;
 const MAX_EXTRACT_SLOTS: usize = 4;
-const MIN_MATERIALIZATION_IO_SLOTS: usize = 4;
-const MAX_MATERIALIZATION_IO_SLOTS: usize = 24;
+const MIN_FILE_ENSURE_IO_SLOTS: usize = 4;
+const MAX_FILE_ENSURE_IO_SLOTS: usize = 24;
 const MAX_VFS_REPAIR_IO_SLOTS: usize = 6;
 
 use crate::runtime::issues::FileIssue;
@@ -314,10 +314,10 @@ impl TaskPoolConfig {
         }
     }
 
-    pub fn for_file_materialization() -> Self {
+    pub fn for_file_ensure() -> Self {
         Self {
             io_slots: available_parallelism()
-                .clamp(MIN_MATERIALIZATION_IO_SLOTS, MAX_MATERIALIZATION_IO_SLOTS),
+                .clamp(MIN_FILE_ENSURE_IO_SLOTS, MAX_FILE_ENSURE_IO_SLOTS),
             ..Self::default()
         }
     }

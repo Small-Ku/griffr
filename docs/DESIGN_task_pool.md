@@ -40,7 +40,7 @@ graph rather than in frontend-specific orchestration.
 shared task queues
 ├── I/O slots       Download, hardlink, copy, file writes
 ├── CPU slots       MD5 verification
-└── Extract slots   ZIP parsing, extraction, HDiff materialization
+└── Extract slots   ZIP parsing, extraction, HDiff application
 ```
 
 The groups are independently limited:
@@ -48,7 +48,7 @@ The groups are independently limited:
 - network concurrency should not be capped by CPU count;
 - checksum concurrency should not exceed useful CPU parallelism;
 - archive and patch work is disk- and CPU-heavy and must not starve downloads;
-- materialization reserves enough I/O lanes to avoid nested-dispatch starvation.
+- the game-file ensure flow reserves enough I/O lanes to avoid nested-dispatch starvation.
 
 ## Archive Pipeline
 
