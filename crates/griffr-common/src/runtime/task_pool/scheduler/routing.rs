@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::{Component, Path};
+use std::path::Path;
 
 use crate::runtime::task_pool::{Task, TaskPoolConfig, TransferClass};
 
@@ -156,20 +156,7 @@ fn normalize_volumes(request: &mut ResourceRequest) {
 }
 
 fn volume_key(path: &Path) -> String {
-    crate::runtime::task_pool::fs_ops::storage_volume_id(path)
-        .unwrap_or_else(|| format!("unknown:{}", path_anchor(path)))
-}
-
-fn path_anchor(path: &Path) -> String {
-    path.components()
-        .find_map(|component| match component {
-            Component::Prefix(prefix) => Some(prefix.as_os_str().to_string_lossy().to_string()),
-            Component::RootDir => Some("/".to_string()),
-            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
-            Component::CurDir | Component::ParentDir => None,
-        })
-        .unwrap_or_else(|| ".".to_string())
-        .to_ascii_lowercase()
+    crate::runtime::task_pool::fs_ops::storage_volume_group_key(path)
 }
 
 fn path_key(path: &Path) -> String {

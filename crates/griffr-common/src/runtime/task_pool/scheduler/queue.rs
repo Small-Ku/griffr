@@ -50,17 +50,17 @@ impl ResourceState {
             return false;
         }
         for volume in &request.read_volumes {
+            let limit = config.volume_limit(volume);
             if self.volume_writes.get(volume).copied().unwrap_or(0) > 0
-                || self.volume_reads.get(volume).copied().unwrap_or(0)
-                    >= config.volume_read_slots
+                || self.volume_reads.get(volume).copied().unwrap_or(0) >= limit.read_slots
             {
                 return false;
             }
         }
         for volume in &request.write_volumes {
+            let limit = config.volume_limit(volume);
             if self.volume_reads.get(volume).copied().unwrap_or(0) > 0
-                || self.volume_writes.get(volume).copied().unwrap_or(0)
-                    >= config.volume_write_slots
+                || self.volume_writes.get(volume).copied().unwrap_or(0) >= limit.write_slots
             {
                 return false;
             }
@@ -337,4 +337,26 @@ mod tests {
         queue.release(&first.resources);
         queue.release(&second.resources);
     }
+
+    #[test]
+    fn per_volume_override_allows_more_parallel_ssd_reads() {
+        let mut config = TaskPoolConfig::default();
+        config.volume_concurrency.insert(
+            "volume-a".to_string(),
+            crate::runtime::task_pool::VolumeConcurrency::new(2, 1),
+        );
+        let request = ResourceRequest {
+            execution: ExecutionClass::Cpu,
+            read_volumes: vec!["volume-a".to_string()],
+            ..ResourceRequest::default()
+        };
+        let mut state = super::ResourceState::default();
+
+        assert!(state.can_acquire(&request, &config));
+        state.acquire(&request);
+        assert!(state.can_acquire(&request, &config));
+        state.acquire(&request);
+        assert!(!state.can_acquire(&request, &config));
+    }
+
 }
