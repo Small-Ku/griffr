@@ -115,6 +115,23 @@ pub(crate) fn execute_task(
             spawned,
             event_tx,
         ),
+        Task::VerifyReuseVolume {
+            group_index,
+            candidates,
+            logical_path,
+            expected_md5,
+            expected_size,
+            group,
+        } => transfer::execute_verify_reuse_volume(
+            group_index,
+            candidates,
+            logical_path,
+            expected_md5,
+            expected_size,
+            group,
+            spawned,
+            event_tx,
+        ),
         Task::ReuseFile {
             source,
             remaining_source_candidates,

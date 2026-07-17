@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::task_pool::verify::file_md5;
+use crate::runtime::task_pool::verify::{file_md5, VerifiedArtifactCache};
 use crate::runtime::{PlannedPatchEntry, PlannedPatchSource, PATCH_TRANSACTION_DIR};
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
@@ -51,7 +51,16 @@ fn transaction_defers_version_marker_and_preserves_final_output() {
         vec![PathBuf::from("config.ini")],
     );
 
-    execute_patch_transaction(&plan, None, None, None, None, 2, 2).unwrap();
+    execute_patch_transaction(
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        2,
+        2,
+        &VerifiedArtifactCache::default(),
+    ).unwrap();
 
     assert_eq!(std::fs::read(&output).unwrap(), b"final");
     assert_eq!(
@@ -143,7 +152,12 @@ fn application_revalidates_persisted_base_metadata() {
         Vec::new(),
     );
 
-    let error = apply_planned_entry(&plan, &entry).unwrap_err();
+    let error = apply_planned_entry(
+        &plan,
+        &entry,
+        &VerifiedArtifactCache::default(),
+    )
+    .unwrap_err();
     assert!(error
         .to_string()
         .contains("failed verification before applying"));

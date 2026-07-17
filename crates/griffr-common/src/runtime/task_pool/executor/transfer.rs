@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path, PathBuf};
 
 use compio::dispatcher::Dispatcher;
 
 use super::super::fs_ops::{reuse_verified_file, ReuseMethod};
-use super::super::types::{Task, TransferClass, WorkerEvent};
+use super::super::types::{ReuseCandidateGroup, Task, TransferClass, WorkerEvent};
 
 pub(super) struct DownloadExecInput {
     pub(super) url: String,
@@ -108,6 +109,15 @@ pub(super) fn execute_download(
     }
 }
 
+fn source_volume_key(path: &Path) -> PathBuf {
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => PathBuf::from(prefix.as_os_str()),
+        Some(Component::RootDir) => PathBuf::from(std::path::MAIN_SEPARATOR.to_string()),
+        Some(component) => PathBuf::from(component.as_os_str()),
+        None => PathBuf::new(),
+    }
+}
+
 pub(super) fn execute_repair_file(
     input: RepairFileInput,
     spawned: &mut Vec<Task>,
@@ -124,50 +134,84 @@ pub(super) fn execute_repair_file(
         retry_count,
         transfer_class,
     } = input;
-    let mut candidates = source_candidates.into_iter();
-    while let Some(source) = candidates.next() {
-        if super::super::verify::build_issue(
-            &source,
+
+    let mut seen = BTreeSet::new();
+    let mut by_volume = BTreeMap::<PathBuf, Vec<PathBuf>>::new();
+    for source in source_candidates {
+        let normalized = std::fs::canonicalize(&source).unwrap_or(source);
+        if seen.insert(normalized.clone()) {
+            by_volume
+                .entry(source_volume_key(&normalized))
+                .or_default()
+                .push(normalized);
+        }
+    }
+    if by_volume.is_empty() {
+        if let Some(url) = download_url {
+            spawned.push(Task::Download {
+                url,
+                dest,
+                logical_path,
+                expected_md5,
+                expected_size: Some(expected_size),
+                retry_count,
+                transfer_class,
+            });
+        } else {
+            let _ = event_tx.send(WorkerEvent::Failed {
+                path: logical_path,
+                reason: "no usable source candidates".to_string(),
+            });
+        }
+        return;
+    }
+
+    let group = ReuseCandidateGroup::new(
+        by_volume.len(),
+        dest,
+        logical_path.clone(),
+        expected_md5.clone(),
+        expected_size,
+        download_url,
+        allow_copy_fallback,
+        retry_count,
+        transfer_class,
+    );
+    spawned.extend(
+        by_volume
+            .into_values()
+            .enumerate()
+            .map(|(group_index, candidates)| Task::VerifyReuseVolume {
+                group_index,
+                candidates,
+                logical_path: logical_path.clone(),
+                expected_md5: expected_md5.clone(),
+                expected_size,
+                group: group.clone(),
+            }),
+    );
+}
+
+pub(super) fn execute_verify_reuse_volume(
+    group_index: usize,
+    candidates: Vec<PathBuf>,
+    logical_path: String,
+    expected_md5: String,
+    expected_size: u64,
+    group: std::sync::Arc<ReuseCandidateGroup>,
+    spawned: &mut Vec<Task>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    let source = candidates.into_iter().find(|source| {
+        super::super::verify::build_issue(
+            source,
             &logical_path,
             &expected_md5,
             Some(expected_size),
         )
-        .is_some()
-        {
-            continue;
-        }
-        spawned.push(Task::ReuseFile {
-            source,
-            remaining_source_candidates: candidates.collect(),
-            dest,
-            logical_path,
-            expected_md5,
-            expected_size,
-            download_url,
-            allow_copy_fallback,
-            retry_count,
-            transfer_class,
-        });
-        return;
-    }
-
-    if let Some(url) = download_url {
-        spawned.push(Task::Download {
-            url,
-            dest,
-            logical_path,
-            expected_md5,
-            expected_size: Some(expected_size),
-            retry_count,
-            transfer_class,
-        });
-        return;
-    }
-
-    let _ = event_tx.send(WorkerEvent::Failed {
-        path: logical_path,
-        reason: "no usable source candidates".to_string(),
+        .is_none()
     });
+    group.finish_volume(group_index, source, spawned, event_tx);
 }
 
 pub(super) fn execute_reuse_file(
@@ -219,12 +263,15 @@ pub(super) fn execute_reuse_file(
                 reason: format!("verified-source reuse failed: {reason}"),
             });
             if !remaining_source_candidates.is_empty() {
-                spawned.push(Task::RepairFile {
+                let mut remaining_source_candidates = remaining_source_candidates;
+                let source = remaining_source_candidates.remove(0);
+                spawned.push(Task::ReuseFile {
+                    source,
+                    remaining_source_candidates,
                     dest,
                     logical_path,
                     expected_md5,
                     expected_size,
-                    source_candidates: remaining_source_candidates,
                     download_url,
                     allow_copy_fallback,
                     retry_count,

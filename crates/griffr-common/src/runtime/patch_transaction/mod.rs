@@ -15,7 +15,7 @@ pub use model::{
     PlannedPatchSource,
 };
 pub(crate) use persistence::{read_patch_execution_plan, write_patch_execution_plan};
-pub(crate) use planning::build_patch_execution_plan;
+pub(crate) use planning::build_patch_execution_plan_with_cache;
 pub use planning::preflight_patch_archives;
 pub use recovery::{classify_patch_recovery, PatchRecoveryState};
 pub use space::available_space;

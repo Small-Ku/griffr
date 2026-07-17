@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::UNIX_EPOCH;
 
 use crate::error::{Error, Result};
 use md5::{Digest, Md5};
@@ -48,7 +51,69 @@ pub(crate) fn execute_verify(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ArtifactKey {
+    path: PathBuf,
+    expected_md5: String,
+    expected_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArtifactStamp {
+    len: u64,
+    modified_nanos: Option<u128>,
+}
+
+impl ArtifactStamp {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        let modified_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos());
+        Self {
+            len: metadata.len(),
+            modified_nanos,
+        }
+    }
+}
+
+/// Batch-local proof that a path still has the metadata observed when its MD5
+/// was last validated. The cache never survives the command invocation.
+#[derive(Debug, Default)]
+pub(crate) struct VerifiedArtifactCache {
+    entries: Mutex<HashMap<ArtifactKey, ArtifactStamp>>,
+}
+
+impl VerifiedArtifactCache {
+    pub(crate) fn build_issue(
+        &self,
+        path: &Path,
+        logical_path: &str,
+        expected_md5: &str,
+        expected_size: Option<u64>,
+    ) -> Option<FileIssue> {
+        build_issue_impl(
+            Some(self),
+            path,
+            logical_path,
+            expected_md5,
+            expected_size,
+        )
+    }
+}
+
 pub(crate) fn build_issue(
+    path: &Path,
+    logical_path: &str,
+    expected_md5: &str,
+    expected_size: Option<u64>,
+) -> Option<FileIssue> {
+    build_issue_impl(None, path, logical_path, expected_md5, expected_size)
+}
+
+fn build_issue_impl(
+    cache: Option<&VerifiedArtifactCache>,
     path: &Path,
     logical_path: &str,
     expected_md5: &str,
@@ -81,6 +146,27 @@ pub(crate) fn build_issue(
         }
     }
 
+    let normalized_md5 = expected_md5.to_ascii_lowercase();
+    let key = ArtifactKey {
+        path: path.to_path_buf(),
+        expected_md5: normalized_md5.clone(),
+        expected_size,
+    };
+    let stamp = ArtifactStamp::from_metadata(&metadata);
+    let cacheable = stamp.modified_nanos.is_some();
+    if cacheable
+        && cache.is_some_and(|cache| {
+            cache
+                .entries
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_some_and(|cached| cached == &stamp)
+        })
+    {
+        return None;
+    }
+
     let actual_md5 = match file_md5(path) {
         Ok(md5) => md5,
         Err(_) => {
@@ -94,7 +180,7 @@ pub(crate) fn build_issue(
             });
         }
     };
-    if actual_md5 != expected_md5.to_lowercase() {
+    if actual_md5 != normalized_md5 {
         return Some(FileIssue {
             path: logical_path.to_string(),
             expected_md5: expected_md5.to_string(),
@@ -105,6 +191,11 @@ pub(crate) fn build_issue(
         });
     }
 
+    if cacheable {
+        if let Some(cache) = cache {
+            cache.entries.lock().unwrap().insert(key, stamp);
+        }
+    }
     None
 }
 

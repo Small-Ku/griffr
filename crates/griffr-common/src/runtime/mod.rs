@@ -37,7 +37,7 @@ pub use local_install::{
     decrypt_config_ini, detect_local_install, resolve_install_path, resolve_named_path,
     LocalInstall, ParsedConfigIni,
 };
-pub(crate) use patch_transaction::build_patch_execution_plan;
+pub(crate) use patch_transaction::build_patch_execution_plan_with_cache;
 pub use patch_transaction::{
     available_space, classify_patch_recovery, preflight_patch_archives,
     read_patch_storage_topology, read_predownload_stage_metadata, write_predownload_stage_metadata,

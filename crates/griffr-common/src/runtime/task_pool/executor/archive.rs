@@ -1,13 +1,14 @@
 use std::path::PathBuf;
 
 use crate::error::Error;
-use crate::runtime::{build_patch_execution_plan, PatchApplyOptions};
+use crate::runtime::{build_patch_execution_plan_with_cache, PatchApplyOptions};
 use compio::dispatcher::Dispatcher;
 
 use super::super::fs_ops::{
     commit_staged_extract, execute_patch_transaction, make_extract_staging_dir,
 };
 use super::super::types::{ArchiveInstallGroup, ArchivePart, Task, WorkerEvent};
+use super::super::verify::VerifiedArtifactCache;
 
 pub(super) fn execute_install_archive(
     base_name: String,
@@ -176,12 +177,14 @@ pub(super) fn execute_extract_archive(
             })?;
 
             let inspection = extractor.inspect_patch_payload(password.as_deref())?;
+            let verification_cache = VerifiedArtifactCache::default();
             let patch_plan = if inspection.patch_manifest.is_some() {
-                Some(build_patch_execution_plan(
+                Some(build_patch_execution_plan_with_cache(
                     &dest,
                     &staging_dir,
                     &inspection,
                     &patch_options,
+                    &verification_cache,
                 )?)
             } else {
                 None
@@ -259,6 +262,7 @@ pub(super) fn execute_extract_archive(
                     Some(&mut on_delete),
                     patch_slots,
                     commit_slots,
+                    &verification_cache,
                 )?;
                 if staging_dir.exists() {
                     std::fs::remove_dir_all(&staging_dir).map_err(|source| {

@@ -67,6 +67,7 @@ fn task_progress_path(task: &Task) -> Option<&str> {
         Task::Download { logical_path, .. }
         | Task::Verify { logical_path, .. }
         | Task::RepairFile { logical_path, .. }
+        | Task::VerifyReuseVolume { logical_path, .. }
         | Task::ReuseFile { logical_path, .. } => Some(logical_path.as_str()),
         _ => None,
     }

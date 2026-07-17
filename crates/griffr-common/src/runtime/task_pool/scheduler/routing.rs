@@ -25,7 +25,9 @@ pub(super) fn worker_kind_for_task(task: &Task) -> WorkerKind {
         | Task::Hardlink { .. }
         | Task::ApplyExtractedVfsPatchManifest { .. }
         | Task::ApplyDeleteManifest { .. } => WorkerKind::Io,
-        Task::Verify { .. } | Task::RepairFile { .. } => WorkerKind::Cpu,
+        Task::Verify { .. } | Task::RepairFile { .. } | Task::VerifyReuseVolume { .. } => {
+            WorkerKind::Cpu
+        },
         Task::Extract { .. } => WorkerKind::Extract,
     }
 }

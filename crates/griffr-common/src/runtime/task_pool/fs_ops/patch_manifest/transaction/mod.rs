@@ -6,6 +6,7 @@ use crate::runtime::patch_transaction::{
     read_patch_execution_plan, write_patch_execution_plan, PatchExecutionPlan,
     PatchPreflightReport, PlannedPatchSource,
 };
+use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 
 mod filesystem;
 mod operations;
@@ -27,6 +28,7 @@ pub(crate) fn execute_patch_transaction(
     delete_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
     patch_slots: usize,
     commit_slots: usize,
+    verification_cache: &VerifiedArtifactCache,
 ) -> Result<()> {
     plan.validate()?;
     write_patch_execution_plan(plan)?;
@@ -58,7 +60,8 @@ pub(crate) fn execute_patch_transaction(
                     .iter()
                     .map(|entry| {
                         scope.spawn(move || {
-                            apply_planned_entry(plan, entry).map_err(|error| error.to_string())
+                            apply_planned_entry(plan, entry, verification_cache)
+                                .map_err(|error| error.to_string())
                         })
                     })
                     .collect::<Vec<_>>()
@@ -108,6 +111,7 @@ pub(crate) fn resume_patch_transaction(
     commit_slots: usize,
 ) -> Result<()> {
     let plan = read_patch_execution_plan(install_root)?;
+    let verification_cache = VerifiedArtifactCache::default();
     execute_patch_transaction(
         &plan,
         None,
@@ -116,6 +120,7 @@ pub(crate) fn resume_patch_transaction(
         delete_callback,
         patch_slots,
         commit_slots,
+        &verification_cache,
     )
 }
 

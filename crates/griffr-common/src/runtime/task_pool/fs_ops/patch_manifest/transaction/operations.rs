@@ -6,17 +6,18 @@ use crate::runtime::patch_transaction::{
     PatchExecutionPlan, PlannedPatchEntry, PlannedPatchSource, PATCH_DEFERRED_DIR,
     PATCH_TRANSACTION_DIR,
 };
-use crate::runtime::task_pool::verify::build_issue;
+use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 
-use super::super::super::extract::move_path_replace_cross_volume;
-use super::super::apply::{apply_hdiff_patch, verify_patch_output};
 use super::filesystem::remove_path_if_exists;
+use super::super::apply::{apply_hdiff_patch, verify_patch_output};
+use super::super::super::extract::move_path_replace_cross_volume;
 
 pub(super) fn apply_planned_entry(
     plan: &PatchExecutionPlan,
     entry: &PlannedPatchEntry,
+    verification_cache: &VerifiedArtifactCache,
 ) -> Result<()> {
-    if build_issue(
+    if verification_cache.build_issue(
         &entry.destination,
         &entry.name,
         &entry.expected_md5,
@@ -64,7 +65,9 @@ pub(super) fn apply_planned_entry(
                 .unwrap_or_else(|| base.to_path_buf())
                 .to_string_lossy()
                 .replace('\\', "/");
-            if let Some(issue) = build_issue(base, &base_logical, base_md5, Some(*base_size)) {
+            if let Some(issue) =
+                verification_cache.build_issue(base, &base_logical, base_md5, Some(*base_size))
+            {
                 return Err(Error::Vfs(format!(
                     "Patch base {} failed verification before applying {}: {:?}",
                     base.display(),

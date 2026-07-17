@@ -82,6 +82,105 @@ impl ArchiveInstallGroup {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct ReuseCandidateGroup {
+    remaining: AtomicUsize,
+    verified_sources: Mutex<Vec<(usize, PathBuf)>>,
+    dest: PathBuf,
+    logical_path: String,
+    expected_md5: String,
+    expected_size: u64,
+    download_url: Option<String>,
+    allow_copy_fallback: bool,
+    retry_count: u32,
+    transfer_class: TransferClass,
+}
+
+impl ReuseCandidateGroup {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        group_count: usize,
+        dest: PathBuf,
+        logical_path: String,
+        expected_md5: String,
+        expected_size: u64,
+        download_url: Option<String>,
+        allow_copy_fallback: bool,
+        retry_count: u32,
+        transfer_class: TransferClass,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            remaining: AtomicUsize::new(group_count),
+            verified_sources: Mutex::new(Vec::new()),
+            dest,
+            logical_path,
+            expected_md5,
+            expected_size,
+            download_url,
+            allow_copy_fallback,
+            retry_count,
+            transfer_class,
+        })
+    }
+
+    pub(crate) fn finish_volume(
+        &self,
+        group_index: usize,
+        source: Option<PathBuf>,
+        spawned: &mut Vec<Task>,
+        event_tx: &flume::Sender<WorkerEvent>,
+    ) {
+        if let Some(source) = source {
+            self.verified_sources
+                .lock()
+                .unwrap()
+                .push((group_index, source));
+        }
+        if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+
+        let mut guard = self.verified_sources.lock().unwrap();
+        let mut sources = std::mem::take(&mut *guard);
+        drop(guard);
+        sources.sort_by_key(|(index, _)| *index);
+        let mut sources = sources
+            .into_iter()
+            .map(|(_, source)| source)
+            .collect::<Vec<_>>();
+        if !sources.is_empty() {
+            let source = sources.remove(0);
+            spawned.push(Task::ReuseFile {
+                source,
+                remaining_source_candidates: sources,
+                dest: self.dest.clone(),
+                logical_path: self.logical_path.clone(),
+                expected_md5: self.expected_md5.clone(),
+                expected_size: self.expected_size,
+                download_url: self.download_url.clone(),
+                allow_copy_fallback: self.allow_copy_fallback,
+                retry_count: self.retry_count,
+                transfer_class: self.transfer_class,
+            });
+        } else if let Some(url) = self.download_url.clone() {
+            spawned.push(Task::Download {
+                url,
+                dest: self.dest.clone(),
+                logical_path: self.logical_path.clone(),
+                expected_md5: self.expected_md5.clone(),
+                expected_size: Some(self.expected_size),
+                retry_count: self.retry_count,
+                transfer_class: self.transfer_class,
+            });
+        } else {
+            let _ = event_tx.send(WorkerEvent::Failed {
+                path: self.logical_path.clone(),
+                reason: "no usable source candidates".to_string(),
+            });
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Task {
     InstallArchive {
@@ -122,6 +221,14 @@ pub enum Task {
         allow_copy_fallback: bool,
         retry_count: u32,
         transfer_class: TransferClass,
+    },
+    VerifyReuseVolume {
+        group_index: usize,
+        candidates: Vec<PathBuf>,
+        logical_path: String,
+        expected_md5: String,
+        expected_size: u64,
+        group: Arc<ReuseCandidateGroup>,
     },
     ReuseFile {
         source: PathBuf,
