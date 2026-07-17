@@ -1,9 +1,14 @@
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
+
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_SEQUENTIAL_SCAN;
 
 use crate::error::{Error, Result};
 use md5::{Digest, Md5};
@@ -93,13 +98,7 @@ impl VerifiedArtifactCache {
         expected_md5: &str,
         expected_size: Option<u64>,
     ) -> Option<FileIssue> {
-        build_issue_impl(
-            Some(self),
-            path,
-            logical_path,
-            expected_md5,
-            expected_size,
-        )
+        build_issue_impl(Some(self), path, logical_path, expected_md5, expected_size)
     }
 }
 
@@ -200,7 +199,7 @@ fn build_issue_impl(
 }
 
 pub(crate) fn file_md5(path: &Path) -> Result<String> {
-    let mut file = File::open(path).map_err(|e| Error::OpenFileFailed {
+    let mut file = open_sequential_read(path).map_err(|e| Error::OpenFileFailed {
         path: path.to_path_buf(),
         source: e,
     })?;
@@ -214,4 +213,12 @@ pub(crate) fn file_md5(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn open_sequential_read(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    options.custom_flags(FILE_FLAG_SEQUENTIAL_SCAN);
+    options.open(path)
 }
