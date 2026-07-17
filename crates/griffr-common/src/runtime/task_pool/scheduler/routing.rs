@@ -83,15 +83,27 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.read_volumes.push(volume_key(source));
             request.write_volumes.push(volume_key(dest));
         }
-        Task::Extract {
-            volumes, dest, ..
-        } => {
+        Task::Extract { .. } => {}
+        Task::PrepareArchive { work } => {
             request
                 .read_volumes
-                .extend(volumes.first().map(volume_key));
-            request.write_volumes.push(volume_key(dest));
+                .extend(work.volumes.first().map(|path| volume_key(path)));
+        }
+        Task::ExtractArchiveShard { shard } => {
+            request
+                .read_volumes
+                .extend(shard.work.volumes.first().map(|path| volume_key(path)));
+            request.write_volumes.push(volume_key(&shard.staging_dir));
             request.extract = true;
-            request.mutation_root = Some(path_key(dest));
+        }
+        Task::CommitArchive { work } => {
+            request.write_volumes.push(volume_key(&work.dest));
+            request.mutation_root = Some(path_key(&work.dest));
+        }
+        Task::CleanupArchive { work } => {
+            request
+                .write_volumes
+                .extend(work.volumes.first().map(|path| volume_key(path)));
         }
         Task::ApplyExtractedVfsPatchManifest { install_root }
         | Task::ApplyDeleteManifest { install_root } => {
@@ -119,6 +131,10 @@ fn execution_class(task: &Task) -> ExecutionClass {
         Task::InstallArchive { .. }
         | Task::ReuseFile { .. }
         | Task::Extract { .. }
+        | Task::PrepareArchive { .. }
+        | Task::ExtractArchiveShard { .. }
+        | Task::CommitArchive { .. }
+        | Task::CleanupArchive { .. }
         | Task::ApplyExtractedVfsPatchManifest { .. }
         | Task::ApplyDeleteManifest { .. }
         | Task::Hardlink { .. } => ExecutionClass::Blocking,
@@ -169,6 +185,10 @@ pub(super) fn task_path(task: &Task) -> String {
         Task::InstallArchive { base_name, .. } | Task::Extract { base_name, .. } => {
             base_name.clone()
         }
+        Task::PrepareArchive { work }
+        | Task::CommitArchive { work }
+        | Task::CleanupArchive { work } => work.base_name.clone(),
+        Task::ExtractArchiveShard { shard } => shard.work.base_name.clone(),
         Task::InstallArchivePart { part, .. } | Task::TransferArchivePart { part, .. } => {
             part.logical_path.clone()
         }

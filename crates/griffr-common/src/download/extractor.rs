@@ -320,7 +320,10 @@ impl MultiVolumeExtractor {
         })
     }
 
-    fn extraction_ranges(inspection: &ArchiveInspection, max_shards: usize) -> Vec<Range<usize>> {
+    pub(crate) fn extraction_ranges(
+        inspection: &ArchiveInspection,
+        max_shards: usize,
+    ) -> Vec<Range<usize>> {
         let entry_count = inspection.entry_sizes.len();
         if entry_count == 0 {
             return Vec::new();
@@ -358,18 +361,18 @@ impl MultiVolumeExtractor {
         ranges
     }
 
-    fn extract_range(
+    pub(crate) fn extract_range_with_progress(
         &self,
         target_dir: &Path,
         password: Option<&str>,
         inspection: &ArchiveInspection,
         range: Range<usize>,
         progress_buffer_bytes: usize,
-        progress_tx: &mpsc::Sender<ExtractShardEvent>,
+        mut progress_callback: impl FnMut(u64),
     ) -> Result<()> {
         // zip 2.x keeps parsed central-directory state in an Arc, so cloning
-        // this inspected archive gives each shard an independent lazy stream
-        // while sharing the immutable entry map and offsets.
+        // this inspected archive gives each scheduler shard an independent
+        // lazy stream while sharing immutable central-directory state.
         let mut archive = inspection.archive.clone();
         let mut buffer = vec![0u8; progress_buffer_bytes.max(4 * 1024)];
         let mut pending_progress = 0u64;
@@ -404,13 +407,13 @@ impl MultiVolumeExtractor {
                 std::io::Write::write_all(&mut output, &buffer[..read])?;
                 pending_progress = pending_progress.saturating_add(read as u64);
                 if pending_progress >= progress_buffer_bytes as u64 {
-                    let _ = progress_tx.send(ExtractShardEvent::Bytes(pending_progress));
+                    progress_callback(pending_progress);
                     pending_progress = 0;
                 }
             }
         }
         if pending_progress > 0 {
-            let _ = progress_tx.send(ExtractShardEvent::Bytes(pending_progress));
+            progress_callback(pending_progress);
         }
         Ok(())
     }
@@ -442,13 +445,15 @@ impl MultiVolumeExtractor {
                     let tx = progress_tx.clone();
                     scope.spawn(move || {
                         let result = self
-                            .extract_range(
+                            .extract_range_with_progress(
                                 target_dir,
                                 password,
                                 inspection,
                                 range,
                                 progress_buffer_bytes,
-                                &tx,
+                                |bytes| {
+                                    let _ = tx.send(ExtractShardEvent::Bytes(bytes));
+                                },
                             )
                             .map_err(|error| error.to_string());
                         let _ = tx.send(ExtractShardEvent::Finished(result));

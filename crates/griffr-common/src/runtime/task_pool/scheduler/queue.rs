@@ -268,9 +268,9 @@ impl SchedulerQueue {
         }
     }
 
-    pub(super) fn release(&self, scheduled: &ScheduledTask) {
+    pub(super) fn release(&self, resources: &ResourceRequest) {
         let mut state = self.state.lock().unwrap();
-        state.resources.release(&scheduled.resources);
+        state.resources.release(resources);
         drop(state);
         self.ready.notify_all();
     }
@@ -334,7 +334,7 @@ mod tests {
         let second = queue
             .pop(ExecutionClass::Blocking, &config, &shutdown)
             .unwrap();
-        queue.release(&first);
-        queue.release(&second);
+        queue.release(&first.resources);
+        queue.release(&second.resources);
     }
 }

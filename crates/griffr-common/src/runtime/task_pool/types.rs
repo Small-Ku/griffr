@@ -1,7 +1,9 @@
-use crate::runtime::PatchApplyOptions;
+use crate::download::extractor::ArchiveInspection;
+use crate::runtime::{PatchApplyOptions, PatchExecutionPlan, PatchPreflightReport};
 use md5::Md5;
+use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Selects the download throttle. Local verification and reuse never use the
@@ -234,6 +236,104 @@ impl ReuseCandidateGroup {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct PreparedArchive {
+    pub(crate) staging_dir: PathBuf,
+    pub(crate) inspection: Arc<ArchiveInspection>,
+    pub(crate) patch_plan: Option<(PatchExecutionPlan, PatchPreflightReport)>,
+}
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ArchiveWork {
+    pub(crate) base_name: String,
+    pub(crate) volumes: Vec<PathBuf>,
+    pub(crate) dest: PathBuf,
+    pub(crate) cleanup: bool,
+    pub(crate) password: Option<String>,
+    pub(crate) patch_options: PatchApplyOptions,
+    pub(crate) prepared: Mutex<Option<PreparedArchive>>,
+    pub(crate) extracted_bytes: AtomicU64,
+}
+
+impl ArchiveWork {
+    pub(crate) fn new(
+        base_name: String,
+        volumes: Vec<PathBuf>,
+        dest: PathBuf,
+        cleanup: bool,
+        password: Option<String>,
+        patch_options: PatchApplyOptions,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            base_name,
+            volumes,
+            dest,
+            cleanup,
+            password,
+            patch_options,
+            prepared: Mutex::new(None),
+            extracted_bytes: AtomicU64::new(0),
+        })
+    }
+}
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ArchiveExtractionGroup {
+    remaining: AtomicUsize,
+    failed: AtomicBool,
+    failure_reported: AtomicBool,
+    continuation: Mutex<Option<Task>>,
+}
+
+impl ArchiveExtractionGroup {
+    pub(crate) fn new(shard_count: usize, continuation: Task) -> Arc<Self> {
+        Arc::new(Self {
+            remaining: AtomicUsize::new(shard_count),
+            failed: AtomicBool::new(false),
+            failure_reported: AtomicBool::new(false),
+            continuation: Mutex::new(Some(continuation)),
+        })
+    }
+
+    pub(crate) fn record_failure(&self) -> bool {
+        self.failed.store(true, Ordering::Release);
+        !self.failure_reported.swap(true, Ordering::AcqRel)
+    }
+
+    pub(crate) fn is_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn finish_shard(&self, succeeded: bool, spawned: &mut Vec<Task>) -> bool {
+        if !succeeded {
+            self.failed.store(true, Ordering::Release);
+        }
+        if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return false;
+        }
+        if self.failed.load(Ordering::Acquire) {
+            self.continuation.lock().unwrap().take();
+            return true;
+        }
+        if let Some(task) = self.continuation.lock().unwrap().take() {
+            spawned.push(task);
+        }
+        false
+    }
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct ArchiveShardTask {
+    pub(crate) work: Arc<ArchiveWork>,
+    pub(crate) inspection: Arc<ArchiveInspection>,
+    pub(crate) staging_dir: PathBuf,
+    pub(crate) range: Range<usize>,
+    pub(crate) group: Arc<ArchiveExtractionGroup>,
+}
+
+#[derive(Debug, Clone)]
 pub enum Task {
     InstallArchive {
         base_name: String,
@@ -322,6 +422,22 @@ pub enum Task {
         cleanup: bool,
         password: Option<String>,
         patch_options: PatchApplyOptions,
+    },
+    #[doc(hidden)]
+    PrepareArchive {
+        work: Arc<ArchiveWork>,
+    },
+    #[doc(hidden)]
+    ExtractArchiveShard {
+        shard: ArchiveShardTask,
+    },
+    #[doc(hidden)]
+    CommitArchive {
+        work: Arc<ArchiveWork>,
+    },
+    #[doc(hidden)]
+    CleanupArchive {
+        work: Arc<ArchiveWork>,
     },
     ApplyExtractedVfsPatchManifest {
         install_root: PathBuf,

@@ -14,10 +14,6 @@ const MIN_EXTRACT_SLOTS: usize = 1;
 const MAX_EXTRACT_SLOTS: usize = 2;
 const MIN_EXTRACT_SHARDS: usize = 1;
 const MAX_EXTRACT_SHARDS: usize = 4;
-const MIN_COMMIT_SLOTS: usize = 1;
-const MAX_COMMIT_SLOTS: usize = 4;
-const MIN_PATCH_SLOTS: usize = 1;
-const MAX_PATCH_SLOTS: usize = 4;
 
 pub const DEFAULT_PROGRESS_BUFFER_BYTES: usize = 256 * 1024;
 
@@ -38,9 +34,7 @@ pub struct TaskPoolConfig {
     pub volume_read_slots: usize,
     /// Maximum concurrent writers per physical volume.
     pub volume_write_slots: usize,
-    pub patch_slots: usize,
     pub extract_shards: usize,
-    pub commit_slots: usize,
     pub max_retries: u32,
     pub user_agent: String,
     pub extraction_progress_buffer_bytes: usize,
@@ -100,9 +94,7 @@ impl Default for TaskPoolConfig {
             extract_slots: (cpus / 4).clamp(MIN_EXTRACT_SLOTS, MAX_EXTRACT_SLOTS),
             volume_read_slots: 1,
             volume_write_slots: 1,
-            patch_slots: (cpus / 4).clamp(MIN_PATCH_SLOTS, MAX_PATCH_SLOTS),
-            extract_shards: (cpus / 4).clamp(MIN_EXTRACT_SHARDS, MAX_EXTRACT_SHARDS),
-            commit_slots: (cpus / 2).clamp(MIN_COMMIT_SLOTS, MAX_COMMIT_SLOTS),
+            extract_shards: (cpus / 2).clamp(MIN_EXTRACT_SHARDS, MAX_EXTRACT_SHARDS),
             max_retries: DEFAULT_MAX_RETRIES,
             user_agent: MIN_USER_AGENT.to_owned(),
             extraction_progress_buffer_bytes: DEFAULT_PROGRESS_BUFFER_BYTES,

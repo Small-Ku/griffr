@@ -227,16 +227,16 @@ fn worker_loop(class: ExecutionClass, ctx: WorkerContext) {
     while let Some(scheduled) = ctx.queue.pop(class, &ctx.config, &ctx.shutdown) {
         let _pending = PendingTaskGuard::new(&ctx);
         let failure_path = task_path(&scheduled.task);
+        let resources = scheduled.resources;
+        let task = scheduled.task;
         let mut spawned = Vec::new();
         let result = catch_unwind(AssertUnwindSafe(|| {
             execute_task(
-                scheduled.task.clone(),
+                task,
                 ctx.config.max_retries,
                 ctx.config.extraction_progress_buffer_bytes,
                 ctx.config.download_progress_buffer_bytes,
-                ctx.config.patch_slots,
                 ctx.config.extract_shards,
-                ctx.config.commit_slots,
                 Some(ctx.shared_dispatcher.as_ref()),
                 &ctx.config.user_agent,
                 &mut spawned,
@@ -244,7 +244,7 @@ fn worker_loop(class: ExecutionClass, ctx: WorkerContext) {
             );
         }));
 
-        ctx.queue.release(&scheduled);
+        ctx.queue.release(&resources);
 
         if result.is_err() {
             let _ = ctx.event_tx.send(WorkerEvent::Failed {

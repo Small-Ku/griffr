@@ -14,9 +14,7 @@ pub(crate) fn execute_task(
     max_retries: u32,
     extraction_progress_buffer_bytes: usize,
     download_progress_buffer_bytes: usize,
-    patch_slots: usize,
     extract_shards: usize,
-    commit_slots: usize,
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
     spawned: &mut Vec<Task>,
@@ -225,20 +223,28 @@ pub(crate) fn execute_task(
             cleanup,
             password,
             patch_options,
-        } => archive::execute_extract_archive(
+        } => archive::execute_schedule_extract(
             base_name,
             volumes,
             dest,
             cleanup,
             password,
             patch_options,
+            spawned,
+        ),
+        Task::PrepareArchive { work } => {
+            archive::execute_prepare_archive(work, extract_shards, spawned, event_tx)
+        }
+        Task::ExtractArchiveShard { shard } => archive::execute_extract_archive_shard(
+            shard,
             extraction_progress_buffer_bytes,
-            patch_slots,
-            extract_shards,
-            commit_slots,
             spawned,
             event_tx,
         ),
+        Task::CommitArchive { work } => {
+            archive::execute_commit_archive(work, spawned, event_tx)
+        }
+        Task::CleanupArchive { work } => archive::execute_cleanup_archive(work, event_tx),
         Task::ApplyExtractedVfsPatchManifest { install_root } => {
             let plan_path = install_root
                 .join(crate::runtime::PATCH_TRANSACTION_DIR)
@@ -288,8 +294,8 @@ pub(crate) fn execute_task(
                     Some(&mut on_commit),
                     Some(&mut on_patch),
                     Some(&mut on_delete),
-                    patch_slots,
-                    commit_slots,
+                    1,
+                    1,
                 )
             } else {
                 let mut on_progress = |path: &str, completed: usize, total: usize| {

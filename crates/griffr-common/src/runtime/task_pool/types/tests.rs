@@ -148,3 +148,34 @@ fn reuse_group_defers_cross_volume_copy_until_hardlink_probes_fail() {
         [Task::VerifyReuseVolume { copy_only: true, .. }]
     ));
 }
+
+#[test]
+fn archive_shards_release_commit_only_after_all_succeed() {
+    let continuation = Task::Hardlink {
+        src: PathBuf::from("stage/source.bin"),
+        dest: PathBuf::from("game/source.bin"),
+    };
+    let group = super::ArchiveExtractionGroup::new(2, continuation);
+    let mut spawned = Vec::new();
+
+    assert!(!group.finish_shard(true, &mut spawned));
+    assert!(spawned.is_empty());
+    assert!(!group.finish_shard(true, &mut spawned));
+    assert!(matches!(spawned.as_slice(), [Task::Hardlink { .. }]));
+}
+
+#[test]
+fn archive_shard_failure_suppresses_commit_continuation() {
+    let continuation = Task::Hardlink {
+        src: PathBuf::from("stage/source.bin"),
+        dest: PathBuf::from("game/source.bin"),
+    };
+    let group = super::ArchiveExtractionGroup::new(2, continuation);
+    let mut spawned = Vec::new();
+
+    assert!(group.record_failure());
+    assert!(!group.record_failure(), "only the first failure is reported");
+    assert!(!group.finish_shard(false, &mut spawned));
+    assert!(group.finish_shard(true, &mut spawned));
+    assert!(spawned.is_empty());
+}

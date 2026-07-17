@@ -7,7 +7,10 @@ use compio::dispatcher::Dispatcher;
 use super::super::fs_ops::{
     commit_staged_extract, execute_patch_transaction, make_extract_staging_dir,
 };
-use super::super::types::{ArchiveInstallGroup, ArchivePart, Task, WorkerEvent};
+use super::super::types::{
+    ArchiveInstallGroup, ArchivePart, ArchiveShardTask, ArchiveWork, PreparedArchive, Task,
+    WorkerEvent,
+};
 use super::super::verify::VerifiedArtifactCache;
 
 pub(super) fn execute_install_archive(
@@ -231,152 +234,291 @@ pub(super) fn execute_transfer_archive_part(
     }
 }
 
-pub(super) fn execute_extract_archive(
+pub(super) fn execute_schedule_extract(
     base_name: String,
     volumes: Vec<PathBuf>,
     dest: PathBuf,
     cleanup: bool,
     password: Option<String>,
     patch_options: PatchApplyOptions,
-    extraction_progress_buffer_bytes: usize,
-    patch_slots: usize,
+    spawned: &mut Vec<Task>,
+) {
+    spawned.push(Task::PrepareArchive {
+        work: ArchiveWork::new(base_name, volumes, dest, cleanup, password, patch_options),
+    });
+}
+
+pub(super) fn execute_prepare_archive(
+    work: std::sync::Arc<ArchiveWork>,
     extract_shards: usize,
-    commit_slots: usize,
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) {
-    let progress_path = base_name.clone();
-    let event_tx_clone = event_tx.clone();
-    let result =
-        crate::download::extractor::MultiVolumeExtractor::new(volumes).and_then(|extractor| {
-            let patch_options = patch_options.resolved_for_install(&dest)?;
-            let staging_dir =
-                make_extract_staging_dir(&dest, &base_name, patch_options.work_dir.as_deref())?;
-            std::fs::create_dir_all(&staging_dir).map_err(|source| Error::CreateDirFailed {
-                path: staging_dir.clone(),
-                source,
-            })?;
+    let result = (|| {
+        let extractor =
+            crate::download::extractor::MultiVolumeExtractor::new(work.volumes.clone())?;
+        let patch_options = work.patch_options.resolved_for_install(&work.dest)?;
+        let staging_dir = make_extract_staging_dir(
+            &work.dest,
+            &work.base_name,
+            patch_options.work_dir.as_deref(),
+        )?;
+        std::fs::create_dir_all(&staging_dir).map_err(|source| Error::CreateDirFailed {
+            path: staging_dir.clone(),
+            source,
+        })?;
 
-            let inspection = extractor.inspect_patch_payload(password.as_deref())?;
-            let verification_cache = VerifiedArtifactCache::default();
-            let patch_plan = if inspection.patch_manifest.is_some() {
-                Some(build_patch_execution_plan_with_cache(
-                    &dest,
-                    &staging_dir,
-                    &inspection,
-                    &patch_options,
-                    &verification_cache,
-                )?)
-            } else {
-                None
-            };
-            if let Some((_, report)) = patch_plan.as_ref() {
-                let _ = event_tx.send(WorkerEvent::ArchivePreflight {
-                    path: base_name.clone(),
-                    report: report.clone(),
-                });
-            }
-
-            if let Err(error) = extractor.extract_to_with_progress(
+        let inspection = std::sync::Arc::new(
+            extractor.inspect_patch_payload(work.password.as_deref())?,
+        );
+        let verification_cache = VerifiedArtifactCache::default();
+        let patch_plan = if inspection.patch_manifest.is_some() {
+            Some(build_patch_execution_plan_with_cache(
+                &work.dest,
                 &staging_dir,
-                password.as_deref(),
                 &inspection,
-                extract_shards,
-                extraction_progress_buffer_bytes,
-                Some(move |bytes, total_bytes| {
-                    let _ = event_tx_clone.send(WorkerEvent::ExtractedBytes {
-                        path: progress_path.clone(),
-                        bytes,
-                        total_bytes,
-                    });
-                }),
-            ) {
-                let _ = std::fs::remove_dir_all(&staging_dir);
-                return Err(error);
-            }
+                &patch_options,
+                &verification_cache,
+            )?)
+        } else {
+            None
+        };
+        if let Some((_, report)) = patch_plan.as_ref() {
+            let _ = event_tx.send(WorkerEvent::ArchivePreflight {
+                path: work.base_name.clone(),
+                report: report.clone(),
+            });
+        }
 
-            let mut on_commit = |path: &std::path::Path, completed: usize, total: usize| {
-                let normalized = path.to_string_lossy().replace('\\', "/");
-                if completed > 0 {
-                    let _ = event_tx.send(WorkerEvent::Changed {
-                        path: normalized.clone(),
-                    });
-                }
-                let _ = event_tx.send(WorkerEvent::ArchiveCommitProgress {
-                    path: normalized,
-                    completed,
-                    total,
-                });
-            };
-            let mut on_patch = |path: &str, completed: usize, total: usize| {
-                if completed > 0 {
-                    let _ = event_tx.send(WorkerEvent::Changed {
-                        path: path.replace('\\', "/"),
-                    });
-                }
-                let _ = event_tx.send(WorkerEvent::PatchProgress {
-                    path: path.to_string(),
-                    completed,
-                    total,
-                });
-            };
-            let mut on_delete = |path: &std::path::Path, completed: usize, total: usize| {
-                let normalized = path.to_string_lossy().replace('\\', "/");
-                if completed > 0 {
-                    let _ = event_tx.send(WorkerEvent::Changed {
-                        path: normalized.clone(),
-                    });
-                }
-                let _ = event_tx.send(WorkerEvent::DeleteProgress {
-                    path: normalized,
-                    completed,
-                    total,
-                });
-            };
-
-            if let Some((plan, report)) = patch_plan {
-                execute_patch_transaction(
-                    &plan,
-                    Some(&report),
-                    Some(&mut on_commit),
-                    Some(&mut on_patch),
-                    Some(&mut on_delete),
-                    patch_slots,
-                    commit_slots,
-                    &verification_cache,
-                )?;
-                if staging_dir.exists() {
-                    std::fs::remove_dir_all(&staging_dir).map_err(|source| {
-                        Error::RemoveFailed {
-                            path: staging_dir.clone(),
-                            source,
-                        }
-                    })?;
-                }
-            } else {
-                if let Err(error) =
-                    commit_staged_extract(&staging_dir, &dest, commit_slots, Some(&mut on_commit))
-                {
-                    let _ = std::fs::remove_dir_all(&staging_dir);
-                    return Err(error);
-                }
-                spawned.push(Task::ApplyExtractedVfsPatchManifest {
-                    install_root: dest.clone(),
-                });
-            }
-
-            if cleanup {
-                extractor.cleanup()?;
-            }
-            Ok(())
+        *work.prepared.lock().unwrap() = Some(PreparedArchive {
+            staging_dir: staging_dir.clone(),
+            inspection: inspection.clone(),
+            patch_plan,
         });
+        let ranges = crate::download::extractor::MultiVolumeExtractor::extraction_ranges(
+            &inspection,
+            extract_shards,
+        );
+        let _ = event_tx.send(WorkerEvent::ExtractedBytes {
+            path: work.base_name.clone(),
+            bytes: 0,
+            total_bytes: inspection.total_uncompressed_bytes,
+        });
+        if ranges.is_empty() {
+            spawned.push(Task::CommitArchive { work: work.clone() });
+            return Ok(());
+        }
+
+        let group = super::super::types::ArchiveExtractionGroup::new(
+            ranges.len(),
+            Task::CommitArchive { work: work.clone() },
+        );
+        spawned.extend(ranges.into_iter().map(|range| Task::ExtractArchiveShard {
+            shard: ArchiveShardTask {
+                work: work.clone(),
+                inspection: inspection.clone(),
+                staging_dir: staging_dir.clone(),
+                range,
+                group: group.clone(),
+            },
+        }));
+        Ok(())
+    })();
+
+    if let Err(error) = result {
+        if let Some(prepared) = work.prepared.lock().unwrap().take() {
+            let _ = std::fs::remove_dir_all(prepared.staging_dir);
+        }
+        let _ = event_tx.send(WorkerEvent::Failed {
+            path: work.base_name.clone(),
+            reason: error.to_string(),
+        });
+    }
+}
+
+pub(super) fn execute_extract_archive_shard(
+    shard: ArchiveShardTask,
+    extraction_progress_buffer_bytes: usize,
+    spawned: &mut Vec<Task>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    let work = shard.work.clone();
+    let inspection = shard.inspection.clone();
+    let staging_dir = shard.staging_dir.clone();
+    let range = shard.range.clone();
+    let group = shard.group.clone();
+    let extractor = crate::download::extractor::MultiVolumeExtractor::new(work.volumes.clone());
+    let result = extractor.and_then(|extractor| {
+        extractor.extract_range_with_progress(
+            &staging_dir,
+            work.password.as_deref(),
+            &inspection,
+            range,
+            extraction_progress_buffer_bytes,
+            |bytes| {
+                let extracted = work
+                    .extracted_bytes
+                    .fetch_add(bytes, std::sync::atomic::Ordering::AcqRel)
+                    .saturating_add(bytes);
+                let _ = event_tx.send(WorkerEvent::ExtractedBytes {
+                    path: work.base_name.clone(),
+                    bytes: extracted.min(inspection.total_uncompressed_bytes),
+                    total_bytes: inspection.total_uncompressed_bytes,
+                });
+            },
+        )
+    });
+
+    let succeeded = result.is_ok();
+    if let Err(error) = result {
+        if group.record_failure() {
+            let _ = event_tx.send(WorkerEvent::Failed {
+                path: work.base_name.clone(),
+                reason: error.to_string(),
+            });
+        }
+    }
+    let last_failed = group.finish_shard(succeeded, spawned);
+    if last_failed {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        work.prepared.lock().unwrap().take();
+    } else if succeeded && !group.is_failed() {
+        let extracted = work.extracted_bytes.load(std::sync::atomic::Ordering::Acquire);
+        if extracted >= inspection.total_uncompressed_bytes {
+            let _ = event_tx.send(WorkerEvent::ExtractedBytes {
+                path: work.base_name.clone(),
+                bytes: inspection.total_uncompressed_bytes,
+                total_bytes: inspection.total_uncompressed_bytes,
+            });
+        }
+    }
+}
+
+pub(super) fn execute_commit_archive(
+    work: std::sync::Arc<ArchiveWork>,
+    spawned: &mut Vec<Task>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    let prepared = match work.prepared.lock().unwrap().clone() {
+        Some(prepared) => prepared,
+        None => {
+            let _ = event_tx.send(WorkerEvent::Failed {
+                path: work.base_name.clone(),
+                reason: "archive commit started without prepared state".to_string(),
+            });
+            return;
+        }
+    };
+    let result = (|| {
+        let mut on_commit = |path: &std::path::Path, completed: usize, total: usize| {
+            let normalized = path.to_string_lossy().replace('\\', "/");
+            if completed > 0 {
+                let _ = event_tx.send(WorkerEvent::Changed {
+                    path: normalized.clone(),
+                });
+            }
+            let _ = event_tx.send(WorkerEvent::ArchiveCommitProgress {
+                path: normalized,
+                completed,
+                total,
+            });
+        };
+        let mut on_patch = |path: &str, completed: usize, total: usize| {
+            if completed > 0 {
+                let _ = event_tx.send(WorkerEvent::Changed {
+                    path: path.replace('\\', "/"),
+                });
+            }
+            let _ = event_tx.send(WorkerEvent::PatchProgress {
+                path: path.to_string(),
+                completed,
+                total,
+            });
+        };
+        let mut on_delete = |path: &std::path::Path, completed: usize, total: usize| {
+            let normalized = path.to_string_lossy().replace('\\', "/");
+            if completed > 0 {
+                let _ = event_tx.send(WorkerEvent::Changed {
+                    path: normalized.clone(),
+                });
+            }
+            let _ = event_tx.send(WorkerEvent::DeleteProgress {
+                path: normalized,
+                completed,
+                total,
+            });
+        };
+        let verification_cache = VerifiedArtifactCache::default();
+        if let Some((plan, report)) = prepared.patch_plan.clone() {
+            // Patch entries are dependency ordered. Run each wave serially here;
+            // concurrency belongs to the task scheduler rather than nested threads.
+            execute_patch_transaction(
+                &plan,
+                Some(&report),
+                Some(&mut on_commit),
+                Some(&mut on_patch),
+                Some(&mut on_delete),
+                1,
+                1,
+                &verification_cache,
+            )?;
+            if prepared.staging_dir.exists() {
+                std::fs::remove_dir_all(&prepared.staging_dir).map_err(|source| {
+                    Error::RemoveFailed {
+                        path: prepared.staging_dir.clone(),
+                        source,
+                    }
+                })?;
+            }
+        } else {
+            commit_staged_extract(
+                &prepared.staging_dir,
+                &work.dest,
+                1,
+                Some(&mut on_commit),
+            )?;
+            spawned.push(Task::ApplyExtractedVfsPatchManifest {
+                install_root: work.dest.clone(),
+            });
+        }
+        Ok(())
+    })();
+
     match result {
         Ok(()) => {
-            let _ = event_tx.send(WorkerEvent::Extracted { path: dest });
+            work.prepared.lock().unwrap().take();
+            spawned.push(Task::CleanupArchive { work });
+        }
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&prepared.staging_dir);
+            work.prepared.lock().unwrap().take();
+            let _ = event_tx.send(WorkerEvent::Failed {
+                path: work.base_name.clone(),
+                reason: error.to_string(),
+            });
+        }
+    }
+}
+
+pub(super) fn execute_cleanup_archive(
+    work: std::sync::Arc<ArchiveWork>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    let result = if work.cleanup {
+        crate::download::extractor::MultiVolumeExtractor::new(work.volumes.clone())
+            .and_then(|extractor| extractor.cleanup())
+    } else {
+        Ok(())
+    };
+    match result {
+        Ok(()) => {
+            let _ = event_tx.send(WorkerEvent::Extracted {
+                path: work.dest.clone(),
+            });
         }
         Err(error) => {
             let _ = event_tx.send(WorkerEvent::Failed {
-                path: base_name,
+                path: work.base_name.clone(),
                 reason: error.to_string(),
             });
         }
