@@ -412,7 +412,6 @@ mod tests {
         assert!(!state.can_acquire(&request, &config));
     }
 
-
     #[test]
     fn runnable_tasks_prefer_smaller_work_on_the_same_backlogged_volume() {
         let queue = SchedulerQueue::default();

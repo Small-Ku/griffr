@@ -198,7 +198,6 @@ fn build_issue_impl(
     None
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CandidateVerification {
     Valid,
