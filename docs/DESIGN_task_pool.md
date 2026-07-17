@@ -7,10 +7,10 @@ one frontend-neutral task pool. Commands build different initial task lists, but
 all work is expressed through shared task kinds, typed progress lanes, and
 durable outcomes.
 
-The pool separates network/file I/O, checksum work, and archive extraction so
-each workload can be throttled independently. Windows I/O remains on the
-compio/IOCP runtime; CPU-heavy checksum and extraction work use their dedicated
-worker slots.
+The pool separates local checksum work, general file/network I/O, VFS CDN
+traffic, and archive extraction so one throttle cannot accidentally constrain an
+unrelated workload. Windows I/O remains on the compio/IOCP runtime; checksum
+work uses dedicated CPU workers.
 
 ## Task Model
 
@@ -19,9 +19,10 @@ The current task surface is intentionally domain-oriented:
 ```rust
 enum Task {
     InstallArchive { parts, dest, cleanup, password, patch_options, .. },
-    Download { url, dest, expected_md5, expected_size, retry_count, .. },
+    Download { url, dest, expected_md5, expected_size, transfer_class, .. },
     Verify { path, expected_md5, expected_size, on_fail, .. },
-    EnsureFile { source_candidates, download_url, prefer_reuse, .. },
+    RepairFile { source_candidates, download_url, .. },
+    ReuseFile { source, remaining_source_candidates, download_url, .. },
     Extract { volumes, dest, cleanup, password, patch_options, .. },
     ApplyExtractedVfsPatchManifest { install_root },
     ApplyDeleteManifest { install_root },
@@ -29,45 +30,96 @@ enum Task {
 }
 ```
 
+`Task::ensure_file(FileEnsureTask)` builds the repair graph. Normal ensure starts
+with `Verify`; only a failed verification enqueues `RepairFile`. Explicit relink
+mode is the sole exception because its purpose is to replace an already-valid
+destination with shared storage.
+
 `InstallArchive` is an archive state machine: verify each split volume, download
-missing or mismatched parts, verify again, then spawn one `Extract` task.
-`Verify.on_fail` and `EnsureFile` keep repair/reuse fallbacks inside the task
-graph rather than in frontend-specific orchestration.
+missing or mismatched parts, then spawn one `Extract` task. Download streaming
+already computes and validates MD5 and size, so a successfully committed part is
+not read again solely for a second checksum pass.
+
+## Repair and Reuse Flow
+
+```text
+Verify destination (CPU queue)
+    ├── valid -> Verified
+    └── invalid -> RepairFile (CPU queue)
+                       ├── validate candidates until first usable source
+                       │      └── ReuseFile (general I/O queue)
+                       │             ├── hardlink -> trust verified inode
+                       │             ├── copy -> hash while copying, then commit
+                       │             └── I/O failure -> try next candidate
+                       └── no source -> Download
+```
+
+The source search stops at the first valid candidate. Later candidates are
+validated only if reuse of the earlier candidate fails. A successful hardlink
+is not rehashed because it names the same already-verified file object. Copy
+fallback computes MD5 while writing the temporary destination and commits only
+when both size and MD5 match, avoiding a post-copy full-file read.
 
 ## Slot Groups
 
 ```text
-shared task queues
-├── I/O slots       Download, hardlink, copy, file writes
-├── CPU slots       MD5 verification
-└── Extract slots   ZIP parsing, extraction, HDiff application
+shared task graph
+├── General I/O slots  archive state, ordinary downloads, hardlink/copy, patch commit
+├── VFS I/O slots      VFS CDN downloads only (default: 6)
+├── CPU slots          destination MD5 and reuse-source validation
+└── Extract slots      ZIP parsing, extraction, HDiff application
 ```
 
 The groups are independently limited:
 
-- network concurrency should not be capped by CPU count;
-- checksum concurrency should not exceed useful CPU parallelism;
-- archive and patch work is disk- and CPU-heavy and must not starve downloads;
-- the game-file ensure flow reserves enough I/O lanes to avoid nested-dispatch starvation.
+- local manifest verification always uses CPU workers, including `verify --repair`;
+- the VFS limit applies only to `Download { transfer_class: Vfs }`;
+- VFS hardlink/copy work uses general I/O slots, so local reuse is not restricted
+  by the CDN safety limit;
+- archive and patch work has its own throttle and cannot consume checksum slots;
+- dispatcher capacity includes extra I/O lanes so worker loops waiting on nested
+  compio operations do not starve completion work.
+
+This prevents Endfield's conservative VFS concurrency from reducing all local
+game-file verification to six workers.
 
 ## Archive Pipeline
 
 An archive task performs these barriers:
 
-1. Verify all split archive parts against API MD5 and size metadata.
-2. Inspect archive paths and patch control files without mutating the install.
-3. Build and validate a patch execution plan when `patch.json` is present.
-4. Extract into a unique staging directory, optionally under `--work-dir`.
-5. Either:
-   - commit a normal staged extraction; or
-   - execute the persisted forward-only patch transaction.
-6. Delete archive parts only after successful completion when cleanup is
+1. Verify all existing split archive parts against API MD5 and size metadata.
+2. Download invalid parts while computing MD5 during the write.
+3. Inspect archive paths and patch control files without mutating the install.
+4. Build and validate a patch execution plan when `patch.json` is present.
+5. Extract into a unique staging directory, optionally under `--work-dir`.
+6. Either commit a normal staged extraction or execute the persisted
+   forward-only patch transaction.
+7. Delete archive parts only after successful completion when cleanup is
    enabled.
 
 Normal extraction can cross volumes safely: files are copied into a
 destination-local temporary file, verified, and atomically replaced. Patch
 archives defer completion markers such as `config.ini` until VFS outputs and
 cleanup have succeeded.
+
+Every committed archive file, patched VFS output, and delete-manifest path emits
+a durable `Committed` outcome with its install-relative logical path. The update command uses this set
+for incremental post-update integrity verification.
+
+## Post-Update Integrity Scope
+
+A normal explicit verify still selects the full `game_files` manifest.
+Post-update verification selects only paths that the just-completed archive or
+patch transaction committed, plus the separately planned VFS DAG. Files created
+through the local-reuse update path are already validated by the ensure graph and
+are not scanned again. Incremental manifest entries whose physical destination is
+already covered by the VFS DAG are also removed, so the same file is not hashed
+twice under different logical path conventions.
+
+This avoids rereading an entire 80–100 GB installation after package-part and
+patch-output validation have already established most of the relevant facts.
+Users can still request a complete manifest scan through the explicit verify
+command.
 
 ## Forward Patch Dependencies
 
@@ -93,8 +145,9 @@ are removed only after the target version marker commits.
 
 ```text
 compio dispatcher
-├── I/O task bodies
-├── CPU/extract worker dispatch
+├── general I/O worker loops
+├── VFS-download worker loops
+├── CPU/extract worker loops
 └── crate-private WorkerEvent stream
         ├── transient progress reduction
         └── durable TaskOutcome collection
@@ -103,7 +156,7 @@ compio dispatcher
 `WorkerEvent` is crate-private. Byte samples, retries, and phase counters are
 reduced while the batch is running and never retained in result history.
 `TaskPoolResult` stores only durable `TaskOutcome` values such as verification,
-download, reuse, extraction, preflight, and failure results.
+download, reuse, extraction, changed-path, preflight, and failure results.
 
 ## Progress Protocol
 
@@ -124,14 +177,16 @@ verify, download, extract, commit, patch, delete, integrity, VFS, and
 predownload streams distinct. `TaskProgress` maps worker facts to those lanes.
 
 The CLI owns all `indicatif` state on a consumer thread. Interactive terminals
-render stable rows; non-interactive stderr receives periodic textual samples.
-A GUI can consume the same receiver without terminal dependencies in
+render stable rows; non-interactive stderr receives periodic textual samples. A
+GUI can consume the same receiver without terminal dependencies in
 `griffr-common`.
 
 ## Retry and Failure Rules
 
 - Downloads carry a bounded retry count.
-- Verification failure may enqueue one explicit repair/download task.
+- Verification failure may enqueue one explicit repair task.
+- A failed reuse operation validates the next source candidate before falling
+  back to download.
 - A patch output is never committed before target MD5 and size verification.
 - Selected HDiff bases are reverified immediately before patching.
 - Missing staged payloads, invalid paths, dependency cycles, and insufficient
