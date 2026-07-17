@@ -51,7 +51,7 @@ fn transaction_defers_version_marker_and_preserves_final_output() {
         vec![PathBuf::from("config.ini")],
     );
 
-    execute_patch_transaction(&plan, None, None, None, None).unwrap();
+    execute_patch_transaction(&plan, None, None, None, None, 2).unwrap();
 
     assert_eq!(std::fs::read(&output).unwrap(), b"final");
     assert_eq!(

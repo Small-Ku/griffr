@@ -18,6 +18,8 @@ const MIN_FILE_ENSURE_IO_SLOTS: usize = 4;
 const MAX_FILE_ENSURE_IO_SLOTS: usize = 24;
 const DEFAULT_VFS_IO_SLOTS: usize = 6;
 const DEFAULT_ARCHIVE_IO_SLOTS: usize = 6;
+const MIN_PATCH_SLOTS: usize = 1;
+const MAX_PATCH_SLOTS: usize = 4;
 
 use crate::runtime::issues::FileIssue;
 
@@ -386,6 +388,7 @@ pub struct TaskPoolConfig {
     pub io_slots: usize,
     pub vfs_io_slots: usize,
     pub archive_io_slots: usize,
+    pub patch_slots: usize,
     pub cpu_slots: usize,
     pub extract_slots: usize,
     pub max_retries: u32,
@@ -443,6 +446,7 @@ impl Default for TaskPoolConfig {
             io_slots: (cpus * 2).clamp(MIN_IO_SLOTS, MAX_IO_SLOTS),
             vfs_io_slots: DEFAULT_VFS_IO_SLOTS,
             archive_io_slots: DEFAULT_ARCHIVE_IO_SLOTS,
+            patch_slots: (cpus / 4).clamp(MIN_PATCH_SLOTS, MAX_PATCH_SLOTS),
             cpu_slots: cpus.clamp(MIN_CPU_SLOTS, MAX_CPU_SLOTS),
             extract_slots: (cpus / 2).clamp(MIN_EXTRACT_SLOTS, MAX_EXTRACT_SLOTS),
             max_retries: DEFAULT_MAX_RETRIES,

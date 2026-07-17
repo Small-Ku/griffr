@@ -14,6 +14,7 @@ pub(crate) fn execute_task(
     max_retries: u32,
     extraction_progress_buffer_bytes: usize,
     download_progress_buffer_bytes: usize,
+    patch_slots: usize,
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
     spawned: &mut Vec<Task>,
@@ -166,6 +167,7 @@ pub(crate) fn execute_task(
             password,
             patch_options,
             extraction_progress_buffer_bytes,
+            patch_slots,
             spawned,
             event_tx,
         ),
@@ -218,6 +220,7 @@ pub(crate) fn execute_task(
                     Some(&mut on_commit),
                     Some(&mut on_patch),
                     Some(&mut on_delete),
+                    patch_slots,
                 )
             } else {
                 let mut on_progress = |path: &str, completed: usize, total: usize| {

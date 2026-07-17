@@ -157,6 +157,7 @@ pub(super) fn execute_extract_archive(
     password: Option<String>,
     patch_options: PatchApplyOptions,
     extraction_progress_buffer_bytes: usize,
+    patch_slots: usize,
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) {
@@ -252,6 +253,7 @@ pub(super) fn execute_extract_archive(
                     Some(&mut on_commit),
                     Some(&mut on_patch),
                     Some(&mut on_delete),
+                    patch_slots,
                 )?;
                 if staging_dir.exists() {
                     std::fs::remove_dir_all(&staging_dir).map_err(|source| {

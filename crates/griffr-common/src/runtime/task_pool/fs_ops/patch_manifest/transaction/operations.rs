@@ -123,7 +123,7 @@ pub(super) fn final_output_paths(plan: &PatchExecutionPlan) -> BTreeSet<PathBuf>
         .collect()
 }
 
-pub(super) fn ordered_entries(plan: &PatchExecutionPlan) -> Result<Vec<&PlannedPatchEntry>> {
+pub(super) fn entry_waves(plan: &PatchExecutionPlan) -> Result<Vec<Vec<&PlannedPatchEntry>>> {
     let mut destination_writers = BTreeMap::new();
     for (index, entry) in plan.entries.iter().enumerate() {
         let logical_destination = plan
@@ -158,6 +158,7 @@ pub(super) fn ordered_entries(plan: &PatchExecutionPlan) -> Result<Vec<&PlannedP
         if writer_index == consumer_index {
             continue;
         }
+        // The consumer must run before a writer destructively replaces its base.
         if outgoing[consumer_index].insert(writer_index) {
             indegree[writer_index] = indegree[writer_index].saturating_add(1);
         }
@@ -168,17 +169,27 @@ pub(super) fn ordered_entries(plan: &PatchExecutionPlan) -> Result<Vec<&PlannedP
         .enumerate()
         .filter_map(|(index, degree)| (*degree == 0).then_some(index))
         .collect::<BTreeSet<_>>();
-    let mut order = Vec::with_capacity(plan.entries.len());
-    while let Some(index) = ready.pop_first() {
-        order.push(index);
-        for dependent in outgoing[index].iter().copied() {
-            indegree[dependent] = indegree[dependent].saturating_sub(1);
-            if indegree[dependent] == 0 {
-                ready.insert(dependent);
+    let mut waves = Vec::new();
+    let mut completed = 0usize;
+    while !ready.is_empty() {
+        let wave = ready.iter().copied().collect::<Vec<_>>();
+        ready.clear();
+        completed = completed.saturating_add(wave.len());
+        for index in &wave {
+            for dependent in outgoing[*index].iter().copied() {
+                indegree[dependent] = indegree[dependent].saturating_sub(1);
+                if indegree[dependent] == 0 {
+                    ready.insert(dependent);
+                }
             }
         }
+        waves.push(
+            wave.into_iter()
+                .map(|index| &plan.entries[index])
+                .collect(),
+        );
     }
-    if order.len() != plan.entries.len() {
+    if completed != plan.entries.len() {
         let blocked = indegree
             .iter()
             .enumerate()
@@ -191,10 +202,11 @@ pub(super) fn ordered_entries(plan: &PatchExecutionPlan) -> Result<Vec<&PlannedP
             blocked.join(", ")
         )));
     }
-    Ok(order
-        .into_iter()
-        .map(|index| &plan.entries[index])
-        .collect())
+    Ok(waves)
+}
+
+pub(super) fn ordered_entries(plan: &PatchExecutionPlan) -> Result<Vec<&PlannedPatchEntry>> {
+    Ok(entry_waves(plan)?.into_iter().flatten().collect())
 }
 
 pub(super) fn delete_unreferenced_paths_before_patch(plan: &PatchExecutionPlan) -> Result<()> {
