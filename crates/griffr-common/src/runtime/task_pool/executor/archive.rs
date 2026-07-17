@@ -460,8 +460,6 @@ pub(super) fn execute_commit_archive(
                 Some(&mut on_commit),
                 Some(&mut on_patch),
                 Some(&mut on_delete),
-                1,
-                1,
                 &verification_cache,
             )?;
             if prepared.staging_dir.exists() {
@@ -476,7 +474,6 @@ pub(super) fn execute_commit_archive(
             commit_staged_extract(
                 &prepared.staging_dir,
                 &work.dest,
-                1,
                 Some(&mut on_commit),
             )?;
             spawned.push(Task::ApplyExtractedVfsPatchManifest {

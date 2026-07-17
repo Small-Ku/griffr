@@ -202,7 +202,6 @@ pub(super) fn is_patch_control_path(relative: &Path) -> bool {
 pub(super) fn commit_top_level_files(
     plan: &PatchExecutionPlan,
     callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
-    commit_slots: usize,
 ) -> Result<()> {
     let files = collect_staged_files(&plan.stage_root)?;
     let deferred = plan.deferred_paths.iter().cloned().collect::<BTreeSet<_>>();
@@ -231,5 +230,5 @@ pub(super) fn commit_top_level_files(
             }
         })
         .collect();
-    commit_file_jobs(jobs, commit_slots, callback)
+    commit_file_jobs(jobs, callback)
 }

@@ -26,14 +26,12 @@ pub(crate) fn execute_patch_transaction(
     commit_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
     mut patch_callback: Option<&mut dyn FnMut(&str, usize, usize)>,
     delete_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
-    patch_slots: usize,
-    commit_slots: usize,
     verification_cache: &VerifiedArtifactCache,
 ) -> Result<()> {
     plan.validate()?;
     write_patch_execution_plan(plan)?;
     prepare_external_vfs_root(plan)?;
-    commit_top_level_files(plan, commit_callback, commit_slots)?;
+    commit_top_level_files(plan, commit_callback)?;
     delete_unreferenced_paths_before_patch(plan)?;
 
     let delete_set = plan.delete_paths.iter().cloned().collect::<BTreeSet<_>>();
@@ -52,47 +50,25 @@ pub(crate) fn execute_patch_transaction(
         }
     }
     let mut completed = 0usize;
-    let patch_slots = patch_slots.max(1);
     for wave in waves {
-        for chunk in wave.chunks(patch_slots) {
-            let results = std::thread::scope(|scope| {
-                chunk
-                    .iter()
-                    .map(|entry| {
-                        scope.spawn(move || {
-                            apply_planned_entry(plan, entry, verification_cache)
-                                .map_err(|error| error.to_string())
-                        })
-                    })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .map(|handle| {
-                        handle.join().unwrap_or_else(|_| {
-                            Err("patch worker panicked while applying an entry".to_string())
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            });
-
-            for (entry, result) in chunk.iter().zip(results) {
-                result.map_err(|error| {
-                    Error::Other(format!(
-                        "Failed to apply patch entry {}: {}",
-                        entry.name, error
-                    ))
-                })?;
-                if let PlannedPatchSource::Hdiff { base, .. } = &entry.source {
-                    release_base_if_unused(plan, base, &mut remaining, &delete_set, &outputs)?;
-                }
-                completed = completed.saturating_add(1);
-                if let Some(callback) = patch_callback.as_deref_mut() {
-                    let logical_path = plan.vfs_base_path.join(&entry.name);
-                    callback(
-                        &logical_path.to_string_lossy().replace('\\', "/"),
-                        completed,
-                        total,
-                    );
-                }
+        for entry in &wave {
+            apply_planned_entry(plan, entry, verification_cache).map_err(|error| {
+                Error::Other(format!(
+                    "Failed to apply patch entry {}: {}",
+                    entry.name, error
+                ))
+            })?;
+            if let PlannedPatchSource::Hdiff { base, .. } = &entry.source {
+                release_base_if_unused(plan, base, &mut remaining, &delete_set, &outputs)?;
+            }
+            completed = completed.saturating_add(1);
+            if let Some(callback) = patch_callback.as_deref_mut() {
+                let logical_path = plan.vfs_base_path.join(&entry.name);
+                callback(
+                    &logical_path.to_string_lossy().replace('\\', "/"),
+                    completed,
+                    total,
+                );
             }
         }
     }
@@ -107,8 +83,6 @@ pub(crate) fn resume_patch_transaction(
     commit_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
     patch_callback: Option<&mut dyn FnMut(&str, usize, usize)>,
     delete_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
-    patch_slots: usize,
-    commit_slots: usize,
 ) -> Result<()> {
     let plan = read_patch_execution_plan(install_root)?;
     let verification_cache = VerifiedArtifactCache::default();
@@ -118,8 +92,6 @@ pub(crate) fn resume_patch_transaction(
         commit_callback,
         patch_callback,
         delete_callback,
-        patch_slots,
-        commit_slots,
         &verification_cache,
     )
 }

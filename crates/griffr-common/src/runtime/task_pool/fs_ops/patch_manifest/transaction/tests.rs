@@ -57,8 +57,6 @@ fn transaction_defers_version_marker_and_preserves_final_output() {
         None,
         None,
         None,
-        2,
-        2,
         &VerifiedArtifactCache::default(),
     )
     .unwrap();

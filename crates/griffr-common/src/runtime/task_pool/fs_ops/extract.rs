@@ -84,7 +84,6 @@ fn commit_file_job(job: &CommitFileJob) -> Result<()> {
 
 pub(crate) fn commit_file_jobs(
     jobs: Vec<CommitFileJob>,
-    commit_slots: usize,
     mut progress_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
 ) -> Result<()> {
     let total = jobs.len();
@@ -93,42 +92,10 @@ pub(crate) fn commit_file_jobs(
             callback(Path::new("."), 0, total);
         }
     }
-    let mut completed = 0usize;
-    let commit_slots = commit_slots.max(1);
-    for chunk in jobs.chunks(commit_slots) {
-        let results = std::thread::scope(|scope| {
-            chunk
-                .iter()
-                .map(|job| {
-                    scope.spawn(move || commit_file_job(job).map_err(|error| error.to_string()))
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|handle| {
-                    handle
-                        .join()
-                        .unwrap_or_else(|_| Err("archive commit worker panicked".to_string()))
-                })
-                .collect::<Vec<_>>()
-        });
-
-        let mut failures = Vec::new();
-        for (job, result) in chunk.iter().zip(results) {
-            match result {
-                Ok(()) => {
-                    completed = completed.saturating_add(1);
-                    if let Some(callback) = progress_callback.as_deref_mut() {
-                        callback(&job.logical_path, completed, total);
-                    }
-                }
-                Err(error) => failures.push(format!("{}: {}", job.logical_path.display(), error)),
-            }
-        }
-        if !failures.is_empty() {
-            return Err(Error::Other(format!(
-                "Archive commit failed: {}",
-                failures.join("; ")
-            )));
+    for (index, job) in jobs.iter().enumerate() {
+        commit_file_job(job)?;
+        if let Some(callback) = progress_callback.as_deref_mut() {
+            callback(&job.logical_path, index + 1, total);
         }
     }
     Ok(())
@@ -137,7 +104,6 @@ pub(crate) fn commit_file_jobs(
 pub(crate) fn commit_staged_extract(
     staging_root: &Path,
     dest_root: &Path,
-    commit_slots: usize,
     progress_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
 ) -> Result<()> {
     let jobs = collect_staged_files(staging_root)?
@@ -151,7 +117,7 @@ pub(crate) fn commit_staged_extract(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    commit_file_jobs(jobs, commit_slots, progress_callback)?;
+    commit_file_jobs(jobs, progress_callback)?;
     std::fs::remove_dir_all(staging_root).map_err(|source| Error::RemoveFailed {
         path: staging_root.to_path_buf(),
         source,
@@ -334,7 +300,7 @@ mod tests {
         let mut on_progress = |path: &Path, completed: usize, total: usize| {
             progress.push((path.to_path_buf(), completed, total));
         };
-        commit_staged_extract(&staging_root, &dest_root, 2, Some(&mut on_progress)).unwrap();
+        commit_staged_extract(&staging_root, &dest_root, Some(&mut on_progress)).unwrap();
 
         assert_eq!(progress.first().map(|item| (item.1, item.2)), Some((0, 2)));
         assert_eq!(progress.last().map(|item| (item.1, item.2)), Some((2, 2)));

@@ -297,8 +297,6 @@ pub(crate) fn execute_task(
                     Some(&mut on_commit),
                     Some(&mut on_patch),
                     Some(&mut on_delete),
-                    1,
-                    1,
                 )
             } else {
                 let mut on_progress = |path: &str, completed: usize, total: usize| {
