@@ -2,6 +2,8 @@ use crate::api::protocol::MIN_USER_AGENT;
 
 const DEFAULT_PARALLELISM_FALLBACK: usize = 4;
 const DEFAULT_MAX_RETRIES: u32 = 3;
+const MIN_DISPATCHER_THREADS: usize = 2;
+const MAX_DISPATCHER_THREADS: usize = 4;
 pub const DEFAULT_PROGRESS_BUFFER_BYTES: usize = 256 * 1024;
 
 const MIN_IO_SLOTS: usize = 2;
@@ -23,6 +25,7 @@ const MAX_PATCH_SLOTS: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct TaskPoolConfig {
+    pub dispatcher_threads: usize,
     pub io_slots: usize,
     pub vfs_io_slots: usize,
     pub archive_io_slots: usize,
@@ -83,6 +86,7 @@ impl Default for TaskPoolConfig {
     fn default() -> Self {
         let cpus = available_parallelism();
         Self {
+            dispatcher_threads: cpus.clamp(MIN_DISPATCHER_THREADS, MAX_DISPATCHER_THREADS),
             io_slots: (cpus * 2).clamp(MIN_IO_SLOTS, MAX_IO_SLOTS),
             vfs_io_slots: DEFAULT_VFS_IO_SLOTS,
             archive_io_slots: DEFAULT_ARCHIVE_IO_SLOTS,

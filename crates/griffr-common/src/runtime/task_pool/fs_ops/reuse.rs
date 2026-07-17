@@ -4,8 +4,6 @@ use std::io::ErrorKind;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
-use std::time::Duration;
 
 use crate::error::{Error, Result};
 use crate::runtime::preallocate_file;
@@ -20,17 +18,18 @@ where
 {
     let dispatcher =
         io_dispatcher.ok_or_else(|| Error::TaskPool("IO dispatcher not available".to_string()))?;
-    let mut receiver = dispatcher
-        .dispatch(task)
+    let (result_tx, result_rx) = flume::bounded(1);
+    let completion = dispatcher
+        .dispatch(move || async move {
+            let result = task().await;
+            let _ = result_tx.send(result);
+        })
         .map_err(|_| Error::TaskPool("Failed to dispatch IO task".to_string()))?;
-
-    loop {
-        match receiver.try_recv() {
-            Ok(Some(result)) => return result,
-            Ok(None) => thread::sleep(Duration::from_millis(1)),
-            Err(_) => return Err(Error::TaskPool("IO task cancelled".to_string())),
-        }
-    }
+    let result = result_rx
+        .recv()
+        .map_err(|_| Error::TaskPool("IO task cancelled".to_string()))?;
+    drop(completion);
+    result
 }
 
 pub(crate) fn make_partial_download_path(path: &Path) -> Result<PathBuf> {

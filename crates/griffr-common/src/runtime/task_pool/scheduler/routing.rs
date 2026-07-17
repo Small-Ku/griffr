@@ -2,13 +2,7 @@ use super::WorkerKind;
 use crate::runtime::task_pool::{Task, TaskPoolConfig, TransferClass};
 
 pub(super) fn dispatcher_thread_count(config: &TaskPoolConfig) -> usize {
-    let worker_loops = config.io_slots
-        + config.vfs_io_slots
-        + config.archive_io_slots
-        + config.cpu_slots
-        + config.extract_slots;
-    let extra_io_lanes = (config.io_slots + config.vfs_io_slots + config.archive_io_slots).max(1);
-    (worker_loops + extra_io_lanes).clamp(2, 64)
+    config.dispatcher_threads.clamp(2, 4)
 }
 
 pub(super) fn worker_kind_for_task(task: &Task) -> WorkerKind {
@@ -30,6 +24,26 @@ pub(super) fn worker_kind_for_task(task: &Task) -> WorkerKind {
         | Task::RepairFile { .. }
         | Task::VerifyReuseVolume { .. } => WorkerKind::Cpu,
         Task::Extract { .. } => WorkerKind::Extract,
+    }
+}
+
+pub(super) fn task_path(task: &Task) -> String {
+    match task {
+        Task::InstallArchive { base_name, .. } | Task::Extract { base_name, .. } => {
+            base_name.clone()
+        }
+        Task::InstallArchivePart { part, .. } | Task::TransferArchivePart { part, .. } => {
+            part.logical_path.clone()
+        }
+        Task::Download { logical_path, .. }
+        | Task::TransferDownload { logical_path, .. }
+        | Task::Verify { logical_path, .. }
+        | Task::RepairFile { logical_path, .. }
+        | Task::VerifyReuseVolume { logical_path, .. }
+        | Task::ReuseFile { logical_path, .. } => logical_path.clone(),
+        Task::ApplyExtractedVfsPatchManifest { install_root }
+        | Task::ApplyDeleteManifest { install_root } => install_root.display().to_string(),
+        Task::Hardlink { dest, .. } => dest.display().to_string(),
     }
 }
 

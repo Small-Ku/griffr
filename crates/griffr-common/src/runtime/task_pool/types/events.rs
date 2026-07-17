@@ -139,4 +139,5 @@ pub struct TaskPoolResult {
 pub struct TaskPoolRunner {
     pub(crate) ctx: crate::runtime::task_pool::scheduler::WorkerContext,
     pub(crate) event_rx: flume::Receiver<WorkerEvent>,
+    pub(crate) workers: Vec<std::thread::JoinHandle<()>>,
 }

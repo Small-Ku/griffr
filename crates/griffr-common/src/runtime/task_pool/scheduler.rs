@@ -1,11 +1,13 @@
 use std::num::NonZeroUsize;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use compio::dispatcher::Dispatcher;
-use flume::{Receiver, RecvTimeoutError, Sender};
+use flume::Sender;
 use tracing::debug;
 
 use super::executor::execute_task;
@@ -16,11 +18,15 @@ use super::types::{
 const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 mod progress;
+mod queue;
+mod routing;
 
 use progress::TaskProgressReducer;
+use queue::WorkerQueue;
+use routing::{dispatcher_thread_count, task_path, worker_kind_for_task};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkerKind {
+pub(super) enum WorkerKind {
     Io,
     VfsIo,
     ArchiveIo,
@@ -28,19 +34,66 @@ enum WorkerKind {
     Extract,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TaskPriority {
+    Continuation,
+    Bulk,
+}
+
 #[derive(Clone)]
 pub(crate) struct WorkerContext {
-    pub(crate) io_tx: Sender<Task>,
-    pub(crate) vfs_io_tx: Sender<Task>,
-    pub(crate) archive_io_tx: Sender<Task>,
-    pub(crate) cpu_tx: Sender<Task>,
-    pub(crate) extract_tx: Sender<Task>,
+    io_queue: Arc<WorkerQueue>,
+    vfs_io_queue: Arc<WorkerQueue>,
+    archive_io_queue: Arc<WorkerQueue>,
+    cpu_queue: Arc<WorkerQueue>,
+    extract_queue: Arc<WorkerQueue>,
     pub(crate) event_tx: Sender<WorkerEvent>,
     pub(crate) pending: Arc<AtomicUsize>,
     pub(crate) done_pair: Arc<(Mutex<()>, Condvar)>,
     pub(crate) shutdown: Arc<AtomicBool>,
     pub(crate) config: TaskPoolConfig,
     pub(crate) shared_dispatcher: Arc<Dispatcher>,
+}
+
+impl WorkerContext {
+    fn queue(&self, kind: WorkerKind) -> &WorkerQueue {
+        match kind {
+            WorkerKind::Io => &self.io_queue,
+            WorkerKind::VfsIo => &self.vfs_io_queue,
+            WorkerKind::ArchiveIo => &self.archive_io_queue,
+            WorkerKind::Cpu => &self.cpu_queue,
+            WorkerKind::Extract => &self.extract_queue,
+        }
+    }
+
+    fn notify_shutdown(&self) {
+        self.io_queue.notify_all();
+        self.vfs_io_queue.notify_all();
+        self.archive_io_queue.notify_all();
+        self.cpu_queue.notify_all();
+        self.extract_queue.notify_all();
+        self.done_pair.1.notify_all();
+    }
+}
+
+struct PendingTaskGuard {
+    ctx: WorkerContext,
+}
+
+impl PendingTaskGuard {
+    fn new(ctx: &WorkerContext) -> Self {
+        Self { ctx: ctx.clone() }
+    }
+}
+
+impl Drop for PendingTaskGuard {
+    fn drop(&mut self) {
+        let previous = self.ctx.pending.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "task-pool pending counter underflow");
+        if previous <= 1 {
+            self.ctx.done_pair.1.notify_all();
+        }
+    }
 }
 
 fn record_worker_event(
@@ -59,11 +112,6 @@ fn record_worker_event(
 
 impl TaskPoolRunner {
     pub fn new(config: TaskPoolConfig) -> Result<Self> {
-        let (io_tx, io_rx) = flume::unbounded::<Task>();
-        let (vfs_io_tx, vfs_io_rx) = flume::unbounded::<Task>();
-        let (archive_io_tx, archive_io_rx) = flume::unbounded::<Task>();
-        let (cpu_tx, cpu_rx) = flume::unbounded::<Task>();
-        let (extract_tx, extract_rx) = flume::unbounded::<Task>();
         let (event_tx, event_rx) = flume::unbounded::<WorkerEvent>();
         let pending = Arc::new(AtomicUsize::new(0));
         let done_pair = Arc::new((Mutex::new(()), Condvar::new()));
@@ -80,39 +128,33 @@ impl TaskPoolRunner {
                 })?,
         );
         let ctx = WorkerContext {
-            io_tx: io_tx.clone(),
-            vfs_io_tx: vfs_io_tx.clone(),
-            archive_io_tx: archive_io_tx.clone(),
-            cpu_tx: cpu_tx.clone(),
-            extract_tx: extract_tx.clone(),
-            event_tx: event_tx.clone(),
+            io_queue: Arc::new(WorkerQueue::default()),
+            vfs_io_queue: Arc::new(WorkerQueue::default()),
+            archive_io_queue: Arc::new(WorkerQueue::default()),
+            cpu_queue: Arc::new(WorkerQueue::default()),
+            extract_queue: Arc::new(WorkerQueue::default()),
+            event_tx,
             pending,
             done_pair,
             shutdown,
             config,
             shared_dispatcher,
         };
-        spawn_workers(WorkerKind::Io, ctx.config.io_slots, io_rx, ctx.clone())?;
-        spawn_workers(
-            WorkerKind::VfsIo,
-            ctx.config.vfs_io_slots,
-            vfs_io_rx,
-            ctx.clone(),
-        )?;
-        spawn_workers(
-            WorkerKind::ArchiveIo,
-            ctx.config.archive_io_slots,
-            archive_io_rx,
-            ctx.clone(),
-        )?;
-        spawn_workers(WorkerKind::Cpu, ctx.config.cpu_slots, cpu_rx, ctx.clone())?;
-        spawn_workers(
-            WorkerKind::Extract,
-            ctx.config.extract_slots,
-            extract_rx,
-            ctx.clone(),
-        )?;
-        Ok(Self { ctx, event_rx })
+
+        let mut workers = Vec::new();
+        if let Err(error) = spawn_all_workers(&ctx, &mut workers) {
+            ctx.shutdown.store(true, Ordering::Release);
+            ctx.notify_shutdown();
+            for worker in workers {
+                let _ = worker.join();
+            }
+            return Err(error);
+        }
+        Ok(Self {
+            ctx,
+            event_rx,
+            workers,
+        })
     }
 
     pub fn run_batch(
@@ -122,7 +164,7 @@ impl TaskPoolRunner {
     ) -> Result<TaskPoolResult> {
         while self.event_rx.try_recv().is_ok() {}
         for task in initial_tasks {
-            enqueue_task(&self.ctx, task)?;
+            enqueue_task(&self.ctx, task, TaskPriority::Bulk)?;
         }
         let mut progress = TaskProgressReducer::new(progress);
         let mut outcomes = Vec::new();
@@ -162,8 +204,10 @@ impl TaskPoolRunner {
 impl Drop for TaskPoolRunner {
     fn drop(&mut self) {
         self.ctx.shutdown.store(true, Ordering::Release);
-        let cv = &self.ctx.done_pair.1;
-        cv.notify_all();
+        self.ctx.notify_shutdown();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -180,78 +224,94 @@ pub fn run_tasks(initial_tasks: Vec<Task>, config: TaskPoolConfig) -> Result<Tas
     run_tasks_with_progress(initial_tasks, config, TaskProgress::disabled())
 }
 
-fn spawn_workers(
-    _kind: WorkerKind,
-    count: usize,
-    rx: Receiver<Task>,
-    ctx: WorkerContext,
-) -> Result<()> {
-    for _ in 0..count {
-        let worker_rx = rx.clone();
-        let worker_ctx = ctx.clone();
-        let dispatcher = Arc::clone(&worker_ctx.shared_dispatcher);
-        std::mem::drop(
-            dispatcher
-                .dispatch_blocking(move || loop {
-                    if worker_ctx.shutdown.load(Ordering::Acquire) {
-                        break;
-                    }
-                    let task = match worker_rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(task) => task,
-                        Err(RecvTimeoutError::Timeout) => continue,
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    };
-                    let mut spawned = Vec::new();
-                    execute_task(
-                        task,
-                        worker_ctx.config.max_retries,
-                        worker_ctx.config.extraction_progress_buffer_bytes,
-                        worker_ctx.config.download_progress_buffer_bytes,
-                        worker_ctx.config.patch_slots,
-                        worker_ctx.config.extract_shards,
-                        worker_ctx.config.commit_slots,
-                        Some(worker_ctx.shared_dispatcher.as_ref()),
-                        &worker_ctx.config.user_agent,
-                        &mut spawned,
-                        &worker_ctx.event_tx,
-                    );
-                    for task in spawned {
-                        let _ = enqueue_task(&worker_ctx, task);
-                    }
-                    let remaining = worker_ctx.pending.fetch_sub(1, Ordering::AcqRel) - 1;
-                    if remaining == 0 {
-                        let (_, cv) = &*worker_ctx.done_pair;
-                        cv.notify_all();
-                    }
-                })
-                .map_err(|_| Error::TaskPool("Failed to dispatch worker loop".to_string()))?,
-        );
+fn spawn_all_workers(ctx: &WorkerContext, workers: &mut Vec<JoinHandle<()>>) -> Result<()> {
+    for (kind, count) in [
+        (WorkerKind::Io, ctx.config.io_slots),
+        (WorkerKind::VfsIo, ctx.config.vfs_io_slots),
+        (WorkerKind::ArchiveIo, ctx.config.archive_io_slots),
+        (WorkerKind::Cpu, ctx.config.cpu_slots),
+        (WorkerKind::Extract, ctx.config.extract_slots),
+    ] {
+        spawn_workers(kind, count, ctx.clone(), workers)?;
     }
     Ok(())
 }
 
-mod routing;
+fn spawn_workers(
+    kind: WorkerKind,
+    count: usize,
+    ctx: WorkerContext,
+    workers: &mut Vec<JoinHandle<()>>,
+) -> Result<()> {
+    for index in 0..count {
+        let worker_ctx = ctx.clone();
+        let worker = std::thread::Builder::new()
+            .name(format!("griffr-task-{kind:?}-{index}"))
+            .spawn(move || worker_loop(kind, worker_ctx))
+            .map_err(|error| {
+                Error::TaskPool(format!("Failed to spawn {kind:?} worker {index}: {error}"))
+            })?;
+        workers.push(worker);
+    }
+    Ok(())
+}
 
-use routing::{dispatcher_thread_count, worker_kind_for_task};
+fn worker_loop(kind: WorkerKind, ctx: WorkerContext) {
+    while let Some(task) = ctx.queue(kind).pop(&ctx.shutdown) {
+        let _pending = PendingTaskGuard::new(&ctx);
+        let failure_path = task_path(&task);
+        let mut spawned = Vec::new();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            execute_task(
+                task,
+                ctx.config.max_retries,
+                ctx.config.extraction_progress_buffer_bytes,
+                ctx.config.download_progress_buffer_bytes,
+                ctx.config.patch_slots,
+                ctx.config.extract_shards,
+                ctx.config.commit_slots,
+                Some(ctx.shared_dispatcher.as_ref()),
+                &ctx.config.user_agent,
+                &mut spawned,
+                &ctx.event_tx,
+            );
+        }));
 
-pub(crate) fn enqueue_task(ctx: &WorkerContext, task: Task) -> Result<()> {
-    ctx.pending.fetch_add(1, Ordering::AcqRel);
-    let send_result = match worker_kind_for_task(&task) {
-        WorkerKind::Io => ctx.io_tx.send(task),
-        WorkerKind::VfsIo => ctx.vfs_io_tx.send(task),
-        WorkerKind::ArchiveIo => ctx.archive_io_tx.send(task),
-        WorkerKind::Cpu => ctx.cpu_tx.send(task),
-        WorkerKind::Extract => ctx.extract_tx.send(task),
-    };
-    if send_result.is_err() {
-        let remaining = ctx.pending.fetch_sub(1, Ordering::AcqRel) - 1;
-        if remaining == 0 {
-            let (_, cv) = &*ctx.done_pair;
-            cv.notify_all();
+        if result.is_err() {
+            let _ = ctx.event_tx.send(WorkerEvent::Failed {
+                path: failure_path,
+                reason: "task worker panicked".to_string(),
+            });
+            continue;
         }
-        return Err(Error::TaskPool(
-            "Failed to enqueue task: queue disconnected".to_string(),
-        ));
+
+        for task in spawned {
+            if let Err(error) = enqueue_task(&ctx, task, TaskPriority::Continuation) {
+                let _ = ctx.event_tx.send(WorkerEvent::Failed {
+                    path: failure_path.clone(),
+                    reason: format!("failed to enqueue continuation: {error}"),
+                });
+                ctx.shutdown.store(true, Ordering::Release);
+                ctx.notify_shutdown();
+                break;
+            }
+        }
+    }
+}
+
+pub(crate) fn enqueue_task(
+    ctx: &WorkerContext,
+    task: Task,
+    priority: TaskPriority,
+) -> Result<()> {
+    let kind = worker_kind_for_task(&task);
+    ctx.pending.fetch_add(1, Ordering::AcqRel);
+    if let Err(error) = ctx.queue(kind).push(task, priority, &ctx.shutdown) {
+        let previous = ctx.pending.fetch_sub(1, Ordering::AcqRel);
+        if previous <= 1 {
+            ctx.done_pair.1.notify_all();
+        }
+        return Err(error);
     }
     Ok(())
 }
