@@ -161,7 +161,6 @@ pub(crate) fn execute_task(
             event_tx,
         ),
         Task::VerifyReuseVolume {
-            group_index,
             copy_only,
             candidates,
             logical_path,
@@ -169,7 +168,6 @@ pub(crate) fn execute_task(
             expected_size,
             group,
         } => transfer::execute_verify_reuse_volume(
-            group_index,
             copy_only,
             candidates,
             logical_path,

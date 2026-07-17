@@ -90,3 +90,61 @@ fn durable_worker_facts_become_task_outcomes() {
             if path == "asset.bin" && bytes == 128
     ));
 }
+
+#[test]
+fn reuse_group_claims_first_verified_source_immediately() {
+    let source = PathBuf::from("reuse/source.bin");
+    let other = PathBuf::from("reuse/other.bin");
+    let group = super::ReuseCandidateGroup::new(
+        2,
+        vec![vec![PathBuf::from("copy/source.bin")]],
+        vec![source.clone(), other],
+        PathBuf::from("game/file.bin"),
+        "file.bin".to_string(),
+        "00".repeat(16),
+        4,
+        None,
+        true,
+        0,
+        TransferClass::General,
+    );
+    let (event_tx, _event_rx) = flume::unbounded();
+    let mut spawned = Vec::new();
+
+    group.finish_volume(false, Some(source.clone()), &mut spawned, &event_tx);
+    assert!(matches!(
+        spawned.as_slice(),
+        [Task::ReuseFile { source: winner, copy_only: false, .. }] if winner == &source
+    ));
+
+    group.finish_volume(false, None, &mut spawned, &event_tx);
+    assert_eq!(spawned.len(), 1, "late probes must not replace the winner");
+}
+
+#[test]
+fn reuse_group_defers_cross_volume_copy_until_hardlink_probes_fail() {
+    let copy_source = PathBuf::from("copy/source.bin");
+    let group = super::ReuseCandidateGroup::new(
+        2,
+        vec![vec![copy_source.clone()]],
+        vec![copy_source],
+        PathBuf::from("game/file.bin"),
+        "file.bin".to_string(),
+        "00".repeat(16),
+        4,
+        None,
+        true,
+        0,
+        TransferClass::General,
+    );
+    let (event_tx, _event_rx) = flume::unbounded();
+    let mut spawned = Vec::new();
+
+    group.finish_volume(false, None, &mut spawned, &event_tx);
+    assert!(spawned.is_empty());
+    group.finish_volume(false, None, &mut spawned, &event_tx);
+    assert!(matches!(
+        spawned.as_slice(),
+        [Task::VerifyReuseVolume { copy_only: true, .. }]
+    ));
+}

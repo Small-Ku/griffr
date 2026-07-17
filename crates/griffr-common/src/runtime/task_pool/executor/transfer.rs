@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use compio::dispatcher::Dispatcher;
@@ -35,7 +35,7 @@ pub(super) struct RepairFileInput {
 pub(super) struct ReuseFileInput {
     pub(super) source: PathBuf,
     pub(super) copy_only: bool,
-    pub(super) remaining_source_candidates: Vec<(bool, PathBuf)>,
+    pub(super) remaining_source_candidates: Vec<PathBuf>,
     pub(super) dest: PathBuf,
     pub(super) logical_path: String,
     pub(super) expected_md5: String,
@@ -193,7 +193,12 @@ pub(super) fn execute_repair_file(
 
     let destination_volume = storage_volume_id(&dest);
     let mut seen = BTreeSet::new();
-    let mut by_volume = BTreeMap::<String, (bool, Vec<PathBuf>)>::new();
+    let mut all_sources = Vec::new();
+    let mut hardlink_groups = Vec::<Vec<PathBuf>>::new();
+    let mut copy_groups = Vec::<Vec<PathBuf>>::new();
+    let mut hardlink_indexes = HashMap::<String, usize>::new();
+    let mut copy_indexes = HashMap::<String, usize>::new();
+
     for source in source_candidates {
         let normalized = std::fs::canonicalize(&source).unwrap_or(source);
         if !seen.insert(normalized.clone()) {
@@ -206,35 +211,44 @@ pub(super) fn execute_repair_file(
         if copy_only && !allow_copy_fallback {
             continue;
         }
+        all_sources.push(normalized.clone());
         let key = storage_volume_group_key(&normalized);
-        let group = by_volume
-            .entry(key)
-            .or_insert_with(|| (copy_only, Vec::new()));
-        group.0 |= copy_only;
-        group.1.push(normalized);
-    }
-    if by_volume.is_empty() {
-        if let Some(url) = download_url {
-            spawned.push(Task::Download {
-                url,
-                dest,
-                logical_path,
-                expected_md5,
-                expected_size: Some(expected_size),
-                retry_count,
-                transfer_class,
-            });
+        let (groups, indexes) = if copy_only {
+            (&mut copy_groups, &mut copy_indexes)
         } else {
-            let _ = event_tx.send(WorkerEvent::Failed {
-                path: logical_path,
-                reason: "no usable source candidates".to_string(),
-            });
-        }
+            (&mut hardlink_groups, &mut hardlink_indexes)
+        };
+        let index = *indexes.entry(key).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[index].push(normalized);
+    }
+
+    if hardlink_groups.is_empty() && copy_groups.is_empty() {
+        enqueue_download_or_failure(
+            dest,
+            logical_path,
+            expected_md5,
+            expected_size,
+            download_url,
+            retry_count,
+            transfer_class,
+            spawned,
+            event_tx,
+        );
         return;
     }
 
+    let (initial_groups, initial_copy_only, deferred_copy_groups) = if hardlink_groups.is_empty() {
+        (copy_groups, true, Vec::new())
+    } else {
+        (hardlink_groups, false, copy_groups)
+    };
     let group = ReuseCandidateGroup::new(
-        by_volume.len(),
+        initial_groups.len(),
+        deferred_copy_groups,
+        all_sources,
         dest,
         logical_path.clone(),
         expected_md5.clone(),
@@ -244,21 +258,47 @@ pub(super) fn execute_repair_file(
         retry_count,
         transfer_class,
     );
-    spawned.extend(by_volume.into_values().enumerate().map(
-        |(group_index, (copy_only, candidates))| Task::VerifyReuseVolume {
-            group_index,
-            copy_only,
-            candidates,
-            logical_path: logical_path.clone(),
-            expected_md5: expected_md5.clone(),
-            expected_size,
-            group: group.clone(),
-        },
-    ));
+    spawned.extend(initial_groups.into_iter().map(|candidates| Task::VerifyReuseVolume {
+        copy_only: initial_copy_only,
+        candidates,
+        logical_path: logical_path.clone(),
+        expected_md5: expected_md5.clone(),
+        expected_size,
+        group: group.clone(),
+    }));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enqueue_download_or_failure(
+    dest: PathBuf,
+    logical_path: String,
+    expected_md5: String,
+    expected_size: u64,
+    download_url: Option<String>,
+    retry_count: u32,
+    transfer_class: TransferClass,
+    spawned: &mut Vec<Task>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    if let Some(url) = download_url {
+        spawned.push(Task::Download {
+            url,
+            dest,
+            logical_path,
+            expected_md5,
+            expected_size: Some(expected_size),
+            retry_count,
+            transfer_class,
+        });
+    } else {
+        let _ = event_tx.send(WorkerEvent::Failed {
+            path: logical_path,
+            reason: "no usable source candidates".to_string(),
+        });
+    }
 }
 
 pub(super) fn execute_verify_reuse_volume(
-    group_index: usize,
     copy_only: bool,
     candidates: Vec<PathBuf>,
     logical_path: String,
@@ -268,11 +308,24 @@ pub(super) fn execute_verify_reuse_volume(
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) {
+    if group.is_resolved() {
+        return;
+    }
     let source = candidates.into_iter().find(|source| {
-        super::super::verify::build_issue(source, &logical_path, &expected_md5, Some(expected_size))
-            .is_none()
+        if group.is_resolved() {
+            return false;
+        }
+        matches!(
+            super::super::verify::verify_candidate_cancellable(
+                source,
+                &expected_md5,
+                expected_size,
+                || group.is_resolved(),
+            ),
+            super::super::verify::CandidateVerification::Valid
+        )
     });
-    group.finish_volume(group_index, copy_only, source, spawned, event_tx);
+    group.finish_volume(copy_only, source, spawned, event_tx);
 }
 
 pub(super) fn execute_reuse_file(
@@ -330,16 +383,12 @@ pub(super) fn execute_reuse_file(
                 reason: format!("verified-source reuse failed: {reason}"),
             });
             if !remaining_source_candidates.is_empty() {
-                let mut remaining_source_candidates = remaining_source_candidates;
-                let (copy_only, source) = remaining_source_candidates.remove(0);
-                spawned.push(Task::ReuseFile {
-                    source,
-                    copy_only,
-                    remaining_source_candidates,
+                spawned.push(Task::RepairFile {
                     dest,
                     logical_path,
                     expected_md5,
                     expected_size,
+                    source_candidates: remaining_source_candidates,
                     download_url,
                     allow_copy_fallback,
                     retry_count,

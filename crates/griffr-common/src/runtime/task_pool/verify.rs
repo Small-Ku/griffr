@@ -198,6 +198,54 @@ fn build_issue_impl(
     None
 }
 
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CandidateVerification {
+    Valid,
+    Invalid,
+    Cancelled,
+}
+
+pub(crate) fn verify_candidate_cancellable(
+    path: &Path,
+    expected_md5: &str,
+    expected_size: u64,
+    is_cancelled: impl Fn() -> bool,
+) -> CandidateVerification {
+    if is_cancelled() {
+        return CandidateVerification::Cancelled;
+    }
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() == expected_size => {}
+        Ok(_) | Err(_) => return CandidateVerification::Invalid,
+    }
+    let mut file = match open_sequential_read(path) {
+        Ok(file) => file,
+        Err(_) => return CandidateVerification::Invalid,
+    };
+    let mut hasher = Md5::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        if is_cancelled() {
+            return CandidateVerification::Cancelled;
+        }
+        let read = match file.read(&mut buffer) {
+            Ok(read) => read,
+            Err(_) => return CandidateVerification::Invalid,
+        };
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual_md5 = format!("{:x}", hasher.finalize());
+    if actual_md5 == expected_md5.to_ascii_lowercase() {
+        CandidateVerification::Valid
+    } else {
+        CandidateVerification::Invalid
+    }
+}
+
 pub(crate) fn file_md5(path: &Path) -> Result<String> {
     let mut file = open_sequential_read(path).map_err(|e| Error::OpenFileFailed {
         path: path.to_path_buf(),

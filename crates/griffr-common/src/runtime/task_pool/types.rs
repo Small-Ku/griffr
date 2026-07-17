@@ -96,7 +96,9 @@ impl ArchiveInstallGroup {
 #[derive(Debug)]
 pub struct ReuseCandidateGroup {
     remaining: AtomicUsize,
-    verified_sources: Mutex<Vec<(bool, usize, PathBuf)>>,
+    resolved: AtomicBool,
+    copy_phase_groups: Mutex<Option<Vec<Vec<PathBuf>>>>,
+    all_sources: Vec<PathBuf>,
     dest: PathBuf,
     logical_path: String,
     expected_md5: String,
@@ -111,6 +113,8 @@ impl ReuseCandidateGroup {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         group_count: usize,
+        copy_phase_groups: Vec<Vec<PathBuf>>,
+        all_sources: Vec<PathBuf>,
         dest: PathBuf,
         logical_path: String,
         expected_md5: String,
@@ -122,7 +126,11 @@ impl ReuseCandidateGroup {
     ) -> Arc<Self> {
         Arc::new(Self {
             remaining: AtomicUsize::new(group_count),
-            verified_sources: Mutex::new(Vec::new()),
+            resolved: AtomicBool::new(false),
+            copy_phase_groups: Mutex::new(
+                (!copy_phase_groups.is_empty()).then_some(copy_phase_groups),
+            ),
+            all_sources,
             dest,
             logical_path,
             expected_md5,
@@ -134,47 +142,78 @@ impl ReuseCandidateGroup {
         })
     }
 
+    pub(crate) fn is_resolved(&self) -> bool {
+        self.resolved.load(Ordering::Acquire)
+    }
+
     pub(crate) fn finish_volume(
         &self,
-        group_index: usize,
         copy_only: bool,
         source: Option<PathBuf>,
         spawned: &mut Vec<Task>,
         event_tx: &flume::Sender<WorkerEvent>,
     ) {
         if let Some(source) = source {
-            self.verified_sources
-                .lock()
-                .unwrap()
-                .push((copy_only, group_index, source));
-        }
-        if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
+            if self
+                .resolved
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let remaining_source_candidates = self
+                    .all_sources
+                    .iter()
+                    .filter(|candidate| *candidate != &source)
+                    .cloned()
+                    .collect();
+                spawned.push(Task::ReuseFile {
+                    source,
+                    copy_only,
+                    remaining_source_candidates,
+                    dest: self.dest.clone(),
+                    logical_path: self.logical_path.clone(),
+                    expected_md5: self.expected_md5.clone(),
+                    expected_size: self.expected_size,
+                    download_url: self.download_url.clone(),
+                    allow_copy_fallback: self.allow_copy_fallback,
+                    retry_count: self.retry_count,
+                    transfer_class: self.transfer_class,
+                });
+            }
             return;
         }
 
-        let mut guard = self.verified_sources.lock().unwrap();
-        let mut sources = std::mem::take(&mut *guard);
-        drop(guard);
-        sources.sort_by_key(|(copy_only, index, _)| (*copy_only, *index));
-        let mut sources = sources
-            .into_iter()
-            .map(|(copy_only, _, source)| (copy_only, source))
-            .collect::<Vec<_>>();
-        if !sources.is_empty() {
-            let (copy_only, source) = sources.remove(0);
-            spawned.push(Task::ReuseFile {
-                source,
-                copy_only,
-                remaining_source_candidates: sources,
-                dest: self.dest.clone(),
+        if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1
+            || self
+                .resolved
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+
+        let copy_groups = self.copy_phase_groups.lock().unwrap().take();
+        if let Some(copy_groups) = copy_groups {
+            let group = Self::new(
+                copy_groups.len(),
+                Vec::new(),
+                self.all_sources.clone(),
+                self.dest.clone(),
+                self.logical_path.clone(),
+                self.expected_md5.clone(),
+                self.expected_size,
+                self.download_url.clone(),
+                self.allow_copy_fallback,
+                self.retry_count,
+                self.transfer_class,
+            );
+            spawned.extend(copy_groups.into_iter().map(|candidates| Task::VerifyReuseVolume {
+                copy_only: true,
+                candidates,
                 logical_path: self.logical_path.clone(),
                 expected_md5: self.expected_md5.clone(),
                 expected_size: self.expected_size,
-                download_url: self.download_url.clone(),
-                allow_copy_fallback: self.allow_copy_fallback,
-                retry_count: self.retry_count,
-                transfer_class: self.transfer_class,
-            });
+                group: group.clone(),
+            }));
         } else if let Some(url) = self.download_url.clone() {
             spawned.push(Task::Download {
                 url,
@@ -256,7 +295,6 @@ pub enum Task {
         transfer_class: TransferClass,
     },
     VerifyReuseVolume {
-        group_index: usize,
         copy_only: bool,
         candidates: Vec<PathBuf>,
         logical_path: String,
@@ -267,7 +305,7 @@ pub enum Task {
     ReuseFile {
         source: PathBuf,
         copy_only: bool,
-        remaining_source_candidates: Vec<(bool, PathBuf)>,
+        remaining_source_candidates: Vec<PathBuf>,
         dest: PathBuf,
         logical_path: String,
         expected_md5: String,
