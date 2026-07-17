@@ -1,5 +1,6 @@
 pub mod admin;
 mod compat_fs;
+mod file_allocation;
 pub mod files;
 mod install_plan;
 mod integrity;
@@ -18,6 +19,8 @@ pub use compat_fs::{
     collect_files_recursive, copy_dir_recursive, dir_size, directory_has_entries,
     list_files_with_extension, read_link, remove_dir_all, remove_empty_dirs_recursive, CopyStats,
 };
+pub(crate) use file_allocation::preallocate_file;
+
 pub use files::reuse::{
     ensure_game_files_with_pool, inspect_reuse_installations, resolve_file_reuse_sources,
     FileEnsureSummary, FileReuseConfig, SourceInstallInput,

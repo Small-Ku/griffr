@@ -8,6 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::error::{Error, Result};
+use crate::runtime::preallocate_file;
 use compio::dispatcher::Dispatcher;
 use md5::Md5;
 
@@ -368,6 +369,7 @@ fn copy_file_with_md5(
     let mut copied = 0u64;
     let mut buffer = vec![0u8; 1024 * 1024];
     let copy_result = (|| -> Result<()> {
+        preallocate_file(&output, &temp, expected_size)?;
         loop {
             let read = input.read(&mut buffer)?;
             if read == 0 {

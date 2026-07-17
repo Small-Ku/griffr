@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{Error, Result};
+use crate::runtime::preallocate_file;
 use crate::runtime::task_pool::verify::file_md5;
 use md5::{Digest, Md5};
 #[cfg(windows)]
@@ -217,31 +218,46 @@ pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDi
             path: dest.to_path_buf(),
             source,
         })?;
-    let mut hasher = Md5::new();
-    let mut copied = 0u64;
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        let read = input.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        output
-            .write_all(&buffer[..read])
-            .map_err(|source| Error::WriteFileFailed {
-                path: dest.to_path_buf(),
+    let copy_result = (|| -> Result<CopiedFileDigest> {
+        let expected_size = input
+            .metadata()
+            .map_err(|source| Error::StatFailed {
+                path: src.to_path_buf(),
                 source,
-            })?;
-        hasher.update(&buffer[..read]);
-        copied = copied.saturating_add(read as u64);
+            })?
+            .len();
+        preallocate_file(&output, dest, expected_size)?;
+        let mut hasher = Md5::new();
+        let mut copied = 0u64;
+        let mut buffer = vec![0u8; 1024 * 1024];
+        loop {
+            let read = input.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            output
+                .write_all(&buffer[..read])
+                .map_err(|source| Error::WriteFileFailed {
+                    path: dest.to_path_buf(),
+                    source,
+                })?;
+            hasher.update(&buffer[..read]);
+            copied = copied.saturating_add(read as u64);
+        }
+        output.sync_all().map_err(|source| Error::WriteFileFailed {
+            path: dest.to_path_buf(),
+            source,
+        })?;
+        Ok(CopiedFileDigest {
+            bytes: copied,
+            md5: format!("{:x}", hasher.finalize()),
+        })
+    })();
+    if copy_result.is_err() {
+        drop(output);
+        let _ = std::fs::remove_file(dest);
     }
-    output.sync_all().map_err(|source| Error::WriteFileFailed {
-        path: dest.to_path_buf(),
-        source,
-    })?;
-    Ok(CopiedFileDigest {
-        bytes: copied,
-        md5: format!("{:x}", hasher.finalize()),
-    })
+    copy_result
 }
 
 pub(crate) fn move_path_replace_cross_volume(src: &Path, dest: &Path) -> Result<()> {

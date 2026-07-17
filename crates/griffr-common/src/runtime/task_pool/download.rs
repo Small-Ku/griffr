@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::api::protocol::{byte_range_from, RANGE_HEADER, USER_AGENT_HEADER};
 use crate::error::{Error, Result};
+use crate::runtime::preallocate_file;
 use compio::buf::BufResult;
 use compio::bytes::Bytes;
 use compio::dispatcher::Dispatcher;
@@ -223,6 +224,10 @@ pub(crate) fn do_prepared_download(
                     path: part_path_for_write.clone(),
                     source: e,
                 })?;
+
+        if let Some(expected_size) = expected_size {
+            preallocate_file(&out, &part_path_for_write, expected_size)?;
+        }
 
         let mut hasher = if resume_effective {
             prepared_hasher

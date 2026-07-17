@@ -8,6 +8,7 @@ use std::sync::{mpsc, Arc};
 
 use crate::api::types::ResourcePatch;
 use crate::error::{Error, Result};
+use crate::runtime::preallocate_file;
 use crate::runtime::{DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME};
 
 /// Cached byte range for one split archive volume.
@@ -394,6 +395,7 @@ impl MultiVolumeExtractor {
                     path: file_path.clone(),
                     source,
                 })?;
+            preallocate_file(&output, &file_path, file.size())?;
             loop {
                 let read = file.read(&mut buffer)?;
                 if read == 0 {
