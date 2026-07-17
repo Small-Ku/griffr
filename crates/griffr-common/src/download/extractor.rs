@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use crate::api::types::ResourcePatch;
 use crate::error::{Error, Result};
@@ -22,8 +22,9 @@ struct VolumeLayout {
 ///
 /// Volume sizes and cumulative offsets are captured once at construction so
 /// ZipArchive seeks do not restat every part or linearly rescan the full set.
+#[derive(Debug)]
 pub struct MultiVolumeStream {
-    layouts: Vec<VolumeLayout>,
+    layouts: Arc<Vec<VolumeLayout>>,
     total_size: u64,
     current_volume: usize,
     current_file: Option<std::fs::File>,
@@ -52,7 +53,7 @@ impl MultiVolumeStream {
         }
 
         let mut stream = Self {
-            layouts,
+            layouts: Arc::new(layouts),
             total_size: start,
             current_volume: 0,
             current_file: None,
@@ -87,9 +88,31 @@ impl MultiVolumeStream {
     }
 }
 
+impl Clone for MultiVolumeStream {
+    fn clone(&self) -> Self {
+        // Keep cloning infallible: the archive reader opens the selected volume
+        // lazily on its first read/seek, where filesystem errors can be returned.
+        Self {
+            layouts: self.layouts.clone(),
+            total_size: self.total_size,
+            current_volume: self.current_volume,
+            current_file: None,
+            position: self.position,
+        }
+    }
+}
+
 impl Read for MultiVolumeStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         loop {
+            if self.current_file.is_none() && self.current_volume < self.layouts.len() {
+                self.open_current_volume().map_err(std::io::Error::other)?;
+                let layout = &self.layouts[self.current_volume];
+                let offset = self.position.saturating_sub(layout.start);
+                if let Some(file) = &mut self.current_file {
+                    file.seek(SeekFrom::Start(offset))?;
+                }
+            }
             match &mut self.current_file {
                 Some(file) => {
                     let bytes_read = file.read(buf)?;
@@ -128,7 +151,7 @@ impl Seek for MultiVolumeStream {
         let target = target_position as u64;
         if target == self.total_size {
             let last_index = self.layouts.len() - 1;
-            if self.current_volume != last_index {
+            if self.current_volume != last_index || self.current_file.is_none() {
                 self.current_volume = last_index;
                 self.open_current_volume().map_err(std::io::Error::other)?;
             }
@@ -147,7 +170,7 @@ impl Seek for MultiVolumeStream {
             )
         })?;
         let offset = target.saturating_sub(layout.start);
-        if self.current_volume != index {
+        if self.current_volume != index || self.current_file.is_none() {
             self.current_volume = index;
             self.open_current_volume().map_err(std::io::Error::other)?;
         }
@@ -162,6 +185,7 @@ impl Seek for MultiVolumeStream {
 #[derive(Debug, Clone)]
 pub(crate) struct ArchiveInspection {
     pub entries: BTreeMap<String, u64>,
+    archive: zip::ZipArchive<MultiVolumeStream>,
     pub total_uncompressed_bytes: u64,
     entry_sizes: Vec<u64>,
     pub patch_manifest: Option<ResourcePatch>,
@@ -287,6 +311,7 @@ impl MultiVolumeExtractor {
 
         Ok(ArchiveInspection {
             entries,
+            archive,
             total_uncompressed_bytes,
             entry_sizes,
             patch_manifest,
@@ -336,12 +361,15 @@ impl MultiVolumeExtractor {
         &self,
         target_dir: &Path,
         password: Option<&str>,
+        inspection: &ArchiveInspection,
         range: Range<usize>,
         progress_buffer_bytes: usize,
         progress_tx: &mpsc::Sender<ExtractShardEvent>,
     ) -> Result<()> {
-        let stream = MultiVolumeStream::new(self.volumes.clone())?;
-        let mut archive = zip::ZipArchive::new(stream)?;
+        // zip 2.x keeps parsed central-directory state in an Arc, so cloning
+        // this inspected archive gives each shard an independent lazy stream
+        // while sharing the immutable entry map and offsets.
+        let mut archive = inspection.archive.clone();
         let mut buffer = vec![0u8; progress_buffer_bytes.max(4 * 1024)];
         let mut pending_progress = 0u64;
 
@@ -412,7 +440,14 @@ impl MultiVolumeExtractor {
                     let tx = progress_tx.clone();
                     scope.spawn(move || {
                         let result = self
-                            .extract_range(target_dir, password, range, progress_buffer_bytes, &tx)
+                            .extract_range(
+                                target_dir,
+                                password,
+                                inspection,
+                                range,
+                                progress_buffer_bytes,
+                                &tx,
+                            )
                             .map_err(|error| error.to_string());
                         let _ = tx.send(ExtractShardEvent::Finished(result));
                     })

@@ -26,6 +26,12 @@ fn test_multi_volume_extractor() -> Result<()> {
     // 2. Extract
     let extractor = MultiVolumeExtractor::new(volumes)?;
     let inspection = extractor.inspect_patch_payload(None)?;
+    let archive_clone = inspection.archive.clone();
+    assert_eq!(archive_clone.len(), inspection.archive.len());
+    assert_eq!(
+        archive_clone.central_directory_start(),
+        inspection.archive.central_directory_start()
+    );
     let output_dir = base_path.join("output");
     std::fs::create_dir(&output_dir)?;
     extractor.extract_to_with_progress(
