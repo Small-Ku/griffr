@@ -254,10 +254,12 @@ fn do_download(
         do_prepared_download, prepare_download, DownloadPreparation,
     };
 
+    let http_client = cyper::Client::new();
     match prepare_download(io_dispatcher, dest, expected_md5, expected_size)? {
         DownloadPreparation::Complete(bytes) => Ok(bytes),
         DownloadPreparation::Ready(resume) => do_prepared_download(
             io_dispatcher,
+            &http_client,
             user_agent,
             url,
             dest,

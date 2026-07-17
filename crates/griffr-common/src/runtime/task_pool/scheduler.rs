@@ -40,6 +40,7 @@ pub(crate) struct WorkerContext {
     pub(crate) shutdown: Arc<AtomicBool>,
     pub(crate) config: TaskPoolConfig,
     pub(crate) shared_dispatcher: Arc<Dispatcher>,
+    pub(crate) http_client: cyper::Client,
 }
 
 impl WorkerContext {
@@ -108,6 +109,7 @@ impl TaskPoolRunner {
             shutdown,
             config,
             shared_dispatcher,
+            http_client: cyper::Client::new(),
         };
 
         let mut workers = Vec::new();
@@ -238,6 +240,7 @@ fn worker_loop(class: ExecutionClass, ctx: WorkerContext) {
                 ctx.config.download_progress_buffer_bytes,
                 ctx.config.extract_shards,
                 Some(ctx.shared_dispatcher.as_ref()),
+                &ctx.http_client,
                 &ctx.config.user_agent,
                 &mut spawned,
                 &ctx.event_tx,

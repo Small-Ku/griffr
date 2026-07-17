@@ -90,6 +90,7 @@ pub(super) fn execute_transfer_download(
     resume: super::super::types::DownloadResumeState,
     download_progress_buffer_bytes: usize,
     io_dispatcher: Option<&Dispatcher>,
+    http_client: &cyper::Client,
     user_agent: &str,
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
@@ -103,6 +104,7 @@ pub(super) fn execute_transfer_download(
     });
     let result = super::super::download::do_prepared_download(
         io_dispatcher,
+        http_client,
         user_agent,
         &input.url,
         &input.dest,

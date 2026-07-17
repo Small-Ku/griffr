@@ -109,6 +109,7 @@ pub(crate) fn prepare_download(
 
 pub(crate) fn do_prepared_download(
     io_dispatcher: Option<&Dispatcher>,
+    http_client: &cyper::Client,
     user_agent: &str,
     url: &str,
     dest: &Path,
@@ -132,8 +133,8 @@ pub(crate) fn do_prepared_download(
     let url_owned = url.to_string();
     let user_agent_owned = user_agent.to_string();
     let part_path_for_write = part_path.clone();
+    let client = http_client.clone();
     let (written, actual_md5) = super::fs_ops::dispatch_io(io_dispatcher, move || async move {
-        let client = cyper::Client::new();
         let mut request = client.get(&url_owned)?;
         request = request
             .header(USER_AGENT_HEADER, user_agent_owned.clone())

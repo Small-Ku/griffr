@@ -151,6 +151,7 @@ pub(super) fn execute_transfer_archive_part(
     max_retries: u32,
     download_progress_buffer_bytes: usize,
     io_dispatcher: Option<&Dispatcher>,
+    http_client: &cyper::Client,
     user_agent: &str,
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
@@ -164,6 +165,7 @@ pub(super) fn execute_transfer_archive_part(
     });
     match super::super::download::do_prepared_download(
         io_dispatcher,
+        http_client,
         user_agent,
         &part.url,
         &part.dest,
