@@ -1,6 +1,8 @@
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
+use std::time::Instant;
 
 use crate::error::{Error, Result};
 
@@ -23,6 +25,7 @@ const NETWORK_SCHEDULE: [NetworkClass; 7] = [
 struct QueuedTask {
     task: Task,
     resources: ResourceRequest,
+    enqueued_at: Instant,
 }
 
 #[derive(Debug, Default)]
@@ -196,24 +199,68 @@ fn remove_runnable(
     resources: &ResourceState,
     config: &TaskPoolConfig,
 ) -> Option<QueuedTask> {
-    let preferred = queue.iter().position(|queued| {
-        queued.resources.execution == class
-            && preferred_network.is_none_or(|network| queued.resources.network == Some(network))
-            && resources.can_acquire(&queued.resources, config)
-    });
-    let fallback = preferred.or_else(|| {
-        queue.iter().position(|queued| {
+    let preferred = runnable_index(
+        queue,
+        class,
+        preferred_network,
+        resources,
+        config,
+    );
+    let fallback = preferred.or_else(|| runnable_index(queue, class, None, resources, config));
+    fallback.and_then(|index| queue.remove(index))
+}
+
+fn runnable_index(
+    queue: &VecDeque<QueuedTask>,
+    class: ExecutionClass,
+    network: Option<NetworkClass>,
+    resources: &ResourceState,
+    config: &TaskPoolConfig,
+) -> Option<usize> {
+    let mut volume_depth = HashMap::<&str, usize>::new();
+    for queued in queue {
+        for volume in queued
+            .resources
+            .read_volumes
+            .iter()
+            .chain(&queued.resources.write_volumes)
+        {
+            *volume_depth.entry(volume.as_str()).or_default() += 1;
+        }
+    }
+    queue
+        .iter()
+        .enumerate()
+        .filter(|(_, queued)| {
             queued.resources.execution == class
+                && network.is_none_or(|selected| queued.resources.network == Some(selected))
                 && resources.can_acquire(&queued.resources, config)
         })
-    });
-    fallback.and_then(|index| queue.remove(index))
+        .min_by_key(|(index, queued)| {
+            let age_bucket = queued.enqueued_at.elapsed().as_secs() / 5;
+            let backlog = queued
+                .resources
+                .read_volumes
+                .iter()
+                .chain(&queued.resources.write_volumes)
+                .map(|volume| volume_depth.get(volume.as_str()).copied().unwrap_or(0))
+                .sum::<usize>();
+            (
+                Reverse(age_bucket),
+                Reverse(backlog),
+                queued.resources.estimated_bytes,
+                *index,
+            )
+        })
+        .map(|(index, _)| index)
 }
 
 #[derive(Debug)]
 pub(super) struct ScheduledTask {
     pub(super) task: Task,
-    resources: ResourceRequest,
+    pub(super) resources: ResourceRequest,
+    pub(super) enqueued_at: Instant,
+    pub(super) started_at: Instant,
 }
 
 #[derive(Debug, Default)]
@@ -236,7 +283,11 @@ impl SchedulerQueue {
             ));
         }
         let mut state = self.state.lock().unwrap();
-        let queued = QueuedTask { task, resources };
+        let queued = QueuedTask {
+            task,
+            resources,
+            enqueued_at: Instant::now(),
+        };
         match priority {
             TaskPriority::Continuation => state.continuation.push_back(queued),
             TaskPriority::Bulk => state.bulk.push_back(queued),
@@ -262,6 +313,8 @@ impl SchedulerQueue {
                 return Some(ScheduledTask {
                     task: queued.task,
                     resources: queued.resources,
+                    enqueued_at: queued.enqueued_at,
+                    started_at: Instant::now(),
                 });
             }
             state = self.ready.wait(state).unwrap();
@@ -357,6 +410,39 @@ mod tests {
         assert!(state.can_acquire(&request, &config));
         state.acquire(&request);
         assert!(!state.can_acquire(&request, &config));
+    }
+
+
+    #[test]
+    fn runnable_tasks_prefer_smaller_work_on_the_same_backlogged_volume() {
+        let queue = SchedulerQueue::default();
+        let shutdown = AtomicBool::new(false);
+        let mut config = TaskPoolConfig::default();
+        config.volume_concurrency.insert(
+            "volume-a".to_string(),
+            crate::runtime::task_pool::VolumeConcurrency::new(2, 1),
+        );
+        let mut large = resources("volume-a");
+        large.execution = ExecutionClass::Blocking;
+        large.estimated_bytes = 1024;
+        let mut small = resources("volume-a");
+        small.execution = ExecutionClass::Blocking;
+        small.estimated_bytes = 1;
+        queue
+            .push(hardlink("large"), large, TaskPriority::Bulk, &shutdown)
+            .unwrap();
+        queue
+            .push(hardlink("small"), small, TaskPriority::Bulk, &shutdown)
+            .unwrap();
+
+        let selected = queue
+            .pop(ExecutionClass::Blocking, &config, &shutdown)
+            .unwrap();
+        assert!(matches!(
+            selected.task,
+            Task::Hardlink { ref dest, .. } if dest == &PathBuf::from("small")
+        ));
+        queue.release(&selected.resources);
     }
 
 }

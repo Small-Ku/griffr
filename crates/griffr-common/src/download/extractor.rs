@@ -320,6 +320,13 @@ impl MultiVolumeExtractor {
         })
     }
 
+    pub(crate) fn range_uncompressed_bytes(
+        inspection: &ArchiveInspection,
+        range: Range<usize>,
+    ) -> u64 {
+        inspection.entry_sizes[range].iter().copied().sum()
+    }
+
     pub(crate) fn extraction_ranges(
         inspection: &ArchiveInspection,
         max_shards: usize,

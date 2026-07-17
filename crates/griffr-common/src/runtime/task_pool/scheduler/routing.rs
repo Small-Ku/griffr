@@ -25,6 +25,7 @@ pub(super) struct ResourceRequest {
     pub(super) write_volumes: Vec<String>,
     pub(super) extract: bool,
     pub(super) mutation_root: Option<String>,
+    pub(super) estimated_bytes: u64,
 }
 
 impl Default for ResourceRequest {
@@ -36,6 +37,7 @@ impl Default for ResourceRequest {
             write_volumes: Vec::new(),
             extract: false,
             mutation_root: None,
+            estimated_bytes: 0,
         }
     }
 }
@@ -114,8 +116,38 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
         Task::Hardlink { dest, .. } => request.write_volumes.push(volume_key(dest)),
         Task::InstallArchive { .. } | Task::RepairFile { .. } => {}
     }
+    request.estimated_bytes = task_estimated_bytes(task);
     normalize_volumes(&mut request);
     request
+}
+
+
+fn task_estimated_bytes(task: &Task) -> u64 {
+    match task {
+        Task::InstallArchivePart { part, .. } | Task::TransferArchivePart { part, .. } => {
+            part.expected_size
+        }
+        Task::Download { expected_size, .. }
+        | Task::TransferDownload { expected_size, .. }
+        | Task::Verify { expected_size, .. } => expected_size.unwrap_or(0),
+        Task::RepairFile { expected_size, .. }
+        | Task::VerifyReuseVolume { expected_size, .. }
+        | Task::ReuseFile { expected_size, .. } => *expected_size,
+        Task::ExtractArchiveShard { shard } => {
+            crate::download::extractor::MultiVolumeExtractor::range_uncompressed_bytes(
+                &shard.inspection,
+                shard.range.clone(),
+            )
+        }
+        Task::InstallArchive { .. }
+        | Task::Extract { .. }
+        | Task::PrepareArchive { .. }
+        | Task::CommitArchive { .. }
+        | Task::CleanupArchive { .. }
+        | Task::ApplyExtractedVfsPatchManifest { .. }
+        | Task::ApplyDeleteManifest { .. }
+        | Task::Hardlink { .. } => 0,
+    }
 }
 
 fn execution_class(task: &Task) -> ExecutionClass {

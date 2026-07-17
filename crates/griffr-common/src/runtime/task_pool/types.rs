@@ -496,7 +496,9 @@ mod progress;
 
 pub use config::{TaskPoolConfig, VolumeConcurrency, DEFAULT_PROGRESS_BUFFER_BYTES};
 pub(crate) use events::WorkerEvent;
-pub use events::{TaskOutcome, TaskPoolResult, TaskPoolRunner};
+pub use events::{
+    TaskOutcome, TaskPoolMetrics, TaskPoolResult, TaskPoolRunner, VolumeTaskMetrics,
+};
 pub use progress::TaskProgress;
 
 #[cfg(test)]

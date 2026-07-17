@@ -17,10 +17,12 @@ use super::types::{
 
 const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
+mod metrics;
 mod progress;
 mod queue;
 mod routing;
 
+use metrics::SchedulerMetrics;
 use progress::TaskProgressReducer;
 use queue::SchedulerQueue;
 use routing::{dispatcher_thread_count, task_path, task_resources, ExecutionClass};
@@ -41,6 +43,7 @@ pub(crate) struct WorkerContext {
     pub(crate) config: TaskPoolConfig,
     pub(crate) shared_dispatcher: Arc<Dispatcher>,
     pub(crate) http_client: cyper::Client,
+    metrics: Arc<SchedulerMetrics>,
 }
 
 impl WorkerContext {
@@ -110,6 +113,7 @@ impl TaskPoolRunner {
             config,
             shared_dispatcher,
             http_client: cyper::Client::new(),
+            metrics: Arc::new(SchedulerMetrics::default()),
         };
 
         let mut workers = Vec::new();
@@ -134,6 +138,7 @@ impl TaskPoolRunner {
         progress: TaskProgress,
     ) -> Result<TaskPoolResult> {
         while self.event_rx.try_recv().is_ok() {}
+        self.ctx.metrics.reset();
         for task in initial_tasks {
             enqueue_task(&self.ctx, task, TaskPriority::Bulk)?;
         }
@@ -168,7 +173,17 @@ impl TaskPoolRunner {
             record_worker_event(&mut progress, &mut outcomes, event);
         }
         progress.finish();
-        Ok(TaskPoolResult { outcomes })
+        let metrics = self.ctx.metrics.snapshot();
+        debug!(
+            completed_tasks = metrics.completed_tasks,
+            queue_wait_p50_ms = metrics.queue_wait_p50.as_millis(),
+            queue_wait_p95_ms = metrics.queue_wait_p95.as_millis(),
+            task_duration_p50_ms = metrics.task_duration_p50.as_millis(),
+            task_duration_p95_ms = metrics.task_duration_p95.as_millis(),
+            volume_count = metrics.volumes.len(),
+            "task pool batch metrics"
+        );
+        Ok(TaskPoolResult { outcomes, metrics })
     }
 }
 
@@ -229,6 +244,8 @@ fn worker_loop(class: ExecutionClass, ctx: WorkerContext) {
     while let Some(scheduled) = ctx.queue.pop(class, &ctx.config, &ctx.shutdown) {
         let _pending = PendingTaskGuard::new(&ctx);
         let failure_path = task_path(&scheduled.task);
+        let queue_wait = scheduled.started_at.saturating_duration_since(scheduled.enqueued_at);
+        let started_at = scheduled.started_at;
         let resources = scheduled.resources;
         let task = scheduled.task;
         let mut spawned = Vec::new();
@@ -247,6 +264,8 @@ fn worker_loop(class: ExecutionClass, ctx: WorkerContext) {
             );
         }));
 
+        let run_time = started_at.elapsed();
+        ctx.metrics.record(queue_wait, run_time, &resources);
         ctx.queue.release(&resources);
 
         if result.is_err() {
