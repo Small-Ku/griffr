@@ -194,6 +194,7 @@ pub(super) fn execute_extract_archive(
             if let Err(error) = extractor.extract_to_with_progress(
                 &staging_dir,
                 password.as_deref(),
+                inspection.total_uncompressed_bytes,
                 extraction_progress_buffer_bytes,
                 Some(move |bytes, total_bytes| {
                     let _ = event_tx_clone.send(WorkerEvent::ExtractedBytes {

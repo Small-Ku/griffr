@@ -8,64 +8,73 @@ use crate::api::types::ResourcePatch;
 use crate::error::{Error, Result};
 use crate::runtime::{DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME};
 
-/// Multi-volume stream that reads split zip files as a single stream
+/// Cached byte range for one split archive volume.
+#[derive(Debug, Clone)]
+struct VolumeLayout {
+    path: PathBuf,
+    start: u64,
+    end: u64,
+}
+
+/// Multi-volume stream that reads split zip files as a single stream.
+///
+/// Volume sizes and cumulative offsets are captured once at construction so
+/// ZipArchive seeks do not restat every part or linearly rescan the full set.
 pub struct MultiVolumeStream {
-    volumes: Vec<PathBuf>,
+    layouts: Vec<VolumeLayout>,
+    total_size: u64,
     current_volume: usize,
     current_file: Option<std::fs::File>,
     position: u64,
 }
 
 impl MultiVolumeStream {
-    /// Create a new multi-volume stream from a list of volume paths
+    /// Create a new multi-volume stream from a list of volume paths.
     pub(crate) fn new(volumes: Vec<PathBuf>) -> Result<Self> {
         if volumes.is_empty() {
             return Err(Error::Extraction("No volumes provided".to_string()));
         }
 
-        // Verify all volumes exist
-        for volume in &volumes {
-            if !volume.exists() {
-                return Err(Error::Extraction(format!(
-                    "Volume not found: {}",
-                    volume.display()
-                )));
-            }
+        let mut start = 0u64;
+        let mut layouts = Vec::with_capacity(volumes.len());
+        for path in volumes {
+            let metadata = std::fs::metadata(&path).map_err(|source| Error::StatFailed {
+                path: path.clone(),
+                source,
+            })?;
+            let end = start.checked_add(metadata.len()).ok_or_else(|| {
+                Error::Extraction("Combined archive size overflowed u64".to_string())
+            })?;
+            layouts.push(VolumeLayout { path, start, end });
+            start = end;
         }
 
         let mut stream = Self {
-            volumes,
+            layouts,
+            total_size: start,
             current_volume: 0,
             current_file: None,
             position: 0,
         };
-
-        // Open first volume
         stream.open_current_volume()?;
-
         Ok(stream)
     }
 
-    /// Open the current volume file
     fn open_current_volume(&mut self) -> Result<()> {
-        if self.current_volume >= self.volumes.len() {
-            return Err(Error::Extraction("No more volumes to open".to_string()));
-        }
-
-        let path = &self.volumes[self.current_volume];
-        let file = std::fs::File::open(path).map_err(|e| Error::OpenFileFailed {
-            path: path.clone(),
-            source: e,
+        let layout = self.layouts.get(self.current_volume).ok_or_else(|| {
+            Error::Extraction("No more volumes to open".to_string())
         })?;
-
+        let file = std::fs::File::open(&layout.path).map_err(|source| Error::OpenFileFailed {
+            path: layout.path.clone(),
+            source,
+        })?;
         self.current_file = Some(file);
         Ok(())
     }
 
-    /// Move to the next volume
     fn next_volume(&mut self) -> Result<bool> {
         self.current_volume += 1;
-        if self.current_volume < self.volumes.len() {
+        if self.current_volume < self.layouts.len() {
             self.open_current_volume()?;
             Ok(true)
         } else {
@@ -74,14 +83,8 @@ impl MultiVolumeStream {
         }
     }
 
-    /// Get the total size of all volumes
-    pub fn total_size(&self) -> Result<u64> {
-        let mut total = 0u64;
-        for volume in &self.volumes {
-            let metadata = std::fs::metadata(volume)?;
-            total += metadata.len();
-        }
-        Ok(total)
+    pub fn total_size(&self) -> u64 {
+        self.total_size
     }
 }
 
@@ -92,15 +95,13 @@ impl Read for MultiVolumeStream {
                 Some(file) => {
                     let bytes_read = file.read(buf)?;
                     if bytes_read > 0 {
-                        self.position += bytes_read as u64;
+                        self.position = self.position.saturating_add(bytes_read as u64);
                         return Ok(bytes_read);
                     }
-
-                    // End of current volume, try next
                     match self.next_volume() {
                         Ok(true) => continue,
                         Ok(false) => return Ok(0),
-                        Err(e) => return Err(std::io::Error::other(e)),
+                        Err(error) => return Err(std::io::Error::other(error)),
                     }
                 }
                 None => return Ok(0),
@@ -111,36 +112,25 @@ impl Read for MultiVolumeStream {
 
 impl Seek for MultiVolumeStream {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        // For multi-volume streams, we need to calculate which volume and offset
-        // This is a simplified implementation
         let target_position = match pos {
-            SeekFrom::Start(offset) => offset as i64,
-            SeekFrom::Current(offset) => self.position as i64 + offset,
-            SeekFrom::End(offset) => {
-                let total_size = self.total_size().map_err(std::io::Error::other)? as i64;
-                total_size + offset
-            }
+            SeekFrom::Start(offset) => i128::from(offset),
+            SeekFrom::Current(offset) => i128::from(self.position) + i128::from(offset),
+            SeekFrom::End(offset) => i128::from(self.total_size) + i128::from(offset),
         };
-
-        let total_size = self.total_size().map_err(std::io::Error::other)?;
-
-        if target_position < 0 || target_position > total_size as i64 {
+        if target_position < 0 || target_position > i128::from(self.total_size) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
                     "Invalid seek position: {} (total size: {})",
-                    target_position, total_size
+                    target_position, self.total_size
                 ),
             ));
         }
-
         let target = target_position as u64;
-
-        // Special case for seeking to EOF
-        if target == total_size {
-            let last_idx = self.volumes.len() - 1;
-            if self.current_volume != last_idx {
-                self.current_volume = last_idx;
+        if target == self.total_size {
+            let last_index = self.layouts.len() - 1;
+            if self.current_volume != last_index {
+                self.current_volume = last_index;
                 self.open_current_volume().map_err(std::io::Error::other)?;
             }
             if let Some(file) = &mut self.current_file {
@@ -150,36 +140,23 @@ impl Seek for MultiVolumeStream {
             return Ok(target);
         }
 
-        // Find the volume containing this position
-        let mut cumulative_size = 0u64;
-        for (i, volume) in self.volumes.iter().enumerate() {
-            let volume_size = std::fs::metadata(volume)
-                .map_err(std::io::Error::other)?
-                .len();
-
-            if target >= cumulative_size && target < cumulative_size + volume_size {
-                // Target is in this volume
-                if self.current_volume != i {
-                    self.current_volume = i;
-                    self.open_current_volume().map_err(std::io::Error::other)?;
-                }
-
-                let offset_in_volume = target - cumulative_size;
-                if let Some(file) = &mut self.current_file {
-                    file.seek(SeekFrom::Start(offset_in_volume))?;
-                }
-
-                self.position = target;
-                return Ok(target);
-            }
-
-            cumulative_size += volume_size;
+        let index = self.layouts.partition_point(|layout| layout.end <= target);
+        let layout = self.layouts.get(index).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Seek position beyond end of stream",
+            )
+        })?;
+        let offset = target.saturating_sub(layout.start);
+        if self.current_volume != index {
+            self.current_volume = index;
+            self.open_current_volume().map_err(std::io::Error::other)?;
         }
-
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "Seek position beyond end of stream",
-        ))
+        if let Some(file) = &mut self.current_file {
+            file.seek(SeekFrom::Start(offset))?;
+        }
+        self.position = target;
+        Ok(target)
     }
 }
 
@@ -313,18 +290,12 @@ impl MultiVolumeExtractor {
         &self,
         target_dir: &Path,
         password: Option<&str>,
+        total_extract_bytes: u64,
         progress_buffer_bytes: usize,
         mut progress_callback: Option<impl FnMut(u64, u64)>,
     ) -> Result<()> {
         let stream = MultiVolumeStream::new(self.volumes.clone())?;
         let mut archive = zip::ZipArchive::new(stream)?;
-        let mut total_extract_bytes = 0u64;
-        for i in 0..archive.len() {
-            let file = open_archive_entry(&mut archive, i, password)?;
-            if !file.is_dir() {
-                total_extract_bytes = total_extract_bytes.saturating_add(file.size());
-            }
-        }
         let mut extracted_bytes = 0u64;
         if let Some(ref mut cb) = progress_callback {
             cb(0, total_extract_bytes);
@@ -417,7 +388,7 @@ mod tests {
         let extractor = MultiVolumeExtractor::new(volumes)?;
         let output_dir = base_path.join("output");
         std::fs::create_dir(&output_dir)?;
-        extractor.extract_to_with_progress(&output_dir, None, 64, None::<fn(u64, u64)>)?;
+        extractor.extract_to_with_progress(&output_dir, None, 13, 64, None::<fn(u64, u64)>)?;
 
         // 3. Verify
         let output_file = output_dir.join("hello.txt");
