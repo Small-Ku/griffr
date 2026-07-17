@@ -159,6 +159,7 @@ pub(super) fn execute_extract_archive(
     extraction_progress_buffer_bytes: usize,
     patch_slots: usize,
     extract_shards: usize,
+    commit_slots: usize,
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) {
@@ -257,6 +258,7 @@ pub(super) fn execute_extract_archive(
                     Some(&mut on_patch),
                     Some(&mut on_delete),
                     patch_slots,
+                    commit_slots,
                 )?;
                 if staging_dir.exists() {
                     std::fs::remove_dir_all(&staging_dir).map_err(|source| {
@@ -267,7 +269,7 @@ pub(super) fn execute_extract_archive(
                     })?;
                 }
             } else {
-                if let Err(error) = commit_staged_extract(&staging_dir, &dest, Some(&mut on_commit))
+                if let Err(error) = commit_staged_extract(&staging_dir, &dest, commit_slots, Some(&mut on_commit))
                 {
                     let _ = std::fs::remove_dir_all(&staging_dir);
                     return Err(error);

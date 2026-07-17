@@ -26,11 +26,12 @@ pub(crate) fn execute_patch_transaction(
     mut patch_callback: Option<&mut dyn FnMut(&str, usize, usize)>,
     delete_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
     patch_slots: usize,
+    commit_slots: usize,
 ) -> Result<()> {
     plan.validate()?;
     write_patch_execution_plan(plan)?;
     prepare_external_vfs_root(plan)?;
-    commit_top_level_files(plan, commit_callback)?;
+    commit_top_level_files(plan, commit_callback, commit_slots)?;
     delete_unreferenced_paths_before_patch(plan)?;
 
     let delete_set = plan.delete_paths.iter().cloned().collect::<BTreeSet<_>>();
@@ -104,6 +105,7 @@ pub(crate) fn resume_patch_transaction(
     patch_callback: Option<&mut dyn FnMut(&str, usize, usize)>,
     delete_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
     patch_slots: usize,
+    commit_slots: usize,
 ) -> Result<()> {
     let plan = read_patch_execution_plan(install_root)?;
     execute_patch_transaction(
@@ -113,6 +115,7 @@ pub(crate) fn resume_patch_transaction(
         patch_callback,
         delete_callback,
         patch_slots,
+        commit_slots,
     )
 }
 

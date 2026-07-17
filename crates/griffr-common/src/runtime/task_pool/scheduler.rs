@@ -463,6 +463,7 @@ fn spawn_workers(
                         worker_ctx.config.download_progress_buffer_bytes,
                         worker_ctx.config.patch_slots,
                         worker_ctx.config.extract_shards,
+                        worker_ctx.config.commit_slots,
                         Some(worker_ctx.shared_dispatcher.as_ref()),
                         &worker_ctx.config.user_agent,
                         &mut spawned,

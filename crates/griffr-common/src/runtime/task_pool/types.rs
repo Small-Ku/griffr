@@ -16,6 +16,8 @@ const MIN_EXTRACT_SLOTS: usize = 1;
 const MAX_EXTRACT_SLOTS: usize = 4;
 const MIN_EXTRACT_SHARDS: usize = 1;
 const MAX_EXTRACT_SHARDS: usize = 4;
+const MIN_COMMIT_SLOTS: usize = 1;
+const MAX_COMMIT_SLOTS: usize = 8;
 const MIN_FILE_ENSURE_IO_SLOTS: usize = 4;
 const MAX_FILE_ENSURE_IO_SLOTS: usize = 24;
 const DEFAULT_VFS_IO_SLOTS: usize = 6;
@@ -394,6 +396,7 @@ pub struct TaskPoolConfig {
     pub cpu_slots: usize,
     pub extract_slots: usize,
     pub extract_shards: usize,
+    pub commit_slots: usize,
     pub max_retries: u32,
     pub user_agent: String,
     pub extraction_progress_buffer_bytes: usize,
@@ -453,6 +456,7 @@ impl Default for TaskPoolConfig {
             cpu_slots: cpus.clamp(MIN_CPU_SLOTS, MAX_CPU_SLOTS),
             extract_slots: (cpus / 2).clamp(MIN_EXTRACT_SLOTS, MAX_EXTRACT_SLOTS),
             extract_shards: (cpus / 4).clamp(MIN_EXTRACT_SHARDS, MAX_EXTRACT_SHARDS),
+            commit_slots: cpus.clamp(MIN_COMMIT_SLOTS, MAX_COMMIT_SLOTS),
             max_retries: DEFAULT_MAX_RETRIES,
             user_agent: MIN_USER_AGENT.to_owned(),
             extraction_progress_buffer_bytes: DEFAULT_PROGRESS_BUFFER_BYTES,

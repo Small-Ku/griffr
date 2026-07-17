@@ -10,7 +10,9 @@ use crate::runtime::patch_transaction::{
 use crate::runtime::task_pool::verify::file_md5;
 use crate::runtime::{DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR};
 
-use super::super::super::extract::move_path_replace_cross_volume;
+use super::super::super::extract::{
+    collect_staged_files, commit_file_jobs, move_path_replace_cross_volume, CommitFileJob,
+};
 
 pub(super) fn remove_path_if_exists(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
@@ -191,34 +193,6 @@ pub(super) fn prepare_external_vfs_root(plan: &PatchExecutionPlan) -> Result<()>
     )
 }
 
-pub(super) fn collect_staged_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(directory) = stack.pop() {
-        for entry in std::fs::read_dir(&directory).map_err(|source| Error::ReadDirFailed {
-            path: directory.clone(),
-            source,
-        })? {
-            let entry = entry.map_err(|source| Error::ReadDirFailed {
-                path: directory.clone(),
-                source,
-            })?;
-            let path = entry.path();
-            let file_type = entry.file_type().map_err(|source| Error::StatFailed {
-                path: path.clone(),
-                source,
-            })?;
-            if file_type.is_dir() {
-                stack.push(path);
-            } else {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    Ok(files)
-}
-
 pub(super) fn is_patch_control_path(relative: &Path) -> bool {
     relative == Path::new(PATCH_MANIFEST_NAME)
         || relative == Path::new(DELETE_FILES_MANIFEST_NAME)
@@ -227,7 +201,8 @@ pub(super) fn is_patch_control_path(relative: &Path) -> bool {
 
 pub(super) fn commit_top_level_files(
     plan: &PatchExecutionPlan,
-    mut callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
+    callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
+    commit_slots: usize,
 ) -> Result<()> {
     let files = collect_staged_files(&plan.stage_root)?;
     let deferred = plan.deferred_paths.iter().cloned().collect::<BTreeSet<_>>();
@@ -238,31 +213,23 @@ pub(super) fn commit_top_level_files(
             (!is_patch_control_path(&relative)).then_some((source, relative))
         })
         .collect::<Vec<_>>();
-    let total = commit_files.len();
-    if total > 0 {
-        if let Some(callback) = callback.as_deref_mut() {
-            callback(Path::new("."), 0, total);
-        }
-    }
-    for (index, (source, relative)) in commit_files.into_iter().enumerate() {
-        let target = if deferred.contains(&relative) {
-            plan.install_root
-                .join(PATCH_TRANSACTION_DIR)
-                .join(PATCH_DEFERRED_DIR)
-                .join(&relative)
-        } else {
-            plan.install_root.join(&relative)
-        };
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|source_error| Error::CreateDirFailed {
-                path: parent.to_path_buf(),
-                source: source_error,
-            })?;
-        }
-        move_path_replace_cross_volume(&source, &target)?;
-        if let Some(callback) = callback.as_deref_mut() {
-            callback(&relative, index + 1, total);
-        }
-    }
-    Ok(())
+    let jobs = commit_files
+        .into_iter()
+        .map(|(source, relative)| {
+            let destination = if deferred.contains(&relative) {
+                plan.install_root
+                    .join(PATCH_TRANSACTION_DIR)
+                    .join(PATCH_DEFERRED_DIR)
+                    .join(&relative)
+            } else {
+                plan.install_root.join(&relative)
+            };
+            CommitFileJob {
+                source,
+                destination,
+                logical_path: relative,
+            }
+        })
+        .collect();
+    commit_file_jobs(jobs, commit_slots, callback)
 }

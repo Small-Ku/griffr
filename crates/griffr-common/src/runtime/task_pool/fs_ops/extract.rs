@@ -21,120 +21,141 @@ pub(crate) fn make_extract_staging_dir(
     Ok(parent.join(format!(".griffr.extract.{}.{}", base_name, counter)))
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CommitFileJob {
+    pub source: PathBuf,
+    pub destination: PathBuf,
+    pub logical_path: PathBuf,
+}
+
+pub(crate) fn collect_staged_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).map_err(|source| Error::ReadDirFailed {
+            path: directory.clone(),
+            source,
+        })? {
+            let entry = entry.map_err(|source| Error::ReadDirFailed {
+                path: directory.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|source| Error::StatFailed {
+                path: path.clone(),
+                source,
+            })?;
+            if file_type.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn commit_file_job(job: &CommitFileJob) -> Result<()> {
+    if let Some(parent) = job.destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirFailed {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    if job.destination.is_dir() {
+        std::fs::remove_dir_all(&job.destination).map_err(|source| Error::RemoveFailed {
+            path: job.destination.clone(),
+            source,
+        })?;
+    }
+    move_path_replace_cross_volume(&job.source, &job.destination).map_err(|error| {
+        Error::Other(format!(
+            "Failed to move extracted file {} -> {}: {error}",
+            job.source.display(),
+            job.destination.display()
+        ))
+    })
+}
+
+pub(crate) fn commit_file_jobs(
+    jobs: Vec<CommitFileJob>,
+    commit_slots: usize,
+    mut progress_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
+) -> Result<()> {
+    let total = jobs.len();
+    if total > 0 {
+        if let Some(callback) = progress_callback.as_deref_mut() {
+            callback(Path::new("."), 0, total);
+        }
+    }
+    let mut completed = 0usize;
+    let commit_slots = commit_slots.max(1);
+    for chunk in jobs.chunks(commit_slots) {
+        let results = std::thread::scope(|scope| {
+            chunk
+                .iter()
+                .map(|job| {
+                    scope.spawn(move || commit_file_job(job).map_err(|error| error.to_string()))
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err("archive commit worker panicked".to_string()))
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let mut failures = Vec::new();
+        for (job, result) in chunk.iter().zip(results) {
+            match result {
+                Ok(()) => {
+                    completed = completed.saturating_add(1);
+                    if let Some(callback) = progress_callback.as_deref_mut() {
+                        callback(&job.logical_path, completed, total);
+                    }
+                }
+                Err(error) => failures.push(format!(
+                    "{}: {}",
+                    job.logical_path.display(),
+                    error
+                )),
+            }
+        }
+        if !failures.is_empty() {
+            return Err(Error::Other(format!(
+                "Archive commit failed: {}",
+                failures.join("; ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn commit_staged_extract(
     staging_root: &Path,
     dest_root: &Path,
-    mut progress_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
+    commit_slots: usize,
+    progress_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
 ) -> Result<()> {
-    let total_files = count_staged_files(staging_root)?;
-    if total_files > 0 {
-        if let Some(cb) = progress_callback.as_deref_mut() {
-            cb(Path::new("."), 0, total_files);
-        }
-    }
-    let mut completed_files = 0usize;
-    commit_staged_extract_inner(
-        staging_root,
-        staging_root,
-        dest_root,
-        &mut completed_files,
-        total_files,
-        &mut progress_callback,
-    )?;
-    std::fs::remove_dir_all(staging_root).map_err(|e| Error::RemoveFailed {
+    let jobs = collect_staged_files(staging_root)?
+        .into_iter()
+        .map(|source| {
+            let logical_path = source.strip_prefix(staging_root)?.to_path_buf();
+            Ok(CommitFileJob {
+                destination: dest_root.join(&logical_path),
+                source,
+                logical_path,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    commit_file_jobs(jobs, commit_slots, progress_callback)?;
+    std::fs::remove_dir_all(staging_root).map_err(|source| Error::RemoveFailed {
         path: staging_root.to_path_buf(),
-        source: e,
-    })?;
-    Ok(())
-}
-
-fn count_staged_files(current: &Path) -> Result<usize> {
-    let mut total = 0usize;
-    for entry in std::fs::read_dir(current).map_err(|e| Error::ReadDirFailed {
-        path: current.to_path_buf(),
-        source: e,
-    })? {
-        let entry = entry.map_err(|e| Error::ReadDirFailed {
-            path: current.to_path_buf(),
-            source: e,
-        })?;
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|e| Error::StatFailed {
-            path: path.clone(),
-            source: e,
-        })?;
-        if file_type.is_dir() {
-            total = total.saturating_add(count_staged_files(&path)?);
-        } else {
-            total = total.saturating_add(1);
-        }
-    }
-    Ok(total)
-}
-
-fn commit_staged_extract_inner(
-    staging_root: &Path,
-    current: &Path,
-    dest_root: &Path,
-    completed_files: &mut usize,
-    total_files: usize,
-    progress_callback: &mut Option<&mut dyn FnMut(&Path, usize, usize)>,
-) -> Result<()> {
-    for entry in std::fs::read_dir(current).map_err(|e| Error::ReadDirFailed {
-        path: current.to_path_buf(),
-        source: e,
-    })? {
-        let entry = entry.map_err(|e| Error::ReadDirFailed {
-            path: current.to_path_buf(),
-            source: e,
-        })?;
-        let src_path = entry.path();
-        let file_type = entry.file_type().map_err(|e| Error::StatFailed {
-            path: src_path.clone(),
-            source: e,
-        })?;
-        let relative = src_path.strip_prefix(staging_root)?;
-        let dest_path = dest_root.join(relative);
-        if file_type.is_dir() {
-            std::fs::create_dir_all(&dest_path).map_err(|e| Error::CreateDirFailed {
-                path: dest_path.clone(),
-                source: e,
-            })?;
-            commit_staged_extract_inner(
-                staging_root,
-                &src_path,
-                dest_root,
-                completed_files,
-                total_files,
-                progress_callback,
-            )?;
-            continue;
-        }
-        if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| Error::CreateDirFailed {
-                path: parent.to_path_buf(),
-                source: e,
-            })?;
-        }
-        if dest_path.exists() && dest_path.is_dir() {
-            std::fs::remove_dir_all(&dest_path).map_err(|e| Error::RemoveFailed {
-                path: dest_path.clone(),
-                source: e,
-            })?;
-        }
-        move_path_replace_cross_volume(&src_path, &dest_path).map_err(|e| {
-            Error::Other(format!(
-                "Failed to move extracted file {} -> {}: {e}",
-                src_path.display(),
-                dest_path.display()
-            ))
-        })?;
-        *completed_files = completed_files.saturating_add(1);
-        if let Some(cb) = progress_callback.as_deref_mut() {
-            cb(relative, *completed_files, total_files);
-        }
-    }
-    Ok(())
+        source,
+    })
 }
 
 pub(crate) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
@@ -250,7 +271,7 @@ mod tests {
         let mut on_progress = |path: &Path, completed: usize, total: usize| {
             progress.push((path.to_path_buf(), completed, total));
         };
-        commit_staged_extract(&staging_root, &dest_root, Some(&mut on_progress)).unwrap();
+        commit_staged_extract(&staging_root, &dest_root, 2, Some(&mut on_progress)).unwrap();
 
         assert_eq!(progress.first().map(|item| (item.1, item.2)), Some((0, 2)));
         assert_eq!(progress.last().map(|item| (item.1, item.2)), Some((2, 2)));
