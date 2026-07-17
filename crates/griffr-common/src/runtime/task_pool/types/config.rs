@@ -20,7 +20,6 @@ const MAX_EXTRACT_SHARDS: usize = 4;
 
 pub const DEFAULT_PROGRESS_BUFFER_BYTES: usize = 256 * 1024;
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VolumeConcurrency {
     pub read_slots: usize,

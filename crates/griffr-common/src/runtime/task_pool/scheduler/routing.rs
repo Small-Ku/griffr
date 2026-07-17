@@ -138,7 +138,6 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
     request
 }
 
-
 fn task_estimated_bytes(task: &Task) -> u64 {
     match task {
         Task::InstallArchivePart { part, .. } | Task::TransferArchivePart { part, .. } => {

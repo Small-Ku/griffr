@@ -133,7 +133,6 @@ impl WorkerEvent {
     }
 }
 
-
 #[derive(Debug, Clone, Default)]
 pub struct VolumeTaskMetrics {
     pub read_tasks: usize,
