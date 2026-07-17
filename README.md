@@ -45,5 +45,5 @@ cargo build --release
 ```
 
 ## Documentation
-- API/protocol docs: `docs/API.md`
-- Design docs: `docs/DESIGN_*.md`
+- API/protocol docs: [`docs/API.md`](docs/API.md)
+- Design & architecture docs: [`docs/DESIGN.md`](docs/DESIGN.md)

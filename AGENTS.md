@@ -14,9 +14,8 @@ Primary workspace crates:
 
 Reference material:
 
-- API documentation: `docs/API*.md`
-- Design documentation: `docs/DESIGN_*.md`
-- Patch pipeline documentation: `docs/PATCH_PIPELINE.md`
+- API documentation: `docs/API.md` and `docs/API_*.md`
+- Design documentation: `docs/DESIGN.md` and `docs/DESIGN_*.md`
 - Reverse-engineering references: `ref/`
 - Static checker: `scripts/rust_check.py` and `scripts/rust_check_lib/`
 

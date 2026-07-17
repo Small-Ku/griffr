@@ -248,4 +248,4 @@ For account switching, the safest scoped strategy is snapshot/restore of per-use
 
 Current `griffr-cli` account command caveat: server identity is not auto-inferred from SDK payload. Commands are game-scoped and can narrow default root selection with `--region-hint cn|sg` (`cn` -> `Hypergryph`, `sg` -> `Gryphline`); without a hint they scan both and pick the latest modified `sdk_data_*` unless `--sdk-dir` is provided explicitly.
 
-See [`ACCOUNT_MODEL.md`](ACCOUNT_MODEL.md) for the concrete `griffr` model (storage layout, switching semantics, and security constraints).
+See [`DESIGN_account_model.md`](DESIGN_account_model.md) for the concrete `griffr` model (storage layout, switching semantics, and security constraints).

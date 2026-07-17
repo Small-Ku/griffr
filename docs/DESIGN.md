@@ -1,0 +1,45 @@
+# Griffr Architecture & Design Reference
+
+This directory documents the core design, runtime execution model, storage layouts, and patch transactions of the `griffr` workspace. 
+
+The primary runtime is optimized for Windows large-file I/O, leveraging `compio` for asynchronous kernel completion events (IOCP) and compio's blocking thread pool for CPU/blocking tasks.
+
+---
+
+## File Index
+
+| File | Contents |
+|------|----------|
+| [`DESIGN_compio.md`](DESIGN_compio.md) | Runtime analysis and rationale for selecting `compio` over `tokio` (Windows IOCP, zero-copy `IoBuf` streams, and HTTP/3 support). |
+| [`DESIGN_task_pool.md`](DESIGN_task_pool.md) | Architecture of the unified frontend-neutral task pool, task graph compilation, slot groups, and structured progress/outcome reduction. |
+| [`DESIGN_patch_pipeline.md`](DESIGN_patch_pipeline.md) | Pipeline mechanics for forward-only patch application, including VFS integration, dependency-wave scheduling, and preflight checks. |
+| [`DESIGN_account_model.md`](DESIGN_account_model.md) | Empirical analysis of the official launcher's LocalLow MMKV session caches and `griffr`'s file-based profile switching semantics. |
+| [`DESIGN_optimizations.md`](DESIGN_optimizations.md) | Detail on optimization stages: resume recovery, cross-volume candidate reuse routing, shared ZIP index parsing, and Windows storage preallocation. |
+
+---
+
+## Quick Reference
+
+### 1. Concurrency & Execution Model
+
+The workload separates asynchronous I/O and synchronous CPU tasks to prevent scheduler thread blocking and network starvation:
+
+*   **I/O Queue (`compio`):** Run on a single-thread runtime driven by an IOCP completion port. Handles downloading, local copying, folder creation, and hardlink binding.
+*   **CPU Queue (compio blocking pool):** Handles file hash computation (MD5 verification), zip entry parsing, and HDiff patch generation.
+*   **Bridge:** Task execution uses a thread-safe message-passing pipeline via bounded channels. Frontend clients consume a unified progress protocol over the `ProgressReceiver` wrapper.
+
+### 2. Patch Transaction Rules
+
+Griffr implements a **forward-only transaction model** with no backward rollback capability:
+
+1.  **Preflight:** Scan destination, plan dependencies, select sources, verify hashes, and simulate disk growth.
+2.  **Persisted Plan:** Save execution state to `.griffr-patch/plan.json` before starting mutations.
+3.  **Destructive Wave Execution:** Process changes in waves. Delete files only when their last consumer finishes.
+4.  **Deferred Markers:** Write configuration changes (`config.ini`) only after all VFS and staging directories are successfully processed and cleaned up.
+
+### 3. File Allocation & Storage
+
+On Windows, all output files with a known length reserve physical disk clusters via `FILE_ALLOCATION_INFO` before writing:
+*   Prevents fragmentation and repeated file system allocation updates.
+*   Triggers "out of disk space" errors at the start of the write sequence, rather than hours into a large stream.
+*   Does not alter logical EOF, preserving standard atomic replace behaviors.
