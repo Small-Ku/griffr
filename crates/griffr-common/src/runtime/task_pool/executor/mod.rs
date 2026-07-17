@@ -244,9 +244,7 @@ pub(crate) fn execute_task(
             spawned,
             event_tx,
         ),
-        Task::CommitArchive { work } => {
-            archive::execute_commit_archive(work, spawned, event_tx)
-        }
+        Task::CommitArchive { work } => archive::execute_commit_archive(work, spawned, event_tx),
         Task::CleanupArchive { work } => archive::execute_cleanup_archive(work, event_tx),
         Task::ApplyExtractedVfsPatchManifest { install_root } => {
             let plan_path = install_root

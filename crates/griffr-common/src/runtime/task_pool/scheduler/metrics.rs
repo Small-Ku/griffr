@@ -54,17 +54,14 @@ impl SchedulerMetrics {
             for volume in &sample.read_volumes {
                 let metric = volumes.entry(volume.clone()).or_default();
                 metric.read_bytes = metric.read_bytes.saturating_add(sample.estimated_bytes);
-                metric.read_service_time = metric
-                    .read_service_time
-                    .saturating_add(sample.run_time);
+                metric.read_service_time = metric.read_service_time.saturating_add(sample.run_time);
                 metric.read_tasks = metric.read_tasks.saturating_add(1);
             }
             for volume in &sample.write_volumes {
                 let metric = volumes.entry(volume.clone()).or_default();
                 metric.write_bytes = metric.write_bytes.saturating_add(sample.estimated_bytes);
-                metric.write_service_time = metric
-                    .write_service_time
-                    .saturating_add(sample.run_time);
+                metric.write_service_time =
+                    metric.write_service_time.saturating_add(sample.run_time);
                 metric.write_tasks = metric.write_tasks.saturating_add(1);
             }
         }

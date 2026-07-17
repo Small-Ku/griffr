@@ -256,7 +256,7 @@ pub(super) fn execute_prepare_archive(
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) {
-    let result = (|| {
+    let result: Result<(), Error> = (|| {
         let extractor =
             crate::download::extractor::MultiVolumeExtractor::new(work.volumes.clone())?;
         let patch_options = work.patch_options.resolved_for_install(&work.dest)?;
@@ -270,9 +270,8 @@ pub(super) fn execute_prepare_archive(
             source,
         })?;
 
-        let inspection = std::sync::Arc::new(
-            extractor.inspect_patch_payload(work.password.as_deref())?,
-        );
+        let inspection =
+            std::sync::Arc::new(extractor.inspect_patch_payload(work.password.as_deref())?);
         let verification_cache = VerifiedArtifactCache::default();
         let patch_plan = if inspection.patch_manifest.is_some() {
             Some(build_patch_execution_plan_with_cache(
@@ -294,7 +293,6 @@ pub(super) fn execute_prepare_archive(
 
         *work.prepared.lock().unwrap() = Some(PreparedArchive {
             staging_dir: staging_dir.clone(),
-            inspection: inspection.clone(),
             patch_plan,
         });
         let ranges = crate::download::extractor::MultiVolumeExtractor::extraction_ranges(
@@ -393,7 +391,9 @@ pub(super) fn execute_extract_archive_shard(
         let _ = std::fs::remove_dir_all(&staging_dir);
         work.prepared.lock().unwrap().take();
     } else if succeeded && !group.is_failed() {
-        let extracted = work.extracted_bytes.load(std::sync::atomic::Ordering::Acquire);
+        let extracted = work
+            .extracted_bytes
+            .load(std::sync::atomic::Ordering::Acquire);
         if extracted >= inspection.total_uncompressed_bytes {
             let _ = event_tx.send(WorkerEvent::ExtractedBytes {
                 path: work.base_name.clone(),
@@ -419,7 +419,7 @@ pub(super) fn execute_commit_archive(
             return;
         }
     };
-    let result = (|| {
+    let result: Result<(), Error> = (|| {
         let mut on_commit = |path: &std::path::Path, completed: usize, total: usize| {
             let normalized = path.to_string_lossy().replace('\\', "/");
             if completed > 0 {
@@ -479,11 +479,7 @@ pub(super) fn execute_commit_archive(
                 })?;
             }
         } else {
-            commit_staged_extract(
-                &prepared.staging_dir,
-                &work.dest,
-                Some(&mut on_commit),
-            )?;
+            commit_staged_extract(&prepared.staging_dir, &work.dest, Some(&mut on_commit))?;
             spawned.push(Task::ApplyExtractedVfsPatchManifest {
                 install_root: work.dest.clone(),
             });

@@ -126,7 +126,9 @@ impl Default for TaskPoolConfig {
         Self {
             dispatcher_threads: cpus.clamp(MIN_DISPATCHER_THREADS, MAX_DISPATCHER_THREADS),
             network_slots: (cpus * 2).clamp(MIN_NETWORK_SLOTS, MAX_NETWORK_SLOTS),
-            cpu_workers: cpus.saturating_sub(1).clamp(MIN_CPU_WORKERS, MAX_CPU_WORKERS),
+            cpu_workers: cpus
+                .saturating_sub(1)
+                .clamp(MIN_CPU_WORKERS, MAX_CPU_WORKERS),
             blocking_workers: (cpus / 2).clamp(MIN_BLOCKING_WORKERS, MAX_BLOCKING_WORKERS),
             extract_slots: (cpus / 4).clamp(MIN_EXTRACT_SLOTS, MAX_EXTRACT_SLOTS),
             default_volume_concurrency: VolumeConcurrency::new(1, 1),

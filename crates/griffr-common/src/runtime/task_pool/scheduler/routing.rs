@@ -79,9 +79,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                 request.read_volumes.push(volume_key(path));
             }
         }
-        Task::ReuseFile {
-            source, dest, ..
-        } => {
+        Task::ReuseFile { source, dest, .. } => {
             request.read_volumes.push(volume_key(source));
             request.write_volumes.push(volume_key(dest));
         }
@@ -102,9 +100,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.write_volumes.push(volume_key(&work.dest));
             let prepared = work.prepared.lock().unwrap();
             if let Some(prepared) = prepared.as_ref() {
-                request
-                    .read_volumes
-                    .push(volume_key(&prepared.staging_dir));
+                request.read_volumes.push(volume_key(&prepared.staging_dir));
                 if let Some((plan, _)) = prepared.patch_plan.as_ref() {
                     request
                         .write_volumes
@@ -168,9 +164,7 @@ fn task_estimated_bytes(task: &Task) -> u64 {
 
 fn execution_class(task: &Task) -> ExecutionClass {
     match task {
-        Task::TransferDownload { .. } | Task::TransferArchivePart { .. } => {
-            ExecutionClass::Network
-        }
+        Task::TransferDownload { .. } | Task::TransferArchivePart { .. } => ExecutionClass::Network,
         Task::InstallArchivePart { .. }
         | Task::Download { .. }
         | Task::Verify { .. }
@@ -190,10 +184,7 @@ fn execution_class(task: &Task) -> ExecutionClass {
 }
 
 fn normalize_volumes(request: &mut ResourceRequest) {
-    let writes = request
-        .write_volumes
-        .drain(..)
-        .collect::<BTreeSet<_>>();
+    let writes = request.write_volumes.drain(..).collect::<BTreeSet<_>>();
     let reads = request
         .read_volumes
         .drain(..)

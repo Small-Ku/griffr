@@ -208,14 +208,18 @@ impl ReuseCandidateGroup {
                 self.retry_count,
                 self.transfer_class,
             );
-            spawned.extend(copy_groups.into_iter().map(|candidates| Task::VerifyReuseVolume {
-                copy_only: true,
-                candidates,
-                logical_path: self.logical_path.clone(),
-                expected_md5: self.expected_md5.clone(),
-                expected_size: self.expected_size,
-                group: group.clone(),
-            }));
+            spawned.extend(
+                copy_groups
+                    .into_iter()
+                    .map(|candidates| Task::VerifyReuseVolume {
+                        copy_only: true,
+                        candidates,
+                        logical_path: self.logical_path.clone(),
+                        expected_md5: self.expected_md5.clone(),
+                        expected_size: self.expected_size,
+                        group: group.clone(),
+                    }),
+            );
         } else if let Some(url) = self.download_url.clone() {
             spawned.push(Task::Download {
                 url,
@@ -238,7 +242,6 @@ impl ReuseCandidateGroup {
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedArchive {
     pub(crate) staging_dir: PathBuf,
-    pub(crate) inspection: Arc<ArchiveInspection>,
     pub(crate) patch_plan: Option<(PatchExecutionPlan, PatchPreflightReport)>,
 }
 
@@ -496,9 +499,7 @@ mod progress;
 
 pub use config::{TaskPoolConfig, VolumeConcurrency, DEFAULT_PROGRESS_BUFFER_BYTES};
 pub(crate) use events::WorkerEvent;
-pub use events::{
-    TaskOutcome, TaskPoolMetrics, TaskPoolResult, TaskPoolRunner, VolumeTaskMetrics,
-};
+pub use events::{TaskOutcome, TaskPoolMetrics, TaskPoolResult, TaskPoolRunner, VolumeTaskMetrics};
 pub use progress::TaskProgress;
 
 #[cfg(test)]

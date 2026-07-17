@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 
 use crate::api::types::ResourcePatch;
 use crate::error::{Error, Result};
@@ -191,11 +191,6 @@ pub(crate) struct ArchiveInspection {
     entry_sizes: Vec<u64>,
     pub patch_manifest: Option<ResourcePatch>,
     pub delete_manifest: Option<String>,
-}
-
-enum ExtractShardEvent {
-    Bytes(u64),
-    Finished(std::result::Result<(), String>),
 }
 
 fn open_archive_entry<'a, R: Read + Seek>(
@@ -421,81 +416,6 @@ impl MultiVolumeExtractor {
         }
         if pending_progress > 0 {
             progress_callback(pending_progress);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn extract_to_with_progress(
-        &self,
-        target_dir: &Path,
-        password: Option<&str>,
-        inspection: &ArchiveInspection,
-        max_shards: usize,
-        progress_buffer_bytes: usize,
-        mut progress_callback: Option<impl FnMut(u64, u64)>,
-    ) -> Result<()> {
-        if let Some(callback) = progress_callback.as_mut() {
-            callback(0, inspection.total_uncompressed_bytes);
-        }
-        let ranges = Self::extraction_ranges(inspection, max_shards);
-        if ranges.is_empty() {
-            return Ok(());
-        }
-
-        let (progress_tx, progress_rx) = mpsc::channel();
-        let mut errors = Vec::new();
-        let mut extracted_bytes = 0u64;
-        std::thread::scope(|scope| {
-            let handles = ranges
-                .into_iter()
-                .map(|range| {
-                    let tx = progress_tx.clone();
-                    scope.spawn(move || {
-                        let result = self
-                            .extract_range_with_progress(
-                                target_dir,
-                                password,
-                                inspection,
-                                range,
-                                progress_buffer_bytes,
-                                |bytes| {
-                                    let _ = tx.send(ExtractShardEvent::Bytes(bytes));
-                                },
-                            )
-                            .map_err(|error| error.to_string());
-                        let _ = tx.send(ExtractShardEvent::Finished(result));
-                    })
-                })
-                .collect::<Vec<_>>();
-            drop(progress_tx);
-
-            for event in progress_rx {
-                match event {
-                    ExtractShardEvent::Bytes(bytes) => {
-                        extracted_bytes = extracted_bytes.saturating_add(bytes);
-                        if let Some(callback) = progress_callback.as_mut() {
-                            callback(extracted_bytes, inspection.total_uncompressed_bytes);
-                        }
-                    }
-                    ExtractShardEvent::Finished(Err(error)) => errors.push(error),
-                    ExtractShardEvent::Finished(Ok(())) => {}
-                }
-            }
-            for handle in handles {
-                if handle.join().is_err() {
-                    errors.push("archive extraction shard panicked".to_string());
-                }
-            }
-        });
-
-        if !errors.is_empty() {
-            return Err(Error::Extraction(errors.join("; ")));
-        }
-        if let Some(callback) = progress_callback.as_mut() {
-            callback(
-                inspection.total_uncompressed_bytes,
-                inspection.total_uncompressed_bytes,
-            );
         }
         Ok(())
     }

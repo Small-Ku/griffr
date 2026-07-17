@@ -145,7 +145,10 @@ fn reuse_group_defers_cross_volume_copy_until_hardlink_probes_fail() {
     group.finish_volume(false, None, &mut spawned, &event_tx);
     assert!(matches!(
         spawned.as_slice(),
-        [Task::VerifyReuseVolume { copy_only: true, .. }]
+        [Task::VerifyReuseVolume {
+            copy_only: true,
+            ..
+        }]
     ));
 }
 
@@ -174,7 +177,10 @@ fn archive_shard_failure_suppresses_commit_continuation() {
     let mut spawned = Vec::new();
 
     assert!(group.record_failure());
-    assert!(!group.record_failure(), "only the first failure is reported");
+    assert!(
+        !group.record_failure(),
+        "only the first failure is reported"
+    );
     assert!(!group.finish_shard(false, &mut spawned));
     assert!(group.finish_shard(true, &mut spawned));
     assert!(spawned.is_empty());

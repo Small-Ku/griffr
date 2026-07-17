@@ -260,14 +260,18 @@ pub(super) fn execute_repair_file(
         retry_count,
         transfer_class,
     );
-    spawned.extend(initial_groups.into_iter().map(|candidates| Task::VerifyReuseVolume {
-        copy_only: initial_copy_only,
-        candidates,
-        logical_path: logical_path.clone(),
-        expected_md5: expected_md5.clone(),
-        expected_size,
-        group: group.clone(),
-    }));
+    spawned.extend(
+        initial_groups
+            .into_iter()
+            .map(|candidates| Task::VerifyReuseVolume {
+                copy_only: initial_copy_only,
+                candidates,
+                logical_path: logical_path.clone(),
+                expected_md5: expected_md5.clone(),
+                expected_size,
+                group: group.clone(),
+            }),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -303,7 +307,7 @@ fn enqueue_download_or_failure(
 pub(super) fn execute_verify_reuse_volume(
     copy_only: bool,
     candidates: Vec<PathBuf>,
-    logical_path: String,
+    _logical_path: String,
     expected_md5: String,
     expected_size: u64,
     group: std::sync::Arc<ReuseCandidateGroup>,

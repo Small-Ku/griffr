@@ -28,7 +28,7 @@ use queue::SchedulerQueue;
 use routing::{dispatcher_thread_count, task_path, task_resources, ExecutionClass};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TaskPriority {
+pub(crate) enum TaskPriority {
     Continuation,
     Bulk,
 }
@@ -244,7 +244,9 @@ fn worker_loop(class: ExecutionClass, ctx: WorkerContext) {
     while let Some(scheduled) = ctx.queue.pop(class, &ctx.config, &ctx.shutdown) {
         let _pending = PendingTaskGuard::new(&ctx);
         let failure_path = task_path(&scheduled.task);
-        let queue_wait = scheduled.started_at.saturating_duration_since(scheduled.enqueued_at);
+        let queue_wait = scheduled
+            .started_at
+            .saturating_duration_since(scheduled.enqueued_at);
         let started_at = scheduled.started_at;
         let resources = scheduled.resources;
         let task = scheduled.task;
@@ -290,11 +292,7 @@ fn worker_loop(class: ExecutionClass, ctx: WorkerContext) {
     }
 }
 
-pub(crate) fn enqueue_task(
-    ctx: &WorkerContext,
-    task: Task,
-    priority: TaskPriority,
-) -> Result<()> {
+pub(crate) fn enqueue_task(ctx: &WorkerContext, task: Task, priority: TaskPriority) -> Result<()> {
     let resources = task_resources(&task);
     ctx.pending.fetch_add(1, Ordering::AcqRel);
     if let Err(error) = ctx.queue.push(task, resources, priority, &ctx.shutdown) {

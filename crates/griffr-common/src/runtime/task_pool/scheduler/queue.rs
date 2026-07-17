@@ -199,13 +199,7 @@ fn remove_runnable(
     resources: &ResourceState,
     config: &TaskPoolConfig,
 ) -> Option<QueuedTask> {
-    let preferred = runnable_index(
-        queue,
-        class,
-        preferred_network,
-        resources,
-        config,
-    );
+    let preferred = runnable_index(queue, class, preferred_network, resources, config);
     let fallback = preferred.or_else(|| runnable_index(queue, class, None, resources, config));
     fallback.and_then(|index| queue.remove(index))
 }
@@ -336,9 +330,7 @@ impl SchedulerQueue {
 #[cfg(test)]
 mod tests {
     use super::SchedulerQueue;
-    use crate::runtime::task_pool::scheduler::routing::{
-        ExecutionClass, ResourceRequest,
-    };
+    use crate::runtime::task_pool::scheduler::routing::{ExecutionClass, ResourceRequest};
     use crate::runtime::task_pool::scheduler::TaskPriority;
     use crate::runtime::task_pool::{Task, TaskPoolConfig};
     use std::path::PathBuf;
@@ -443,5 +435,4 @@ mod tests {
         ));
         queue.release(&selected.resources);
     }
-
 }
