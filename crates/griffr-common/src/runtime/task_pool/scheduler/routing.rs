@@ -89,23 +89,37 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
         Task::PrepareArchive { work } => {
             request
                 .read_volumes
-                .extend(work.volumes.first().map(|path| volume_key(path)));
+                .extend(work.volumes.iter().map(|path| volume_key(path)));
         }
         Task::ExtractArchiveShard { shard } => {
             request
                 .read_volumes
-                .extend(shard.work.volumes.first().map(|path| volume_key(path)));
+                .extend(shard.work.volumes.iter().map(|path| volume_key(path)));
             request.write_volumes.push(volume_key(&shard.staging_dir));
             request.extract = true;
         }
         Task::CommitArchive { work } => {
             request.write_volumes.push(volume_key(&work.dest));
+            let prepared = work.prepared.lock().unwrap();
+            if let Some(prepared) = prepared.as_ref() {
+                request
+                    .read_volumes
+                    .push(volume_key(&prepared.staging_dir));
+                if let Some((plan, _)) = prepared.patch_plan.as_ref() {
+                    request
+                        .write_volumes
+                        .push(volume_key(&plan.vfs_destination));
+                    if let Some(work_dir) = plan.work_dir.as_deref() {
+                        request.write_volumes.push(volume_key(work_dir));
+                    }
+                }
+            }
             request.mutation_root = Some(path_key(&work.dest));
         }
         Task::CleanupArchive { work } => {
             request
                 .write_volumes
-                .extend(work.volumes.first().map(|path| volume_key(path)));
+                .extend(work.volumes.iter().map(|path| volume_key(path)));
         }
         Task::ApplyExtractedVfsPatchManifest { install_root }
         | Task::ApplyDeleteManifest { install_root } => {
@@ -113,7 +127,10 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.write_volumes.push(volume);
             request.mutation_root = Some(path_key(install_root));
         }
-        Task::Hardlink { dest, .. } => request.write_volumes.push(volume_key(dest)),
+        Task::Hardlink { src, dest } => {
+            request.read_volumes.push(volume_key(src));
+            request.write_volumes.push(volume_key(dest));
+        }
         Task::InstallArchive { .. } | Task::RepairFile { .. } => {}
     }
     request.estimated_bytes = task_estimated_bytes(task);

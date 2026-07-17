@@ -84,8 +84,8 @@ fn percentile(samples: &mut [Duration], percentile: usize) -> Duration {
         return Duration::ZERO;
     }
     samples.sort_unstable();
-    let index = ((samples.len() - 1) * percentile).div_ceil(100);
-    samples[index.min(samples.len() - 1)]
+    let rank = (samples.len() * percentile).div_ceil(100);
+    samples[rank.saturating_sub(1).min(samples.len() - 1)]
 }
 
 #[cfg(test)]

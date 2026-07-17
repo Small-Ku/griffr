@@ -349,6 +349,14 @@ pub(super) fn execute_extract_archive_shard(
     let staging_dir = shard.staging_dir.clone();
     let range = shard.range.clone();
     let group = shard.group.clone();
+    if group.is_failed() {
+        let last_failed = group.finish_shard(false, spawned);
+        if last_failed {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            work.prepared.lock().unwrap().take();
+        }
+        return;
+    }
     let extractor = crate::download::extractor::MultiVolumeExtractor::new(work.volumes.clone());
     let result = extractor.and_then(|extractor| {
         extractor.extract_range_with_progress(
