@@ -85,6 +85,18 @@ class RustCheckTests(unittest.TestCase):
         root = self.make_workspace("mod absent;\n")
         self.assertIn("MOD005", self.codes(self.run_checker(root)))
 
+    def test_custom_path_submodule_resolution(self) -> None:
+        root = self.make_workspace(
+            '#[path = "main/entrypoint.rs"]\nmod entrypoint;\n',
+            {
+                "src/main/entrypoint.rs": '#[path = "entrypoint/tests.rs"]\nmod tests;\n',
+                "src/main/entrypoint/tests.rs": "pub struct Test;\n",
+            },
+        )
+        codes = self.codes(self.run_checker(root))
+        self.assertNotIn("MOD003", codes)
+        self.assertNotIn("MOD006", codes)
+
     def test_literal_include_marks_file_reachable_and_exports_items(self) -> None:
         root = self.make_workspace(
             'include!("generated.rs");\nmod child { use crate::Generated; }\n',

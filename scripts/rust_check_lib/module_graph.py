@@ -120,9 +120,10 @@ def _register_child_module(
         source = host.source_for(resolved)
         if source is None:
             return
+        has_path_attr = any(re.search(r'#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]', attr) for attr in attrs)
         child_dir = (
             resolved.parent.resolve()
-            if resolved.name == "mod.rs"
+            if resolved.name == "mod.rs" or has_path_attr
             else resolved.with_suffix("").resolve()
         )
         child = ModuleUnit(
