@@ -194,6 +194,110 @@ pub(crate) fn create_hardlink(
     Ok(())
 }
 
+fn existing_volume_probe(path: &Path) -> Option<PathBuf> {
+    let mut probe = path;
+    while !probe.exists() {
+        probe = probe.parent()?;
+    }
+    std::fs::canonicalize(probe)
+        .ok()
+        .or_else(|| Some(probe.to_path_buf()))
+}
+
+#[cfg(windows)]
+pub(crate) fn storage_volume_id(path: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
+    };
+
+    const BUFFER_LEN: usize = 32_768;
+    let probe = existing_volume_probe(path)?;
+    let mut wide = probe.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide.push(0);
+    let mut mount_path = vec![0u16; BUFFER_LEN];
+    if unsafe {
+        GetVolumePathNameW(
+            wide.as_ptr(),
+            mount_path.as_mut_ptr(),
+            mount_path.len() as u32,
+        )
+    } == 0
+    {
+        return None;
+    }
+    let mount_len = mount_path
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(mount_path.len());
+
+    let mut volume_name = vec![0u16; BUFFER_LEN];
+    let identity = if unsafe {
+        GetVolumeNameForVolumeMountPointW(
+            mount_path.as_ptr(),
+            volume_name.as_mut_ptr(),
+            volume_name.len() as u32,
+        )
+    } != 0
+    {
+        let len = volume_name
+            .iter()
+            .position(|value| *value == 0)
+            .unwrap_or(volume_name.len());
+        String::from_utf16_lossy(&volume_name[..len])
+    } else {
+        String::from_utf16_lossy(&mount_path[..mount_len])
+    };
+    Some(identity.to_ascii_lowercase())
+}
+
+#[cfg(unix)]
+pub(crate) fn storage_volume_id(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let probe = existing_volume_probe(path)?;
+    let metadata = std::fs::metadata(probe).ok()?;
+    Some(format!("device:{}", metadata.dev()))
+}
+
+#[cfg(not(any(windows, unix)))]
+pub(crate) fn storage_volume_id(path: &Path) -> Option<String> {
+    existing_volume_probe(path).and_then(|probe| {
+        probe
+            .components()
+            .next()
+            .map(|component| component.as_os_str().to_string_lossy().to_string())
+    })
+}
+
+pub(crate) fn storage_volume_group_key(path: &Path) -> String {
+    storage_volume_id(path).unwrap_or_else(|| {
+        path.components()
+            .next()
+            .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default()
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReuseMode {
+    HardlinkPreferred,
+    CopyOnly,
+}
+
+/// Classifies only identities proven to differ as copy-only. Unknown identities
+/// preserve the hardlink-first path so a temporary volume-query failure cannot
+/// disable otherwise valid reuse.
+pub(crate) fn classify_reuse_mode(
+    source_volume: Option<&str>,
+    destination_volume: Option<&str>,
+) -> ReuseMode {
+    match (source_volume, destination_volume) {
+        (Some(source), Some(destination)) if source != destination => ReuseMode::CopyOnly,
+        _ => ReuseMode::HardlinkPreferred,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReuseMethod {
     Hardlink,
@@ -208,8 +312,21 @@ pub(crate) fn reuse_verified_file(
     dest: &Path,
     expected_md5: &str,
     expected_size: u64,
+    reuse_mode: ReuseMode,
     allow_copy_fallback: bool,
 ) -> Result<ReuseMethod> {
+    if reuse_mode == ReuseMode::CopyOnly {
+        if !allow_copy_fallback {
+            return Err(Error::Other(format!(
+                "Cannot reuse {} for {} across storage volumes because copy fallback is disabled",
+                src.display(),
+                dest.display()
+            )));
+        }
+        copy_file_with_md5(src, dest, expected_md5, expected_size)?;
+        return Ok(ReuseMethod::Copy);
+    }
+
     match create_hardlink(io_dispatcher, src, dest) {
         Ok(()) => Ok(ReuseMethod::Hardlink),
         Err(_hardlink_error) if allow_copy_fallback => {
@@ -363,10 +480,29 @@ pub(crate) fn write_file(
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_file_with_md5, reuse_verified_file, ReuseMethod};
+    use super::{
+        classify_reuse_mode, copy_file_with_md5, reuse_verified_file, storage_volume_id,
+        ReuseMethod, ReuseMode,
+    };
     use compio::dispatcher::Dispatcher;
     use md5::Md5;
     use std::num::NonZeroUsize;
+
+    #[test]
+    fn volume_classification_only_forces_copy_for_proven_differences() {
+        assert_eq!(
+            classify_reuse_mode(Some("volume-a"), Some("volume-a")),
+            ReuseMode::HardlinkPreferred
+        );
+        assert_eq!(
+            classify_reuse_mode(Some("volume-a"), Some("volume-b")),
+            ReuseMode::CopyOnly
+        );
+        assert_eq!(
+            classify_reuse_mode(None, Some("volume-b")),
+            ReuseMode::HardlinkPreferred
+        );
+    }
 
     #[test]
     fn hardlink_reuses_the_already_verified_inode_without_rehashing() {
@@ -385,6 +521,7 @@ mod tests {
             &destination,
             "00000000000000000000000000000000",
             0,
+            ReuseMode::HardlinkPreferred,
             false,
         )
         .unwrap();
@@ -413,6 +550,7 @@ mod tests {
             &destination,
             "00000000000000000000000000000000",
             0,
+            ReuseMode::HardlinkPreferred,
             false,
         )
         .unwrap_err();
@@ -449,5 +587,47 @@ mod tests {
 
         assert!(error.to_string().contains("Copy verification failed"));
         assert_eq!(std::fs::read(&destination).unwrap(), b"old-data");
+    }
+
+    #[test]
+    fn copy_only_reuse_skips_hardlink_and_verifies_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("destination.bin");
+        let payload = b"copy-only-source";
+        std::fs::write(&source, payload).unwrap();
+        let expected_md5 = format!("{:x}", <Md5 as md5::Digest>::digest(payload));
+        let dispatcher = Dispatcher::builder()
+            .worker_threads(NonZeroUsize::new(2).unwrap())
+            .build()
+            .unwrap();
+
+        let method = reuse_verified_file(
+            Some(&dispatcher),
+            &source,
+            &destination,
+            &expected_md5,
+            payload.len() as u64,
+            ReuseMode::CopyOnly,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(method, ReuseMethod::Copy);
+        assert_eq!(std::fs::read(&destination).unwrap(), payload);
+    }
+
+    #[test]
+    fn volume_identity_is_stable_within_one_temp_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.bin");
+        let destination = temp.path().join("nested").join("destination.bin");
+        std::fs::write(&source, b"source").unwrap();
+
+        assert_eq!(
+            storage_volume_id(&source),
+            storage_volume_id(&destination),
+            "missing destination paths should resolve through their existing ancestor"
+        );
     }
 }

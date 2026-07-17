@@ -1,9 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 
 use compio::dispatcher::Dispatcher;
 
-use super::super::fs_ops::{reuse_verified_file, ReuseMethod};
+use super::super::fs_ops::{
+    classify_reuse_mode, reuse_verified_file, storage_volume_group_key, storage_volume_id,
+    ReuseMethod, ReuseMode,
+};
 use super::super::types::{ReuseCandidateGroup, Task, TransferClass, WorkerEvent};
 
 pub(super) struct DownloadExecInput {
@@ -31,7 +34,8 @@ pub(super) struct RepairFileInput {
 
 pub(super) struct ReuseFileInput {
     pub(super) source: PathBuf,
-    pub(super) remaining_source_candidates: Vec<PathBuf>,
+    pub(super) copy_only: bool,
+    pub(super) remaining_source_candidates: Vec<(bool, PathBuf)>,
     pub(super) dest: PathBuf,
     pub(super) logical_path: String,
     pub(super) expected_md5: String,
@@ -170,15 +174,6 @@ fn retry_or_fail_download(
     }
 }
 
-fn source_volume_key(path: &Path) -> PathBuf {
-    match path.components().next() {
-        Some(Component::Prefix(prefix)) => PathBuf::from(prefix.as_os_str()),
-        Some(Component::RootDir) => PathBuf::from(std::path::MAIN_SEPARATOR.to_string()),
-        Some(component) => PathBuf::from(component.as_os_str()),
-        None => PathBuf::new(),
-    }
-}
-
 pub(super) fn execute_repair_file(
     input: RepairFileInput,
     spawned: &mut Vec<Task>,
@@ -196,16 +191,27 @@ pub(super) fn execute_repair_file(
         transfer_class,
     } = input;
 
+    let destination_volume = storage_volume_id(&dest);
     let mut seen = BTreeSet::new();
-    let mut by_volume = BTreeMap::<PathBuf, Vec<PathBuf>>::new();
+    let mut by_volume = BTreeMap::<String, (bool, Vec<PathBuf>)>::new();
     for source in source_candidates {
         let normalized = std::fs::canonicalize(&source).unwrap_or(source);
-        if seen.insert(normalized.clone()) {
-            by_volume
-                .entry(source_volume_key(&normalized))
-                .or_default()
-                .push(normalized);
+        if !seen.insert(normalized.clone()) {
+            continue;
         }
+        let source_volume = storage_volume_id(&normalized);
+        let copy_only =
+            classify_reuse_mode(source_volume.as_deref(), destination_volume.as_deref())
+                == ReuseMode::CopyOnly;
+        if copy_only && !allow_copy_fallback {
+            continue;
+        }
+        let key = storage_volume_group_key(&normalized);
+        let group = by_volume
+            .entry(key)
+            .or_insert_with(|| (copy_only, Vec::new()));
+        group.0 |= copy_only;
+        group.1.push(normalized);
     }
     if by_volume.is_empty() {
         if let Some(url) = download_url {
@@ -238,23 +244,22 @@ pub(super) fn execute_repair_file(
         retry_count,
         transfer_class,
     );
-    spawned.extend(
-        by_volume
-            .into_values()
-            .enumerate()
-            .map(|(group_index, candidates)| Task::VerifyReuseVolume {
-                group_index,
-                candidates,
-                logical_path: logical_path.clone(),
-                expected_md5: expected_md5.clone(),
-                expected_size,
-                group: group.clone(),
-            }),
-    );
+    spawned.extend(by_volume.into_values().enumerate().map(
+        |(group_index, (copy_only, candidates))| Task::VerifyReuseVolume {
+            group_index,
+            copy_only,
+            candidates,
+            logical_path: logical_path.clone(),
+            expected_md5: expected_md5.clone(),
+            expected_size,
+            group: group.clone(),
+        },
+    ));
 }
 
 pub(super) fn execute_verify_reuse_volume(
     group_index: usize,
+    copy_only: bool,
     candidates: Vec<PathBuf>,
     logical_path: String,
     expected_md5: String,
@@ -267,7 +272,7 @@ pub(super) fn execute_verify_reuse_volume(
         super::super::verify::build_issue(source, &logical_path, &expected_md5, Some(expected_size))
             .is_none()
     });
-    group.finish_volume(group_index, source, spawned, event_tx);
+    group.finish_volume(group_index, copy_only, source, spawned, event_tx);
 }
 
 pub(super) fn execute_reuse_file(
@@ -278,6 +283,7 @@ pub(super) fn execute_reuse_file(
 ) {
     let ReuseFileInput {
         source,
+        copy_only,
         remaining_source_candidates,
         dest,
         logical_path,
@@ -294,6 +300,11 @@ pub(super) fn execute_reuse_file(
         &dest,
         &expected_md5,
         expected_size,
+        if copy_only {
+            ReuseMode::CopyOnly
+        } else {
+            ReuseMode::HardlinkPreferred
+        },
         allow_copy_fallback,
     ) {
         Ok(ReuseMethod::Hardlink) => {
@@ -320,9 +331,10 @@ pub(super) fn execute_reuse_file(
             });
             if !remaining_source_candidates.is_empty() {
                 let mut remaining_source_candidates = remaining_source_candidates;
-                let source = remaining_source_candidates.remove(0);
+                let (copy_only, source) = remaining_source_candidates.remove(0);
                 spawned.push(Task::ReuseFile {
                     source,
+                    copy_only,
                     remaining_source_candidates,
                     dest,
                     logical_path,

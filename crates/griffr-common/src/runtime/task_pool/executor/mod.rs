@@ -162,6 +162,7 @@ pub(crate) fn execute_task(
         ),
         Task::VerifyReuseVolume {
             group_index,
+            copy_only,
             candidates,
             logical_path,
             expected_md5,
@@ -169,6 +170,7 @@ pub(crate) fn execute_task(
             group,
         } => transfer::execute_verify_reuse_volume(
             group_index,
+            copy_only,
             candidates,
             logical_path,
             expected_md5,
@@ -179,6 +181,7 @@ pub(crate) fn execute_task(
         ),
         Task::ReuseFile {
             source,
+            copy_only,
             remaining_source_candidates,
             dest,
             logical_path,
@@ -191,6 +194,7 @@ pub(crate) fn execute_task(
         } => transfer::execute_reuse_file(
             transfer::ReuseFileInput {
                 source,
+                copy_only,
                 remaining_source_candidates,
                 dest,
                 logical_path,

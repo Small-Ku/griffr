@@ -67,6 +67,7 @@ mod tests {
 
         let reuse = Task::ReuseFile {
             source: PathBuf::from("source.bin"),
+            copy_only: false,
             remaining_source_candidates: Vec::new(),
             dest: PathBuf::from("dest.bin"),
             logical_path: "dest.bin".to_string(),

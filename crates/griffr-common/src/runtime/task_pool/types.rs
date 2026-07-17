@@ -96,7 +96,7 @@ impl ArchiveInstallGroup {
 #[derive(Debug)]
 pub struct ReuseCandidateGroup {
     remaining: AtomicUsize,
-    verified_sources: Mutex<Vec<(usize, PathBuf)>>,
+    verified_sources: Mutex<Vec<(bool, usize, PathBuf)>>,
     dest: PathBuf,
     logical_path: String,
     expected_md5: String,
@@ -137,6 +137,7 @@ impl ReuseCandidateGroup {
     pub(crate) fn finish_volume(
         &self,
         group_index: usize,
+        copy_only: bool,
         source: Option<PathBuf>,
         spawned: &mut Vec<Task>,
         event_tx: &flume::Sender<WorkerEvent>,
@@ -145,7 +146,7 @@ impl ReuseCandidateGroup {
             self.verified_sources
                 .lock()
                 .unwrap()
-                .push((group_index, source));
+                .push((copy_only, group_index, source));
         }
         if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
             return;
@@ -154,15 +155,16 @@ impl ReuseCandidateGroup {
         let mut guard = self.verified_sources.lock().unwrap();
         let mut sources = std::mem::take(&mut *guard);
         drop(guard);
-        sources.sort_by_key(|(index, _)| *index);
+        sources.sort_by_key(|(copy_only, index, _)| (*copy_only, *index));
         let mut sources = sources
             .into_iter()
-            .map(|(_, source)| source)
+            .map(|(copy_only, _, source)| (copy_only, source))
             .collect::<Vec<_>>();
         if !sources.is_empty() {
-            let source = sources.remove(0);
+            let (copy_only, source) = sources.remove(0);
             spawned.push(Task::ReuseFile {
                 source,
+                copy_only,
                 remaining_source_candidates: sources,
                 dest: self.dest.clone(),
                 logical_path: self.logical_path.clone(),
@@ -255,6 +257,7 @@ pub enum Task {
     },
     VerifyReuseVolume {
         group_index: usize,
+        copy_only: bool,
         candidates: Vec<PathBuf>,
         logical_path: String,
         expected_md5: String,
@@ -263,7 +266,8 @@ pub enum Task {
     },
     ReuseFile {
         source: PathBuf,
-        remaining_source_candidates: Vec<PathBuf>,
+        copy_only: bool,
+        remaining_source_candidates: Vec<(bool, PathBuf)>,
         dest: PathBuf,
         logical_path: String,
         expected_md5: String,
