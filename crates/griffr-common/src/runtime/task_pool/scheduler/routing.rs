@@ -2,9 +2,13 @@ use super::WorkerKind;
 use crate::runtime::task_pool::{Task, TaskPoolConfig, TransferClass};
 
 pub(super) fn dispatcher_thread_count(config: &TaskPoolConfig) -> usize {
-    let worker_loops =
-        config.io_slots + config.vfs_io_slots + config.cpu_slots + config.extract_slots;
-    let extra_io_lanes = (config.io_slots + config.vfs_io_slots).max(1);
+    let worker_loops = config.io_slots
+        + config.vfs_io_slots
+        + config.archive_io_slots
+        + config.cpu_slots
+        + config.extract_slots;
+    let extra_io_lanes =
+        (config.io_slots + config.vfs_io_slots + config.archive_io_slots).max(1);
     (worker_loops + extra_io_lanes).clamp(2, 64)
 }
 
@@ -14,6 +18,7 @@ pub(super) fn worker_kind_for_task(task: &Task) -> WorkerKind {
             transfer_class: TransferClass::Vfs,
             ..
         } => WorkerKind::VfsIo,
+        Task::InstallArchivePart { .. } => WorkerKind::ArchiveIo,
         Task::InstallArchive { .. }
         | Task::Download { .. }
         | Task::ReuseFile { .. }

@@ -1,6 +1,8 @@
 use crate::api::protocol::MIN_USER_AGENT;
 use crate::runtime::{PatchApplyOptions, PatchPreflightReport, ProgressLane, ProgressSender};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 const DEFAULT_PARALLELISM_FALLBACK: usize = 4;
 const DEFAULT_MAX_RETRIES: u32 = 3;
@@ -15,6 +17,7 @@ const MAX_EXTRACT_SLOTS: usize = 4;
 const MIN_FILE_ENSURE_IO_SLOTS: usize = 4;
 const MAX_FILE_ENSURE_IO_SLOTS: usize = 24;
 const DEFAULT_VFS_IO_SLOTS: usize = 6;
+const DEFAULT_ARCHIVE_IO_SLOTS: usize = 6;
 
 use crate::runtime::issues::FileIssue;
 
@@ -40,6 +43,39 @@ pub struct FileEnsureTask {
     pub transfer_class: TransferClass,
 }
 
+#[derive(Debug)]
+pub(crate) struct ArchiveInstallGroup {
+    remaining: AtomicUsize,
+    failed: AtomicBool,
+    continuation: Mutex<Option<Task>>,
+}
+
+impl ArchiveInstallGroup {
+    pub(crate) fn new(part_count: usize, continuation: Task) -> Arc<Self> {
+        Arc::new(Self {
+            remaining: AtomicUsize::new(part_count),
+            failed: AtomicBool::new(false),
+            continuation: Mutex::new(Some(continuation)),
+        })
+    }
+
+    pub(crate) fn finish_part(&self, succeeded: bool, spawned: &mut Vec<Task>) {
+        if !succeeded {
+            self.failed.store(true, Ordering::Release);
+        }
+        if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+        if self.failed.load(Ordering::Acquire) {
+            self.continuation.lock().unwrap().take();
+            return;
+        }
+        if let Some(task) = self.continuation.lock().unwrap().take() {
+            spawned.push(task);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Task {
     InstallArchive {
@@ -49,6 +85,10 @@ pub enum Task {
         password: Option<String>,
         patch_options: PatchApplyOptions,
         parts: Vec<ArchivePart>,
+    },
+    InstallArchivePart {
+        part: ArchivePart,
+        group: Arc<ArchiveInstallGroup>,
     },
     Download {
         url: String,
@@ -345,6 +385,7 @@ impl TaskProgress {
 pub struct TaskPoolConfig {
     pub io_slots: usize,
     pub vfs_io_slots: usize,
+    pub archive_io_slots: usize,
     pub cpu_slots: usize,
     pub extract_slots: usize,
     pub max_retries: u32,
@@ -401,6 +442,7 @@ impl Default for TaskPoolConfig {
         Self {
             io_slots: (cpus * 2).clamp(MIN_IO_SLOTS, MAX_IO_SLOTS),
             vfs_io_slots: DEFAULT_VFS_IO_SLOTS,
+            archive_io_slots: DEFAULT_ARCHIVE_IO_SLOTS,
             cpu_slots: cpus.clamp(MIN_CPU_SLOTS, MAX_CPU_SLOTS),
             extract_slots: (cpus / 2).clamp(MIN_EXTRACT_SLOTS, MAX_EXTRACT_SLOTS),
             max_retries: DEFAULT_MAX_RETRIES,

@@ -7,7 +7,7 @@ use compio::dispatcher::Dispatcher;
 use super::super::fs_ops::{
     commit_staged_extract, execute_patch_transaction, make_extract_staging_dir,
 };
-use super::super::types::{ArchivePart, Task, WorkerEvent};
+use super::super::types::{ArchiveInstallGroup, ArchivePart, Task, WorkerEvent};
 
 pub(super) fn execute_install_archive(
     base_name: String,
@@ -16,10 +16,6 @@ pub(super) fn execute_install_archive(
     password: Option<String>,
     patch_options: PatchApplyOptions,
     mut parts: Vec<ArchivePart>,
-    max_retries: u32,
-    download_progress_buffer_bytes: usize,
-    io_dispatcher: Option<&Dispatcher>,
-    user_agent: &str,
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) {
@@ -28,107 +24,129 @@ pub(super) fn execute_install_archive(
             .cmp(&right.sequence)
             .then_with(|| left.logical_path.cmp(&right.logical_path))
     });
-    let volumes = parts.iter().map(|part| part.dest.clone()).collect();
-    for part in parts {
-        let mut completed = false;
-        for attempt in 0..=max_retries {
-            if super::super::verify::build_issue(
-                &part.dest,
-                &part.logical_path,
-                &part.expected_md5,
-                Some(part.expected_size),
-            )
-            .is_none()
-            {
-                let _ = event_tx.send(WorkerEvent::Verified {
-                    path: part.logical_path.clone(),
-                    ok: true,
-                    issue: None,
-                });
-                completed = true;
-                break;
-            }
-
-            let event_tx_clone = event_tx.clone();
-            let logical_path_clone = part.logical_path.clone();
-            let expected_size_val = part.expected_size;
-            let _ = event_tx.send(WorkerEvent::DownloadStarted {
-                path: part.logical_path.clone(),
-                total_bytes: expected_size_val,
-            });
-            match super::super::download::do_download(
-                io_dispatcher,
-                user_agent,
-                &part.url,
-                &part.dest,
-                &part.expected_md5,
-                Some(part.expected_size),
-                download_progress_buffer_bytes,
-                Some(move |bytes| {
-                    let _ = event_tx_clone.send(WorkerEvent::DownloadedBytes {
-                        path: logical_path_clone.clone(),
-                        bytes,
-                        total_bytes: expected_size_val,
-                    });
-                }),
-            ) {
-                Ok(bytes) => {
-                    let _ = event_tx.send(WorkerEvent::Downloaded {
-                        path: part.logical_path.clone(),
-                        bytes,
-                    });
-                    let _ = event_tx.send(WorkerEvent::Verified {
-                        path: part.logical_path.clone(),
-                        ok: true,
-                        issue: None,
-                    });
-                    completed = true;
-                    break;
-                }
-                Err(err) => {
-                    if attempt < max_retries {
-                        let _ = event_tx.send(WorkerEvent::Retried {
-                            path: part.logical_path.clone(),
-                            reason: format!(
-                                "install-archive download attempt {} failed: {}",
-                                attempt + 1,
-                                err
-                            ),
-                        });
-                        continue;
-                    }
-                    let issue = super::super::verify::build_issue(
-                        &part.dest,
-                        &part.logical_path,
-                        &part.expected_md5,
-                        Some(part.expected_size),
-                    );
-                    let _ = event_tx.send(WorkerEvent::Verified {
-                        path: part.logical_path.clone(),
-                        ok: false,
-                        issue,
-                    });
-                    let _ = event_tx.send(WorkerEvent::Failed {
-                        path: part.logical_path.clone(),
-                        reason: format!("install-archive download failed after retries: {}", err),
-                    });
-                    return;
-                }
-            }
-        }
-        if !completed {
-            return;
-        }
+    if parts.is_empty() {
+        let _ = event_tx.send(WorkerEvent::Failed {
+            path: base_name,
+            reason: "install archive has no parts".to_string(),
+        });
+        return;
     }
 
-    spawned.push(Task::Extract {
+    let volumes = parts.iter().map(|part| part.dest.clone()).collect();
+    let continuation = Task::Extract {
         base_name,
         volumes,
         dest,
         cleanup,
         password,
         patch_options,
-    });
+    };
+    let group = ArchiveInstallGroup::new(parts.len(), continuation);
+    spawned.extend(parts.into_iter().map(|part| Task::InstallArchivePart {
+        part,
+        group: group.clone(),
+    }));
+}
+
+pub(super) fn execute_install_archive_part(
+    part: ArchivePart,
+    group: std::sync::Arc<ArchiveInstallGroup>,
+    max_retries: u32,
+    download_progress_buffer_bytes: usize,
+    io_dispatcher: Option<&Dispatcher>,
+    user_agent: &str,
+    spawned: &mut Vec<Task>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    let mut succeeded = false;
+    for attempt in 0..=max_retries {
+        if super::super::verify::build_issue(
+            &part.dest,
+            &part.logical_path,
+            &part.expected_md5,
+            Some(part.expected_size),
+        )
+        .is_none()
+        {
+            let _ = event_tx.send(WorkerEvent::Verified {
+                path: part.logical_path.clone(),
+                ok: true,
+                issue: None,
+            });
+            succeeded = true;
+            break;
+        }
+
+        let event_tx_clone = event_tx.clone();
+        let logical_path_clone = part.logical_path.clone();
+        let expected_size = part.expected_size;
+        let _ = event_tx.send(WorkerEvent::DownloadStarted {
+            path: part.logical_path.clone(),
+            total_bytes: expected_size,
+        });
+        match super::super::download::do_download(
+            io_dispatcher,
+            user_agent,
+            &part.url,
+            &part.dest,
+            &part.expected_md5,
+            Some(part.expected_size),
+            download_progress_buffer_bytes,
+            Some(move |bytes| {
+                let _ = event_tx_clone.send(WorkerEvent::DownloadedBytes {
+                    path: logical_path_clone.clone(),
+                    bytes,
+                    total_bytes: expected_size,
+                });
+            }),
+        ) {
+            Ok(bytes) => {
+                let _ = event_tx.send(WorkerEvent::Downloaded {
+                    path: part.logical_path.clone(),
+                    bytes,
+                });
+                let _ = event_tx.send(WorkerEvent::Verified {
+                    path: part.logical_path.clone(),
+                    ok: true,
+                    issue: None,
+                });
+                succeeded = true;
+                break;
+            }
+            Err(error) if attempt < max_retries => {
+                let _ = event_tx.send(WorkerEvent::Retried {
+                    path: part.logical_path.clone(),
+                    reason: format!(
+                        "install-archive download attempt {} failed: {}",
+                        attempt + 1,
+                        error
+                    ),
+                });
+            }
+            Err(error) => {
+                let issue = super::super::verify::build_issue(
+                    &part.dest,
+                    &part.logical_path,
+                    &part.expected_md5,
+                    Some(part.expected_size),
+                );
+                let _ = event_tx.send(WorkerEvent::Verified {
+                    path: part.logical_path.clone(),
+                    ok: false,
+                    issue,
+                });
+                let _ = event_tx.send(WorkerEvent::Failed {
+                    path: part.logical_path.clone(),
+                    reason: format!(
+                        "install-archive download failed after retries: {}",
+                        error
+                    ),
+                });
+                break;
+            }
+        }
+    }
+    group.finish_part(succeeded, spawned);
 }
 
 pub(super) fn execute_extract_archive(

@@ -34,6 +34,12 @@ pub(crate) fn execute_task(
             password,
             patch_options,
             parts,
+            spawned,
+            event_tx,
+        ),
+        Task::InstallArchivePart { part, group } => archive::execute_install_archive_part(
+            part,
+            group,
             max_retries,
             download_progress_buffer_bytes,
             io_dispatcher,

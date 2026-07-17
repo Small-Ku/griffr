@@ -22,6 +22,7 @@ const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 enum WorkerKind {
     Io,
     VfsIo,
+    ArchiveIo,
     Cpu,
     Extract,
 }
@@ -30,6 +31,7 @@ enum WorkerKind {
 pub(crate) struct WorkerContext {
     pub(crate) io_tx: Sender<Task>,
     pub(crate) vfs_io_tx: Sender<Task>,
+    pub(crate) archive_io_tx: Sender<Task>,
     pub(crate) cpu_tx: Sender<Task>,
     pub(crate) extract_tx: Sender<Task>,
     pub(crate) event_tx: Sender<WorkerEvent>,
@@ -313,6 +315,7 @@ impl TaskPoolRunner {
     pub fn new(config: TaskPoolConfig) -> Result<Self> {
         let (io_tx, io_rx) = flume::unbounded::<Task>();
         let (vfs_io_tx, vfs_io_rx) = flume::unbounded::<Task>();
+        let (archive_io_tx, archive_io_rx) = flume::unbounded::<Task>();
         let (cpu_tx, cpu_rx) = flume::unbounded::<Task>();
         let (extract_tx, extract_rx) = flume::unbounded::<Task>();
         let (event_tx, event_rx) = flume::unbounded::<WorkerEvent>();
@@ -333,6 +336,7 @@ impl TaskPoolRunner {
         let ctx = WorkerContext {
             io_tx: io_tx.clone(),
             vfs_io_tx: vfs_io_tx.clone(),
+            archive_io_tx: archive_io_tx.clone(),
             cpu_tx: cpu_tx.clone(),
             extract_tx: extract_tx.clone(),
             event_tx: event_tx.clone(),
@@ -347,6 +351,12 @@ impl TaskPoolRunner {
             WorkerKind::VfsIo,
             ctx.config.vfs_io_slots,
             vfs_io_rx,
+            ctx.clone(),
+        )?;
+        spawn_workers(
+            WorkerKind::ArchiveIo,
+            ctx.config.archive_io_slots,
+            archive_io_rx,
             ctx.clone(),
         )?;
         spawn_workers(WorkerKind::Cpu, ctx.config.cpu_slots, cpu_rx, ctx.clone())?;
@@ -480,6 +490,7 @@ pub(crate) fn enqueue_task(ctx: &WorkerContext, task: Task) -> Result<()> {
     let send_result = match worker_kind_for_task(&task) {
         WorkerKind::Io => ctx.io_tx.send(task),
         WorkerKind::VfsIo => ctx.vfs_io_tx.send(task),
+        WorkerKind::ArchiveIo => ctx.archive_io_tx.send(task),
         WorkerKind::Cpu => ctx.cpu_tx.send(task),
         WorkerKind::Extract => ctx.extract_tx.send(task),
     };
