@@ -22,17 +22,8 @@ mod queue;
 mod routing;
 
 use progress::TaskProgressReducer;
-use queue::WorkerQueue;
-use routing::{dispatcher_thread_count, task_path, worker_kind_for_task};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WorkerKind {
-    Io,
-    VfsIo,
-    ArchiveIo,
-    Cpu,
-    Extract,
-}
+use queue::SchedulerQueue;
+use routing::{dispatcher_thread_count, task_path, task_resources, ExecutionClass};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TaskPriority {
@@ -42,11 +33,7 @@ pub(super) enum TaskPriority {
 
 #[derive(Clone)]
 pub(crate) struct WorkerContext {
-    io_queue: Arc<WorkerQueue>,
-    vfs_io_queue: Arc<WorkerQueue>,
-    archive_io_queue: Arc<WorkerQueue>,
-    cpu_queue: Arc<WorkerQueue>,
-    extract_queue: Arc<WorkerQueue>,
+    queue: Arc<SchedulerQueue>,
     pub(crate) event_tx: Sender<WorkerEvent>,
     pub(crate) pending: Arc<AtomicUsize>,
     pub(crate) done_pair: Arc<(Mutex<()>, Condvar)>,
@@ -56,22 +43,8 @@ pub(crate) struct WorkerContext {
 }
 
 impl WorkerContext {
-    fn queue(&self, kind: WorkerKind) -> &WorkerQueue {
-        match kind {
-            WorkerKind::Io => &self.io_queue,
-            WorkerKind::VfsIo => &self.vfs_io_queue,
-            WorkerKind::ArchiveIo => &self.archive_io_queue,
-            WorkerKind::Cpu => &self.cpu_queue,
-            WorkerKind::Extract => &self.extract_queue,
-        }
-    }
-
     fn notify_shutdown(&self) {
-        self.io_queue.notify_all();
-        self.vfs_io_queue.notify_all();
-        self.archive_io_queue.notify_all();
-        self.cpu_queue.notify_all();
-        self.extract_queue.notify_all();
+        self.queue.notify_all();
         self.done_pair.1.notify_all();
     }
 }
@@ -128,11 +101,7 @@ impl TaskPoolRunner {
                 })?,
         );
         let ctx = WorkerContext {
-            io_queue: Arc::new(WorkerQueue::default()),
-            vfs_io_queue: Arc::new(WorkerQueue::default()),
-            archive_io_queue: Arc::new(WorkerQueue::default()),
-            cpu_queue: Arc::new(WorkerQueue::default()),
-            extract_queue: Arc::new(WorkerQueue::default()),
+            queue: Arc::new(SchedulerQueue::default()),
             event_tx,
             pending,
             done_pair,
@@ -225,20 +194,18 @@ pub fn run_tasks(initial_tasks: Vec<Task>, config: TaskPoolConfig) -> Result<Tas
 }
 
 fn spawn_all_workers(ctx: &WorkerContext, workers: &mut Vec<JoinHandle<()>>) -> Result<()> {
-    for (kind, count) in [
-        (WorkerKind::Io, ctx.config.io_slots),
-        (WorkerKind::VfsIo, ctx.config.vfs_io_slots),
-        (WorkerKind::ArchiveIo, ctx.config.archive_io_slots),
-        (WorkerKind::Cpu, ctx.config.cpu_slots),
-        (WorkerKind::Extract, ctx.config.extract_slots),
+    for (class, count) in [
+        (ExecutionClass::Network, ctx.config.network_slots),
+        (ExecutionClass::Cpu, ctx.config.cpu_workers),
+        (ExecutionClass::Blocking, ctx.config.blocking_workers),
     ] {
-        spawn_workers(kind, count, ctx.clone(), workers)?;
+        spawn_workers(class, count, ctx.clone(), workers)?;
     }
     Ok(())
 }
 
 fn spawn_workers(
-    kind: WorkerKind,
+    class: ExecutionClass,
     count: usize,
     ctx: WorkerContext,
     workers: &mut Vec<JoinHandle<()>>,
@@ -246,24 +213,24 @@ fn spawn_workers(
     for index in 0..count {
         let worker_ctx = ctx.clone();
         let worker = std::thread::Builder::new()
-            .name(format!("griffr-task-{kind:?}-{index}"))
-            .spawn(move || worker_loop(kind, worker_ctx))
+            .name(format!("griffr-task-{class:?}-{index}"))
+            .spawn(move || worker_loop(class, worker_ctx))
             .map_err(|error| {
-                Error::TaskPool(format!("Failed to spawn {kind:?} worker {index}: {error}"))
+                Error::TaskPool(format!("Failed to spawn {class:?} worker {index}: {error}"))
             })?;
         workers.push(worker);
     }
     Ok(())
 }
 
-fn worker_loop(kind: WorkerKind, ctx: WorkerContext) {
-    while let Some(task) = ctx.queue(kind).pop(&ctx.shutdown) {
+fn worker_loop(class: ExecutionClass, ctx: WorkerContext) {
+    while let Some(scheduled) = ctx.queue.pop(class, &ctx.config, &ctx.shutdown) {
         let _pending = PendingTaskGuard::new(&ctx);
-        let failure_path = task_path(&task);
+        let failure_path = task_path(&scheduled.task);
         let mut spawned = Vec::new();
         let result = catch_unwind(AssertUnwindSafe(|| {
             execute_task(
-                task,
+                scheduled.task.clone(),
                 ctx.config.max_retries,
                 ctx.config.extraction_progress_buffer_bytes,
                 ctx.config.download_progress_buffer_bytes,
@@ -276,6 +243,8 @@ fn worker_loop(kind: WorkerKind, ctx: WorkerContext) {
                 &ctx.event_tx,
             );
         }));
+
+        ctx.queue.release(&scheduled);
 
         if result.is_err() {
             let _ = ctx.event_tx.send(WorkerEvent::Failed {
@@ -304,9 +273,9 @@ pub(crate) fn enqueue_task(
     task: Task,
     priority: TaskPriority,
 ) -> Result<()> {
-    let kind = worker_kind_for_task(&task);
+    let resources = task_resources(&task);
     ctx.pending.fetch_add(1, Ordering::AcqRel);
-    if let Err(error) = ctx.queue(kind).push(task, priority, &ctx.shutdown) {
+    if let Err(error) = ctx.queue.push(task, resources, priority, &ctx.shutdown) {
         let previous = ctx.pending.fetch_sub(1, Ordering::AcqRel);
         if previous <= 1 {
             ctx.done_pair.1.notify_all();

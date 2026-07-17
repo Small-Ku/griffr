@@ -179,8 +179,8 @@ pub async fn verify(
     );
     if repair && !extra_tasks.is_empty() {
         opts.verbose(format!(
-            "Using {} dedicated VFS transfer slots without reducing {} general IO slots",
-            pool_cfg.vfs_io_slots, pool_cfg.io_slots
+            "Using {} shared network slots with weighted VFS/archive fairness",
+            pool_cfg.network_slots
         ));
     }
     let mut pool_runner = TaskPoolRunner::new(pool_cfg)?;

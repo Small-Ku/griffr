@@ -1,30 +1,167 @@
-use super::WorkerKind;
+use std::collections::BTreeSet;
+use std::path::{Component, Path};
+
 use crate::runtime::task_pool::{Task, TaskPoolConfig, TransferClass};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExecutionClass {
+    Network,
+    Cpu,
+    Blocking,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NetworkClass {
+    General,
+    Vfs,
+    Archive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResourceRequest {
+    pub(super) execution: ExecutionClass,
+    pub(super) network: Option<NetworkClass>,
+    pub(super) read_volumes: Vec<String>,
+    pub(super) write_volumes: Vec<String>,
+    pub(super) extract: bool,
+    pub(super) mutation_root: Option<String>,
+}
+
+impl Default for ResourceRequest {
+    fn default() -> Self {
+        Self {
+            execution: ExecutionClass::Blocking,
+            network: None,
+            read_volumes: Vec::new(),
+            write_volumes: Vec::new(),
+            extract: false,
+            mutation_root: None,
+        }
+    }
+}
 
 pub(super) fn dispatcher_thread_count(config: &TaskPoolConfig) -> usize {
     config.dispatcher_threads.clamp(2, 4)
 }
 
-pub(super) fn worker_kind_for_task(task: &Task) -> WorkerKind {
+pub(super) fn task_resources(task: &Task) -> ResourceRequest {
+    let mut request = ResourceRequest {
+        execution: execution_class(task),
+        ..ResourceRequest::default()
+    };
     match task {
         Task::TransferDownload {
-            transfer_class: TransferClass::Vfs,
+            dest,
+            transfer_class,
             ..
-        } => WorkerKind::VfsIo,
-        Task::TransferArchivePart { .. } => WorkerKind::ArchiveIo,
-        Task::InstallArchive { .. }
-        | Task::ReuseFile { .. }
-        | Task::Hardlink { .. }
-        | Task::ApplyExtractedVfsPatchManifest { .. }
-        | Task::ApplyDeleteManifest { .. }
-        | Task::TransferDownload { .. } => WorkerKind::Io,
+        } => {
+            request.network = Some(match transfer_class {
+                TransferClass::General => NetworkClass::General,
+                TransferClass::Vfs => NetworkClass::Vfs,
+            });
+            request.write_volumes.push(volume_key(dest));
+        }
+        Task::TransferArchivePart { part, .. } => {
+            request.network = Some(NetworkClass::Archive);
+            request.write_volumes.push(volume_key(&part.dest));
+        }
+        Task::Verify { path, .. } => request.read_volumes.push(volume_key(path)),
+        Task::Download { dest, .. } => {
+            request.write_volumes.push(volume_key(dest));
+        }
+        Task::InstallArchivePart { part, .. } => {
+            request.write_volumes.push(volume_key(&part.dest));
+        }
+        Task::VerifyReuseVolume { candidates, .. } => {
+            if let Some(path) = candidates.first() {
+                request.read_volumes.push(volume_key(path));
+            }
+        }
+        Task::ReuseFile {
+            source, dest, ..
+        } => {
+            request.read_volumes.push(volume_key(source));
+            request.write_volumes.push(volume_key(dest));
+        }
+        Task::Extract {
+            volumes, dest, ..
+        } => {
+            request
+                .read_volumes
+                .extend(volumes.first().map(volume_key));
+            request.write_volumes.push(volume_key(dest));
+            request.extract = true;
+            request.mutation_root = Some(path_key(dest));
+        }
+        Task::ApplyExtractedVfsPatchManifest { install_root }
+        | Task::ApplyDeleteManifest { install_root } => {
+            let volume = volume_key(install_root);
+            request.write_volumes.push(volume);
+            request.mutation_root = Some(path_key(install_root));
+        }
+        Task::Hardlink { dest, .. } => request.write_volumes.push(volume_key(dest)),
+        Task::InstallArchive { .. } | Task::RepairFile { .. } => {}
+    }
+    normalize_volumes(&mut request);
+    request
+}
+
+fn execution_class(task: &Task) -> ExecutionClass {
+    match task {
+        Task::TransferDownload { .. } | Task::TransferArchivePart { .. } => {
+            ExecutionClass::Network
+        }
         Task::InstallArchivePart { .. }
         | Task::Download { .. }
         | Task::Verify { .. }
         | Task::RepairFile { .. }
-        | Task::VerifyReuseVolume { .. } => WorkerKind::Cpu,
-        Task::Extract { .. } => WorkerKind::Extract,
+        | Task::VerifyReuseVolume { .. } => ExecutionClass::Cpu,
+        Task::InstallArchive { .. }
+        | Task::ReuseFile { .. }
+        | Task::Extract { .. }
+        | Task::ApplyExtractedVfsPatchManifest { .. }
+        | Task::ApplyDeleteManifest { .. }
+        | Task::Hardlink { .. } => ExecutionClass::Blocking,
     }
+}
+
+fn normalize_volumes(request: &mut ResourceRequest) {
+    let writes = request
+        .write_volumes
+        .drain(..)
+        .collect::<BTreeSet<_>>();
+    let reads = request
+        .read_volumes
+        .drain(..)
+        .filter(|volume| !writes.contains(volume))
+        .collect::<BTreeSet<_>>();
+    request.write_volumes.extend(writes);
+    request.read_volumes.extend(reads);
+}
+
+fn volume_key(path: &Path) -> String {
+    crate::runtime::task_pool::fs_ops::storage_volume_id(path)
+        .unwrap_or_else(|| format!("unknown:{}", path_anchor(path)))
+}
+
+fn path_anchor(path: &Path) -> String {
+    path.components()
+        .find_map(|component| match component {
+            Component::Prefix(prefix) => Some(prefix.as_os_str().to_string_lossy().to_string()),
+            Component::RootDir => Some("/".to_string()),
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            Component::CurDir | Component::ParentDir => None,
+        })
+        .unwrap_or_else(|| ".".to_string())
+        .to_ascii_lowercase()
+}
+
+fn path_key(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase()
 }
 
 pub(super) fn task_path(task: &Task) -> String {
@@ -44,88 +181,5 @@ pub(super) fn task_path(task: &Task) -> String {
         Task::ApplyExtractedVfsPatchManifest { install_root }
         | Task::ApplyDeleteManifest { install_root } => install_root.display().to_string(),
         Task::Hardlink { dest, .. } => dest.display().to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::worker_kind_for_task;
-    use crate::runtime::task_pool::scheduler::WorkerKind;
-    use crate::runtime::task_pool::{DownloadResumeState, Task, TransferClass};
-    use md5::{Digest, Md5};
-    use std::path::PathBuf;
-
-    fn transfer_download(transfer_class: TransferClass) -> Task {
-        Task::TransferDownload {
-            url: "https://example.invalid/file.bin".to_string(),
-            dest: PathBuf::from("file.bin"),
-            logical_path: "file.bin".to_string(),
-            expected_md5: "00".repeat(16),
-            expected_size: Some(4),
-            retry_count: 0,
-            transfer_class,
-            resume: DownloadResumeState::new(0, Md5::new()),
-        }
-    }
-
-    #[test]
-    fn only_vfs_downloads_use_the_limited_vfs_queue() {
-        assert_eq!(
-            worker_kind_for_task(&transfer_download(TransferClass::Vfs)),
-            WorkerKind::VfsIo
-        );
-        assert_eq!(
-            worker_kind_for_task(&transfer_download(TransferClass::General)),
-            WorkerKind::Io
-        );
-
-        let reuse = Task::ReuseFile {
-            source: PathBuf::from("source.bin"),
-            copy_only: false,
-            remaining_source_candidates: Vec::new(),
-            dest: PathBuf::from("dest.bin"),
-            logical_path: "dest.bin".to_string(),
-            expected_md5: "00".repeat(16),
-            expected_size: 4,
-            download_url: None,
-            allow_copy_fallback: false,
-            retry_count: 0,
-            transfer_class: TransferClass::Vfs,
-        };
-        assert_eq!(worker_kind_for_task(&reuse), WorkerKind::Io);
-    }
-
-    #[test]
-    fn verification_and_source_validation_use_cpu_workers() {
-        let prepare = Task::Download {
-            url: "https://example.invalid/file.bin".to_string(),
-            dest: PathBuf::from("file.bin"),
-            logical_path: "file.bin".to_string(),
-            expected_md5: "00".repeat(16),
-            expected_size: Some(4),
-            retry_count: 0,
-            transfer_class: TransferClass::General,
-        };
-        let verify = Task::Verify {
-            path: PathBuf::from("file.bin"),
-            logical_path: "file.bin".to_string(),
-            expected_md5: "00".repeat(16),
-            expected_size: Some(4),
-            on_fail: None,
-        };
-        let repair = Task::RepairFile {
-            dest: PathBuf::from("file.bin"),
-            logical_path: "file.bin".to_string(),
-            expected_md5: "00".repeat(16),
-            expected_size: 4,
-            source_candidates: Vec::new(),
-            download_url: None,
-            allow_copy_fallback: false,
-            retry_count: 0,
-            transfer_class: TransferClass::General,
-        };
-        assert_eq!(worker_kind_for_task(&prepare), WorkerKind::Cpu);
-        assert_eq!(worker_kind_for_task(&verify), WorkerKind::Cpu);
-        assert_eq!(worker_kind_for_task(&repair), WorkerKind::Cpu);
     }
 }
