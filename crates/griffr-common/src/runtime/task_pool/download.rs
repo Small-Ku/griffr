@@ -32,6 +32,12 @@ pub(crate) enum DownloadPreparation {
     Ready(DownloadResumeState),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DownloadProgress {
+    Advanced(u64),
+    Reset(u64),
+}
+
 /// Inspects a partial download and computes the incremental MD5 prefix on a
 /// CPU worker before the network task is admitted to an I/O queue.
 pub(crate) fn prepare_download(
@@ -109,7 +115,7 @@ pub(crate) fn do_prepared_download(
     expected_size: Option<u64>,
     resume: DownloadResumeState,
     progress_buffer_bytes: usize,
-    on_progress: Option<impl Fn(u64) + Send + 'static>,
+    on_progress: Option<impl Fn(DownloadProgress) + Send + 'static>,
 ) -> Result<u64> {
     let send_timeout = duration_from_env_secs(
         "GRIFFR_DOWNLOAD_SEND_TIMEOUT_SECS",
@@ -129,7 +135,7 @@ pub(crate) fn do_prepared_download(
         let client = cyper::Client::new();
         let mut request = client.get(&url_owned)?;
         request = request
-            .header(USER_AGENT_HEADER, user_agent_owned)
+            .header(USER_AGENT_HEADER, user_agent_owned.clone())
             .map_err(|e| Error::Download(format!("Failed to attach User-Agent header: {e}")))?;
         if resume_offset > 0 {
             request = request
@@ -142,9 +148,44 @@ pub(crate) fn do_prepared_download(
                 resume_offset, url_owned
             );
         }
-        let response = compio::time::timeout(send_timeout, request.send())
+        let mut response = compio::time::timeout(send_timeout, request.send())
             .await?
             .map_err(|e| Error::Download(format!("Failed to download {}: {e}", url_owned)))?;
+        let mut progress_reset = false;
+        if resume_offset > 0 && response.status().as_u16() == 416 {
+            match compio::fs::remove_file(&part_path_for_write).await {
+                Ok(()) => {}
+                Err(source) if source.kind() == ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(Error::RemoveFailed {
+                        path: part_path_for_write.clone(),
+                        source,
+                    })
+                }
+            }
+            if let Some(ref callback) = on_progress {
+                callback(DownloadProgress::Reset(0));
+            }
+            progress_reset = true;
+            debug!(
+                "server rejected resume offset {}; restarting {} from byte zero",
+                resume_offset, url_owned
+            );
+
+            let retry_request = client
+                .get(&url_owned)?
+                .header(USER_AGENT_HEADER, user_agent_owned.clone())
+                .map_err(|e| Error::Download(format!("Failed to attach User-Agent header: {e}")))?;
+            response = compio::time::timeout(send_timeout, retry_request.send())
+                .await?
+                .map_err(|e| {
+                    Error::Download(format!(
+                        "Failed to restart download {} after HTTP 416: {e}",
+                        url_owned
+                    ))
+                })?;
+        }
+
         let status = response.status();
         if !status.is_success() {
             return Err(Error::Download(format!("HTTP error {}", status)));
@@ -160,6 +201,15 @@ pub(crate) fn do_prepared_download(
         }
 
         let resume_effective = resume_offset > 0 && status.as_u16() == 206;
+        if resume_offset > 0 && !resume_effective && !progress_reset {
+            if let Some(ref callback) = on_progress {
+                callback(DownloadProgress::Reset(0));
+            }
+            debug!(
+                "server ignored resume range at byte {}; restarting {} from byte zero",
+                resume_offset, url_owned
+            );
+        }
         let mut open_options = compio::fs::OpenOptions::new();
         open_options
             .create(true)
@@ -214,7 +264,7 @@ pub(crate) fn do_prepared_download(
                 let byte_threshold_reached =
                     total_written.saturating_sub(last_reported_bytes) >= progress_threshold;
                 if byte_threshold_reached || last_reported_at.elapsed() >= PROGRESS_EMIT_INTERVAL {
-                    callback(total_written);
+                    callback(DownloadProgress::Advanced(total_written));
                     last_reported_bytes = total_written;
                     last_reported_at = Instant::now();
                 }
@@ -223,7 +273,7 @@ pub(crate) fn do_prepared_download(
 
         if let Some(ref callback) = on_progress {
             if total_written > last_reported_bytes {
-                callback(total_written);
+                callback(DownloadProgress::Advanced(total_written));
             }
         }
 

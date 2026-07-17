@@ -18,6 +18,10 @@ pub(crate) enum WorkerEvent {
         bytes: u64,
         total_bytes: u64,
     },
+    DownloadReset {
+        path: String,
+        bytes: u64,
+    },
     Verified {
         path: String,
         ok: bool,
@@ -117,6 +121,7 @@ impl WorkerEvent {
             Self::Failed { path, reason } => Some(TaskOutcome::Failed { path, reason }),
             Self::DownloadStarted { .. }
             | Self::DownloadedBytes { .. }
+            | Self::DownloadReset { .. }
             | Self::Retried { .. }
             | Self::ExtractedBytes { .. }
             | Self::ArchiveCommitProgress { .. }

@@ -106,7 +106,7 @@ fn do_download_resume_incremental_md5_produces_correct_result() {
         &expected_md5,
         Some(payload.len() as u64),
         0,
-        None::<fn(u64)>,
+        None::<fn(crate::runtime::task_pool::download::DownloadProgress)>,
     )
     .unwrap();
 
@@ -149,13 +149,93 @@ fn completed_partial_is_committed_without_network_request() {
         &expected_md5,
         Some(payload.len() as u64),
         DEFAULT_PROGRESS_BUFFER_BYTES,
-        None::<fn(u64)>,
+        None::<fn(crate::runtime::task_pool::download::DownloadProgress)>,
     )
     .unwrap();
 
     assert_eq!(len, payload.len() as u64);
     assert_eq!(std::fs::read(&dest).unwrap(), payload);
     assert!(!part.exists());
+}
+
+#[test]
+fn ignored_range_restarts_from_zero_and_resets_progress() {
+    let tmp = tempdir().unwrap();
+    let dest = tmp.path().join("ignored-range.chk");
+    let part = make_partial_download_path(&dest).unwrap();
+    let payload = b"server returned a full response".to_vec();
+    std::fs::write(&part, &payload[..8]).unwrap();
+    let expected_md5 = format!("{:x}", Md5::digest(&payload));
+    let (base, range_hits, total_hits, stop) =
+        start_resume_restart_http_channel("/blob", payload.clone(), 200);
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let progress_clone = Arc::clone(&progress);
+
+    let dispatcher = Dispatcher::builder()
+        .worker_threads(NonZeroUsize::new(2).unwrap())
+        .build()
+        .expect("dispatcher should build");
+    let len = do_download(
+        Some(&dispatcher),
+        "Mozilla/5.0",
+        &format!("{base}/blob"),
+        &dest,
+        &expected_md5,
+        Some(payload.len() as u64),
+        1,
+        Some(move |update| progress_clone.lock().unwrap().push(update)),
+    )
+    .unwrap();
+    stop.store(true, Ordering::Release);
+
+    assert_eq!(len, payload.len() as u64);
+    assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    assert_eq!(range_hits.load(Ordering::Acquire), 1);
+    assert_eq!(total_hits.load(Ordering::Acquire), 1);
+    assert!(matches!(
+        progress.lock().unwrap().first(),
+        Some(crate::runtime::task_pool::download::DownloadProgress::Reset(0))
+    ));
+}
+
+#[test]
+fn range_not_satisfiable_retries_without_range_in_same_attempt() {
+    let tmp = tempdir().unwrap();
+    let dest = tmp.path().join("range-416.chk");
+    let part = make_partial_download_path(&dest).unwrap();
+    let payload = b"replacement response after 416".to_vec();
+    std::fs::write(&part, b"stale partial bytes").unwrap();
+    let expected_md5 = format!("{:x}", Md5::digest(&payload));
+    let (base, range_hits, total_hits, stop) =
+        start_resume_restart_http_channel("/blob", payload.clone(), 416);
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let progress_clone = Arc::clone(&progress);
+
+    let dispatcher = Dispatcher::builder()
+        .worker_threads(NonZeroUsize::new(2).unwrap())
+        .build()
+        .expect("dispatcher should build");
+    let len = do_download(
+        Some(&dispatcher),
+        "Mozilla/5.0",
+        &format!("{base}/blob"),
+        &dest,
+        &expected_md5,
+        Some(payload.len() as u64),
+        1,
+        Some(move |update| progress_clone.lock().unwrap().push(update)),
+    )
+    .unwrap();
+    stop.store(true, Ordering::Release);
+
+    assert_eq!(len, payload.len() as u64);
+    assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    assert_eq!(range_hits.load(Ordering::Acquire), 1);
+    assert!(total_hits.load(Ordering::Acquire) >= 2);
+    assert!(matches!(
+        progress.lock().unwrap().first(),
+        Some(crate::runtime::task_pool::download::DownloadProgress::Reset(0))
+    ));
 }
 
 fn do_download(
@@ -166,7 +246,9 @@ fn do_download(
     expected_md5: &str,
     expected_size: Option<u64>,
     progress_buffer_bytes: usize,
-    on_progress: Option<impl Fn(u64) + Send + 'static>,
+    on_progress: Option<
+        impl Fn(crate::runtime::task_pool::download::DownloadProgress) + Send + 'static,
+    >,
 ) -> crate::error::Result<u64> {
     use crate::runtime::task_pool::download::{
         do_prepared_download, prepare_download, DownloadPreparation,

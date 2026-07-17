@@ -108,3 +108,45 @@ fn reducer_emits_scoped_updates_without_regressing_retry_bytes() {
         .collect::<Vec<_>>();
     assert_eq!(downloaded_positions.last().copied(), Some(90));
 }
+
+#[test]
+fn reducer_accepts_explicit_download_reset_after_restart() {
+    let lane = ProgressLane::INTEGRITY_DOWNLOAD;
+    let (sender, receiver) = ProgressSender::channel();
+    let mut reducer = TaskProgressReducer::new(TaskProgress::new(sender).with_download(lane));
+
+    reducer.handle(&WorkerEvent::DownloadStarted {
+        path: "a.bin".to_string(),
+        total_bytes: 100,
+    });
+    reducer.handle(&WorkerEvent::DownloadedBytes {
+        path: "a.bin".to_string(),
+        bytes: 80,
+        total_bytes: 100,
+    });
+    reducer.handle(&WorkerEvent::DownloadReset {
+        path: "a.bin".to_string(),
+        bytes: 0,
+    });
+    reducer.handle(&WorkerEvent::DownloadedBytes {
+        path: "a.bin".to_string(),
+        bytes: 20,
+        total_bytes: 100,
+    });
+
+    let mut positions = Vec::new();
+    while let Some(update) = receiver.try_recv() {
+        if let ProgressUpdate::Advanced {
+            lane: update_lane,
+            completed,
+            ..
+        } = update
+        {
+            if update_lane == lane {
+                positions.push(completed);
+            }
+        }
+    }
+    assert!(positions.windows(2).any(|pair| pair == [80, 0]));
+    assert_eq!(positions.last().copied(), Some(20));
+}

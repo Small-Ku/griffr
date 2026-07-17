@@ -172,3 +172,71 @@ fn start_range_http_channel(
 
     (format!("http://{}", addr), range_hits, total_hits, stop)
 }
+
+fn start_resume_restart_http_channel(
+    path: &'static str,
+    body: Vec<u8>,
+    range_status: u16,
+) -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<AtomicBool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test channel");
+    listener
+        .set_nonblocking(true)
+        .expect("set nonblocking test channel");
+    let addr = listener.local_addr().expect("channel addr");
+    let range_hits = Arc::new(AtomicUsize::new(0));
+    let total_hits = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let range_hits_thread = Arc::clone(&range_hits);
+    let total_hits_thread = Arc::clone(&total_hits);
+    let stop_thread = Arc::clone(&stop);
+
+    thread::spawn(move || {
+        while !stop_thread.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut buf = [0u8; 8192];
+                    let read = stream.read(&mut buf).unwrap_or(0);
+                    if read == 0 {
+                        continue;
+                    }
+                    total_hits_thread.fetch_add(1, Ordering::AcqRel);
+                    let request = String::from_utf8_lossy(&buf[..read]);
+                    let mut lines = request.lines();
+                    let request_path = lines
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    if request_path != path {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        continue;
+                    }
+                    let has_range =
+                        lines.any(|line| line.to_ascii_lowercase().starts_with("range: bytes="));
+                    if has_range {
+                        range_hits_thread.fetch_add(1, Ordering::AcqRel);
+                    }
+                    if has_range && range_status == 416 {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                    } else {
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(&body);
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    (format!("http://{}", addr), range_hits, total_hits, stop)
+}

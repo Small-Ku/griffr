@@ -93,6 +93,19 @@ impl TaskProgressReducer {
                     path,
                 );
             }
+            WorkerEvent::DownloadReset { path, bytes } => {
+                let Some(lane) = self.config.download else {
+                    return;
+                };
+                self.download_completed.record(path, *bytes);
+                self.start_download_lane(lane, self.download_totals.total_bytes());
+                self.emit_bytes(
+                    lane,
+                    self.download_completed.total_bytes(),
+                    self.download_totals.total_bytes(),
+                    path,
+                );
+            }
             WorkerEvent::Downloaded { path, bytes } => {
                 let Some(lane) = self.config.download else {
                     return;

@@ -168,12 +168,20 @@ pub(super) fn execute_transfer_archive_part(
         Some(part.expected_size),
         resume,
         download_progress_buffer_bytes,
-        Some(move |bytes| {
-            let _ = event_tx_clone.send(WorkerEvent::DownloadedBytes {
-                path: logical_path_clone.clone(),
-                bytes,
-                total_bytes: expected_size,
-            });
+        Some(move |progress| match progress {
+            super::super::download::DownloadProgress::Advanced(bytes) => {
+                let _ = event_tx_clone.send(WorkerEvent::DownloadedBytes {
+                    path: logical_path_clone.clone(),
+                    bytes,
+                    total_bytes: expected_size,
+                });
+            }
+            super::super::download::DownloadProgress::Reset(bytes) => {
+                let _ = event_tx_clone.send(WorkerEvent::DownloadReset {
+                    path: logical_path_clone.clone(),
+                    bytes,
+                });
+            }
         }),
     ) {
         Ok(bytes) => {
