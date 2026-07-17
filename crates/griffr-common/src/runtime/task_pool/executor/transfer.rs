@@ -42,8 +42,48 @@ pub(super) struct ReuseFileInput {
     pub(super) transfer_class: TransferClass,
 }
 
-pub(super) fn execute_download(
+pub(super) fn execute_prepare_download(
     input: DownloadExecInput,
+    io_dispatcher: Option<&Dispatcher>,
+    spawned: &mut Vec<Task>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    match super::super::download::prepare_download(
+        io_dispatcher,
+        &input.dest,
+        &input.expected_md5,
+        input.expected_size,
+    ) {
+        Ok(super::super::download::DownloadPreparation::Complete(bytes)) => {
+            let _ = event_tx.send(WorkerEvent::Downloaded {
+                path: input.logical_path.clone(),
+                bytes,
+            });
+            let _ = event_tx.send(WorkerEvent::Verified {
+                path: input.logical_path,
+                ok: true,
+                issue: None,
+            });
+        }
+        Ok(super::super::download::DownloadPreparation::Ready(resume)) => {
+            spawned.push(Task::TransferDownload {
+                url: input.url,
+                dest: input.dest,
+                logical_path: input.logical_path,
+                expected_md5: input.expected_md5,
+                expected_size: input.expected_size,
+                retry_count: input.retry_count,
+                transfer_class: input.transfer_class,
+                resume,
+            });
+        }
+        Err(error) => retry_or_fail_download(input, error, spawned, event_tx),
+    }
+}
+
+pub(super) fn execute_transfer_download(
+    input: DownloadExecInput,
+    resume: super::super::types::DownloadResumeState,
     download_progress_buffer_bytes: usize,
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
@@ -57,13 +97,14 @@ pub(super) fn execute_download(
         path: input.logical_path.clone(),
         total_bytes: expected_size_val.unwrap_or(0),
     });
-    let result = super::super::download::do_download(
+    let result = super::super::download::do_prepared_download(
         io_dispatcher,
         user_agent,
         &input.url,
         &input.dest,
         &input.expected_md5,
         input.expected_size,
+        resume,
         download_progress_buffer_bytes,
         Some(move |bytes| {
             let _ = event_tx_clone.send(WorkerEvent::DownloadedBytes {
@@ -85,27 +126,39 @@ pub(super) fn execute_download(
                 issue: None,
             });
         }
-        Err(err) if input.retry_count < input.max_retries => {
-            let _ = event_tx.send(WorkerEvent::Retried {
-                path: input.logical_path.clone(),
-                reason: format!("download attempt {} failed: {}", input.retry_count + 1, err),
-            });
-            spawned.push(Task::Download {
-                url: input.url,
-                dest: input.dest,
-                logical_path: input.logical_path,
-                expected_md5: input.expected_md5,
-                expected_size: input.expected_size,
-                retry_count: input.retry_count + 1,
-                transfer_class: input.transfer_class,
-            });
-        }
-        Err(err) => {
-            let _ = event_tx.send(WorkerEvent::Failed {
-                path: input.logical_path,
-                reason: format!("download failed after retries: {}", err),
-            });
-        }
+        Err(error) => retry_or_fail_download(input, error, spawned, event_tx),
+    }
+}
+
+fn retry_or_fail_download(
+    input: DownloadExecInput,
+    error: crate::error::Error,
+    spawned: &mut Vec<Task>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    if input.retry_count < input.max_retries {
+        let _ = event_tx.send(WorkerEvent::Retried {
+            path: input.logical_path.clone(),
+            reason: format!(
+                "download attempt {} failed: {}",
+                input.retry_count + 1,
+                error
+            ),
+        });
+        spawned.push(Task::Download {
+            url: input.url,
+            dest: input.dest,
+            logical_path: input.logical_path,
+            expected_md5: input.expected_md5,
+            expected_size: input.expected_size,
+            retry_count: input.retry_count + 1,
+            transfer_class: input.transfer_class,
+        });
+    } else {
+        let _ = event_tx.send(WorkerEvent::Failed {
+            path: input.logical_path,
+            reason: format!("download failed after retries: {}", error),
+        });
     }
 }
 
@@ -203,13 +256,8 @@ pub(super) fn execute_verify_reuse_volume(
     event_tx: &flume::Sender<WorkerEvent>,
 ) {
     let source = candidates.into_iter().find(|source| {
-        super::super::verify::build_issue(
-            source,
-            &logical_path,
-            &expected_md5,
-            Some(expected_size),
-        )
-        .is_none()
+        super::super::verify::build_issue(source, &logical_path, &expected_md5, Some(expected_size))
+            .is_none()
     });
     group.finish_volume(group_index, source, spawned, event_tx);
 }

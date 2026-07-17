@@ -40,9 +40,29 @@ pub(crate) fn execute_task(
             spawned,
             event_tx,
         ),
-        Task::InstallArchivePart { part, group } => archive::execute_install_archive_part(
+        Task::InstallArchivePart {
             part,
             group,
+            retry_count,
+        } => archive::execute_install_archive_part(
+            part,
+            group,
+            retry_count,
+            max_retries,
+            io_dispatcher,
+            spawned,
+            event_tx,
+        ),
+        Task::TransferArchivePart {
+            part,
+            group,
+            retry_count,
+            resume,
+        } => archive::execute_transfer_archive_part(
+            part,
+            group,
+            retry_count,
+            resume,
             max_retries,
             download_progress_buffer_bytes,
             io_dispatcher,
@@ -73,7 +93,7 @@ pub(crate) fn execute_task(
             expected_size,
             retry_count,
             transfer_class,
-        } => transfer::execute_download(
+        } => transfer::execute_prepare_download(
             transfer::DownloadExecInput {
                 url,
                 dest,
@@ -84,6 +104,31 @@ pub(crate) fn execute_task(
                 max_retries,
                 transfer_class,
             },
+            io_dispatcher,
+            spawned,
+            event_tx,
+        ),
+        Task::TransferDownload {
+            url,
+            dest,
+            logical_path,
+            expected_md5,
+            expected_size,
+            retry_count,
+            transfer_class,
+            resume,
+        } => transfer::execute_transfer_download(
+            transfer::DownloadExecInput {
+                url,
+                dest,
+                logical_path,
+                expected_md5,
+                expected_size,
+                retry_count,
+                max_retries,
+                transfer_class,
+            },
+            resume,
             download_progress_buffer_bytes,
             io_dispatcher,
             user_agent,

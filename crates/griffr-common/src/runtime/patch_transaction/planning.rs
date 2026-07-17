@@ -288,7 +288,9 @@ pub(crate) fn build_patch_execution_plan_with_cache(
         max_output = max_output.max(entry.size);
         final_delta += i128::from(entry.size) - i128::from(existing_size);
 
-        let source = if verification_cache.build_issue(existing_path, &logical, &entry.md5, Some(entry.size)).is_none()
+        let source = if verification_cache
+            .build_issue(existing_path, &logical, &entry.md5, Some(entry.size))
+            .is_none()
         {
             PlannedPatchSource::AlreadyPresent
         } else if let Some(local_path) = entry.effective_local_path() {
@@ -315,13 +317,14 @@ pub(crate) fn build_patch_execution_plan_with_cache(
                 let base_logical = base_relative.to_string_lossy().replace('\\', "/");
                 let payload =
                     archive_payload_path(PATCH_DIFF_STAGE_DIR, diff.effective_patch_path())?;
-                if verification_cache.build_issue(
-                    &verified_base,
-                    &base_logical,
-                    &diff.base_md5,
-                    Some(diff.base_size),
-                )
-                .is_some()
+                if verification_cache
+                    .build_issue(
+                        &verified_base,
+                        &base_logical,
+                        &diff.base_md5,
+                        Some(diff.base_size),
+                    )
+                    .is_some()
                 {
                     failures.push(format!("{} (base mismatch)", base_relative.display()));
                     continue;

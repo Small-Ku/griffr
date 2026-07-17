@@ -1,8 +1,11 @@
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::verify::file_md5;
+use md5::{Digest, Md5};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
@@ -117,11 +120,7 @@ pub(crate) fn commit_file_jobs(
                         callback(&job.logical_path, completed, total);
                     }
                 }
-                Err(error) => failures.push(format!(
-                    "{}: {}",
-                    job.logical_path.display(),
-                    error
-                )),
+                Err(error) => failures.push(format!("{}: {}", job.logical_path.display(), error)),
             }
         }
         if !failures.is_empty() {
@@ -198,6 +197,53 @@ pub(crate) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
     }
 }
 
+pub(crate) struct CopiedFileDigest {
+    pub(crate) bytes: u64,
+    pub(crate) md5: String,
+}
+
+/// Copies a file while calculating MD5 from the same buffers written to the
+/// destination. Callers with an expected digest can avoid a second full read.
+pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDigest> {
+    let mut input = File::open(src).map_err(|source| Error::OpenFileFailed {
+        path: src.to_path_buf(),
+        source,
+    })?;
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(dest)
+        .map_err(|source| Error::WriteFileFailed {
+            path: dest.to_path_buf(),
+            source,
+        })?;
+    let mut hasher = Md5::new();
+    let mut copied = 0u64;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = input.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .map_err(|source| Error::WriteFileFailed {
+                path: dest.to_path_buf(),
+                source,
+            })?;
+        hasher.update(&buffer[..read]);
+        copied = copied.saturating_add(read as u64);
+    }
+    output.sync_all().map_err(|source| Error::WriteFileFailed {
+        path: dest.to_path_buf(),
+        source,
+    })?;
+    Ok(CopiedFileDigest {
+        bytes: copied,
+        md5: format!("{:x}", hasher.finalize()),
+    })
+}
+
 pub(crate) fn move_path_replace_cross_volume(src: &Path, dest: &Path) -> Result<()> {
     match move_path_replace(src, dest) {
         Ok(()) => return Ok(()),
@@ -223,16 +269,17 @@ pub(crate) fn move_path_replace_cross_volume(src: &Path, dest: &Path) -> Result<
     }
     let temp = super::reuse::make_temp_write_path(dest)?;
     let _ = std::fs::remove_file(&temp);
-    std::fs::copy(src, &temp).map_err(|source| Error::CopyFailed {
-        src: src.to_path_buf(),
-        dest: temp.clone(),
-        source,
-    })?;
-    let copied_metadata = std::fs::metadata(&temp).map_err(|source| Error::StatFailed {
-        path: temp.clone(),
-        source,
-    })?;
-    if copied_metadata.len() != source_metadata.len() || file_md5(src)? != file_md5(&temp)? {
+    let copied = match copy_file_with_md5(src, &temp) {
+        Ok(copied) => copied,
+        Err(error) => {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
+    };
+    // Generic staging commits do not carry an expected checksum, so retain one
+    // destination read for durability while eliminating the former source
+    // re-read. Expected-checksum callers use the inline digest directly.
+    if copied.bytes != source_metadata.len() || copied.md5 != file_md5(&temp)? {
         let _ = std::fs::remove_file(&temp);
         return Err(Error::Other(format!(
             "Cross-volume copy verification failed for {} -> {}",

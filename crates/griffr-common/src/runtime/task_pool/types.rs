@@ -1,31 +1,8 @@
-use crate::api::protocol::MIN_USER_AGENT;
-use crate::runtime::{PatchApplyOptions, PatchPreflightReport, ProgressLane, ProgressSender};
+use crate::runtime::PatchApplyOptions;
+use md5::Md5;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-
-const DEFAULT_PARALLELISM_FALLBACK: usize = 4;
-const DEFAULT_MAX_RETRIES: u32 = 3;
-pub const DEFAULT_PROGRESS_BUFFER_BYTES: usize = 256 * 1024;
-
-const MIN_IO_SLOTS: usize = 2;
-const MAX_IO_SLOTS: usize = 16;
-const MIN_CPU_SLOTS: usize = 1;
-const MAX_CPU_SLOTS: usize = 16;
-const MIN_EXTRACT_SLOTS: usize = 1;
-const MAX_EXTRACT_SLOTS: usize = 4;
-const MIN_EXTRACT_SHARDS: usize = 1;
-const MAX_EXTRACT_SHARDS: usize = 4;
-const MIN_COMMIT_SLOTS: usize = 1;
-const MAX_COMMIT_SLOTS: usize = 8;
-const MIN_FILE_ENSURE_IO_SLOTS: usize = 4;
-const MAX_FILE_ENSURE_IO_SLOTS: usize = 24;
-const DEFAULT_VFS_IO_SLOTS: usize = 6;
-const DEFAULT_ARCHIVE_IO_SLOTS: usize = 6;
-const MIN_PATCH_SLOTS: usize = 1;
-const MAX_PATCH_SLOTS: usize = 4;
-
-use crate::runtime::issues::FileIssue;
 
 /// Selects the download throttle. Local verification and reuse never use the
 /// VFS CDN queue, even when a later fallback download is VFS-classified.
@@ -33,6 +10,40 @@ use crate::runtime::issues::FileIssue;
 pub enum TransferClass {
     General,
     Vfs,
+}
+
+/// Prepared incremental-MD5 state passed from a CPU preparation task to the
+/// network transfer task. The hasher is intentionally opaque to callers.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct DownloadResumeState {
+    pub(crate) offset: u64,
+    hasher: Arc<Mutex<Option<Md5>>>,
+}
+
+impl DownloadResumeState {
+    pub(crate) fn new(offset: u64, hasher: Md5) -> Self {
+        Self {
+            offset,
+            hasher: Arc::new(Mutex::new(Some(hasher))),
+        }
+    }
+
+    pub(crate) fn take_hasher(self) -> Md5 {
+        let mut hasher = self.hasher.lock().unwrap();
+        hasher
+            .take()
+            .expect("download resume state consumed more than once")
+    }
+}
+
+impl std::fmt::Debug for DownloadResumeState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DownloadResumeState")
+            .field("offset", &self.offset)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -50,7 +61,7 @@ pub struct FileEnsureTask {
 }
 
 #[derive(Debug)]
-pub(crate) struct ArchiveInstallGroup {
+pub struct ArchiveInstallGroup {
     remaining: AtomicUsize,
     failed: AtomicBool,
     continuation: Mutex<Option<Task>>,
@@ -83,7 +94,7 @@ impl ArchiveInstallGroup {
 }
 
 #[derive(Debug)]
-pub(crate) struct ReuseCandidateGroup {
+pub struct ReuseCandidateGroup {
     remaining: AtomicUsize,
     verified_sources: Mutex<Vec<(usize, PathBuf)>>,
     dest: PathBuf,
@@ -194,7 +205,16 @@ pub enum Task {
     InstallArchivePart {
         part: ArchivePart,
         group: Arc<ArchiveInstallGroup>,
+        retry_count: u32,
     },
+    TransferArchivePart {
+        part: ArchivePart,
+        group: Arc<ArchiveInstallGroup>,
+        retry_count: u32,
+        resume: DownloadResumeState,
+    },
+    /// CPU-side partial-file inspection and prefix hashing. This task creates
+    /// `TransferDownload` only after the resume state is ready.
     Download {
         url: String,
         dest: PathBuf,
@@ -203,6 +223,17 @@ pub enum Task {
         expected_size: Option<u64>,
         retry_count: u32,
         transfer_class: TransferClass,
+    },
+    #[doc(hidden)]
+    TransferDownload {
+        url: String,
+        dest: PathBuf,
+        logical_path: String,
+        expected_md5: String,
+        expected_size: Option<u64>,
+        retry_count: u32,
+        transfer_class: TransferClass,
+        resume: DownloadResumeState,
     },
     Verify {
         path: PathBuf,
@@ -301,292 +332,14 @@ pub struct ArchivePart {
     pub expected_size: u64,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum WorkerEvent {
-    DownloadStarted {
-        path: String,
-        total_bytes: u64,
-    },
-    Downloaded {
-        path: String,
-        bytes: u64,
-    },
-    DownloadedBytes {
-        path: String,
-        bytes: u64,
-        total_bytes: u64,
-    },
-    Verified {
-        path: String,
-        ok: bool,
-        issue: Option<FileIssue>,
-    },
-    Retried {
-        path: String,
-        reason: String,
-    },
-    Extracted {
-        path: PathBuf,
-    },
-    Changed {
-        path: String,
-    },
-    ExtractedBytes {
-        path: String,
-        bytes: u64,
-        total_bytes: u64,
-    },
-    ArchiveCommitProgress {
-        path: String,
-        completed: usize,
-        total: usize,
-    },
-    ArchivePreflight {
-        path: String,
-        report: PatchPreflightReport,
-    },
-    PatchProgress {
-        path: String,
-        completed: usize,
-        total: usize,
-    },
-    DeleteProgress {
-        path: String,
-        completed: usize,
-        total: usize,
-    },
-    Hardlinked {
-        path: PathBuf,
-    },
-    Copied {
-        path: PathBuf,
-    },
-    Failed {
-        path: String,
-        reason: String,
-    },
-}
+mod config;
+mod events;
+mod progress;
 
-#[derive(Debug, Clone)]
-pub enum TaskOutcome {
-    ArchivePreflight {
-        path: String,
-        report: PatchPreflightReport,
-    },
-    Downloaded {
-        path: String,
-        bytes: u64,
-    },
-    Verified {
-        path: String,
-        ok: bool,
-        issue: Option<FileIssue>,
-    },
-    Extracted {
-        path: PathBuf,
-    },
-    Changed {
-        path: String,
-    },
-    Hardlinked {
-        path: PathBuf,
-    },
-    Copied {
-        path: PathBuf,
-    },
-    Failed {
-        path: String,
-        reason: String,
-    },
-}
-
-impl WorkerEvent {
-    pub(crate) fn into_outcome(self) -> Option<TaskOutcome> {
-        match self {
-            Self::ArchivePreflight { path, report } => {
-                Some(TaskOutcome::ArchivePreflight { path, report })
-            }
-            Self::Downloaded { path, bytes } => Some(TaskOutcome::Downloaded { path, bytes }),
-            Self::Verified { path, ok, issue } => Some(TaskOutcome::Verified { path, ok, issue }),
-            Self::Extracted { path } => Some(TaskOutcome::Extracted { path }),
-            Self::Changed { path } => Some(TaskOutcome::Changed { path }),
-            Self::Hardlinked { path } => Some(TaskOutcome::Hardlinked { path }),
-            Self::Copied { path } => Some(TaskOutcome::Copied { path }),
-            Self::Failed { path, reason } => Some(TaskOutcome::Failed { path, reason }),
-            Self::DownloadStarted { .. }
-            | Self::DownloadedBytes { .. }
-            | Self::Retried { .. }
-            | Self::ExtractedBytes { .. }
-            | Self::ArchiveCommitProgress { .. }
-            | Self::PatchProgress { .. }
-            | Self::DeleteProgress { .. } => None,
-        }
-    }
-}
-
-/// Maps task-pool facts onto frontend-neutral progress lanes for one batch.
-///
-/// A disabled sender keeps every lane unset so non-interactive callers pay no
-/// aggregation or allocation cost for transient progress updates.
-#[derive(Clone, Default)]
-pub struct TaskProgress {
-    pub(crate) sender: ProgressSender,
-    pub(crate) verify: Option<(ProgressLane, u64)>,
-    pub(crate) download: Option<ProgressLane>,
-    pub(crate) extract: Option<ProgressLane>,
-    pub(crate) commit: Option<ProgressLane>,
-    pub(crate) patch: Option<ProgressLane>,
-    pub(crate) delete: Option<ProgressLane>,
-}
-
-impl TaskProgress {
-    pub fn disabled() -> Self {
-        Self::default()
-    }
-
-    pub fn new(sender: ProgressSender) -> Self {
-        Self {
-            sender,
-            ..Self::default()
-        }
-    }
-
-    pub fn with_verify(mut self, lane: ProgressLane, total: usize) -> Self {
-        if self.sender.is_enabled() {
-            self.verify = Some((lane, total as u64));
-        }
-        self
-    }
-
-    pub fn with_download(mut self, lane: ProgressLane) -> Self {
-        if self.sender.is_enabled() {
-            self.download = Some(lane);
-        }
-        self
-    }
-
-    pub fn with_extract(mut self, lane: ProgressLane) -> Self {
-        if self.sender.is_enabled() {
-            self.extract = Some(lane);
-        }
-        self
-    }
-
-    pub fn with_commit(mut self, lane: ProgressLane) -> Self {
-        if self.sender.is_enabled() {
-            self.commit = Some(lane);
-        }
-        self
-    }
-
-    pub fn with_patch(mut self, lane: ProgressLane) -> Self {
-        if self.sender.is_enabled() {
-            self.patch = Some(lane);
-        }
-        self
-    }
-
-    pub fn with_delete(mut self, lane: ProgressLane) -> Self {
-        if self.sender.is_enabled() {
-            self.delete = Some(lane);
-        }
-        self
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct TaskPoolConfig {
-    pub io_slots: usize,
-    pub vfs_io_slots: usize,
-    pub archive_io_slots: usize,
-    pub patch_slots: usize,
-    pub cpu_slots: usize,
-    pub extract_slots: usize,
-    pub extract_shards: usize,
-    pub commit_slots: usize,
-    pub max_retries: u32,
-    pub user_agent: String,
-    pub extraction_progress_buffer_bytes: usize,
-    pub download_progress_buffer_bytes: usize,
-}
-
-impl TaskPoolConfig {
-    pub fn with_progress_buffers(
-        extraction_progress_buffer_bytes: usize,
-        download_progress_buffer_bytes: usize,
-    ) -> Self {
-        Self {
-            extraction_progress_buffer_bytes,
-            download_progress_buffer_bytes,
-            ..Self::default()
-        }
-    }
-
-    pub fn with_download_progress_buffer(download_progress_buffer_bytes: usize) -> Self {
-        Self {
-            download_progress_buffer_bytes,
-            ..Self::default()
-        }
-    }
-
-    pub fn with_extract_slots(extract_slots: usize) -> Self {
-        Self {
-            extract_slots: extract_slots.max(MIN_EXTRACT_SLOTS),
-            ..Self::default()
-        }
-    }
-
-    pub fn for_file_reuse() -> Self {
-        Self {
-            io_slots: available_parallelism().clamp(MIN_IO_SLOTS, MAX_IO_SLOTS),
-            ..Self::default()
-        }
-    }
-
-    pub fn for_file_ensure() -> Self {
-        Self {
-            io_slots: available_parallelism()
-                .clamp(MIN_FILE_ENSURE_IO_SLOTS, MAX_FILE_ENSURE_IO_SLOTS),
-            ..Self::default()
-        }
-    }
-}
-
-impl Default for TaskPoolConfig {
-    fn default() -> Self {
-        let cpus = available_parallelism();
-        Self {
-            io_slots: (cpus * 2).clamp(MIN_IO_SLOTS, MAX_IO_SLOTS),
-            vfs_io_slots: DEFAULT_VFS_IO_SLOTS,
-            archive_io_slots: DEFAULT_ARCHIVE_IO_SLOTS,
-            patch_slots: (cpus / 4).clamp(MIN_PATCH_SLOTS, MAX_PATCH_SLOTS),
-            cpu_slots: cpus.clamp(MIN_CPU_SLOTS, MAX_CPU_SLOTS),
-            extract_slots: (cpus / 2).clamp(MIN_EXTRACT_SLOTS, MAX_EXTRACT_SLOTS),
-            extract_shards: (cpus / 4).clamp(MIN_EXTRACT_SHARDS, MAX_EXTRACT_SHARDS),
-            commit_slots: cpus.clamp(MIN_COMMIT_SLOTS, MAX_COMMIT_SLOTS),
-            max_retries: DEFAULT_MAX_RETRIES,
-            user_agent: MIN_USER_AGENT.to_owned(),
-            extraction_progress_buffer_bytes: DEFAULT_PROGRESS_BUFFER_BYTES,
-            download_progress_buffer_bytes: DEFAULT_PROGRESS_BUFFER_BYTES,
-        }
-    }
-}
-
-fn available_parallelism() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(DEFAULT_PARALLELISM_FALLBACK)
-}
-
-#[derive(Debug)]
-pub struct TaskPoolResult {
-    pub outcomes: Vec<TaskOutcome>,
-}
-
-pub struct TaskPoolRunner {
-    pub(crate) ctx: crate::runtime::task_pool::scheduler::WorkerContext,
-    pub(crate) event_rx: flume::Receiver<WorkerEvent>,
-}
+pub use config::{TaskPoolConfig, DEFAULT_PROGRESS_BUFFER_BYTES};
+pub(crate) use events::WorkerEvent;
+pub use events::{TaskOutcome, TaskPoolResult, TaskPoolRunner};
+pub use progress::TaskProgress;
 
 #[cfg(test)]
 mod tests;

@@ -1,5 +1,6 @@
 use super::*;
-use crate::runtime::{ProgressLane, ProgressSender, ProgressUpdate};
+use crate::runtime::task_pool::TaskProgress;
+use crate::runtime::{ProgressLane, ProgressSender, ProgressUnit, ProgressUpdate};
 
 #[test]
 fn disabled_task_progress_does_not_configure_lanes() {

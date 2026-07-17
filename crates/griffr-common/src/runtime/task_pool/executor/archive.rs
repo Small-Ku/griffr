@@ -46,12 +46,105 @@ pub(super) fn execute_install_archive(
     spawned.extend(parts.into_iter().map(|part| Task::InstallArchivePart {
         part,
         group: group.clone(),
+        retry_count: 0,
     }));
 }
 
 pub(super) fn execute_install_archive_part(
     part: ArchivePart,
     group: std::sync::Arc<ArchiveInstallGroup>,
+    retry_count: u32,
+    max_retries: u32,
+    io_dispatcher: Option<&Dispatcher>,
+    spawned: &mut Vec<Task>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    if super::super::verify::build_issue(
+        &part.dest,
+        &part.logical_path,
+        &part.expected_md5,
+        Some(part.expected_size),
+    )
+    .is_none()
+    {
+        let _ = event_tx.send(WorkerEvent::Verified {
+            path: part.logical_path.clone(),
+            ok: true,
+            issue: None,
+        });
+        group.finish_part(true, spawned);
+        return;
+    }
+
+    match super::super::download::prepare_download(
+        io_dispatcher,
+        &part.dest,
+        &part.expected_md5,
+        Some(part.expected_size),
+    ) {
+        Ok(super::super::download::DownloadPreparation::Complete(bytes)) => {
+            let _ = event_tx.send(WorkerEvent::Downloaded {
+                path: part.logical_path.clone(),
+                bytes,
+            });
+            let _ = event_tx.send(WorkerEvent::Verified {
+                path: part.logical_path.clone(),
+                ok: true,
+                issue: None,
+            });
+            group.finish_part(true, spawned);
+        }
+        Ok(super::super::download::DownloadPreparation::Ready(resume)) => {
+            spawned.push(Task::TransferArchivePart {
+                part,
+                group,
+                retry_count,
+                resume,
+            });
+        }
+        Err(error) if retry_count < max_retries => {
+            let _ = event_tx.send(WorkerEvent::Retried {
+                path: part.logical_path.clone(),
+                reason: format!(
+                    "install-archive preparation attempt {} failed: {}",
+                    retry_count + 1,
+                    error
+                ),
+            });
+            spawned.push(Task::InstallArchivePart {
+                part,
+                group,
+                retry_count: retry_count + 1,
+            });
+        }
+        Err(error) => {
+            let _ = event_tx.send(WorkerEvent::Verified {
+                path: part.logical_path.clone(),
+                ok: false,
+                issue: super::super::verify::build_issue(
+                    &part.dest,
+                    &part.logical_path,
+                    &part.expected_md5,
+                    Some(part.expected_size),
+                ),
+            });
+            let _ = event_tx.send(WorkerEvent::Failed {
+                path: part.logical_path.clone(),
+                reason: format!(
+                    "install-archive preparation failed after retries: {}",
+                    error
+                ),
+            });
+            group.finish_part(false, spawned);
+        }
+    }
+}
+
+pub(super) fn execute_transfer_archive_part(
+    part: ArchivePart,
+    group: std::sync::Arc<ArchiveInstallGroup>,
+    retry_count: u32,
+    resume: super::super::types::DownloadResumeState,
     max_retries: u32,
     download_progress_buffer_bytes: usize,
     io_dispatcher: Option<&Dispatcher>,
@@ -59,95 +152,75 @@ pub(super) fn execute_install_archive_part(
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) {
-    let mut succeeded = false;
-    for attempt in 0..=max_retries {
-        if super::super::verify::build_issue(
-            &part.dest,
-            &part.logical_path,
-            &part.expected_md5,
-            Some(part.expected_size),
-        )
-        .is_none()
-        {
+    let event_tx_clone = event_tx.clone();
+    let logical_path_clone = part.logical_path.clone();
+    let expected_size = part.expected_size;
+    let _ = event_tx.send(WorkerEvent::DownloadStarted {
+        path: part.logical_path.clone(),
+        total_bytes: expected_size,
+    });
+    match super::super::download::do_prepared_download(
+        io_dispatcher,
+        user_agent,
+        &part.url,
+        &part.dest,
+        &part.expected_md5,
+        Some(part.expected_size),
+        resume,
+        download_progress_buffer_bytes,
+        Some(move |bytes| {
+            let _ = event_tx_clone.send(WorkerEvent::DownloadedBytes {
+                path: logical_path_clone.clone(),
+                bytes,
+                total_bytes: expected_size,
+            });
+        }),
+    ) {
+        Ok(bytes) => {
+            let _ = event_tx.send(WorkerEvent::Downloaded {
+                path: part.logical_path.clone(),
+                bytes,
+            });
             let _ = event_tx.send(WorkerEvent::Verified {
                 path: part.logical_path.clone(),
                 ok: true,
                 issue: None,
             });
-            succeeded = true;
-            break;
+            group.finish_part(true, spawned);
         }
-
-        let event_tx_clone = event_tx.clone();
-        let logical_path_clone = part.logical_path.clone();
-        let expected_size = part.expected_size;
-        let _ = event_tx.send(WorkerEvent::DownloadStarted {
-            path: part.logical_path.clone(),
-            total_bytes: expected_size,
-        });
-        match super::super::download::do_download(
-            io_dispatcher,
-            user_agent,
-            &part.url,
-            &part.dest,
-            &part.expected_md5,
-            Some(part.expected_size),
-            download_progress_buffer_bytes,
-            Some(move |bytes| {
-                let _ = event_tx_clone.send(WorkerEvent::DownloadedBytes {
-                    path: logical_path_clone.clone(),
-                    bytes,
-                    total_bytes: expected_size,
-                });
-            }),
-        ) {
-            Ok(bytes) => {
-                let _ = event_tx.send(WorkerEvent::Downloaded {
-                    path: part.logical_path.clone(),
-                    bytes,
-                });
-                let _ = event_tx.send(WorkerEvent::Verified {
-                    path: part.logical_path.clone(),
-                    ok: true,
-                    issue: None,
-                });
-                succeeded = true;
-                break;
-            }
-            Err(error) if attempt < max_retries => {
-                let _ = event_tx.send(WorkerEvent::Retried {
-                    path: part.logical_path.clone(),
-                    reason: format!(
-                        "install-archive download attempt {} failed: {}",
-                        attempt + 1,
-                        error
-                    ),
-                });
-            }
-            Err(error) => {
-                let issue = super::super::verify::build_issue(
+        Err(error) if retry_count < max_retries => {
+            let _ = event_tx.send(WorkerEvent::Retried {
+                path: part.logical_path.clone(),
+                reason: format!(
+                    "install-archive download attempt {} failed: {}",
+                    retry_count + 1,
+                    error
+                ),
+            });
+            spawned.push(Task::InstallArchivePart {
+                part,
+                group,
+                retry_count: retry_count + 1,
+            });
+        }
+        Err(error) => {
+            let _ = event_tx.send(WorkerEvent::Verified {
+                path: part.logical_path.clone(),
+                ok: false,
+                issue: super::super::verify::build_issue(
                     &part.dest,
                     &part.logical_path,
                     &part.expected_md5,
                     Some(part.expected_size),
-                );
-                let _ = event_tx.send(WorkerEvent::Verified {
-                    path: part.logical_path.clone(),
-                    ok: false,
-                    issue,
-                });
-                let _ = event_tx.send(WorkerEvent::Failed {
-                    path: part.logical_path.clone(),
-                    reason: format!(
-                        "install-archive download failed after retries: {}",
-                        error
-                    ),
-                });
-                break;
-            }
+                ),
+            });
+            let _ = event_tx.send(WorkerEvent::Failed {
+                path: part.logical_path.clone(),
+                reason: format!("install-archive download failed after retries: {}", error),
+            });
+            group.finish_part(false, spawned);
         }
     }
-    group.finish_part(succeeded, spawned);
 }
 
 pub(super) fn execute_extract_archive(
@@ -273,7 +346,8 @@ pub(super) fn execute_extract_archive(
                     })?;
                 }
             } else {
-                if let Err(error) = commit_staged_extract(&staging_dir, &dest, commit_slots, Some(&mut on_commit))
+                if let Err(error) =
+                    commit_staged_extract(&staging_dir, &dest, commit_slots, Some(&mut on_commit))
                 {
                     let _ = std::fs::remove_dir_all(&staging_dir);
                     return Err(error);

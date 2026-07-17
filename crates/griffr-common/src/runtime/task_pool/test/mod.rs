@@ -1,5 +1,4 @@
 use super::*;
-use crate::runtime::task_pool::download::do_download;
 use crate::runtime::task_pool::fs_ops::{
     make_partial_download_path, make_temp_write_path, write_file,
 };

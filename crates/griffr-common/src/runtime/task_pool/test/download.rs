@@ -127,3 +127,63 @@ fn do_download_resume_incremental_md5_produces_correct_result() {
         "expected resume request with Range header"
     );
 }
+
+#[test]
+fn completed_partial_is_committed_without_network_request() {
+    let tmp = tempdir().unwrap();
+    let dest = tmp.path().join("complete.chk");
+    let part = make_partial_download_path(&dest).unwrap();
+    let payload = b"already complete partial download";
+    std::fs::write(&part, payload).unwrap();
+    let expected_md5 = format!("{:x}", Md5::digest(payload));
+
+    let dispatcher = Dispatcher::builder()
+        .worker_threads(NonZeroUsize::new(2).unwrap())
+        .build()
+        .expect("dispatcher should build");
+    let len = do_download(
+        Some(&dispatcher),
+        "Mozilla/5.0",
+        "http://127.0.0.1:1/must-not-be-requested",
+        &dest,
+        &expected_md5,
+        Some(payload.len() as u64),
+        DEFAULT_PROGRESS_BUFFER_BYTES,
+        None::<fn(u64)>,
+    )
+    .unwrap();
+
+    assert_eq!(len, payload.len() as u64);
+    assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    assert!(!part.exists());
+}
+
+fn do_download(
+    io_dispatcher: Option<&Dispatcher>,
+    user_agent: &str,
+    url: &str,
+    dest: &std::path::Path,
+    expected_md5: &str,
+    expected_size: Option<u64>,
+    progress_buffer_bytes: usize,
+    on_progress: Option<impl Fn(u64) + Send + 'static>,
+) -> crate::error::Result<u64> {
+    use crate::runtime::task_pool::download::{
+        do_prepared_download, prepare_download, DownloadPreparation,
+    };
+
+    match prepare_download(io_dispatcher, dest, expected_md5, expected_size)? {
+        DownloadPreparation::Complete(bytes) => Ok(bytes),
+        DownloadPreparation::Ready(resume) => do_prepared_download(
+            io_dispatcher,
+            user_agent,
+            url,
+            dest,
+            expected_md5,
+            expected_size,
+            resume,
+            progress_buffer_bytes,
+            on_progress,
+        ),
+    }
+}

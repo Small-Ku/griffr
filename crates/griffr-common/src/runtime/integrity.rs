@@ -42,6 +42,7 @@ fn normalize_target_path(path: &Path) -> String {
 fn task_target_path(task: &Task) -> Option<&Path> {
     match task {
         Task::Download { dest, .. }
+        | Task::TransferDownload { dest, .. }
         | Task::RepairFile { dest, .. }
         | Task::ReuseFile { dest, .. } => Some(dest.as_path()),
         Task::Verify { path, .. } => Some(path.as_path()),
@@ -65,6 +66,7 @@ fn resolve_reused_logical_path(
 fn task_progress_path(task: &Task) -> Option<&str> {
     match task {
         Task::Download { logical_path, .. }
+        | Task::TransferDownload { logical_path, .. }
         | Task::Verify { logical_path, .. }
         | Task::RepairFile { logical_path, .. }
         | Task::VerifyReuseVolume { logical_path, .. }
@@ -260,9 +262,7 @@ pub async fn run_integrity_pool(
     }
 
     let summary = outcomes.summary();
-    let mut issues = issues_by_path
-        .into_values()
-        .collect::<Vec<_>>();
+    let mut issues = issues_by_path.into_values().collect::<Vec<_>>();
     issues.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(IntegrityRunSummary {
         issues,

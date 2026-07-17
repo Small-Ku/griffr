@@ -8,22 +8,23 @@ use crate::runtime::patch_transaction::{
 };
 use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 
-use super::filesystem::remove_path_if_exists;
-use super::super::apply::{apply_hdiff_patch, verify_patch_output};
 use super::super::super::extract::move_path_replace_cross_volume;
+use super::super::apply::{apply_hdiff_patch, verify_patch_output};
+use super::filesystem::remove_path_if_exists;
 
 pub(super) fn apply_planned_entry(
     plan: &PatchExecutionPlan,
     entry: &PlannedPatchEntry,
     verification_cache: &VerifiedArtifactCache,
 ) -> Result<()> {
-    if verification_cache.build_issue(
-        &entry.destination,
-        &entry.name,
-        &entry.expected_md5,
-        Some(entry.expected_size),
-    )
-    .is_none()
+    if verification_cache
+        .build_issue(
+            &entry.destination,
+            &entry.name,
+            &entry.expected_md5,
+            Some(entry.expected_size),
+        )
+        .is_none()
     {
         return Ok(());
     }
@@ -186,11 +187,7 @@ pub(super) fn entry_waves(plan: &PatchExecutionPlan) -> Result<Vec<Vec<&PlannedP
                 }
             }
         }
-        waves.push(
-            wave.into_iter()
-                .map(|index| &plan.entries[index])
-                .collect(),
-        );
+        waves.push(wave.into_iter().map(|index| &plan.entries[index]).collect());
     }
     if completed != plan.entries.len() {
         let blocked = indegree
@@ -208,6 +205,7 @@ pub(super) fn entry_waves(plan: &PatchExecutionPlan) -> Result<Vec<Vec<&PlannedP
     Ok(waves)
 }
 
+#[cfg(test)]
 pub(super) fn ordered_entries(plan: &PatchExecutionPlan) -> Result<Vec<&PlannedPatchEntry>> {
     Ok(entry_waves(plan)?.into_iter().flatten().collect())
 }

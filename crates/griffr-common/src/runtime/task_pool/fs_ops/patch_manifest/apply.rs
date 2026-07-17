@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::api::types::ResourcePatchEntry;
 use crate::runtime::task_pool::verify::build_issue;
 
-use super::super::extract::move_path_replace;
+use super::super::extract::{copy_file_with_md5, move_path_replace};
 use super::super::path_safety::parse_safe_relative_path;
 use super::super::reuse::make_temp_write_path;
 use super::resolve_patch_stage_path;
@@ -127,28 +127,28 @@ pub(super) fn apply_hdiff_patch(
             base_path.display()
         )));
     }
-    if let Err(err) = verify_patch_output(&temp_path, logical_path, expected_md5, expected_size) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(err);
-    }
     if work_dir.is_some() {
         let local_temp = make_temp_write_path(dest_path)?;
         let _ = std::fs::remove_file(&local_temp);
-        if let Err(source) = std::fs::copy(&temp_path, &local_temp) {
+        let copied = match copy_file_with_md5(&temp_path, &local_temp) {
+            Ok(copied) => copied,
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp_path);
+                let _ = std::fs::remove_file(&local_temp);
+                return Err(error);
+            }
+        };
+        if copied.bytes != expected_size || copied.md5 != expected_md5.to_ascii_lowercase() {
             let _ = std::fs::remove_file(&temp_path);
             let _ = std::fs::remove_file(&local_temp);
-            return Err(Error::CopyFailed {
-                src: temp_path,
-                dest: local_temp,
-                source,
-            });
-        }
-        if let Err(error) =
-            verify_patch_output(&local_temp, logical_path, expected_md5, expected_size)
-        {
-            let _ = std::fs::remove_file(&temp_path);
-            let _ = std::fs::remove_file(&local_temp);
-            return Err(error);
+            return Err(Error::Vfs(format!(
+                "Patch output {} failed inline copy verification: expected size/md5 {}/{}, got {}/{}",
+                logical_path,
+                expected_size,
+                expected_md5,
+                copied.bytes,
+                copied.md5
+            )));
         }
         if let Err(error) = move_path_replace(&local_temp, dest_path) {
             let _ = std::fs::remove_file(&temp_path);
@@ -157,6 +157,10 @@ pub(super) fn apply_hdiff_patch(
         }
         let _ = std::fs::remove_file(&temp_path);
         return Ok(());
+    }
+    if let Err(err) = verify_patch_output(&temp_path, logical_path, expected_md5, expected_size) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err);
     }
     if let Err(error) = move_path_replace(&temp_path, dest_path) {
         let _ = std::fs::remove_file(&temp_path);

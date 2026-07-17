@@ -60,7 +60,8 @@ fn transaction_defers_version_marker_and_preserves_final_output() {
         2,
         2,
         &VerifiedArtifactCache::default(),
-    ).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(std::fs::read(&output).unwrap(), b"final");
     assert_eq!(
@@ -152,12 +153,7 @@ fn application_revalidates_persisted_base_metadata() {
         Vec::new(),
     );
 
-    let error = apply_planned_entry(
-        &plan,
-        &entry,
-        &VerifiedArtifactCache::default(),
-    )
-    .unwrap_err();
+    let error = apply_planned_entry(&plan, &entry, &VerifiedArtifactCache::default()).unwrap_err();
     assert!(error
         .to_string()
         .contains("failed verification before applying"));

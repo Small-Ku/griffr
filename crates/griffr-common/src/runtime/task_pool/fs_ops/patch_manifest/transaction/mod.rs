@@ -12,13 +12,13 @@ mod filesystem;
 mod operations;
 
 use filesystem::{commit_top_level_files, prepare_external_vfs_root};
+#[cfg(test)]
+use operations::ordered_entries;
 use operations::{
     apply_planned_entry, apply_remaining_deletes, cleanup_staging, cleanup_transaction,
     commit_deferred_files, delete_unreferenced_paths_before_patch, entry_waves, final_output_paths,
     release_base_if_unused,
 };
-#[cfg(test)]
-use operations::ordered_entries;
 
 pub(crate) fn execute_patch_transaction(
     plan: &PatchExecutionPlan,

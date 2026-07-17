@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::{Error, Result};
 use crate::runtime::patch_transaction::{

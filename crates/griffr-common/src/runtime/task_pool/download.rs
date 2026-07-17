@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::api::protocol::{byte_range_from, RANGE_HEADER, USER_AGENT_HEADER};
 use crate::error::{Error, Result};
@@ -11,8 +12,11 @@ use futures_util::StreamExt;
 use md5::{Digest, Md5};
 use tracing::debug;
 
+use super::types::DownloadResumeState;
+
 const DEFAULT_DOWNLOAD_SEND_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_DOWNLOAD_BODY_TIMEOUT_SECS: u64 = 15 * 60;
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 
 fn duration_from_env_secs(var: &str, default_secs: u64) -> std::time::Duration {
     let secs = std::env::var(var)
@@ -23,13 +27,87 @@ fn duration_from_env_secs(var: &str, default_secs: u64) -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
-pub(crate) fn do_download(
+pub(crate) enum DownloadPreparation {
+    Complete(u64),
+    Ready(DownloadResumeState),
+}
+
+/// Inspects a partial download and computes the incremental MD5 prefix on a
+/// CPU worker before the network task is admitted to an I/O queue.
+pub(crate) fn prepare_download(
+    io_dispatcher: Option<&Dispatcher>,
+    dest: &Path,
+    expected_md5: &str,
+    expected_size: Option<u64>,
+) -> Result<DownloadPreparation> {
+    let part_path = super::fs_ops::make_partial_download_path(dest)?;
+    let metadata = match std::fs::metadata(&part_path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == ErrorKind::NotFound => {
+            return Ok(DownloadPreparation::Ready(DownloadResumeState::new(
+                0,
+                Md5::new(),
+            )));
+        }
+        Err(source) => {
+            return Err(Error::StatFailed {
+                path: part_path,
+                source,
+            });
+        }
+    };
+    if !metadata.is_file() {
+        return Err(Error::Download(format!(
+            "Partial download path is not a file: {}",
+            part_path.display()
+        )));
+    }
+
+    let partial_len = metadata.len();
+    if let Some(expected_size) = expected_size {
+        if partial_len > expected_size {
+            std::fs::remove_file(&part_path).map_err(|source| Error::RemoveFailed {
+                path: part_path.clone(),
+                source,
+            })?;
+            return Ok(DownloadPreparation::Ready(DownloadResumeState::new(
+                0,
+                Md5::new(),
+            )));
+        }
+        if partial_len == expected_size {
+            let actual_md5 = super::verify::file_md5(&part_path)?;
+            if actual_md5 == expected_md5.to_ascii_lowercase() {
+                super::fs_ops::commit_partial_download(io_dispatcher, &part_path, dest)?;
+                return Ok(DownloadPreparation::Complete(partial_len));
+            }
+            std::fs::remove_file(&part_path).map_err(|source| Error::RemoveFailed {
+                path: part_path.clone(),
+                source,
+            })?;
+            return Ok(DownloadPreparation::Ready(DownloadResumeState::new(
+                0,
+                Md5::new(),
+            )));
+        }
+    }
+
+    let mut hasher = Md5::new();
+    super::fs_ops::hash_file_prefix_into_hasher(&part_path, partial_len, &mut hasher)?;
+    Ok(DownloadPreparation::Ready(DownloadResumeState::new(
+        partial_len,
+        hasher,
+    )))
+}
+
+pub(crate) fn do_prepared_download(
     io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
     url: &str,
     dest: &Path,
     expected_md5: &str,
     expected_size: Option<u64>,
+    resume: DownloadResumeState,
     progress_buffer_bytes: usize,
     on_progress: Option<impl Fn(u64) + Send + 'static>,
 ) -> Result<u64> {
@@ -42,22 +120,8 @@ pub(crate) fn do_download(
         DEFAULT_DOWNLOAD_BODY_TIMEOUT_SECS,
     );
     let part_path = super::fs_ops::make_partial_download_path(dest)?;
-    let part_path_for_resume = part_path.clone();
-    let resume_from = super::fs_ops::dispatch_io(io_dispatcher, move || async move {
-        match compio::fs::metadata(&part_path_for_resume).await {
-            Ok(metadata) => Ok::<Option<u64>, Error>(match expected_size {
-                Some(size) if metadata.len() < size => Some(metadata.len()),
-                Some(_) => Some(0),
-                None => Some(metadata.len()),
-            }),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(Error::StatFailed {
-                path: part_path_for_resume.clone(),
-                source: err,
-            }),
-        }
-    })?;
-
+    let resume_offset = resume.offset;
+    let prepared_hasher = resume.take_hasher();
     let url_owned = url.to_string();
     let user_agent_owned = user_agent.to_string();
     let part_path_for_write = part_path.clone();
@@ -67,13 +131,16 @@ pub(crate) fn do_download(
         request = request
             .header(USER_AGENT_HEADER, user_agent_owned)
             .map_err(|e| Error::Download(format!("Failed to attach User-Agent header: {e}")))?;
-        if let Some(offset) = resume_from.filter(|o| *o > 0) {
+        if resume_offset > 0 {
             request = request
-                .header(RANGE_HEADER, byte_range_from(offset))
+                .header(RANGE_HEADER, byte_range_from(resume_offset))
                 .map_err(|e| {
                     Error::Download(format!("Failed to set Range header for resume: {e}"))
                 })?;
-            debug!("resuming download from byte {} for {}", offset, url_owned);
+            debug!(
+                "resuming download from byte {} for {}",
+                resume_offset, url_owned
+            );
         }
         let response = compio::time::timeout(send_timeout, request.send())
             .await?
@@ -92,8 +159,7 @@ pub(crate) fn do_download(
                 })?;
         }
 
-        let resume_effective = resume_from.filter(|o| *o > 0).is_some() && status.as_u16() == 206;
-        let resume_offset = resume_from.unwrap_or(0);
+        let resume_effective = resume_offset > 0 && status.as_u16() == 206;
         let mut open_options = compio::fs::OpenOptions::new();
         open_options
             .create(true)
@@ -108,19 +174,17 @@ pub(crate) fn do_download(
                     source: e,
                 })?;
 
-        let mut hasher = Md5::new();
-        if resume_effective {
-            super::fs_ops::hash_file_prefix_into_hasher(
-                &part_path_for_write,
-                resume_offset,
-                &mut hasher,
-            )?;
-        }
-
+        let mut hasher = if resume_effective {
+            prepared_hasher
+        } else {
+            Md5::new()
+        };
         let mut stream = response.bytes_stream();
         let mut total_written = if resume_effective { resume_offset } else { 0 };
         let mut write_offset = total_written;
         let mut last_reported_bytes = total_written;
+        let mut last_reported_at = Instant::now();
+        let progress_threshold = (progress_buffer_bytes as u64).max(1);
         loop {
             let next: Option<std::result::Result<Bytes, cyper::Error>> =
                 compio::time::timeout(body_timeout, stream.next())
@@ -146,17 +210,20 @@ pub(crate) fn do_download(
             })?;
             write_offset = write_offset.saturating_add(chunk_len);
             total_written = total_written.saturating_add(chunk_len);
-            if let Some(ref cb) = on_progress {
-                if total_written - last_reported_bytes >= progress_buffer_bytes as u64 {
-                    cb(total_written);
+            if let Some(ref callback) = on_progress {
+                let byte_threshold_reached =
+                    total_written.saturating_sub(last_reported_bytes) >= progress_threshold;
+                if byte_threshold_reached || last_reported_at.elapsed() >= PROGRESS_EMIT_INTERVAL {
+                    callback(total_written);
                     last_reported_bytes = total_written;
+                    last_reported_at = Instant::now();
                 }
             }
         }
 
-        if let Some(ref cb) = on_progress {
+        if let Some(ref callback) = on_progress {
             if total_written > last_reported_bytes {
-                cb(total_written);
+                callback(total_written);
             }
         }
 
@@ -178,7 +245,7 @@ pub(crate) fn do_download(
         Ok::<(u64, String), Error>((total_written, actual_md5))
     })?;
 
-    if actual_md5 != expected_md5.to_lowercase() {
+    if actual_md5 != expected_md5.to_ascii_lowercase() {
         return Err(Error::Download(format!(
             "MD5 mismatch: expected {}, got {}",
             expected_md5, actual_md5
