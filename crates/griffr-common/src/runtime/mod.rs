@@ -29,7 +29,7 @@ pub use files::vfs::{
     VfsUpdateOutcome, VfsUpdateResult,
 };
 pub use install_plan::required_install_bytes;
-pub use integrity::{run_integrity_pool, IntegrityRunSummary};
+pub use integrity::{run_integrity_pool, IntegrityRunSummary, IntegritySelection};
 pub use issues::{FileIssue, FileIssueKind};
 pub use launcher::{GameProcess, Launcher};
 pub use launcher_metadata::sync_launcher_metadata;

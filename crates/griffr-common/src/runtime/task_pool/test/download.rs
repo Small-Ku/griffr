@@ -42,7 +42,7 @@ fn ensure_file_can_relink_verified_target_when_prefer_reuse_enabled() {
     std::fs::write(&target, b"same-bytes").unwrap();
     let expected_md5 = format!("{:x}", Md5::digest(b"same-bytes"));
 
-    let tasks = vec![Task::EnsureFile {
+    let tasks = vec![Task::ensure_file(FileEnsureTask {
         dest: target.clone(),
         logical_path: "target.bin".to_string(),
         expected_md5,
@@ -52,7 +52,8 @@ fn ensure_file_can_relink_verified_target_when_prefer_reuse_enabled() {
         allow_copy_fallback: false,
         prefer_reuse: true,
         retry_count: 0,
-    }];
+        transfer_class: TransferClass::General,
+    })];
 
     let result = run_tasks(tasks, TaskPoolConfig::default()).unwrap();
     assert!(

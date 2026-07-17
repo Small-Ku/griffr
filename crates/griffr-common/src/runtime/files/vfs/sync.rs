@@ -7,7 +7,9 @@ use crate::api::client::{ApiClient, ApiError};
 use crate::api::crypto::RES_INDEX_KEY;
 use crate::api::protocol::DEFAULT_PLATFORM;
 use crate::config::ApiTarget;
-use crate::runtime::task_pool::{Task, TaskOutcome, TaskPoolRunner, TaskProgress};
+use crate::runtime::task_pool::{
+    FileEnsureTask, Task, TaskOutcome, TaskPoolRunner, TaskProgress, TransferClass,
+};
 use crate::runtime::{
     resource_manifest_url, PathOutcomeTracker, ProgressLane, ProgressSender, ResourceManifestKind,
 };
@@ -75,7 +77,7 @@ pub async fn plan_vfs_tasks(
                 .collect::<Vec<_>>();
             total_files += 1;
             total_bytes = total_bytes.saturating_add(file.size);
-            tasks.push(Task::EnsureFile {
+            tasks.push(Task::ensure_file(FileEnsureTask {
                 dest: streaming_assets_path.join(&file.name),
                 logical_path: file.name.clone(),
                 expected_md5,
@@ -85,7 +87,8 @@ pub async fn plan_vfs_tasks(
                 allow_copy_fallback: options.allow_copy_fallback,
                 prefer_reuse: options.prefer_reuse,
                 retry_count: 0,
-            });
+                transfer_class: TransferClass::Vfs,
+            }));
         }
     }
 

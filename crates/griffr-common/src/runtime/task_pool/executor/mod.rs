@@ -63,6 +63,7 @@ pub(crate) fn execute_task(
             expected_md5,
             expected_size,
             retry_count,
+            transfer_class,
         } => transfer::execute_download(
             transfer::DownloadExecInput {
                 url,
@@ -72,6 +73,7 @@ pub(crate) fn execute_task(
                 expected_size,
                 retry_count,
                 max_retries,
+                transfer_class,
             },
             download_progress_buffer_bytes,
             io_dispatcher,
@@ -79,7 +81,7 @@ pub(crate) fn execute_task(
             spawned,
             event_tx,
         ),
-        Task::EnsureFile {
+        Task::RepairFile {
             dest,
             logical_path,
             expected_md5,
@@ -87,10 +89,10 @@ pub(crate) fn execute_task(
             source_candidates,
             download_url,
             allow_copy_fallback,
-            prefer_reuse,
             retry_count,
-        } => transfer::execute_ensure_file(
-            transfer::EnsureFileInput {
+            transfer_class,
+        } => transfer::execute_repair_file(
+            transfer::RepairFileInput {
                 dest,
                 logical_path,
                 expected_md5,
@@ -98,13 +100,37 @@ pub(crate) fn execute_task(
                 source_candidates,
                 download_url,
                 allow_copy_fallback,
-                prefer_reuse,
                 retry_count,
-                max_retries,
+                transfer_class,
             },
-            download_progress_buffer_bytes,
+            spawned,
+            event_tx,
+        ),
+        Task::ReuseFile {
+            source,
+            remaining_source_candidates,
+            dest,
+            logical_path,
+            expected_md5,
+            expected_size,
+            download_url,
+            allow_copy_fallback,
+            retry_count,
+            transfer_class,
+        } => transfer::execute_reuse_file(
+            transfer::ReuseFileInput {
+                source,
+                remaining_source_candidates,
+                dest,
+                logical_path,
+                expected_md5,
+                expected_size,
+                download_url,
+                allow_copy_fallback,
+                retry_count,
+                transfer_class,
+            },
             io_dispatcher,
-            user_agent,
             spawned,
             event_tx,
         ),
@@ -144,13 +170,24 @@ pub(crate) fn execute_task(
             let has_transaction_plan = plan_path.is_file();
             let result = if has_transaction_plan {
                 let mut on_commit = |path: &std::path::Path, completed: usize, total: usize| {
+                    let normalized = path.to_string_lossy().replace('\\', "/");
+                    if completed > 0 {
+                        let _ = event_tx.send(WorkerEvent::Changed {
+                            path: normalized.clone(),
+                        });
+                    }
                     let _ = event_tx.send(WorkerEvent::ArchiveCommitProgress {
-                        path: path.to_string_lossy().replace('\\', "/"),
+                        path: normalized,
                         completed,
                         total,
                     });
                 };
                 let mut on_patch = |path: &str, completed: usize, total: usize| {
+                    if completed > 0 {
+                        let _ = event_tx.send(WorkerEvent::Changed {
+                            path: path.replace('\\', "/"),
+                        });
+                    }
                     let _ = event_tx.send(WorkerEvent::PatchProgress {
                         path: path.to_string(),
                         completed,
@@ -158,8 +195,14 @@ pub(crate) fn execute_task(
                     });
                 };
                 let mut on_delete = |path: &std::path::Path, completed: usize, total: usize| {
+                    let normalized = path.to_string_lossy().replace('\\', "/");
+                    if completed > 0 {
+                        let _ = event_tx.send(WorkerEvent::Changed {
+                            path: normalized.clone(),
+                        });
+                    }
                     let _ = event_tx.send(WorkerEvent::DeleteProgress {
-                        path: path.to_string_lossy().replace('\\', "/"),
+                        path: normalized,
                         completed,
                         total,
                     });
@@ -172,6 +215,11 @@ pub(crate) fn execute_task(
                 )
             } else {
                 let mut on_progress = |path: &str, completed: usize, total: usize| {
+                    if completed > 0 {
+                        let _ = event_tx.send(WorkerEvent::Changed {
+                            path: path.replace('\\', "/"),
+                        });
+                    }
                     let _ = event_tx.send(WorkerEvent::PatchProgress {
                         path: path.to_string(),
                         completed,
@@ -196,8 +244,14 @@ pub(crate) fn execute_task(
         Task::ApplyDeleteManifest { install_root } => {
             let result = {
                 let mut on_progress = |path: &std::path::Path, completed: usize, total: usize| {
+                    let normalized = path.to_string_lossy().replace('\\', "/");
+                    if completed > 0 {
+                        let _ = event_tx.send(WorkerEvent::Changed {
+                            path: normalized.clone(),
+                        });
+                    }
                     let _ = event_tx.send(WorkerEvent::DeleteProgress {
-                        path: path.to_string_lossy().replace('\\', "/"),
+                        path: normalized,
                         completed,
                         total,
                     });

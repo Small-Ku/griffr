@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -17,9 +18,10 @@ use crate::runtime::{ProgressUnit, ProgressUpdate};
 
 const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerKind {
     Io,
+    VfsIo,
     Cpu,
     Extract,
 }
@@ -27,6 +29,7 @@ enum WorkerKind {
 #[derive(Clone)]
 pub(crate) struct WorkerContext {
     pub(crate) io_tx: Sender<Task>,
+    pub(crate) vfs_io_tx: Sender<Task>,
     pub(crate) cpu_tx: Sender<Task>,
     pub(crate) extract_tx: Sender<Task>,
     pub(crate) event_tx: Sender<WorkerEvent>,
@@ -40,6 +43,7 @@ pub(crate) struct WorkerContext {
 struct TaskProgressReducer {
     config: TaskProgress,
     verify_completed: u64,
+    verified_paths: HashSet<String>,
     download_completed: RunningByteProgress,
     download_totals: RunningByteProgress,
     extract_completed: RunningByteProgress,
@@ -65,6 +69,7 @@ impl TaskProgressReducer {
         Self {
             config,
             verify_completed: 0,
+            verified_paths: HashSet::new(),
             download_completed: RunningByteProgress::new(),
             download_totals: RunningByteProgress::new(),
             extract_completed: RunningByteProgress::new(),
@@ -81,13 +86,15 @@ impl TaskProgressReducer {
         match event {
             WorkerEvent::Verified { path, .. } => {
                 if let Some((lane, total)) = self.config.verify {
-                    self.verify_completed = self.verify_completed.saturating_add(1).min(total);
-                    self.config.sender.emit(ProgressUpdate::Advanced {
-                        lane,
-                        completed: self.verify_completed,
-                        total: Some(total),
-                        item: Some(path.clone()),
-                    });
+                    if self.verified_paths.insert(path.clone()) {
+                        self.verify_completed = self.verify_completed.saturating_add(1).min(total);
+                        self.config.sender.emit(ProgressUpdate::Advanced {
+                            lane,
+                            completed: self.verify_completed,
+                            total: Some(total),
+                            item: Some(path.clone()),
+                        });
+                    }
                 }
             }
             WorkerEvent::DownloadStarted { path, total_bytes } => {
@@ -305,6 +312,7 @@ fn known_total(total: u64) -> Option<u64> {
 impl TaskPoolRunner {
     pub fn new(config: TaskPoolConfig) -> Result<Self> {
         let (io_tx, io_rx) = flume::unbounded::<Task>();
+        let (vfs_io_tx, vfs_io_rx) = flume::unbounded::<Task>();
         let (cpu_tx, cpu_rx) = flume::unbounded::<Task>();
         let (extract_tx, extract_rx) = flume::unbounded::<Task>();
         let (event_tx, event_rx) = flume::unbounded::<WorkerEvent>();
@@ -324,6 +332,7 @@ impl TaskPoolRunner {
         );
         let ctx = WorkerContext {
             io_tx: io_tx.clone(),
+            vfs_io_tx: vfs_io_tx.clone(),
             cpu_tx: cpu_tx.clone(),
             extract_tx: extract_tx.clone(),
             event_tx: event_tx.clone(),
@@ -334,6 +343,12 @@ impl TaskPoolRunner {
             shared_dispatcher,
         };
         spawn_workers(WorkerKind::Io, ctx.config.io_slots, io_rx, ctx.clone())?;
+        spawn_workers(
+            WorkerKind::VfsIo,
+            ctx.config.vfs_io_slots,
+            vfs_io_rx,
+            ctx.clone(),
+        )?;
         spawn_workers(WorkerKind::Cpu, ctx.config.cpu_slots, cpu_rx, ctx.clone())?;
         spawn_workers(
             WorkerKind::Extract,
@@ -456,23 +471,17 @@ fn spawn_workers(
     Ok(())
 }
 
-fn dispatcher_thread_count(config: &TaskPoolConfig) -> usize {
-    let worker_loops = config.io_slots + config.cpu_slots + config.extract_slots;
-    let extra_io_lanes = config.io_slots.max(1);
-    (worker_loops + extra_io_lanes).clamp(2, 64)
-}
+mod routing;
+
+use routing::{dispatcher_thread_count, worker_kind_for_task};
 
 pub(crate) fn enqueue_task(ctx: &WorkerContext, task: Task) -> Result<()> {
     ctx.pending.fetch_add(1, Ordering::AcqRel);
-    let send_result = match task {
-        Task::InstallArchive { .. }
-        | Task::Download { .. }
-        | Task::Hardlink { .. }
-        | Task::EnsureFile { .. }
-        | Task::ApplyExtractedVfsPatchManifest { .. }
-        | Task::ApplyDeleteManifest { .. } => ctx.io_tx.send(task),
-        Task::Verify { .. } => ctx.cpu_tx.send(task),
-        Task::Extract { .. } => ctx.extract_tx.send(task),
+    let send_result = match worker_kind_for_task(&task) {
+        WorkerKind::Io => ctx.io_tx.send(task),
+        WorkerKind::VfsIo => ctx.vfs_io_tx.send(task),
+        WorkerKind::Cpu => ctx.cpu_tx.send(task),
+        WorkerKind::Extract => ctx.extract_tx.send(task),
     };
     if send_result.is_err() {
         let remaining = ctx.pending.fetch_sub(1, Ordering::AcqRel) - 1;

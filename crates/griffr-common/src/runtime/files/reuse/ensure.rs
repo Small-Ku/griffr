@@ -7,6 +7,7 @@ use tracing::{info, warn};
 
 use crate::api::types::GameFileEntry;
 use crate::api::ApiClient;
+use crate::runtime::task_pool::{FileEnsureTask, Task, TransferClass};
 use crate::runtime::{
     build_cdn_file_url, files_base_url, is_launcher_metadata_path, logical_path_from_root,
     PathOutcomeTracker, PathReuseMethod, ProgressLane, ProgressSender,
@@ -106,7 +107,7 @@ pub async fn ensure_game_files_with_pool(
                 }
             }
 
-            crate::runtime::task_pool::Task::EnsureFile {
+            Task::ensure_file(FileEnsureTask {
                 dest: install_path.join(&entry.path),
                 logical_path: entry.path.clone(),
                 expected_md5: entry.md5.clone(),
@@ -116,7 +117,8 @@ pub async fn ensure_game_files_with_pool(
                 allow_copy_fallback: config.allow_copy_fallback,
                 prefer_reuse: false,
                 retry_count: 0,
-            }
+                transfer_class: TransferClass::General,
+            })
         })
         .collect::<Vec<_>>();
 

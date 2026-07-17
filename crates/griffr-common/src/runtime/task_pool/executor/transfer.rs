@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use compio::dispatcher::Dispatcher;
 
-use super::super::fs_ops::{reuse_file, ReuseMethod};
-use super::super::types::{Task, WorkerEvent};
+use super::super::fs_ops::{reuse_verified_file, ReuseMethod};
+use super::super::types::{Task, TransferClass, WorkerEvent};
 
 pub(super) struct DownloadExecInput {
     pub(super) url: String,
@@ -13,9 +13,10 @@ pub(super) struct DownloadExecInput {
     pub(super) expected_size: Option<u64>,
     pub(super) retry_count: u32,
     pub(super) max_retries: u32,
+    pub(super) transfer_class: TransferClass,
 }
 
-pub(super) struct EnsureFileInput {
+pub(super) struct RepairFileInput {
     pub(super) dest: PathBuf,
     pub(super) logical_path: String,
     pub(super) expected_md5: String,
@@ -23,9 +24,21 @@ pub(super) struct EnsureFileInput {
     pub(super) source_candidates: Vec<PathBuf>,
     pub(super) download_url: Option<String>,
     pub(super) allow_copy_fallback: bool,
-    pub(super) prefer_reuse: bool,
     pub(super) retry_count: u32,
-    pub(super) max_retries: u32,
+    pub(super) transfer_class: TransferClass,
+}
+
+pub(super) struct ReuseFileInput {
+    pub(super) source: PathBuf,
+    pub(super) remaining_source_candidates: Vec<PathBuf>,
+    pub(super) dest: PathBuf,
+    pub(super) logical_path: String,
+    pub(super) expected_md5: String,
+    pub(super) expected_size: u64,
+    pub(super) download_url: Option<String>,
+    pub(super) allow_copy_fallback: bool,
+    pub(super) retry_count: u32,
+    pub(super) transfer_class: TransferClass,
 }
 
 pub(super) fn execute_download(
@@ -65,177 +78,174 @@ pub(super) fn execute_download(
                 path: input.logical_path.clone(),
                 bytes,
             });
-            let on_fail = if input.retry_count < input.max_retries {
-                Some(Box::new(Task::Download {
-                    url: input.url.clone(),
-                    dest: input.dest.clone(),
-                    logical_path: input.logical_path.clone(),
-                    expected_md5: input.expected_md5.clone(),
-                    expected_size: input.expected_size,
-                    retry_count: input.retry_count + 1,
-                }))
-            } else {
-                None
-            };
-            spawned.push(Task::Verify {
-                path: input.dest,
+            let _ = event_tx.send(WorkerEvent::Verified {
+                path: input.logical_path,
+                ok: true,
+                issue: None,
+            });
+        }
+        Err(err) if input.retry_count < input.max_retries => {
+            let _ = event_tx.send(WorkerEvent::Retried {
+                path: input.logical_path.clone(),
+                reason: format!("download attempt {} failed: {}", input.retry_count + 1, err),
+            });
+            spawned.push(Task::Download {
+                url: input.url,
+                dest: input.dest,
                 logical_path: input.logical_path,
                 expected_md5: input.expected_md5,
                 expected_size: input.expected_size,
-                on_fail,
+                retry_count: input.retry_count + 1,
+                transfer_class: input.transfer_class,
             });
         }
         Err(err) => {
-            if input.retry_count < input.max_retries {
-                let _ = event_tx.send(WorkerEvent::Retried {
-                    path: input.logical_path.clone(),
-                    reason: format!("download attempt {} failed: {}", input.retry_count + 1, err),
-                });
-                spawned.push(Task::Download {
-                    url: input.url,
-                    dest: input.dest,
-                    logical_path: input.logical_path,
-                    expected_md5: input.expected_md5,
-                    expected_size: input.expected_size,
-                    retry_count: input.retry_count + 1,
-                });
-            } else {
-                let _ = event_tx.send(WorkerEvent::Failed {
-                    path: input.logical_path.clone(),
-                    reason: format!("download failed after retries: {}", err),
-                });
-                spawned.push(Task::Verify {
-                    path: input.dest,
-                    logical_path: input.logical_path,
-                    expected_md5: input.expected_md5,
-                    expected_size: input.expected_size,
-                    on_fail: None,
-                });
-            }
+            let _ = event_tx.send(WorkerEvent::Failed {
+                path: input.logical_path,
+                reason: format!("download failed after retries: {}", err),
+            });
         }
     }
 }
 
-pub(super) fn execute_ensure_file(
-    input: EnsureFileInput,
-    download_progress_buffer_bytes: usize,
-    io_dispatcher: Option<&Dispatcher>,
-    user_agent: &str,
+pub(super) fn execute_repair_file(
+    input: RepairFileInput,
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) {
-    let existing_ok = super::super::verify::build_issue(
-        &input.dest,
-        &input.logical_path,
-        &input.expected_md5,
-        Some(input.expected_size),
-    )
-    .is_none();
-    if existing_ok && !input.prefer_reuse {
-        let _ = event_tx.send(WorkerEvent::Verified {
-            path: input.logical_path,
-            ok: true,
-            issue: None,
-        });
-        return;
-    }
-    let mut reuse_error = None;
-    for source in &input.source_candidates {
+    let RepairFileInput {
+        dest,
+        logical_path,
+        expected_md5,
+        expected_size,
+        source_candidates,
+        download_url,
+        allow_copy_fallback,
+        retry_count,
+        transfer_class,
+    } = input;
+    let mut candidates = source_candidates.into_iter();
+    while let Some(source) = candidates.next() {
         if super::super::verify::build_issue(
-            source,
-            &input.logical_path,
-            &input.expected_md5,
-            Some(input.expected_size),
+            &source,
+            &logical_path,
+            &expected_md5,
+            Some(expected_size),
         )
         .is_some()
         {
             continue;
         }
-        match reuse_file(
-            io_dispatcher,
+        spawned.push(Task::ReuseFile {
             source,
-            &input.dest,
-            input.allow_copy_fallback,
-        ) {
-            Ok(ReuseMethod::Hardlink) => {
-                let _ = event_tx.send(WorkerEvent::Hardlinked {
-                    path: input.dest.clone(),
-                });
-                if super::super::verify::build_issue(
-                    &input.dest,
-                    &input.logical_path,
-                    &input.expected_md5,
-                    Some(input.expected_size),
-                )
-                .is_none()
-                {
-                    let _ = event_tx.send(WorkerEvent::Verified {
-                        path: input.logical_path,
-                        ok: true,
-                        issue: None,
-                    });
-                    return;
-                }
-            }
-            Ok(ReuseMethod::Copy) => {
-                let _ = event_tx.send(WorkerEvent::Copied {
-                    path: input.dest.clone(),
-                });
-                if super::super::verify::build_issue(
-                    &input.dest,
-                    &input.logical_path,
-                    &input.expected_md5,
-                    Some(input.expected_size),
-                )
-                .is_none()
-                {
-                    let _ = event_tx.send(WorkerEvent::Verified {
-                        path: input.logical_path,
-                        ok: true,
-                        issue: None,
-                    });
-                    return;
-                }
-            }
-            Err(err) => {
-                reuse_error = Some(err.to_string());
-            }
-        }
-    }
-
-    if let Some(url) = input.download_url {
-        execute_download(
-            DownloadExecInput {
-                url,
-                dest: input.dest,
-                logical_path: input.logical_path,
-                expected_md5: input.expected_md5,
-                expected_size: Some(input.expected_size),
-                retry_count: input.retry_count,
-                max_retries: input.max_retries,
-            },
-            download_progress_buffer_bytes,
-            io_dispatcher,
-            user_agent,
-            spawned,
-            event_tx,
-        );
+            remaining_source_candidates: candidates.collect(),
+            dest,
+            logical_path,
+            expected_md5,
+            expected_size,
+            download_url,
+            allow_copy_fallback,
+            retry_count,
+            transfer_class,
+        });
         return;
     }
 
-    let issue = super::super::verify::build_issue(
-        &input.dest,
-        &input.logical_path,
-        &input.expected_md5,
-        Some(input.expected_size),
-    );
-    let _ = event_tx.send(WorkerEvent::Verified {
-        path: input.logical_path.clone(),
-        ok: false,
-        issue,
-    });
+    if let Some(url) = download_url {
+        spawned.push(Task::Download {
+            url,
+            dest,
+            logical_path,
+            expected_md5,
+            expected_size: Some(expected_size),
+            retry_count,
+            transfer_class,
+        });
+        return;
+    }
+
     let _ = event_tx.send(WorkerEvent::Failed {
-        path: input.logical_path,
-        reason: reuse_error.unwrap_or_else(|| "no usable source candidates".to_string()),
+        path: logical_path,
+        reason: "no usable source candidates".to_string(),
     });
+}
+
+pub(super) fn execute_reuse_file(
+    input: ReuseFileInput,
+    io_dispatcher: Option<&Dispatcher>,
+    spawned: &mut Vec<Task>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    let ReuseFileInput {
+        source,
+        remaining_source_candidates,
+        dest,
+        logical_path,
+        expected_md5,
+        expected_size,
+        download_url,
+        allow_copy_fallback,
+        retry_count,
+        transfer_class,
+    } = input;
+    match reuse_verified_file(
+        io_dispatcher,
+        &source,
+        &dest,
+        &expected_md5,
+        expected_size,
+        allow_copy_fallback,
+    ) {
+        Ok(ReuseMethod::Hardlink) => {
+            let _ = event_tx.send(WorkerEvent::Hardlinked { path: dest });
+            let _ = event_tx.send(WorkerEvent::Verified {
+                path: logical_path,
+                ok: true,
+                issue: None,
+            });
+        }
+        Ok(ReuseMethod::Copy) => {
+            let _ = event_tx.send(WorkerEvent::Copied { path: dest });
+            let _ = event_tx.send(WorkerEvent::Verified {
+                path: logical_path,
+                ok: true,
+                issue: None,
+            });
+        }
+        Err(error) => {
+            let reason = error.to_string();
+            let _ = event_tx.send(WorkerEvent::Retried {
+                path: logical_path.clone(),
+                reason: format!("verified-source reuse failed: {reason}"),
+            });
+            if !remaining_source_candidates.is_empty() {
+                spawned.push(Task::RepairFile {
+                    dest,
+                    logical_path,
+                    expected_md5,
+                    expected_size,
+                    source_candidates: remaining_source_candidates,
+                    download_url,
+                    allow_copy_fallback,
+                    retry_count,
+                    transfer_class,
+                });
+            } else if let Some(url) = download_url {
+                spawned.push(Task::Download {
+                    url,
+                    dest,
+                    logical_path,
+                    expected_md5,
+                    expected_size: Some(expected_size),
+                    retry_count,
+                    transfer_class,
+                });
+            } else {
+                let _ = event_tx.send(WorkerEvent::Failed {
+                    path: logical_path,
+                    reason,
+                });
+            }
+        }
+    }
 }

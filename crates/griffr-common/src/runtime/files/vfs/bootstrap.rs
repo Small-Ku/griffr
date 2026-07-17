@@ -6,7 +6,9 @@ use crate::api::client::{ApiClient, ApiError};
 use crate::api::crypto::RES_INDEX_KEY;
 use crate::api::protocol::DEFAULT_PLATFORM;
 use crate::config::ApiTarget;
-use crate::runtime::task_pool::{Task, TaskOutcome, TaskPoolRunner, TaskProgress};
+use crate::runtime::task_pool::{
+    FileEnsureTask, Task, TaskOutcome, TaskPoolRunner, TaskProgress, TransferClass,
+};
 use crate::runtime::{
     collect_files_recursive, logical_path_from_root, normalize_logical_path,
     remove_empty_dirs_recursive, resource_manifest_filename, resource_manifest_url, vfs_path,
@@ -205,7 +207,7 @@ fn res_index_to_ensure_tasks(
         }
         total_files += 1;
         total_bytes = total_bytes.saturating_add(file.size);
-        tasks.push(Task::EnsureFile {
+        tasks.push(Task::ensure_file(FileEnsureTask {
             dest: persistent_root.join(&file.name),
             logical_path: file.name.clone(),
             expected_md5,
@@ -222,7 +224,8 @@ fn res_index_to_ensure_tasks(
             allow_copy_fallback: cfg.allow_copy_fallback,
             prefer_reuse: cfg.prefer_reuse,
             retry_count: 0,
-        });
+            transfer_class: TransferClass::Vfs,
+        }));
     }
 
     (tasks, total_files, total_bytes)
@@ -314,7 +317,13 @@ pub async fn plan_persistent_bootstrap_tasks(
             cfg,
         );
         for task in &group_tasks {
-            if let Task::EnsureFile { logical_path, .. } = task {
+            let logical_path = match task {
+                Task::Verify { logical_path, .. } | Task::RepairFile { logical_path, .. } => {
+                    Some(logical_path)
+                }
+                _ => None,
+            };
+            if let Some(logical_path) = logical_path {
                 expected_paths.insert(normalize_logical_path(logical_path));
             }
         }

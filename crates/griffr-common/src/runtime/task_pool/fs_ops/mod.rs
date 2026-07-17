@@ -11,7 +11,7 @@ pub(crate) use patch_manifest::{
 };
 pub(crate) use reuse::{
     commit_partial_download, create_hardlink, dispatch_io, hash_file_prefix_into_hasher,
-    make_partial_download_path, reuse_file, ReuseMethod,
+    make_partial_download_path, reuse_verified_file, ReuseMethod,
 };
 
 #[cfg(test)]

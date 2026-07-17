@@ -56,7 +56,7 @@ pub(crate) fn apply_extracted_vfs_patch_manifest(
 
     let vfs_base_path =
         parse_safe_relative_path("patch.json vfs_base_path", manifest.vfs_base_path.trim())?;
-    let dest_root = install_root.join(vfs_base_path);
+    let dest_root = install_root.join(&vfs_base_path);
 
     let total_entries = manifest.files.len();
     if total_entries > 0 {
@@ -69,7 +69,12 @@ pub(crate) fn apply_extracted_vfs_patch_manifest(
             |e| Error::Other(format!("Failed to apply patch entry {}: {e}", entry.name)),
         )?;
         if let Some(cb) = progress_callback.as_deref_mut() {
-            cb(&entry.name, index + 1, total_entries);
+            let logical_path = vfs_base_path.join(&entry.name);
+            cb(
+                &logical_path.to_string_lossy().replace('\\', "/"),
+                index + 1,
+                total_entries,
+            );
         }
     }
 
@@ -129,7 +134,14 @@ mod tests {
 
         assert_eq!(
             progress,
-            vec![("".to_string(), 0, 1), ("ui/direct.ab".to_string(), 1, 1),]
+            vec![
+                ("".to_string(), 0, 1),
+                (
+                    "Arknights_Data/StreamingAssets/AB/Windows/ui/direct.ab".to_string(),
+                    1,
+                    1,
+                ),
+            ]
         );
         assert_eq!(
             std::fs::read(

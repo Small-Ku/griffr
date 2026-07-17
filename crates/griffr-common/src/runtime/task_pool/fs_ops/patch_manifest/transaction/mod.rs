@@ -56,7 +56,12 @@ pub(crate) fn execute_patch_transaction(
             release_base_if_unused(plan, base, &mut remaining, &delete_set, &outputs)?;
         }
         if let Some(callback) = patch_callback.as_deref_mut() {
-            callback(&entry.name, index + 1, total);
+            let logical_path = plan.vfs_base_path.join(&entry.name);
+            callback(
+                &logical_path.to_string_lossy().replace('\\', "/"),
+                index + 1,
+                total,
+            );
         }
     }
     apply_remaining_deletes(plan, delete_callback)?;

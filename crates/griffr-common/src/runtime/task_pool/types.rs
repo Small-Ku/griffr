@@ -14,9 +14,31 @@ const MIN_EXTRACT_SLOTS: usize = 1;
 const MAX_EXTRACT_SLOTS: usize = 4;
 const MIN_FILE_ENSURE_IO_SLOTS: usize = 4;
 const MAX_FILE_ENSURE_IO_SLOTS: usize = 24;
-const MAX_VFS_REPAIR_IO_SLOTS: usize = 6;
+const DEFAULT_VFS_IO_SLOTS: usize = 6;
 
 use crate::runtime::issues::FileIssue;
+
+/// Selects the download throttle. Local verification and reuse never use the
+/// VFS CDN queue, even when a later fallback download is VFS-classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferClass {
+    General,
+    Vfs,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileEnsureTask {
+    pub dest: PathBuf,
+    pub logical_path: String,
+    pub expected_md5: String,
+    pub expected_size: u64,
+    pub source_candidates: Vec<PathBuf>,
+    pub download_url: Option<String>,
+    pub allow_copy_fallback: bool,
+    pub prefer_reuse: bool,
+    pub retry_count: u32,
+    pub transfer_class: TransferClass,
+}
 
 #[derive(Debug, Clone)]
 pub enum Task {
@@ -35,6 +57,7 @@ pub enum Task {
         expected_md5: String,
         expected_size: Option<u64>,
         retry_count: u32,
+        transfer_class: TransferClass,
     },
     Verify {
         path: PathBuf,
@@ -43,7 +66,7 @@ pub enum Task {
         expected_size: Option<u64>,
         on_fail: Option<Box<Task>>,
     },
-    EnsureFile {
+    RepairFile {
         dest: PathBuf,
         logical_path: String,
         expected_md5: String,
@@ -51,8 +74,20 @@ pub enum Task {
         source_candidates: Vec<PathBuf>,
         download_url: Option<String>,
         allow_copy_fallback: bool,
-        prefer_reuse: bool,
         retry_count: u32,
+        transfer_class: TransferClass,
+    },
+    ReuseFile {
+        source: PathBuf,
+        remaining_source_candidates: Vec<PathBuf>,
+        dest: PathBuf,
+        logical_path: String,
+        expected_md5: String,
+        expected_size: u64,
+        download_url: Option<String>,
+        allow_copy_fallback: bool,
+        retry_count: u32,
+        transfer_class: TransferClass,
     },
     Extract {
         base_name: String,
@@ -72,6 +107,35 @@ pub enum Task {
         src: PathBuf,
         dest: PathBuf,
     },
+}
+
+impl Task {
+    /// Builds a CPU-first verify/repair graph. Only explicit relink mode skips
+    /// destination verification because relinking is itself the requested work.
+    pub fn ensure_file(spec: FileEnsureTask) -> Self {
+        let repair = Self::RepairFile {
+            dest: spec.dest.clone(),
+            logical_path: spec.logical_path.clone(),
+            expected_md5: spec.expected_md5.clone(),
+            expected_size: spec.expected_size,
+            source_candidates: spec.source_candidates,
+            download_url: spec.download_url,
+            allow_copy_fallback: spec.allow_copy_fallback,
+            retry_count: spec.retry_count,
+            transfer_class: spec.transfer_class,
+        };
+        if spec.prefer_reuse {
+            repair
+        } else {
+            Self::Verify {
+                path: spec.dest,
+                logical_path: spec.logical_path,
+                expected_md5: spec.expected_md5,
+                expected_size: Some(spec.expected_size),
+                on_fail: Some(Box::new(repair)),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +174,9 @@ pub(crate) enum WorkerEvent {
     },
     Extracted {
         path: PathBuf,
+    },
+    Changed {
+        path: String,
     },
     ExtractedBytes {
         path: String,
@@ -165,6 +232,9 @@ pub enum TaskOutcome {
     Extracted {
         path: PathBuf,
     },
+    Changed {
+        path: String,
+    },
     Hardlinked {
         path: PathBuf,
     },
@@ -186,6 +256,7 @@ impl WorkerEvent {
             Self::Downloaded { path, bytes } => Some(TaskOutcome::Downloaded { path, bytes }),
             Self::Verified { path, ok, issue } => Some(TaskOutcome::Verified { path, ok, issue }),
             Self::Extracted { path } => Some(TaskOutcome::Extracted { path }),
+            Self::Changed { path } => Some(TaskOutcome::Changed { path }),
             Self::Hardlinked { path } => Some(TaskOutcome::Hardlinked { path }),
             Self::Copied { path } => Some(TaskOutcome::Copied { path }),
             Self::Failed { path, reason } => Some(TaskOutcome::Failed { path, reason }),
@@ -273,6 +344,7 @@ impl TaskProgress {
 #[derive(Debug, Clone)]
 pub struct TaskPoolConfig {
     pub io_slots: usize,
+    pub vfs_io_slots: usize,
     pub cpu_slots: usize,
     pub extract_slots: usize,
     pub max_retries: u32,
@@ -321,11 +393,6 @@ impl TaskPoolConfig {
             ..Self::default()
         }
     }
-
-    pub fn with_vfs_repair_limits(mut self) -> Self {
-        self.io_slots = self.io_slots.min(MAX_VFS_REPAIR_IO_SLOTS);
-        self
-    }
 }
 
 impl Default for TaskPoolConfig {
@@ -333,6 +400,7 @@ impl Default for TaskPoolConfig {
         let cpus = available_parallelism();
         Self {
             io_slots: (cpus * 2).clamp(MIN_IO_SLOTS, MAX_IO_SLOTS),
+            vfs_io_slots: DEFAULT_VFS_IO_SLOTS,
             cpu_slots: cpus.clamp(MIN_CPU_SLOTS, MAX_CPU_SLOTS),
             extract_slots: (cpus / 2).clamp(MIN_EXTRACT_SLOTS, MAX_EXTRACT_SLOTS),
             max_retries: DEFAULT_MAX_RETRIES,
@@ -360,37 +428,4 @@ pub struct TaskPoolRunner {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{TaskOutcome, WorkerEvent};
-
-    #[test]
-    fn transient_worker_progress_is_not_retained_as_an_outcome() {
-        assert!(WorkerEvent::DownloadedBytes {
-            path: "asset.bin".to_string(),
-            bytes: 64,
-            total_bytes: 128,
-        }
-        .into_outcome()
-        .is_none());
-        assert!(WorkerEvent::PatchProgress {
-            path: "patch.json".to_string(),
-            completed: 1,
-            total: 2,
-        }
-        .into_outcome()
-        .is_none());
-    }
-
-    #[test]
-    fn durable_worker_facts_become_task_outcomes() {
-        assert!(matches!(
-            WorkerEvent::Downloaded {
-                path: "asset.bin".to_string(),
-                bytes: 128,
-            }
-            .into_outcome(),
-            Some(TaskOutcome::Downloaded { path, bytes })
-                if path == "asset.bin" && bytes == 128
-        ));
-    }
-}
+mod tests;

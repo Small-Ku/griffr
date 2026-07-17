@@ -9,8 +9,8 @@ pub(crate) mod verify;
 pub use archive_plan::{plan_archive_groups, ArchiveGroup};
 pub use scheduler::{run_tasks, run_tasks_with_progress};
 pub use types::{
-    ArchivePart, Task, TaskOutcome, TaskPoolConfig, TaskPoolResult, TaskPoolRunner, TaskProgress,
-    DEFAULT_PROGRESS_BUFFER_BYTES,
+    ArchivePart, FileEnsureTask, Task, TaskOutcome, TaskPoolConfig, TaskPoolResult, TaskPoolRunner,
+    TaskProgress, TransferClass, DEFAULT_PROGRESS_BUFFER_BYTES,
 };
 
 #[cfg(test)]
