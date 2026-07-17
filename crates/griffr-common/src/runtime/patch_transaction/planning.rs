@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::download::extractor::ArchiveInspection;
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::fs_ops::{
-    parse_delete_files_manifest, path_safety::parse_safe_relative_path,
+    parse_delete_files_manifest, path_safety::parse_safe_relative_path, storage_volume_group_key,
 };
 use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 use crate::runtime::{
@@ -13,8 +13,9 @@ use crate::runtime::{
 };
 
 use super::{
-    available_space, read_patch_storage_topology, PatchApplyOptions, PatchExecutionPlan,
-    PatchPreflightReport, PlannedPatchEntry, PlannedPatchSource,
+    available_space, read_patch_storage_topology, space_model::simulate_space_peaks,
+    PatchApplyOptions, PatchExecutionPlan, PatchPreflightReport, PlannedPatchEntry,
+    PlannedPatchSource,
 };
 
 fn normalized_archive_path(path: &Path) -> String {
@@ -108,23 +109,6 @@ fn same_link_target(link: &Path, target: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn same_storage_volume(left: &Path, right: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        let volume = |path: &Path| {
-            path.components()
-                .next()
-                .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
-        };
-        volume(left) == volume(right)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (left, right);
-        true
-    }
-}
-
 fn verify_space_requirements(
     install_root: &Path,
     install_bytes: u64,
@@ -146,11 +130,14 @@ fn verify_space_requirements(
         if required == 0 {
             continue;
         }
+        let volume_key = storage_volume_group_key(path);
         if let Some(group) = groups
             .iter_mut()
-            .find(|(group_path, ..)| same_storage_volume(group_path, path))
+            .find(|(group_path, ..)| storage_volume_group_key(group_path) == volume_key)
         {
-            group.1 = group.1.saturating_add(required);
+            // Each role already reports the simulated peak for this physical
+            // volume, so aliases use max rather than double-counting it.
+            group.1 = group.1.max(required);
             group.3.push(label);
         } else {
             groups.push((path.to_path_buf(), required, available, vec![label]));
@@ -271,7 +258,6 @@ pub(crate) fn build_patch_execution_plan_with_cache(
         .sum::<u64>();
     let mut entries = Vec::with_capacity(manifest.files.len());
     let mut missing = Vec::new();
-    let mut max_output = 0u64;
     let mut final_delta: i128 = 0;
 
     for entry in &manifest.files {
@@ -285,7 +271,6 @@ pub(crate) fn build_patch_execution_plan_with_cache(
             &destination
         };
         let existing_size = metadata_len(existing_path);
-        max_output = max_output.max(entry.size);
         final_delta += i128::from(entry.size) - i128::from(existing_size);
 
         let source = if verification_cache
@@ -394,7 +379,9 @@ pub(crate) fn build_patch_execution_plan_with_cache(
     }
 
     let vfs_growth = final_delta.max(0) as u64;
-    let existing_vfs_bytes = if options.external_vfs_root.is_some() {
+    let relocating_vfs_bytes = if options.external_vfs_root.is_some()
+        && !same_link_target(&logical_vfs_destination, &vfs_destination)
+    {
         directory_size(&logical_vfs_destination)?
     } else {
         0
@@ -406,38 +393,37 @@ pub(crate) fn build_patch_execution_plan_with_cache(
     let final_growth = top_level_growth
         .saturating_add(vfs_growth)
         .saturating_sub(delete_bytes);
-    let max_top_level_output = archive_entries
-        .iter()
-        .filter_map(|(name, size)| {
-            let relative = PathBuf::from(name);
-            (!is_patch_archive_control_path(&relative)).then_some(*size)
-        })
-        .max()
-        .unwrap_or(0);
-    let extraction_on_install_volume = options.work_dir.is_none();
-    let install_vfs_peak = if options.external_vfs_root.is_some() {
-        0
-    } else {
-        vfs_growth.saturating_add(max_output)
+
+    let deferred_paths = [PathBuf::from("config.ini")]
+        .into_iter()
+        .filter(|path| archive_entries.contains_key(&normalized_archive_path(path)))
+        .collect::<Vec<_>>();
+    let plan = PatchExecutionPlan {
+        schema_version: PatchExecutionPlan::SCHEMA_VERSION,
+        install_root: install_root.to_path_buf(),
+        stage_root: stage_root.to_path_buf(),
+        vfs_base_path,
+        vfs_destination,
+        work_dir: options.work_dir.clone(),
+        entries,
+        delete_paths,
+        deferred_paths,
     };
-    let install_peak = top_level_growth
-        .saturating_add(install_vfs_peak)
-        .saturating_add(if extraction_on_install_volume {
-            inspection.total_uncompressed_bytes
-        } else {
-            max_top_level_output
-        });
+    plan.validate()?;
+    let peaks = simulate_space_peaks(
+        &plan,
+        archive_entries,
+        inspection.total_uncompressed_bytes,
+        relocating_vfs_bytes,
+    )?;
+    let install_peak = peaks.install;
     let vfs_peak = if options.external_vfs_root.is_some() {
-        existing_vfs_bytes
-            .saturating_add(vfs_growth)
-            .saturating_add(max_output)
+        peaks.vfs
     } else {
         install_peak
     };
     let work_bytes = if options.work_dir.is_some() {
-        inspection
-            .total_uncompressed_bytes
-            .saturating_add(max_output)
+        peaks.work
     } else {
         0
     };
@@ -464,22 +450,6 @@ pub(crate) fn build_patch_execution_plan_with_cache(
             .map(|path| (path, work_bytes, available_work_bytes)),
     )?;
 
-    let deferred_paths = [PathBuf::from("config.ini")]
-        .into_iter()
-        .filter(|path| archive_entries.contains_key(&normalized_archive_path(path)))
-        .collect::<Vec<_>>();
-    let plan = PatchExecutionPlan {
-        schema_version: PatchExecutionPlan::SCHEMA_VERSION,
-        install_root: install_root.to_path_buf(),
-        stage_root: stage_root.to_path_buf(),
-        vfs_base_path,
-        vfs_destination,
-        work_dir: options.work_dir.clone(),
-        entries,
-        delete_paths,
-        deferred_paths,
-    };
-    plan.validate()?;
     let report = PatchPreflightReport {
         archive_uncompressed_bytes: inspection.total_uncompressed_bytes,
         estimated_final_growth_bytes: final_growth,

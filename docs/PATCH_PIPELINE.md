@@ -156,3 +156,15 @@ receives periodic textual samples so long patch operations do not appear hung.
 
 The inspected VFS diffs use `HDIFFSF20` and are applied with `hdiffpatch-rs`.
 Every generated output is verified before destination replacement.
+
+## Dependency-Wave Space Preflight
+
+Patch preflight uses the same destructive dependency waves as the executor. It simulates the
+additional allocated bytes on each physical volume across extraction, top-level commit, first-time
+external VFS relocation, parallel patch output creation, cross-volume copies, early delete-only
+cleanup, payload removal, and last-consumer base release.
+
+Entries in one dependency wave are treated as concurrently active, which is conservative when the
+runtime further chunks a wave by `patch_slots`. Paths on the same physical volume share one signed
+ledger, so space freed by safe early deletes or released patch bases is available to later waves and
+install/VFS/work aliases are not double-counted.

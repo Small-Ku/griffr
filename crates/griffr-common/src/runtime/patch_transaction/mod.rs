@@ -1,10 +1,14 @@
+mod dependency;
 mod metadata;
 mod model;
 mod persistence;
 mod planning;
 mod recovery;
 mod space;
+mod space_model;
 mod storage;
+
+pub(crate) use dependency::entry_wave_indices;
 
 pub use metadata::{
     read_predownload_stage_metadata, write_predownload_stage_metadata, PredownloadStageMetadata,

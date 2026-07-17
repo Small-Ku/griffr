@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::runtime::patch_transaction::{
-    PatchExecutionPlan, PlannedPatchEntry, PlannedPatchSource, PATCH_DEFERRED_DIR,
-    PATCH_TRANSACTION_DIR,
+    entry_wave_indices, PatchExecutionPlan, PlannedPatchEntry, PlannedPatchSource,
+    PATCH_DEFERRED_DIR, PATCH_TRANSACTION_DIR,
 };
 use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 
@@ -128,81 +128,12 @@ pub(super) fn final_output_paths(plan: &PatchExecutionPlan) -> BTreeSet<PathBuf>
 }
 
 pub(super) fn entry_waves(plan: &PatchExecutionPlan) -> Result<Vec<Vec<&PlannedPatchEntry>>> {
-    let mut destination_writers = BTreeMap::new();
-    for (index, entry) in plan.entries.iter().enumerate() {
-        let logical_destination = plan
-            .install_root
-            .join(&plan.vfs_base_path)
-            .join(&entry.name);
-        let aliases = [entry.destination.clone(), logical_destination]
+    entry_wave_indices(plan).map(|waves| {
+        waves
             .into_iter()
-            .collect::<BTreeSet<_>>();
-        for destination in aliases {
-            if destination_writers
-                .insert(destination.clone(), index)
-                .is_some()
-            {
-                return Err(Error::Vfs(format!(
-                    "Patch plan has multiple writers for {}",
-                    destination.display()
-                )));
-            }
-        }
-    }
-
-    let mut outgoing = vec![BTreeSet::<usize>::new(); plan.entries.len()];
-    let mut indegree = vec![0usize; plan.entries.len()];
-    for (consumer_index, entry) in plan.entries.iter().enumerate() {
-        let PlannedPatchSource::Hdiff { base, .. } = &entry.source else {
-            continue;
-        };
-        let Some(&writer_index) = destination_writers.get(base) else {
-            continue;
-        };
-        if writer_index == consumer_index {
-            continue;
-        }
-        // The consumer must run before a writer destructively replaces its base.
-        if outgoing[consumer_index].insert(writer_index) {
-            indegree[writer_index] = indegree[writer_index].saturating_add(1);
-        }
-    }
-
-    let mut ready = indegree
-        .iter()
-        .enumerate()
-        .filter_map(|(index, degree)| (*degree == 0).then_some(index))
-        .collect::<BTreeSet<_>>();
-    let mut waves = Vec::new();
-    let mut completed = 0usize;
-    while !ready.is_empty() {
-        let wave = ready.iter().copied().collect::<Vec<_>>();
-        ready.clear();
-        completed = completed.saturating_add(wave.len());
-        for index in &wave {
-            for dependent in outgoing[*index].iter().copied() {
-                indegree[dependent] = indegree[dependent].saturating_sub(1);
-                if indegree[dependent] == 0 {
-                    ready.insert(dependent);
-                }
-            }
-        }
-        waves.push(wave.into_iter().map(|index| &plan.entries[index]).collect());
-    }
-    if completed != plan.entries.len() {
-        let blocked = indegree
-            .iter()
-            .enumerate()
-            .filter_map(|(index, degree)| {
-                (*degree > 0).then_some(plan.entries[index].name.as_str())
-            })
-            .collect::<Vec<_>>();
-        return Err(Error::Vfs(format!(
-            "Patch dependency graph contains a destructive overwrite cycle: {}",
-            blocked.join(", ")
-        )));
-    }
-    Ok(waves)
+            .map(|wave| wave.into_iter().map(|index| &plan.entries[index]).collect())
+            .collect()
+    })
 }
 
 #[cfg(test)]
