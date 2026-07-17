@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
+use std::sync::mpsc;
 
 use crate::api::types::ResourcePatch;
 use crate::error::{Error, Result};
@@ -164,8 +166,14 @@ impl Seek for MultiVolumeStream {
 pub(crate) struct ArchiveInspection {
     pub entries: BTreeMap<String, u64>,
     pub total_uncompressed_bytes: u64,
+    entry_sizes: Vec<u64>,
     pub patch_manifest: Option<ResourcePatch>,
     pub delete_manifest: Option<String>,
+}
+
+enum ExtractShardEvent {
+    Bytes(u64),
+    Finished(std::result::Result<(), String>),
 }
 
 fn open_archive_entry<'a, R: Read + Seek>(
@@ -242,16 +250,18 @@ impl MultiVolumeExtractor {
         let mut archive = zip::ZipArchive::new(stream)?;
         let mut entries = BTreeMap::new();
         let mut total_uncompressed_bytes = 0u64;
+        let mut entry_sizes = Vec::with_capacity(archive.len());
         let mut patch_manifest = None;
         let mut delete_manifest = None;
 
         for index in 0..archive.len() {
             let mut file = open_archive_entry(&mut archive, index, password)?;
             let name = normalized_archive_name(file.name())?;
+            let size = if file.is_dir() { 0 } else { file.size() };
+            entry_sizes.push(size);
             if name.is_empty() || file.is_dir() {
                 continue;
             }
-            let size = file.size();
             total_uncompressed_bytes = total_uncompressed_bytes.saturating_add(size);
             if entries.insert(name.clone(), size).is_some() {
                 return Err(Error::Extraction(format!(
@@ -281,68 +291,169 @@ impl MultiVolumeExtractor {
         Ok(ArchiveInspection {
             entries,
             total_uncompressed_bytes,
+            entry_sizes,
             patch_manifest,
             delete_manifest,
         })
+    }
+
+    fn extraction_ranges(inspection: &ArchiveInspection, max_shards: usize) -> Vec<Range<usize>> {
+        let entry_count = inspection.entry_sizes.len();
+        if entry_count == 0 {
+            return Vec::new();
+        }
+        let shard_count = max_shards.max(1).min(entry_count);
+        if shard_count == 1 || inspection.total_uncompressed_bytes == 0 {
+            return vec![0..entry_count];
+        }
+        let target_bytes = inspection
+            .total_uncompressed_bytes
+            .div_ceil(shard_count as u64)
+            .max(1);
+        let mut ranges = Vec::with_capacity(shard_count);
+        let mut start = 0usize;
+        let mut accumulated = 0u64;
+        for (index, size) in inspection.entry_sizes.iter().copied().enumerate() {
+            accumulated = accumulated.saturating_add(size);
+            let remaining_entries = entry_count.saturating_sub(index + 1);
+            let remaining_shards = shard_count.saturating_sub(ranges.len() + 1);
+            if accumulated >= target_bytes
+                && remaining_shards > 0
+                && remaining_entries >= remaining_shards
+            {
+                ranges.push(start..index + 1);
+                start = index + 1;
+                accumulated = 0;
+            }
+        }
+        if start < entry_count {
+            ranges.push(start..entry_count);
+        }
+        ranges
+    }
+
+    fn extract_range(
+        &self,
+        target_dir: &Path,
+        password: Option<&str>,
+        range: Range<usize>,
+        progress_buffer_bytes: usize,
+        progress_tx: &mpsc::Sender<ExtractShardEvent>,
+    ) -> Result<()> {
+        let stream = MultiVolumeStream::new(self.volumes.clone())?;
+        let mut archive = zip::ZipArchive::new(stream)?;
+        let mut buffer = vec![0u8; progress_buffer_bytes.max(4 * 1024)];
+        let mut pending_progress = 0u64;
+
+        for index in range {
+            let mut file = open_archive_entry(&mut archive, index, password)?;
+            let file_path = target_dir.join(safe_relative_archive_path(file.name())?);
+            if file.is_dir() {
+                std::fs::create_dir_all(&file_path).map_err(|source| Error::CreateDirFailed {
+                    path: file_path.clone(),
+                    source,
+                })?;
+                continue;
+            }
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            let mut output =
+                std::fs::File::create(&file_path).map_err(|source| Error::OpenFileFailed {
+                    path: file_path.clone(),
+                    source,
+                })?;
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                std::io::Write::write_all(&mut output, &buffer[..read])?;
+                pending_progress = pending_progress.saturating_add(read as u64);
+                if pending_progress >= progress_buffer_bytes as u64 {
+                    let _ = progress_tx.send(ExtractShardEvent::Bytes(pending_progress));
+                    pending_progress = 0;
+                }
+            }
+        }
+        if pending_progress > 0 {
+            let _ = progress_tx.send(ExtractShardEvent::Bytes(pending_progress));
+        }
+        Ok(())
     }
 
     pub(crate) fn extract_to_with_progress(
         &self,
         target_dir: &Path,
         password: Option<&str>,
-        total_extract_bytes: u64,
+        inspection: &ArchiveInspection,
+        max_shards: usize,
         progress_buffer_bytes: usize,
         mut progress_callback: Option<impl FnMut(u64, u64)>,
     ) -> Result<()> {
-        let stream = MultiVolumeStream::new(self.volumes.clone())?;
-        let mut archive = zip::ZipArchive::new(stream)?;
+        if let Some(callback) = progress_callback.as_mut() {
+            callback(0, inspection.total_uncompressed_bytes);
+        }
+        let ranges = Self::extraction_ranges(inspection, max_shards);
+        if ranges.is_empty() {
+            return Ok(());
+        }
+
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let mut errors = Vec::new();
         let mut extracted_bytes = 0u64;
-        if let Some(ref mut cb) = progress_callback {
-            cb(0, total_extract_bytes);
-        }
+        std::thread::scope(|scope| {
+            let handles = ranges
+                .into_iter()
+                .map(|range| {
+                    let tx = progress_tx.clone();
+                    scope.spawn(move || {
+                        let result = self
+                            .extract_range(
+                                target_dir,
+                                password,
+                                range,
+                                progress_buffer_bytes,
+                                &tx,
+                            )
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(ExtractShardEvent::Finished(result));
+                    })
+                })
+                .collect::<Vec<_>>();
+            drop(progress_tx);
 
-        // Extract all files
-        for i in 0..archive.len() {
-            let mut file = open_archive_entry(&mut archive, i, password)?;
-            let file_path = target_dir.join(safe_relative_archive_path(file.name())?);
-
-            if file.is_dir() {
-                std::fs::create_dir_all(&file_path).map_err(|e| Error::CreateDirFailed {
-                    path: file_path.clone(),
-                    source: e,
-                })?;
-                continue;
-            }
-
-            // Create parent directory if needed
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| Error::CreateDirFailed {
-                    path: parent.to_path_buf(),
-                    source: e,
-                })?;
-            }
-
-            // Extract file (overwrite if exists)
-            let mut output =
-                std::fs::File::create(&file_path).map_err(|e| Error::OpenFileFailed {
-                    path: file_path.clone(),
-                    source: e,
-                })?;
-            let buffer_size = progress_buffer_bytes.max(4 * 1024);
-            let mut buf = vec![0u8; buffer_size];
-            loop {
-                let n = file.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                std::io::Write::write_all(&mut output, &buf[..n])?;
-                extracted_bytes = extracted_bytes.saturating_add(n as u64);
-                if let Some(ref mut cb) = progress_callback {
-                    cb(extracted_bytes, total_extract_bytes);
+            for event in progress_rx {
+                match event {
+                    ExtractShardEvent::Bytes(bytes) => {
+                        extracted_bytes = extracted_bytes.saturating_add(bytes);
+                        if let Some(callback) = progress_callback.as_mut() {
+                            callback(extracted_bytes, inspection.total_uncompressed_bytes);
+                        }
+                    }
+                    ExtractShardEvent::Finished(Err(error)) => errors.push(error),
+                    ExtractShardEvent::Finished(Ok(())) => {}
                 }
             }
-        }
+            for handle in handles {
+                if handle.join().is_err() {
+                    errors.push("archive extraction shard panicked".to_string());
+                }
+            }
+        });
 
+        if !errors.is_empty() {
+            return Err(Error::Extraction(errors.join("; ")));
+        }
+        if let Some(callback) = progress_callback.as_mut() {
+            callback(
+                inspection.total_uncompressed_bytes,
+                inspection.total_uncompressed_bytes,
+            );
+        }
         Ok(())
     }
 
@@ -386,9 +497,17 @@ mod tests {
 
         // 2. Extract
         let extractor = MultiVolumeExtractor::new(volumes)?;
+        let inspection = extractor.inspect_patch_payload(None)?;
         let output_dir = base_path.join("output");
         std::fs::create_dir(&output_dir)?;
-        extractor.extract_to_with_progress(&output_dir, None, 13, 64, None::<fn(u64, u64)>)?;
+        extractor.extract_to_with_progress(
+            &output_dir,
+            None,
+            &inspection,
+            2,
+            64,
+            None::<fn(u64, u64)>,
+        )?;
 
         // 3. Verify
         let output_file = output_dir.join("hello.txt");
