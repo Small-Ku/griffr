@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::io::ErrorKind;
 use std::path::Path;
 
@@ -23,7 +24,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
     patch_options: &PatchApplyOptions,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let total_size: u64 = archives.iter().map(|p| p.size()).sum();
     let phase_verb = match mode {
         ArchiveAcquireMode::DownloadIfMissing => "Downloading",
@@ -123,14 +124,19 @@ pub(super) async fn download_and_extract_archives_from_dir(
             }
         }
 
-        let failures = result
-            .outcomes
-            .into_iter()
-            .filter_map(|event| match event {
-                TaskOutcome::Failed { path, reason } => Some(format!("{} ({})", path, reason)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let mut modified_paths = BTreeSet::new();
+        let mut failures = Vec::new();
+        for event in result.outcomes {
+            match event {
+                TaskOutcome::Changed { path } => {
+                    modified_paths.insert(path);
+                }
+                TaskOutcome::Failed { path, reason } => {
+                    failures.push(format!("{} ({})", path, reason));
+                }
+                _ => {}
+            }
+        }
         if !failures.is_empty() {
             anyhow::bail!(
                 "Archive apply failed for {} item(s): {}",
@@ -138,7 +144,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
                 failures.join(", ")
             );
         }
-        return Ok(());
+        return Ok(modified_paths.into_iter().collect());
     }
 
     let mut tasks = Vec::with_capacity(archive_groups.len());
@@ -186,10 +192,17 @@ pub(super) async fn download_and_extract_archives_from_dir(
         }
     }
 
+    let mut modified_paths = BTreeSet::new();
     let mut failures = Vec::new();
     for event in result.outcomes {
-        if let TaskOutcome::Failed { path, reason } = event {
-            failures.push(format!("{} ({})", path, reason));
+        match event {
+            TaskOutcome::Changed { path } => {
+                modified_paths.insert(path);
+            }
+            TaskOutcome::Failed { path, reason } => {
+                failures.push(format!("{} ({})", path, reason));
+            }
+            _ => {}
         }
     }
     if !failures.is_empty() {
@@ -200,7 +213,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
         );
     }
 
-    Ok(())
+    Ok(modified_paths.into_iter().collect())
 }
 
 pub(super) async fn download_and_extract_archives(
@@ -212,7 +225,7 @@ pub(super) async fn download_and_extract_archives(
     patch_options: &PatchApplyOptions,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let download_dir = install_path.join("downloads");
     download_and_extract_archives_from_dir(
         archives,

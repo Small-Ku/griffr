@@ -284,7 +284,7 @@ pub async fn install(
             &VfsFilePlanOptions {
                 source_streaming_assets,
                 allow_copy_fallback: force_copy,
-                prefer_reuse: !reuse_paths.is_empty(),
+                prefer_reuse: false,
             },
         )
         .await
@@ -311,6 +311,7 @@ pub async fn install(
         &install_path,
         &install_target,
         Some(&version_info.version),
+        griffr_common::runtime::IntegritySelection::Full,
         true,
         &[],
         false,

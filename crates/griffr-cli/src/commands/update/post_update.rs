@@ -5,7 +5,8 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::config::InstallTarget;
 use griffr_common::runtime::task_pool::{Task, TaskPoolRunner, TaskProgress};
 use griffr_common::runtime::{
-    is_launcher_metadata_path, run_integrity_pool, sync_launcher_metadata, ProgressLane,
+    is_launcher_metadata_path, run_integrity_pool, sync_launcher_metadata, IntegritySelection,
+    ProgressLane,
 };
 
 use crate::progress::CountAndByteProgress;
@@ -19,6 +20,7 @@ pub(super) async fn verify_updated_install(
     target_version: &str,
     skip_verify: bool,
     extra_tasks: Vec<Task>,
+    modified_paths: Vec<String>,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<()> {
@@ -36,6 +38,11 @@ pub(super) async fn verify_updated_install(
         return Ok(());
     }
 
+    let modified_path_count = modified_paths.len();
+    ui::print_info(format!(
+        "Post-update integrity scope: {} modified archive path(s) plus planned VFS tasks",
+        modified_path_count
+    ));
     let verify_progress =
         CountAndByteProgress::new("update.verify", "update.repair.download", opts.verbose);
     let verify_session = verify_progress.start(
@@ -47,6 +54,7 @@ pub(super) async fn verify_updated_install(
         install_path,
         install_target,
         Some(target_version),
+        IntegritySelection::Paths(modified_paths),
         true,
         &[],
         false,
@@ -60,7 +68,8 @@ pub(super) async fn verify_updated_install(
     verify_progress.finish();
 
     ui::print_info(format!(
-        "Verification summary: issues={} repaired_downloads={}",
+        "Verification summary: verified={} issues={} repaired_downloads={}",
+        summary.verified_files,
         summary.issues.len(),
         summary.downloaded_files
     ));

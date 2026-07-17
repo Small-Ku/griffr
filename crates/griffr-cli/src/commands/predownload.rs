@@ -104,6 +104,7 @@ fn build_predownload_tasks(stage_dir: &Path, patches: &[PackFile]) -> Result<Vec
                 expected_md5: patch.md5.clone(),
                 expected_size: Some(patch.size()),
                 retry_count: 0,
+                transfer_class: griffr_common::runtime::task_pool::TransferClass::General,
             })),
         });
     }

@@ -133,7 +133,8 @@ async fn download_and_extract_archives_recovers_partial_part_on_rerun() {
     )
     .await;
     stop.store(true, Ordering::Release);
-    result.unwrap();
+    let modified_paths = result.unwrap();
+    assert!(modified_paths.iter().any(|path| path == "payload.txt"));
 
     let guard = hits.lock().unwrap();
     assert_eq!(
@@ -206,7 +207,8 @@ async fn download_and_extract_archives_applies_delete_files_manifest() {
     )
     .await;
     stop.store(true, Ordering::Release);
-    result.unwrap();
+    let modified_paths = result.unwrap();
+    assert!(modified_paths.iter().any(|path| path == "payload.txt"));
 
     assert_eq!(
         std::fs::read_to_string(install_path.join("payload.txt")).unwrap(),

@@ -4,7 +4,7 @@ use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
 use griffr_common::runtime::{
     inspect_reuse_installations, is_launcher_metadata_path, run_integrity_pool,
-    sync_launcher_metadata, ProgressLane, ProgressSender,
+    sync_launcher_metadata, IntegritySelection, ProgressLane, ProgressSender,
 };
 use griffr_common::runtime::{plan_vfs_tasks, streaming_assets_path, VfsFilePlanOptions};
 use serde_json::json;
@@ -173,29 +173,23 @@ pub async fn verify(
         Vec::new()
     };
 
-    let base_pool_cfg = TaskPoolConfig::with_progress_buffers(
+    let pool_cfg = TaskPoolConfig::with_progress_buffers(
         opts.extraction_progress_buffer_bytes,
         opts.download_progress_buffer_bytes,
     );
-    let pool_cfg = if repair && !extra_tasks.is_empty() {
-        // VFS CDN endpoints can become unstable under high parallelism on some routes.
-        let limited = base_pool_cfg.clone().with_vfs_repair_limits();
-        if limited.io_slots != base_pool_cfg.io_slots {
-            opts.verbose(format!(
-                "Clamping task-pool io_slots from {} to {} for verify+repair VFS batch",
-                base_pool_cfg.io_slots, limited.io_slots
-            ));
-        }
-        limited
-    } else {
-        base_pool_cfg
-    };
+    if repair && !extra_tasks.is_empty() {
+        opts.verbose(format!(
+            "Using {} dedicated VFS transfer slots without reducing {} general IO slots",
+            pool_cfg.vfs_io_slots, pool_cfg.io_slots
+        ));
+    }
     let mut pool_runner = TaskPoolRunner::new(pool_cfg)?;
     let summary = run_integrity_pool(
         &api_client,
         &local.install_path,
         &install_target,
         Some(&installed_version),
+        IntegritySelection::Full,
         repair,
         &source_roots,
         force_copy,

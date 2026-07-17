@@ -230,6 +230,7 @@ pub(super) async fn update_internal(
         return Ok(());
     }
 
+    let mut modified_paths = Vec::new();
     if !reuse_paths.is_empty() {
         ui::print_phase("Applying update via local file reuse");
         update_via_reuse(
@@ -254,7 +255,7 @@ pub(super) async fn update_internal(
                     .context("No patch package information available")?;
                 let patch_password = patch.cd_key.as_deref();
                 if let Some(stage_dir) = predownload_stage_dir.as_ref() {
-                    download_and_extract_archives_from_dir(
+                    modified_paths = download_and_extract_archives_from_dir(
                         &patch.patches,
                         stage_dir,
                         &local.install_path,
@@ -272,7 +273,7 @@ pub(super) async fn update_internal(
                     )
                     .await?;
                 } else {
-                    download_and_extract_archives(
+                    modified_paths = download_and_extract_archives(
                         &patch.patches,
                         &local.install_path,
                         "patch",
@@ -290,7 +291,7 @@ pub(super) async fn update_internal(
                     .pkg
                     .as_ref()
                     .context("No full package information available")?;
-                download_and_extract_archives(
+                modified_paths = download_and_extract_archives(
                     &pkg.packs,
                     &local.install_path,
                     "full",
@@ -327,7 +328,7 @@ pub(super) async fn update_internal(
             &VfsFilePlanOptions {
                 source_streaming_assets,
                 allow_copy_fallback: force_copy,
-                prefer_reuse: !reuse_paths.is_empty(),
+                prefer_reuse: false,
             },
         )
         .await
@@ -346,6 +347,7 @@ pub(super) async fn update_internal(
         &version_info.version,
         opts.skip_verify,
         extra_tasks,
+        modified_paths,
         &opts,
         &mut task_pool_runner,
     )
