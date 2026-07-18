@@ -90,6 +90,7 @@ pub(crate) fn execute_blocking_task(
             source_candidates,
             download_url,
             allow_copy_fallback,
+            verify_destination_fallback,
             retry_count,
             transfer_class,
         } => transfer::execute_repair_file(
@@ -101,6 +102,7 @@ pub(crate) fn execute_blocking_task(
                 source_candidates,
                 download_url,
                 allow_copy_fallback,
+                verify_destination_fallback,
                 retry_count,
                 transfer_class,
             },
@@ -134,6 +136,7 @@ pub(crate) fn execute_blocking_task(
             expected_size,
             download_url,
             allow_copy_fallback,
+            verify_destination_fallback,
             retry_count,
             transfer_class,
         } => transfer::execute_copy_reuse_file(
@@ -147,6 +150,7 @@ pub(crate) fn execute_blocking_task(
                 expected_size,
                 download_url,
                 allow_copy_fallback,
+                verify_destination_fallback,
                 retry_count,
                 transfer_class,
             },
@@ -358,6 +362,7 @@ pub(crate) async fn execute_async_task(
             expected_size,
             download_url,
             allow_copy_fallback,
+            verify_destination_fallback,
             retry_count,
             transfer_class,
         } => {
@@ -372,6 +377,7 @@ pub(crate) async fn execute_async_task(
                     expected_size,
                     download_url,
                     allow_copy_fallback,
+                    verify_destination_fallback,
                     retry_count,
                     transfer_class,
                 },

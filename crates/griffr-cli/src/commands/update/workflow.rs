@@ -324,6 +324,7 @@ pub(super) async fn update_internal(
             &streaming_assets,
             &VfsFilePlanOptions {
                 source_streaming_assets,
+                allow_repair: true,
                 allow_copy_fallback: force_copy,
                 prefer_reuse: false,
             },

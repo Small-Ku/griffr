@@ -130,7 +130,7 @@ pub async fn verify(
         Vec::new()
     };
 
-    let extra_tasks = if repair && !skip_vfs {
+    let extra_tasks = if !skip_vfs {
         if opts.output != OutputFormat::Json {
             ui::print_info(
                 "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
@@ -158,6 +158,7 @@ pub async fn verify(
                 &streaming_assets,
                 &VfsFilePlanOptions {
                     source_streaming_assets,
+                    allow_repair: repair,
                     allow_copy_fallback: force_copy,
                     prefer_reuse: relink_reuse,
                 },

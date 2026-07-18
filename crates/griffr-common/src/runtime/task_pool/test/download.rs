@@ -73,6 +73,44 @@ fn ensure_file_can_relink_verified_target_when_prefer_reuse_enabled() {
 }
 
 #[test]
+fn relink_mode_keeps_valid_destination_when_no_source_can_be_reused() {
+    let tmp = tempdir().unwrap();
+    let target = tmp.path().join("target.bin");
+    std::fs::write(&target, b"destination-only").unwrap();
+    let expected_md5 = crate::to_hex(&Md5::digest(b"destination-only"));
+
+    let tasks = vec![Task::ensure_file(FileEnsureTask {
+        dest: target,
+        logical_path: "target.bin".to_string(),
+        expected_md5,
+        expected_size: 16,
+        source_candidates: vec![tmp.path().join("missing-source.bin")],
+        download_url: Some("http://127.0.0.1:1/must-not-download".to_string()),
+        allow_copy_fallback: false,
+        prefer_reuse: true,
+        retry_count: 0,
+        transfer_class: TransferClass::General,
+    })];
+
+    let result = run_tasks(tasks, TaskPoolConfig::default()).unwrap();
+    assert!(result.outcomes.iter().any(|event| matches!(
+        event,
+        TaskOutcome::Verified {
+            path,
+            ok: true,
+            issue: None,
+        } if path == "target.bin"
+    )));
+    assert!(
+        !result
+            .outcomes
+            .iter()
+            .any(|event| matches!(event, TaskOutcome::Downloaded { .. })),
+        "a valid destination must be the terminal fallback before network download"
+    );
+}
+
+#[test]
 fn do_download_resume_incremental_md5_produces_correct_result() {
     let tmp = tempdir().unwrap();
     let dest = tmp.path().join("asset.chk");

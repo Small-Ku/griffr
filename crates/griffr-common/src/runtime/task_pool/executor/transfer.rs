@@ -5,7 +5,9 @@ use super::super::fs_ops::{
     classify_reuse_mode, create_hardlink_async, reuse_verified_file, storage_volume_group_key,
     storage_volume_id, ReuseMethod, ReuseMode,
 };
-use super::super::types::{ReuseCandidateGroup, Task, TransferClass, WorkerEvent};
+use super::super::types::{
+    enqueue_destination_or_download, ReuseCandidateGroup, Task, TransferClass, WorkerEvent,
+};
 
 pub(super) struct DownloadExecInput {
     pub(super) url: String,
@@ -26,6 +28,7 @@ pub(super) struct RepairFileInput {
     pub(super) source_candidates: Vec<PathBuf>,
     pub(super) download_url: Option<String>,
     pub(super) allow_copy_fallback: bool,
+    pub(super) verify_destination_fallback: bool,
     pub(super) retry_count: u32,
     pub(super) transfer_class: TransferClass,
 }
@@ -40,6 +43,7 @@ pub(super) struct ReuseFileInput {
     pub(super) expected_size: u64,
     pub(super) download_url: Option<String>,
     pub(super) allow_copy_fallback: bool,
+    pub(super) verify_destination_fallback: bool,
     pub(super) retry_count: u32,
     pub(super) transfer_class: TransferClass,
 }
@@ -182,6 +186,7 @@ pub(super) fn execute_repair_file(
         source_candidates,
         download_url,
         allow_copy_fallback,
+        verify_destination_fallback,
         retry_count,
         transfer_class,
     } = input;
@@ -221,12 +226,13 @@ pub(super) fn execute_repair_file(
     }
 
     if hardlink_groups.is_empty() && copy_groups.is_empty() {
-        enqueue_download_or_failure(
+        enqueue_destination_or_download(
             dest,
             logical_path,
             expected_md5,
             expected_size,
             download_url,
+            verify_destination_fallback,
             retry_count,
             transfer_class,
             spawned,
@@ -250,6 +256,7 @@ pub(super) fn execute_repair_file(
         expected_size,
         download_url,
         allow_copy_fallback,
+        verify_destination_fallback,
         retry_count,
         transfer_class,
     );
@@ -268,35 +275,6 @@ pub(super) fn execute_repair_file(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn enqueue_download_or_failure(
-    dest: PathBuf,
-    logical_path: String,
-    expected_md5: String,
-    expected_size: u64,
-    download_url: Option<String>,
-    retry_count: u32,
-    transfer_class: TransferClass,
-    spawned: &mut Vec<Task>,
-    event_tx: &flume::Sender<WorkerEvent>,
-) {
-    if let Some(url) = download_url {
-        spawned.push(Task::Download {
-            url,
-            dest,
-            logical_path,
-            expected_md5,
-            expected_size: Some(expected_size),
-            retry_count,
-            transfer_class,
-        });
-    } else {
-        let _ = event_tx.send(WorkerEvent::Failed {
-            path: logical_path,
-            reason: "no usable source candidates".to_string(),
-        });
-    }
-}
-
 pub(super) fn execute_verify_reuse_volume(
     copy_only: bool,
     candidates: Vec<PathBuf>,
@@ -375,6 +353,7 @@ fn finish_reuse_file(
         expected_size,
         download_url,
         allow_copy_fallback,
+        verify_destination_fallback,
         retry_count,
         transfer_class,
     } = input;
@@ -412,15 +391,15 @@ fn finish_reuse_file(
                 expected_size,
                 download_url,
                 allow_copy_fallback,
+                verify_destination_fallback,
                 retry_count,
                 transfer_class,
             });
         }
         Err(error) => {
-            let reason = error.to_string();
             let _ = event_tx.send(WorkerEvent::Retried {
                 path: logical_path.clone(),
-                reason: format!("verified-source reuse failed: {reason}"),
+                reason: format!("verified-source reuse failed: {error}"),
             });
             if !remaining_source_candidates.is_empty() {
                 spawned.push(Task::RepairFile {
@@ -431,24 +410,23 @@ fn finish_reuse_file(
                     source_candidates: remaining_source_candidates,
                     download_url,
                     allow_copy_fallback,
-                    retry_count,
-                    transfer_class,
-                });
-            } else if let Some(url) = download_url {
-                spawned.push(Task::Download {
-                    url,
-                    dest,
-                    logical_path,
-                    expected_md5,
-                    expected_size: Some(expected_size),
+                    verify_destination_fallback,
                     retry_count,
                     transfer_class,
                 });
             } else {
-                let _ = event_tx.send(WorkerEvent::Failed {
-                    path: logical_path,
-                    reason,
-                });
+                enqueue_destination_or_download(
+                    dest,
+                    logical_path,
+                    expected_md5,
+                    expected_size,
+                    download_url,
+                    verify_destination_fallback,
+                    retry_count,
+                    transfer_class,
+                    spawned,
+                    event_tx,
+                );
             }
         }
     }

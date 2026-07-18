@@ -20,6 +20,8 @@ use crate::runtime::{
 pub struct VfsFilePlanOptions {
     /// Candidate StreamingAssets roots from other installs for VFS file reuse.
     pub source_streaming_assets: Vec<std::path::PathBuf>,
+    /// Allow invalid destinations to be repaired by reuse or download.
+    pub allow_repair: bool,
     /// Allow copy fallback when hardlinking from source installs fails.
     pub allow_copy_fallback: bool,
     /// Prefer relinking from reuse sources even when local files already verify.

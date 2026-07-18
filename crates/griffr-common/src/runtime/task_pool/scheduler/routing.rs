@@ -282,6 +282,7 @@ mod tests {
             expected_size: 1,
             download_url: None,
             allow_copy_fallback: true,
+            verify_destination_fallback: false,
             retry_count: 0,
             transfer_class: TransferClass::General,
         }

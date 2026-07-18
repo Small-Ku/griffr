@@ -135,6 +135,7 @@ Practical interpretation:
 - Validation/materialization rule:
   - If `pref_*` exists, `Persistent` should be treated as `pref-only` scope.
   - `index-full` scope should be used for `StreamingAssets` baseline validation, not `Persistent`.
+  - If `game_files` and `index_*` collide on a `StreamingAssets` destination, the resource index owns validation and repair.
 - Files are selected by the game, and we still need to further investigate why some files are not selected. Just follow the selection of the game currently.
 
 ### `patch.json`

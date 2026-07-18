@@ -116,21 +116,26 @@ Each Dispatcher runtime thread lazily reuses a thread-local `cyper::Client`. Aft
 ## 5. Verify, Repair, and Reuse
 
 ```text
-Verify destination
-    ├── valid -> Verified
-    └── invalid -> RepairFile
-                       ├── phase 1: same-volume hardlink candidates
-                       │      └── first verified source atomically claims winner
-                       ├── cancel remaining probes at hash-chunk boundaries
-                       ├── phase 2: cross-volume copy candidates, only if phase 1 fails
-                       └── phase 3: download, only if all local sources fail
+Normal repair
+    Verify destination
+        ├── valid -> Verified
+        └── invalid -> reuse candidates -> download fallback
+
+Explicit relink
+    Reuse candidates
+        ├── verified source -> hardlink/copy commit
+        └── no usable source -> verify destination
+                                  ├── valid -> preserve destination
+                                  └── invalid -> download fallback
 ```
 
 Candidate order remains the caller's original order. It is not reordered by volume-key sorting.
 
 The winner is claimed immediately rather than after every source volume finishes. A successful hardlink trusts the already-verified inode. Copy fallback hashes while copying and commits only after size and MD5 verification. A failed reuse operation re-enters repair so another source is verified before use.
 
-Reuse commits are pipelined (default limit: 16) to overlap verification and disk commits. `--relink-reuse` skips destination verification to replace existing valid files with hardlinks. Normal `verify --repair` verifies the destination first, querying reuse candidates only for missing or corrupt files.
+Reuse commits are pipelined (default limit: 16) to overlap verification and disk commits. Normal `verify --repair` verifies the destination first, querying reuse only on failure. `--relink-reuse` skips initial verification to force relinking, but verifies the destination before fallback download to avoid redownloads.
+
+Combined integrity/VFS batches are keyed by normalized physical destination. VFS index tasks own shared destinations, preventing races. Duplicate tasks collapse; conflicts fail planning. Read-only `verify` runs VFS index tasks without repair continuations.
 
 ---
 

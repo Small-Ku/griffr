@@ -29,10 +29,6 @@ pub enum IntegritySelection {
     Paths(Vec<String>),
 }
 
-fn normalize_progress_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
 fn normalize_target_path(path: &Path) -> String {
     path.to_string_lossy()
         .replace('\\', "/")
@@ -50,17 +46,79 @@ fn task_target_path(task: &Task) -> Option<&Path> {
     }
 }
 
-fn resolve_reused_logical_path(
-    path: &Path,
-    filename_index: &HashMap<String, Vec<String>>,
-) -> Option<String> {
-    let normalized = normalize_progress_path(path);
-    let filename = path.file_name()?.to_str()?;
-    let candidates = filename_index.get(filename)?;
-    candidates
-        .iter()
-        .find(|candidate| normalized.ends_with(candidate.as_str()))
-        .cloned()
+fn task_expected_artifact(task: &Task) -> Option<(&Path, &str, Option<u64>)> {
+    match task {
+        Task::Download {
+            dest,
+            expected_md5,
+            expected_size,
+            ..
+        }
+        | Task::TransferDownload {
+            dest,
+            expected_md5,
+            expected_size,
+            ..
+        } => Some((dest, expected_md5, *expected_size)),
+        Task::RepairFile {
+            dest,
+            expected_md5,
+            expected_size,
+            ..
+        }
+        | Task::ReuseFile {
+            dest,
+            expected_md5,
+            expected_size,
+            ..
+        } => Some((dest, expected_md5, Some(*expected_size))),
+        Task::Verify {
+            path,
+            expected_md5,
+            expected_size,
+            ..
+        } => Some((path, expected_md5, *expected_size)),
+        _ => None,
+    }
+}
+
+fn deduplicate_target_tasks(tasks: Vec<Task>) -> Result<Vec<Task>> {
+    let mut targets = HashMap::<String, (String, Option<u64>)>::default();
+    let mut unique = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let Some((path, expected_md5, expected_size)) = task_expected_artifact(&task) else {
+            unique.push(task);
+            continue;
+        };
+        let target = normalize_target_path(path);
+        let expected = (expected_md5.to_ascii_lowercase(), expected_size);
+        if let Some(previous) = targets.get(&target) {
+            if previous != &expected {
+                return Err(Error::Integrity(format!(
+                    "conflicting integrity tasks target {} with different expected content",
+                    path.display()
+                )));
+            }
+            continue;
+        }
+        targets.insert(target, expected);
+        unique.push(task);
+    }
+    Ok(unique)
+}
+
+fn remove_entries_owned_by_extra_tasks(
+    entries: &mut Vec<crate::api::types::GameFileEntry>,
+    install_path: &Path,
+    extra_target_paths: &HashSet<String>,
+) {
+    if extra_target_paths.is_empty() {
+        return;
+    }
+    entries.retain(|entry| {
+        let target = install_path.join(&entry.path);
+        !extra_target_paths.contains(&normalize_target_path(&target))
+    });
 }
 
 fn task_progress_path(task: &Task) -> Option<&str> {
@@ -90,16 +148,12 @@ pub async fn run_integrity_pool(
     task_pool_runner: Option<&mut TaskPoolRunner>,
     progress: ProgressSender,
 ) -> Result<IntegrityRunSummary> {
-    let incremental_selection = matches!(&selection, IntegritySelection::Paths(_));
-    let extra_target_paths = if incremental_selection {
-        extra_tasks
-            .iter()
-            .filter_map(task_target_path)
-            .map(normalize_target_path)
-            .collect::<HashSet<_>>()
-    } else {
-        HashSet::default()
-    };
+    let extra_tasks = deduplicate_target_tasks(extra_tasks)?;
+    let extra_target_paths = extra_tasks
+        .iter()
+        .filter_map(task_target_path)
+        .map(normalize_target_path)
+        .collect::<HashSet<_>>();
     let selected_paths = match selection {
         IntegritySelection::Full => None,
         IntegritySelection::Paths(paths) => Some(
@@ -130,12 +184,7 @@ pub async fn run_integrity_pool(
         if let Some(paths) = selected_paths.as_ref() {
             entries.retain(|entry| paths.contains(&normalize_logical_path(&entry.path)));
         }
-        if incremental_selection && !extra_target_paths.is_empty() {
-            entries.retain(|entry| {
-                let target = install_path.join(&entry.path);
-                !extra_target_paths.contains(&normalize_target_path(&target))
-            });
-        }
+        remove_entries_owned_by_extra_tasks(&mut entries, install_path, &extra_target_paths);
         (
             entries,
             repair
@@ -153,13 +202,18 @@ pub async fn run_integrity_pool(
         .filter_map(task_progress_path)
         .map(str::to_owned)
         .collect::<HashSet<_>>();
-    let mut filename_index = HashMap::default();
-    for path in tracked_paths.iter().chain(extra_tracked_paths.iter()) {
-        if let Some(filename) = Path::new(path).file_name().and_then(|f| f.to_str()) {
-            filename_index
-                .entry(filename.to_string())
-                .or_insert_with(Vec::new)
-                .push(path.clone());
+    let mut target_logical_paths = HashMap::default();
+    for entry in &entries {
+        target_logical_paths.insert(
+            normalize_target_path(&install_path.join(&entry.path)),
+            entry.path.clone(),
+        );
+    }
+    for task in &extra_tasks {
+        if let (Some(target), Some(logical_path)) =
+            (task_target_path(task), task_progress_path(task))
+        {
+            target_logical_paths.insert(normalize_target_path(target), logical_path.to_string());
         }
     }
 
@@ -237,13 +291,15 @@ pub async fn run_integrity_pool(
                 outcomes.record_downloaded(&path, bytes);
             }
             TaskOutcome::Hardlinked { path } => {
-                if let Some(logical_path) = resolve_reused_logical_path(&path, &filename_index) {
-                    outcomes.record_reused(&logical_path, PathReuseMethod::Hardlink);
+                if let Some(logical_path) = target_logical_paths.get(&normalize_target_path(&path))
+                {
+                    outcomes.record_reused(logical_path, PathReuseMethod::Hardlink);
                 }
             }
             TaskOutcome::Copied { path } => {
-                if let Some(logical_path) = resolve_reused_logical_path(&path, &filename_index) {
-                    outcomes.record_reused(&logical_path, PathReuseMethod::Copy);
+                if let Some(logical_path) = target_logical_paths.get(&normalize_target_path(&path))
+                {
+                    outcomes.record_reused(logical_path, PathReuseMethod::Copy);
                 }
             }
             TaskOutcome::Failed { path, reason } => {
@@ -270,4 +326,73 @@ pub async fn run_integrity_pool(
         downloaded_files: summary.downloaded_files,
         reused_files: summary.reused_files,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::types::GameFileEntry;
+
+    fn verify_task(path: &str, md5: &str, size: u64) -> Task {
+        Task::Verify {
+            path: PathBuf::from(path),
+            logical_path: path.replace('\\', "/"),
+            expected_md5: md5.to_string(),
+            expected_size: Some(size),
+            on_fail: None,
+        }
+    }
+
+    #[test]
+    fn duplicate_identical_physical_targets_are_collapsed() {
+        let tasks = vec![
+            verify_task("root/VFS/file.blc", "00", 4),
+            verify_task("ROOT\\vfs\\file.blc", "00", 4),
+        ];
+
+        let unique = deduplicate_target_tasks(tasks).unwrap();
+
+        assert_eq!(unique.len(), 1);
+    }
+
+    #[test]
+    fn conflicting_physical_targets_are_rejected() {
+        let tasks = vec![
+            verify_task("root/VFS/file.blc", "00", 4),
+            verify_task("ROOT\\vfs\\file.blc", "11", 4),
+        ];
+
+        let error = deduplicate_target_tasks(tasks).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("conflicting integrity tasks target"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn extra_task_owns_overlapping_game_manifest_destination() {
+        let install_path = Path::new("install");
+        let extra_target_paths =
+            HashSet::from_iter([normalize_target_path(Path::new("install/VFS/file.blc"))]);
+        let mut entries = vec![
+            GameFileEntry {
+                path: "VFS/file.blc".to_string(),
+                md5: "base".to_string(),
+                size: 4,
+            },
+            GameFileEntry {
+                path: "game.bin".to_string(),
+                md5: "game".to_string(),
+                size: 8,
+            },
+        ];
+
+        remove_entries_owned_by_extra_tasks(&mut entries, install_path, &extra_target_paths);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "game.bin");
+    }
 }

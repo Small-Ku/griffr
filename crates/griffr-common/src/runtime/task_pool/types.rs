@@ -107,6 +107,7 @@ pub struct ReuseCandidateGroup {
     expected_size: u64,
     download_url: Option<String>,
     allow_copy_fallback: bool,
+    verify_destination_fallback: bool,
     retry_count: u32,
     transfer_class: TransferClass,
 }
@@ -123,6 +124,7 @@ impl ReuseCandidateGroup {
         expected_size: u64,
         download_url: Option<String>,
         allow_copy_fallback: bool,
+        verify_destination_fallback: bool,
         retry_count: u32,
         transfer_class: TransferClass,
     ) -> Arc<Self> {
@@ -139,6 +141,7 @@ impl ReuseCandidateGroup {
             expected_size,
             download_url,
             allow_copy_fallback,
+            verify_destination_fallback,
             retry_count,
             transfer_class,
         })
@@ -177,6 +180,7 @@ impl ReuseCandidateGroup {
                     expected_size: self.expected_size,
                     download_url: self.download_url.clone(),
                     allow_copy_fallback: self.allow_copy_fallback,
+                    verify_destination_fallback: self.verify_destination_fallback,
                     retry_count: self.retry_count,
                     transfer_class: self.transfer_class,
                 });
@@ -205,6 +209,7 @@ impl ReuseCandidateGroup {
                 self.expected_size,
                 self.download_url.clone(),
                 self.allow_copy_fallback,
+                self.verify_destination_fallback,
                 self.retry_count,
                 self.transfer_class,
             );
@@ -220,22 +225,60 @@ impl ReuseCandidateGroup {
                         group: group.clone(),
                     }),
             );
-        } else if let Some(url) = self.download_url.clone() {
-            spawned.push(Task::Download {
-                url,
-                dest: self.dest.clone(),
-                logical_path: self.logical_path.clone(),
-                expected_md5: self.expected_md5.clone(),
-                expected_size: Some(self.expected_size),
-                retry_count: self.retry_count,
-                transfer_class: self.transfer_class,
-            });
         } else {
-            let _ = event_tx.send(WorkerEvent::Failed {
-                path: self.logical_path.clone(),
-                reason: "no usable source candidates".to_string(),
-            });
+            enqueue_destination_or_download(
+                self.dest.clone(),
+                self.logical_path.clone(),
+                self.expected_md5.clone(),
+                self.expected_size,
+                self.download_url.clone(),
+                self.verify_destination_fallback,
+                self.retry_count,
+                self.transfer_class,
+                spawned,
+                event_tx,
+            );
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn enqueue_destination_or_download(
+    dest: PathBuf,
+    logical_path: String,
+    expected_md5: String,
+    expected_size: u64,
+    download_url: Option<String>,
+    verify_destination_fallback: bool,
+    retry_count: u32,
+    transfer_class: TransferClass,
+    spawned: &mut Vec<Task>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    let download = download_url.map(|url| Task::Download {
+        url,
+        dest: dest.clone(),
+        logical_path: logical_path.clone(),
+        expected_md5: expected_md5.clone(),
+        expected_size: Some(expected_size),
+        retry_count,
+        transfer_class,
+    });
+    if verify_destination_fallback {
+        spawned.push(Task::Verify {
+            path: dest,
+            logical_path,
+            expected_md5,
+            expected_size: Some(expected_size),
+            on_fail: download.map(Box::new),
+        });
+    } else if let Some(download) = download {
+        spawned.push(download);
+    } else {
+        let _ = event_tx.send(WorkerEvent::Failed {
+            path: logical_path,
+            reason: "no usable source candidates".to_string(),
+        });
     }
 }
 
@@ -394,6 +437,7 @@ pub enum Task {
         source_candidates: Vec<PathBuf>,
         download_url: Option<String>,
         allow_copy_fallback: bool,
+        verify_destination_fallback: bool,
         retry_count: u32,
         transfer_class: TransferClass,
     },
@@ -415,6 +459,7 @@ pub enum Task {
         expected_size: u64,
         download_url: Option<String>,
         allow_copy_fallback: bool,
+        verify_destination_fallback: bool,
         retry_count: u32,
         transfer_class: TransferClass,
     },
@@ -455,8 +500,8 @@ pub enum Task {
 }
 
 impl Task {
-    /// Builds a CPU-first verify/repair graph. Only explicit relink mode skips
-    /// destination verification because relinking is itself the requested work.
+    /// Builds a CPU-first verify/repair graph. Explicit relink mode probes reuse
+    /// first, then verifies the destination before allowing a network fallback.
     pub fn ensure_file(spec: FileEnsureTask) -> Self {
         let repair = Self::RepairFile {
             dest: spec.dest.clone(),
@@ -466,6 +511,7 @@ impl Task {
             source_candidates: spec.source_candidates,
             download_url: spec.download_url,
             allow_copy_fallback: spec.allow_copy_fallback,
+            verify_destination_fallback: spec.prefer_reuse,
             retry_count: spec.retry_count,
             transfer_class: spec.transfer_class,
         };

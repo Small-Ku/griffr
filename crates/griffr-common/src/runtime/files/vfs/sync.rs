@@ -15,6 +15,40 @@ use crate::runtime::{
 };
 
 use super::{VfsFilePlanOptions, VfsPlanOutcome, VfsTaskPlan, VfsUpdateOutcome, VfsUpdateResult};
+
+fn plan_vfs_file_task(
+    dest: std::path::PathBuf,
+    logical_path: String,
+    expected_md5: String,
+    expected_size: u64,
+    source_candidates: Vec<std::path::PathBuf>,
+    download_url: String,
+    options: &VfsFilePlanOptions,
+) -> Task {
+    if options.allow_repair {
+        Task::ensure_file(FileEnsureTask {
+            dest,
+            logical_path,
+            expected_md5,
+            expected_size,
+            source_candidates,
+            download_url: Some(download_url),
+            allow_copy_fallback: options.allow_copy_fallback,
+            prefer_reuse: options.prefer_reuse,
+            retry_count: 0,
+            transfer_class: TransferClass::Vfs,
+        })
+    } else {
+        Task::Verify {
+            path: dest,
+            logical_path,
+            expected_md5,
+            expected_size: Some(expected_size),
+            on_fail: None,
+        }
+    }
+}
+
 pub async fn plan_vfs_tasks(
     api_client: &ApiClient,
     target: &ApiTarget,
@@ -77,18 +111,16 @@ pub async fn plan_vfs_tasks(
                 .collect::<Vec<_>>();
             total_files += 1;
             total_bytes = total_bytes.saturating_add(file.size);
-            tasks.push(Task::ensure_file(FileEnsureTask {
-                dest: streaming_assets_path.join(&file.name),
-                logical_path: file.name.clone(),
+            let dest = streaming_assets_path.join(&file.name);
+            tasks.push(plan_vfs_file_task(
+                dest,
+                file.name.clone(),
                 expected_md5,
-                expected_size: file.size,
+                file.size,
                 source_candidates,
-                download_url: Some(format!("{}/{}", resource.path, file.name)),
-                allow_copy_fallback: options.allow_copy_fallback,
-                prefer_reuse: options.prefer_reuse,
-                retry_count: 0,
-                transfer_class: TransferClass::Vfs,
-            }));
+                format!("{}/{}", resource.path, file.name),
+                options,
+            ));
         }
     }
 
@@ -270,5 +302,25 @@ mod tests {
             VfsBootstrapScope::Complete,
             "main"
         ));
+    }
+
+    #[test]
+    fn read_only_vfs_plan_has_no_repair_continuation() {
+        let task = plan_vfs_file_task(
+            "StreamingAssets/VFS/file.blc".into(),
+            "VFS/file.blc".to_string(),
+            "00".repeat(16),
+            4,
+            vec!["source/VFS/file.blc".into()],
+            "https://example.invalid/VFS/file.blc".to_string(),
+            &VfsFilePlanOptions {
+                source_streaming_assets: Vec::new(),
+                allow_repair: false,
+                allow_copy_fallback: false,
+                prefer_reuse: false,
+            },
+        );
+
+        assert!(matches!(task, Task::Verify { on_fail: None, .. }));
     }
 }

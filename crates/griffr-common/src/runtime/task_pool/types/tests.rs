@@ -105,6 +105,7 @@ fn reuse_group_claims_first_verified_source_immediately() {
         4,
         None,
         true,
+        false,
         0,
         TransferClass::General,
     );
@@ -134,6 +135,7 @@ fn reuse_group_defers_cross_volume_copy_until_hardlink_probes_fail() {
         4,
         None,
         true,
+        false,
         0,
         TransferClass::General,
     );
