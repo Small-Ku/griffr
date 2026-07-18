@@ -237,7 +237,7 @@ pub(crate) fn verify_candidate_cancellable(
         }
         hasher.update(&buffer[..read]);
     }
-    let actual_md5 = format!("{:x}", hasher.finalize());
+    let actual_md5 = crate::to_hex(&hasher.finalize());
     if actual_md5 == expected_md5.to_ascii_lowercase() {
         CandidateVerification::Valid
     } else {
@@ -259,7 +259,7 @@ pub(crate) fn file_md5(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(crate::to_hex(&hasher.finalize()))
 }
 
 fn open_sequential_read(path: &Path) -> std::io::Result<File> {

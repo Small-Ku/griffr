@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::runtime::task_pool::{Task, TaskPoolConfig, TransferClass};
+use crate::runtime::task_pool::{Task, TransferClass};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExecutionClass {
-    Network,
+    AsyncIo,
     Cpu,
     Blocking,
 }
@@ -23,9 +23,12 @@ pub(super) struct ResourceRequest {
     pub(super) network: Option<NetworkClass>,
     pub(super) read_volumes: Vec<String>,
     pub(super) write_volumes: Vec<String>,
+    pub(super) metadata_volumes: Vec<String>,
     pub(super) extract: bool,
     pub(super) mutation_root: Option<String>,
     pub(super) estimated_bytes: u64,
+    pub(super) reuse_probe: bool,
+    pub(super) reuse_commit: bool,
 }
 
 impl Default for ResourceRequest {
@@ -35,15 +38,14 @@ impl Default for ResourceRequest {
             network: None,
             read_volumes: Vec::new(),
             write_volumes: Vec::new(),
+            metadata_volumes: Vec::new(),
             extract: false,
             mutation_root: None,
             estimated_bytes: 0,
+            reuse_probe: false,
+            reuse_commit: false,
         }
     }
-}
-
-pub(super) fn dispatcher_thread_count(config: &TaskPoolConfig) -> usize {
-    config.dispatcher_threads.clamp(2, 4)
 }
 
 pub(super) fn task_resources(task: &Task) -> ResourceRequest {
@@ -62,26 +64,47 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                 TransferClass::Vfs => NetworkClass::Vfs,
             });
             request.write_volumes.push(volume_key(dest));
+            request.mutation_root = Some(path_key(dest));
         }
         Task::TransferArchivePart { part, .. } => {
             request.network = Some(NetworkClass::Archive);
             request.write_volumes.push(volume_key(&part.dest));
+            request.mutation_root = Some(path_key(&part.dest));
         }
         Task::Verify { path, .. } => request.read_volumes.push(volume_key(path)),
         Task::Download { dest, .. } => {
-            request.write_volumes.push(volume_key(dest));
+            let volume = volume_key(dest);
+            request.read_volumes.push(volume.clone());
+            request.metadata_volumes.push(volume);
+            request.mutation_root = Some(path_key(dest));
         }
         Task::InstallArchivePart { part, .. } => {
-            request.write_volumes.push(volume_key(&part.dest));
+            let volume = volume_key(&part.dest);
+            request.read_volumes.push(volume.clone());
+            request.metadata_volumes.push(volume);
+            request.mutation_root = Some(path_key(&part.dest));
         }
         Task::VerifyReuseVolume { candidates, .. } => {
             if let Some(path) = candidates.first() {
                 request.read_volumes.push(volume_key(path));
             }
+            request.reuse_probe = true;
         }
-        Task::ReuseFile { source, dest, .. } => {
-            request.read_volumes.push(volume_key(source));
-            request.write_volumes.push(volume_key(dest));
+        Task::ReuseFile {
+            source,
+            copy_only,
+            dest,
+            ..
+        } => {
+            if *copy_only {
+                request.read_volumes.push(volume_key(source));
+                request.write_volumes.push(volume_key(dest));
+                request.mutation_root = Some(path_key(dest));
+            } else {
+                request.metadata_volumes.push(volume_key(dest));
+                request.mutation_root = Some(path_key(dest));
+                request.reuse_commit = true;
+            }
         }
         Task::Extract { .. } => {}
         Task::PrepareArchive { work } => {
@@ -114,18 +137,22 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
         }
         Task::CleanupArchive { work } => {
             request
-                .write_volumes
+                .metadata_volumes
                 .extend(work.volumes.iter().map(|path| volume_key(path)));
         }
-        Task::ApplyExtractedVfsPatchManifest { install_root }
-        | Task::ApplyDeleteManifest { install_root } => {
+        Task::ApplyExtractedVfsPatchManifest { install_root } => {
             let volume = volume_key(install_root);
+            request.read_volumes.push(volume.clone());
             request.write_volumes.push(volume);
             request.mutation_root = Some(path_key(install_root));
         }
-        Task::Hardlink { src, dest } => {
-            request.read_volumes.push(volume_key(src));
-            request.write_volumes.push(volume_key(dest));
+        Task::ApplyDeleteManifest { install_root } => {
+            request.metadata_volumes.push(volume_key(install_root));
+            request.mutation_root = Some(path_key(install_root));
+        }
+        Task::Hardlink { dest, .. } => {
+            request.metadata_volumes.push(volume_key(dest));
+            request.mutation_root = Some(path_key(dest));
         }
         Task::InstallArchive { .. } | Task::RepairFile { .. } => {}
     }
@@ -164,33 +191,41 @@ fn task_estimated_bytes(task: &Task) -> u64 {
 
 fn execution_class(task: &Task) -> ExecutionClass {
     match task {
-        Task::TransferDownload { .. } | Task::TransferArchivePart { .. } => ExecutionClass::Network,
+        Task::TransferDownload { .. }
+        | Task::TransferArchivePart { .. }
+        | Task::Hardlink { .. }
+        | Task::ReuseFile {
+            copy_only: false, ..
+        } => ExecutionClass::AsyncIo,
         Task::InstallArchivePart { .. }
         | Task::Download { .. }
         | Task::Verify { .. }
         | Task::RepairFile { .. }
         | Task::VerifyReuseVolume { .. } => ExecutionClass::Cpu,
         Task::InstallArchive { .. }
-        | Task::ReuseFile { .. }
+        | Task::ReuseFile {
+            copy_only: true, ..
+        }
         | Task::Extract { .. }
         | Task::PrepareArchive { .. }
         | Task::ExtractArchiveShard { .. }
         | Task::CommitArchive { .. }
         | Task::CleanupArchive { .. }
         | Task::ApplyExtractedVfsPatchManifest { .. }
-        | Task::ApplyDeleteManifest { .. }
-        | Task::Hardlink { .. } => ExecutionClass::Blocking,
+        | Task::ApplyDeleteManifest { .. } => ExecutionClass::Blocking,
     }
 }
 
 fn normalize_volumes(request: &mut ResourceRequest) {
     let writes = request.write_volumes.drain(..).collect::<BTreeSet<_>>();
-    let reads = request
-        .read_volumes
+    let metadata = request
+        .metadata_volumes
         .drain(..)
         .filter(|volume| !writes.contains(volume))
         .collect::<BTreeSet<_>>();
+    let reads = request.read_volumes.drain(..).collect::<BTreeSet<_>>();
     request.write_volumes.extend(writes);
+    request.metadata_volumes.extend(metadata);
     request.read_volumes.extend(reads);
 }
 
@@ -227,5 +262,61 @@ pub(super) fn task_path(task: &Task) -> String {
         Task::ApplyExtractedVfsPatchManifest { install_root }
         | Task::ApplyDeleteManifest { install_root } => install_root.display().to_string(),
         Task::Hardlink { dest, .. } => dest.display().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{task_resources, ExecutionClass};
+    use crate::runtime::task_pool::{Task, TransferClass};
+    use std::path::PathBuf;
+
+    fn reuse_task(copy_only: bool) -> Task {
+        Task::ReuseFile {
+            source: PathBuf::from("volume-a/source.bin"),
+            copy_only,
+            remaining_source_candidates: Vec::new(),
+            dest: PathBuf::from("volume-a/dest.bin"),
+            logical_path: "volume-a/dest.bin".to_string(),
+            expected_md5: "00000000000000000000000000000000".to_string(),
+            expected_size: 1,
+            download_url: None,
+            allow_copy_fallback: true,
+            retry_count: 0,
+            transfer_class: TransferClass::General,
+        }
+    }
+
+    #[test]
+    fn hardlink_reuse_uses_metadata_capacity_without_streaming_read() {
+        let resources = task_resources(&reuse_task(false));
+        assert!(resources.read_volumes.is_empty());
+        assert!(resources.write_volumes.is_empty());
+        assert_eq!(resources.metadata_volumes.len(), 1);
+        assert!(resources.reuse_commit);
+        assert_eq!(resources.execution, ExecutionClass::AsyncIo);
+    }
+
+    #[test]
+    fn copy_reuse_preserves_same_volume_read_and_write_pressure() {
+        let resources = task_resources(&reuse_task(true));
+        assert_eq!(resources.read_volumes.len(), 1);
+        assert_eq!(resources.write_volumes.len(), 1);
+        assert_eq!(resources.read_volumes, resources.write_volumes);
+        assert!(resources.metadata_volumes.is_empty());
+        assert!(!resources.reuse_commit);
+        assert_eq!(resources.execution, ExecutionClass::Blocking);
+    }
+
+    #[test]
+    fn hardlink_mutations_use_async_dispatcher_runtime() {
+        let reuse = task_resources(&reuse_task(false));
+        assert_eq!(reuse.execution, ExecutionClass::AsyncIo);
+
+        let hardlink = task_resources(&Task::Hardlink {
+            src: PathBuf::from("source.bin"),
+            dest: PathBuf::from("dest.bin"),
+        });
+        assert_eq!(hardlink.execution, ExecutionClass::AsyncIo);
     }
 }

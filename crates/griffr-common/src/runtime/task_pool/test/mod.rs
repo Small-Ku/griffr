@@ -2,12 +2,10 @@ use super::*;
 use crate::runtime::task_pool::fs_ops::{
     make_partial_download_path, make_temp_write_path, write_file,
 };
-use compio::dispatcher::Dispatcher;
 use md5::{Digest, Md5};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

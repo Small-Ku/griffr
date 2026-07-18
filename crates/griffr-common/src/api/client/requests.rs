@@ -45,7 +45,7 @@ impl ApiClient {
     pub fn with_user_agent(user_agent: impl Into<String>) -> Result<Self> {
         let user_agent = user_agent.into();
 
-        let client = cyper::Client::new();
+        let client = cyper::Client::new()?;
 
         Ok(Self { client, user_agent })
     }

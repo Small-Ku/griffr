@@ -40,7 +40,7 @@ impl ApiClient {
 
         // Verify MD5 if provided
         if let Some(expected) = expected_md5 {
-            let actual = format!("{:x}", Md5::digest(&encrypted_data));
+            let actual = crate::to_hex(&Md5::digest(&encrypted_data));
             if actual != expected.to_lowercase() {
                 return Err(Error::ApiClient(format!(
                     "game_files MD5 mismatch: expected {}, got {}",
@@ -213,7 +213,7 @@ impl ApiClient {
 
         let mut hasher = Md5::new();
         hasher.update(&final_bytes);
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(crate::to_hex(&hasher.finalize()))
     }
 
     /// Download a file and verify its MD5

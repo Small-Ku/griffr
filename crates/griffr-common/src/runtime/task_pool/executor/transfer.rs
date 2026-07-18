@@ -1,11 +1,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
-use compio::dispatcher::Dispatcher;
-
 use super::super::fs_ops::{
-    classify_reuse_mode, reuse_verified_file, storage_volume_group_key, storage_volume_id,
-    ReuseMethod, ReuseMode,
+    classify_reuse_mode, create_hardlink_async, reuse_verified_file, storage_volume_group_key,
+    storage_volume_id, ReuseMethod, ReuseMode,
 };
 use super::super::types::{ReuseCandidateGroup, Task, TransferClass, WorkerEvent};
 
@@ -48,12 +46,10 @@ pub(super) struct ReuseFileInput {
 
 pub(super) fn execute_prepare_download(
     input: DownloadExecInput,
-    io_dispatcher: Option<&Dispatcher>,
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) {
     match super::super::download::prepare_download(
-        io_dispatcher,
         &input.dest,
         &input.expected_md5,
         input.expected_size,
@@ -85,12 +81,10 @@ pub(super) fn execute_prepare_download(
     }
 }
 
-pub(super) fn execute_transfer_download(
+pub(super) async fn execute_transfer_download(
     input: DownloadExecInput,
     resume: super::super::types::DownloadResumeState,
     download_progress_buffer_bytes: usize,
-    io_dispatcher: Option<&Dispatcher>,
-    http_client: &cyper::Client,
     user_agent: &str,
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
@@ -103,8 +97,6 @@ pub(super) fn execute_transfer_download(
         total_bytes: expected_size_val.unwrap_or(0),
     });
     let result = super::super::download::do_prepared_download(
-        io_dispatcher,
-        http_client,
         user_agent,
         &input.url,
         &input.dest,
@@ -127,7 +119,8 @@ pub(super) fn execute_transfer_download(
                 });
             }
         }),
-    );
+    )
+    .await;
     match result {
         Ok(bytes) => {
             let _ = event_tx.send(WorkerEvent::Downloaded {
@@ -334,9 +327,41 @@ pub(super) fn execute_verify_reuse_volume(
     group.finish_volume(copy_only, source, spawned, event_tx);
 }
 
-pub(super) fn execute_reuse_file(
+pub(super) async fn execute_hardlink_reuse_file(
     input: ReuseFileInput,
-    io_dispatcher: Option<&Dispatcher>,
+    spawned: &mut Vec<Task>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    assert!(!input.copy_only, "copy reuse routed to async executor");
+    let result = create_hardlink_async(&input.source, &input.dest)
+        .await
+        .map(|()| ReuseMethod::Hardlink);
+    finish_reuse_file(input, result, spawned, event_tx);
+}
+
+pub(super) fn execute_copy_reuse_file(
+    input: ReuseFileInput,
+    spawned: &mut Vec<Task>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    assert!(
+        input.copy_only,
+        "hardlink reuse routed to blocking executor"
+    );
+    let result = reuse_verified_file(
+        &input.source,
+        &input.dest,
+        &input.expected_md5,
+        input.expected_size,
+        ReuseMode::CopyOnly,
+        true,
+    );
+    finish_reuse_file(input, result, spawned, event_tx);
+}
+
+fn finish_reuse_file(
+    input: ReuseFileInput,
+    result: crate::error::Result<ReuseMethod>,
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) {
@@ -353,19 +378,7 @@ pub(super) fn execute_reuse_file(
         retry_count,
         transfer_class,
     } = input;
-    match reuse_verified_file(
-        io_dispatcher,
-        &source,
-        &dest,
-        &expected_md5,
-        expected_size,
-        if copy_only {
-            ReuseMode::CopyOnly
-        } else {
-            ReuseMode::HardlinkPreferred
-        },
-        allow_copy_fallback,
-    ) {
+    match result {
         Ok(ReuseMethod::Hardlink) => {
             let _ = event_tx.send(WorkerEvent::Hardlinked { path: dest });
             let _ = event_tx.send(WorkerEvent::Verified {
@@ -380,6 +393,27 @@ pub(super) fn execute_reuse_file(
                 path: logical_path,
                 ok: true,
                 issue: None,
+            });
+        }
+        Err(error) if !copy_only && allow_copy_fallback => {
+            let _ = event_tx.send(WorkerEvent::Retried {
+                path: logical_path.clone(),
+                reason: format!(
+                    "verified-source hardlink failed; scheduling copy fallback: {error}"
+                ),
+            });
+            spawned.push(Task::ReuseFile {
+                source,
+                copy_only: true,
+                remaining_source_candidates,
+                dest,
+                logical_path,
+                expected_md5,
+                expected_size,
+                download_url,
+                allow_copy_fallback,
+                retry_count,
+                transfer_class,
             });
         }
         Err(error) => {

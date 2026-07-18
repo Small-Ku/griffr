@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use crate::error::Error;
 use crate::runtime::{build_patch_execution_plan_with_cache, PatchApplyOptions};
-use compio::dispatcher::Dispatcher;
 
 use super::super::fs_ops::{
     commit_staged_extract, execute_patch_transaction, make_extract_staging_dir,
@@ -58,7 +57,6 @@ pub(super) fn execute_install_archive_part(
     group: std::sync::Arc<ArchiveInstallGroup>,
     retry_count: u32,
     max_retries: u32,
-    io_dispatcher: Option<&Dispatcher>,
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) {
@@ -80,7 +78,6 @@ pub(super) fn execute_install_archive_part(
     }
 
     match super::super::download::prepare_download(
-        io_dispatcher,
         &part.dest,
         &part.expected_md5,
         Some(part.expected_size),
@@ -143,15 +140,13 @@ pub(super) fn execute_install_archive_part(
     }
 }
 
-pub(super) fn execute_transfer_archive_part(
+pub(super) async fn execute_transfer_archive_part(
     part: ArchivePart,
     group: std::sync::Arc<ArchiveInstallGroup>,
     retry_count: u32,
     resume: super::super::types::DownloadResumeState,
     max_retries: u32,
     download_progress_buffer_bytes: usize,
-    io_dispatcher: Option<&Dispatcher>,
-    http_client: &cyper::Client,
     user_agent: &str,
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
@@ -164,8 +159,6 @@ pub(super) fn execute_transfer_archive_part(
         total_bytes: expected_size,
     });
     match super::super::download::do_prepared_download(
-        io_dispatcher,
-        http_client,
         user_agent,
         &part.url,
         &part.dest,
@@ -188,7 +181,9 @@ pub(super) fn execute_transfer_archive_part(
                 });
             }
         }),
-    ) {
+    )
+    .await
+    {
         Ok(bytes) => {
             let _ = event_tx.send(WorkerEvent::Downloaded {
                 path: part.logical_path.clone(),

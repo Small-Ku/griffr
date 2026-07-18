@@ -44,7 +44,7 @@ fn install_archive_recovers_from_interrupted_partial_part_on_rerun() {
                 url: format!("{}/bundle.zip.001", base_url),
                 dest: part1_path.clone(),
                 logical_path: "bundle.zip.001".to_string(),
-                expected_md5: format!("{:x}", Md5::digest(&part1)),
+                expected_md5: crate::to_hex(&Md5::digest(&part1)),
                 expected_size: part1.len() as u64,
             },
             ArchivePart {
@@ -52,7 +52,7 @@ fn install_archive_recovers_from_interrupted_partial_part_on_rerun() {
                 url: format!("{}/bundle.zip.002", base_url),
                 dest: part2_path.clone(),
                 logical_path: "bundle.zip.002".to_string(),
-                expected_md5: format!("{:x}", Md5::digest(&part2)),
+                expected_md5: crate::to_hex(&Md5::digest(&part2)),
                 expected_size: part2.len() as u64,
             },
         ],

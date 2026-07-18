@@ -197,7 +197,7 @@ fn open_archive_entry<'a, R: Read + Seek>(
     archive: &'a mut zip::ZipArchive<R>,
     index: usize,
     password: Option<&str>,
-) -> Result<zip::read::ZipFile<'a>> {
+) -> Result<zip::read::ZipFile<'a, R>> {
     match password {
         Some(password) => archive
             .by_index_decrypt(index, password.as_bytes())

@@ -216,7 +216,7 @@ pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDi
         })?;
         Ok(CopiedFileDigest {
             bytes: copied,
-            md5: format!("{:x}", hasher.finalize()),
+            md5: crate::to_hex(&hasher.finalize()),
         })
     })();
     if copy_result.is_err() {

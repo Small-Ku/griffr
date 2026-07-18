@@ -1,7 +1,5 @@
-use compio::dispatcher::Dispatcher;
-
 use super::fs_ops::{
-    apply_delete_files_manifest, apply_extracted_vfs_patch_manifest, create_hardlink,
+    apply_delete_files_manifest, apply_extracted_vfs_patch_manifest, create_hardlink_async,
     resume_patch_transaction,
 };
 use super::types::{Task, WorkerEvent};
@@ -9,15 +7,11 @@ use super::types::{Task, WorkerEvent};
 mod archive;
 mod transfer;
 
-pub(crate) fn execute_task(
+pub(crate) fn execute_blocking_task(
     task: Task,
     max_retries: u32,
     extraction_progress_buffer_bytes: usize,
-    download_progress_buffer_bytes: usize,
     extract_shards: usize,
-    io_dispatcher: Option<&Dispatcher>,
-    http_client: &cyper::Client,
-    user_agent: &str,
     spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) {
@@ -48,25 +42,6 @@ pub(crate) fn execute_task(
             group,
             retry_count,
             max_retries,
-            io_dispatcher,
-            spawned,
-            event_tx,
-        ),
-        Task::TransferArchivePart {
-            part,
-            group,
-            retry_count,
-            resume,
-        } => archive::execute_transfer_archive_part(
-            part,
-            group,
-            retry_count,
-            resume,
-            max_retries,
-            download_progress_buffer_bytes,
-            io_dispatcher,
-            http_client,
-            user_agent,
             spawned,
             event_tx,
         ),
@@ -104,35 +79,6 @@ pub(crate) fn execute_task(
                 max_retries,
                 transfer_class,
             },
-            io_dispatcher,
-            spawned,
-            event_tx,
-        ),
-        Task::TransferDownload {
-            url,
-            dest,
-            logical_path,
-            expected_md5,
-            expected_size,
-            retry_count,
-            transfer_class,
-            resume,
-        } => transfer::execute_transfer_download(
-            transfer::DownloadExecInput {
-                url,
-                dest,
-                logical_path,
-                expected_md5,
-                expected_size,
-                retry_count,
-                max_retries,
-                transfer_class,
-            },
-            resume,
-            download_progress_buffer_bytes,
-            io_dispatcher,
-            http_client,
-            user_agent,
             spawned,
             event_tx,
         ),
@@ -190,7 +136,7 @@ pub(crate) fn execute_task(
             allow_copy_fallback,
             retry_count,
             transfer_class,
-        } => transfer::execute_reuse_file(
+        } => transfer::execute_copy_reuse_file(
             transfer::ReuseFileInput {
                 source,
                 copy_only,
@@ -204,21 +150,9 @@ pub(crate) fn execute_task(
                 retry_count,
                 transfer_class,
             },
-            io_dispatcher,
             spawned,
             event_tx,
         ),
-        Task::Hardlink { src, dest } => match create_hardlink(io_dispatcher, &src, &dest) {
-            Ok(()) => {
-                let _ = event_tx.send(WorkerEvent::Hardlinked { path: dest });
-            }
-            Err(err) => {
-                let _ = event_tx.send(WorkerEvent::Failed {
-                    path: dest.display().to_string(),
-                    reason: err.to_string(),
-                });
-            }
-        },
         Task::Extract {
             base_name,
             volumes,
@@ -351,5 +285,112 @@ pub(crate) fn execute_task(
                 }
             }
         }
+        Task::TransferDownload { .. }
+        | Task::TransferArchivePart { .. }
+        | Task::Hardlink { .. } => unreachable!("async I/O task routed to blocking executor"),
+    }
+}
+
+pub(crate) async fn execute_async_task(
+    task: Task,
+    max_retries: u32,
+    download_progress_buffer_bytes: usize,
+    user_agent: &str,
+    spawned: &mut Vec<Task>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) {
+    match task {
+        Task::TransferArchivePart {
+            part,
+            group,
+            retry_count,
+            resume,
+        } => {
+            archive::execute_transfer_archive_part(
+                part,
+                group,
+                retry_count,
+                resume,
+                max_retries,
+                download_progress_buffer_bytes,
+                user_agent,
+                spawned,
+                event_tx,
+            )
+            .await
+        }
+        Task::TransferDownload {
+            url,
+            dest,
+            logical_path,
+            expected_md5,
+            expected_size,
+            retry_count,
+            transfer_class,
+            resume,
+        } => {
+            transfer::execute_transfer_download(
+                transfer::DownloadExecInput {
+                    url,
+                    dest,
+                    logical_path,
+                    expected_md5,
+                    expected_size,
+                    retry_count,
+                    max_retries,
+                    transfer_class,
+                },
+                resume,
+                download_progress_buffer_bytes,
+                user_agent,
+                spawned,
+                event_tx,
+            )
+            .await
+        }
+        Task::ReuseFile {
+            source,
+            copy_only,
+            remaining_source_candidates,
+            dest,
+            logical_path,
+            expected_md5,
+            expected_size,
+            download_url,
+            allow_copy_fallback,
+            retry_count,
+            transfer_class,
+        } => {
+            transfer::execute_hardlink_reuse_file(
+                transfer::ReuseFileInput {
+                    source,
+                    copy_only,
+                    remaining_source_candidates,
+                    dest,
+                    logical_path,
+                    expected_md5,
+                    expected_size,
+                    download_url,
+                    allow_copy_fallback,
+                    retry_count,
+                    transfer_class,
+                },
+                spawned,
+                event_tx,
+            )
+            .await
+        }
+        Task::Hardlink { src, dest } => match create_hardlink_async(&src, &dest).await {
+            Ok(()) => {
+                let _ = event_tx.send(WorkerEvent::Hardlinked { path: dest });
+            }
+            Err(error) => {
+                let _ = event_tx.send(WorkerEvent::Failed {
+                    path: dest.display().to_string(),
+                    reason: error.to_string(),
+                });
+            }
+        },
+        _ => unreachable!("blocking task routed to async I/O executor"),
     }
 }

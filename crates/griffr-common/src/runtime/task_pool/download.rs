@@ -7,7 +7,6 @@ use crate::error::{Error, Result};
 use crate::runtime::preallocate_file;
 use compio::buf::BufResult;
 use compio::bytes::Bytes;
-use compio::dispatcher::Dispatcher;
 use compio::io::AsyncWriteAtExt;
 use futures_util::StreamExt;
 use md5::{Digest, Md5};
@@ -39,10 +38,9 @@ pub(crate) enum DownloadProgress {
     Reset(u64),
 }
 
-/// Inspects a partial download and computes the incremental MD5 prefix on a
-/// CPU worker before the network task is admitted to an I/O queue.
+/// Inspects a partial download and computes the incremental MD5 prefix in a
+/// CPU admission before the async transfer task is submitted to Dispatcher.
 pub(crate) fn prepare_download(
-    io_dispatcher: Option<&Dispatcher>,
     dest: &Path,
     expected_md5: &str,
     expected_size: Option<u64>,
@@ -85,7 +83,7 @@ pub(crate) fn prepare_download(
         if partial_len == expected_size {
             let actual_md5 = super::verify::file_md5(&part_path)?;
             if actual_md5 == expected_md5.to_ascii_lowercase() {
-                super::fs_ops::commit_partial_download(io_dispatcher, &part_path, dest)?;
+                super::fs_ops::commit_partial_download(&part_path, dest)?;
                 return Ok(DownloadPreparation::Complete(partial_len));
             }
             std::fs::remove_file(&part_path).map_err(|source| Error::RemoveFailed {
@@ -107,9 +105,7 @@ pub(crate) fn prepare_download(
     )))
 }
 
-pub(crate) fn do_prepared_download(
-    io_dispatcher: Option<&Dispatcher>,
-    http_client: &cyper::Client,
+pub(crate) async fn do_prepared_download(
     user_agent: &str,
     url: &str,
     dest: &Path,
@@ -133,8 +129,11 @@ pub(crate) fn do_prepared_download(
     let url_owned = url.to_string();
     let user_agent_owned = user_agent.to_string();
     let part_path_for_write = part_path.clone();
-    let client = http_client.clone();
-    let (written, actual_md5) = super::fs_ops::dispatch_io(io_dispatcher, move || async move {
+    let (written, actual_md5) = {
+        thread_local! {
+            static CLIENT: cyper::Client = cyper::Client::new().expect("Failed to create thread-local HTTP client");
+        }
+        let client = CLIENT.with(|c| c.clone());
         let mut request = client.get(&url_owned)?;
         request = request
             .header(USER_AGENT_HEADER, user_agent_owned.clone())
@@ -297,9 +296,9 @@ pub(crate) fn do_prepared_download(
             }
         }
 
-        let actual_md5 = format!("{:x}", md5::Digest::finalize(hasher));
+        let actual_md5 = crate::to_hex(&md5::Digest::finalize(hasher));
         Ok::<(u64, String), Error>((total_written, actual_md5))
-    })?;
+    }?;
 
     if actual_md5 != expected_md5.to_ascii_lowercase() {
         return Err(Error::Download(format!(
@@ -308,16 +307,13 @@ pub(crate) fn do_prepared_download(
         )));
     }
 
-    super::fs_ops::commit_partial_download(io_dispatcher, &part_path, dest)?;
-    let dest_owned = dest.to_path_buf();
-    let metadata = super::fs_ops::dispatch_io(io_dispatcher, move || async move {
-        compio::fs::metadata(&dest_owned)
-            .await
-            .map_err(|e| Error::StatFailed {
-                path: dest_owned.clone(),
-                source: e,
-            })
-    })?;
+    super::fs_ops::commit_partial_download_async(&part_path, dest).await?;
+    let metadata = compio::fs::metadata(dest)
+        .await
+        .map_err(|source| Error::StatFailed {
+            path: dest.to_path_buf(),
+            source,
+        })?;
     let len = metadata.len();
     if len != written {
         debug!(

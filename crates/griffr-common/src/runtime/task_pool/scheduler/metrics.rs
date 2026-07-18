@@ -12,6 +12,7 @@ struct TimingSample {
     estimated_bytes: u64,
     read_volumes: Vec<String>,
     write_volumes: Vec<String>,
+    metadata_volumes: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -20,10 +21,6 @@ pub(super) struct SchedulerMetrics {
 }
 
 impl SchedulerMetrics {
-    pub(super) fn reset(&self) {
-        self.samples.lock().unwrap().clear();
-    }
-
     pub(super) fn record(
         &self,
         queue_wait: Duration,
@@ -36,6 +33,7 @@ impl SchedulerMetrics {
             estimated_bytes: resources.estimated_bytes,
             read_volumes: resources.read_volumes.clone(),
             write_volumes: resources.write_volumes.clone(),
+            metadata_volumes: resources.metadata_volumes.clone(),
         });
     }
 
@@ -63,6 +61,12 @@ impl SchedulerMetrics {
                 metric.write_service_time =
                     metric.write_service_time.saturating_add(sample.run_time);
                 metric.write_tasks = metric.write_tasks.saturating_add(1);
+            }
+            for volume in &sample.metadata_volumes {
+                let metric = volumes.entry(volume.clone()).or_default();
+                metric.metadata_service_time =
+                    metric.metadata_service_time.saturating_add(sample.run_time);
+                metric.metadata_tasks = metric.metadata_tasks.saturating_add(1);
             }
         }
         TaskPoolMetrics {

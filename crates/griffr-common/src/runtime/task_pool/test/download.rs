@@ -19,11 +19,7 @@ fn test_write_file_replaces_hardlink_instead_of_mutating_shared_inode() {
     assert_eq!(std::fs::read(&original).unwrap(), b"before");
     assert_eq!(std::fs::read(&linked).unwrap(), b"before");
 
-    let dispatcher = Dispatcher::builder()
-        .worker_threads(NonZeroUsize::new(1).unwrap())
-        .build()
-        .expect("dispatcher should build");
-    write_file(Some(&dispatcher), &linked, b"after".to_vec()).unwrap();
+    write_file(&linked, b"after".to_vec()).unwrap();
 
     assert_eq!(std::fs::read(&linked).unwrap(), b"after");
     assert_eq!(
@@ -40,7 +36,7 @@ fn ensure_file_can_relink_verified_target_when_prefer_reuse_enabled() {
     let target = tmp.path().join("target.bin");
     std::fs::write(&source, b"same-bytes").unwrap();
     std::fs::write(&target, b"same-bytes").unwrap();
-    let expected_md5 = format!("{:x}", Md5::digest(b"same-bytes"));
+    let expected_md5 = crate::to_hex(&Md5::digest(b"same-bytes"));
 
     let tasks = vec![Task::ensure_file(FileEnsureTask {
         dest: target.clone(),
@@ -86,7 +82,7 @@ fn do_download_resume_incremental_md5_produces_correct_result() {
     for i in 0..(2 * 1024 * 1024 + 333) {
         payload.push((i % 251) as u8);
     }
-    let expected_md5 = format!("{:x}", Md5::digest(&payload));
+    let expected_md5 = crate::to_hex(&Md5::digest(&payload));
 
     let cut = 1_048_576usize;
     std::fs::write(&part, &payload[..cut]).unwrap();
@@ -94,12 +90,7 @@ fn do_download_resume_incremental_md5_produces_correct_result() {
     let (base, range_hits, total_hits, stop) = start_range_http_channel("/blob", payload.clone());
     let url = format!("{}/blob", base);
 
-    let dispatcher = Dispatcher::builder()
-        .worker_threads(NonZeroUsize::new(2).unwrap())
-        .build()
-        .expect("dispatcher should build");
     let len = do_download(
-        Some(&dispatcher),
         "Mozilla/5.0",
         &url,
         &dest,
@@ -135,14 +126,9 @@ fn completed_partial_is_committed_without_network_request() {
     let part = make_partial_download_path(&dest).unwrap();
     let payload = b"already complete partial download";
     std::fs::write(&part, payload).unwrap();
-    let expected_md5 = format!("{:x}", Md5::digest(payload));
+    let expected_md5 = crate::to_hex(&Md5::digest(payload));
 
-    let dispatcher = Dispatcher::builder()
-        .worker_threads(NonZeroUsize::new(2).unwrap())
-        .build()
-        .expect("dispatcher should build");
     let len = do_download(
-        Some(&dispatcher),
         "Mozilla/5.0",
         "http://127.0.0.1:1/must-not-be-requested",
         &dest,
@@ -165,18 +151,13 @@ fn ignored_range_restarts_from_zero_and_resets_progress() {
     let part = make_partial_download_path(&dest).unwrap();
     let payload = b"server returned a full response".to_vec();
     std::fs::write(&part, &payload[..8]).unwrap();
-    let expected_md5 = format!("{:x}", Md5::digest(&payload));
+    let expected_md5 = crate::to_hex(&Md5::digest(&payload));
     let (base, range_hits, total_hits, stop) =
         start_resume_restart_http_channel("/blob", payload.clone(), 200);
     let progress = Arc::new(Mutex::new(Vec::new()));
     let progress_clone = Arc::clone(&progress);
 
-    let dispatcher = Dispatcher::builder()
-        .worker_threads(NonZeroUsize::new(2).unwrap())
-        .build()
-        .expect("dispatcher should build");
     let len = do_download(
-        Some(&dispatcher),
         "Mozilla/5.0",
         &format!("{base}/blob"),
         &dest,
@@ -205,18 +186,13 @@ fn range_not_satisfiable_retries_without_range_in_same_attempt() {
     let part = make_partial_download_path(&dest).unwrap();
     let payload = b"replacement response after 416".to_vec();
     std::fs::write(&part, b"stale partial bytes").unwrap();
-    let expected_md5 = format!("{:x}", Md5::digest(&payload));
+    let expected_md5 = crate::to_hex(&Md5::digest(&payload));
     let (base, range_hits, total_hits, stop) =
         start_resume_restart_http_channel("/blob", payload.clone(), 416);
     let progress = Arc::new(Mutex::new(Vec::new()));
     let progress_clone = Arc::clone(&progress);
 
-    let dispatcher = Dispatcher::builder()
-        .worker_threads(NonZeroUsize::new(2).unwrap())
-        .build()
-        .expect("dispatcher should build");
     let len = do_download(
-        Some(&dispatcher),
         "Mozilla/5.0",
         &format!("{base}/blob"),
         &dest,
@@ -239,7 +215,6 @@ fn range_not_satisfiable_retries_without_range_in_same_attempt() {
 }
 
 fn do_download(
-    io_dispatcher: Option<&Dispatcher>,
     user_agent: &str,
     url: &str,
     dest: &std::path::Path,
@@ -254,20 +229,24 @@ fn do_download(
         do_prepared_download, prepare_download, DownloadPreparation,
     };
 
-    let http_client = cyper::Client::new();
-    match prepare_download(io_dispatcher, dest, expected_md5, expected_size)? {
+    match prepare_download(dest, expected_md5, expected_size)? {
         DownloadPreparation::Complete(bytes) => Ok(bytes),
-        DownloadPreparation::Ready(resume) => do_prepared_download(
-            io_dispatcher,
-            &http_client,
-            user_agent,
-            url,
-            dest,
-            expected_md5,
-            expected_size,
-            resume,
-            progress_buffer_bytes,
-            on_progress,
-        ),
+        DownloadPreparation::Ready(resume) => {
+            let runtime = compio::runtime::Runtime::new().map_err(|error| {
+                crate::error::Error::TaskPool(format!(
+                    "failed to create async download test runtime: {error}"
+                ))
+            })?;
+            runtime.block_on(do_prepared_download(
+                user_agent,
+                url,
+                dest,
+                expected_md5,
+                expected_size,
+                resume,
+                progress_buffer_bytes,
+                on_progress,
+            ))
+        }
     }
 }

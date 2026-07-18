@@ -137,10 +137,12 @@ impl WorkerEvent {
 pub struct VolumeTaskMetrics {
     pub read_tasks: usize,
     pub write_tasks: usize,
+    pub metadata_tasks: usize,
     pub read_bytes: u64,
     pub write_bytes: u64,
     pub read_service_time: Duration,
     pub write_service_time: Duration,
+    pub metadata_service_time: Duration,
 }
 
 impl VolumeTaskMetrics {
@@ -179,7 +181,8 @@ pub struct TaskPoolResult {
 }
 
 pub struct TaskPoolRunner {
-    pub(crate) ctx: crate::runtime::task_pool::scheduler::WorkerContext,
+    pub(crate) config: super::TaskPoolConfig,
+    pub(crate) dispatcher: std::sync::Arc<compio::dispatcher::Dispatcher>,
+    pub(crate) event_tx: flume::Sender<WorkerEvent>,
     pub(crate) event_rx: flume::Receiver<WorkerEvent>,
-    pub(crate) workers: Vec<std::thread::JoinHandle<()>>,
 }
