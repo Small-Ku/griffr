@@ -44,6 +44,7 @@ def run(host: ArchitectureHost) -> None:
     _check_progress_lane_constants(host)
     _check_transient_outcome_leaks(host)
     _check_lane_unit_conflicts(host)
+    _check_dispatcher_task_model(host)
 
 
 def _progress_protocol_packages(host: ArchitectureHost) -> list[Package]:
@@ -578,3 +579,48 @@ def _check_lane_unit_conflicts(host: ArchitectureHost) -> None:
                     ),
                     hint="Use one stable unit per lane and create a distinct lane for count- and byte-based progress.",
                 )
+
+
+_TASK_POOL_FORBIDDEN_PATTERNS = (
+    (re.compile(r"\bstd\s*::\s*thread\s*::\s*Builder\b"), "custom std::thread worker construction"),
+    (re.compile(r"\bCondvar\b"), "Condvar-backed task queue"),
+    (re.compile(r"\bfn\s+worker_loop\b"), "class-specific worker loop"),
+    (re.compile(r"\bfn\s+dispatch_io\b"), "synchronous Dispatcher bridge"),
+    (re.compile(r"\bExecutionClass\s*::\s*Network\b"), "thread-oriented network execution class"),
+    (re.compile(r"\b(?:cpu|blocking)_workers\b"), "worker-count configuration"),
+)
+
+
+def _check_dispatcher_task_model(host: ArchitectureHost) -> None:
+    """Keep task-pool concurrency in Dispatcher plus coordinator admissions."""
+    seen_sources: set[Path] = set()
+    for target in host.targets:
+        for module in target.iter_modules():
+            source = module.source
+            if source.path in seen_sources:
+                continue
+            seen_sources.add(source.path)
+            normalized = source.rel.replace("\\", "/")
+            if "/runtime/task_pool/" not in f"/{normalized}" and not normalized.endswith(
+                "/runtime/task_pool.rs"
+            ):
+                continue
+            text = source.data.decode("utf-8", "replace")
+            for pattern, description in _TASK_POOL_FORBIDDEN_PATTERNS:
+                for match in pattern.finditer(text):
+                    start = len(text[: match.start()].encode("utf-8"))
+                    end = len(text[: match.end()].encode("utf-8"))
+                    node = source.tree.root_node.descendant_for_byte_range(start, end)
+                    host.add(
+                        "DSP001",
+                        "error",
+                        f"Task pool reintroduces {description}",
+                        source=source,
+                        node=node,
+                        confidence="definite",
+                        evidence=(f"matched {match.group(0)!r}",),
+                        hint=(
+                            "Submit async I/O with Dispatcher::dispatch, CPU/blocking work with "
+                            "Dispatcher::dispatch_blocking, and keep limits as coordinator admissions."
+                        ),
+                    )

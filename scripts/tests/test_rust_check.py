@@ -61,6 +61,35 @@ class RustCheckTests(unittest.TestCase):
             diagnostic for diagnostic in checker.diagnostics if diagnostic.code == code
         ]
 
+    def test_task_pool_custom_worker_model_is_rejected(self) -> None:
+        root = self.make_workspace(
+            "mod runtime;\n",
+            {
+                "src/runtime.rs": "mod task_pool;\n",
+                "src/runtime/task_pool.rs": (
+                    "use std::sync::Condvar;\n"
+                    "fn worker_loop() { let _ = Condvar::new(); }\n"
+                ),
+            },
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DSP001")
+        self.assertGreaterEqual(len(diagnostics), 2)
+
+    def test_task_pool_dispatcher_admission_model_is_allowed(self) -> None:
+        root = self.make_workspace(
+            "mod runtime;\n",
+            {
+                "src/runtime.rs": "mod task_pool;\n",
+                "src/runtime/task_pool.rs": (
+                    "struct Coordinator { cpu_slots: usize }\n"
+                    "fn submit() { dispatcher_dispatch(); dispatcher_dispatch_blocking(); }\n"
+                    "fn dispatcher_dispatch() {}\n"
+                    "fn dispatcher_dispatch_blocking() {}\n"
+                ),
+            },
+        )
+        self.assertNotIn("DSP001", self.codes(self.run_checker(root)))
+
     def test_cfg_guarded_duplicate_functions_are_not_reported(self) -> None:
         root = self.make_workspace(
             "#[cfg(windows)]\nfn platform() {}\n"

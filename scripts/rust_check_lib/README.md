@@ -32,7 +32,8 @@ The default policy favors recall:
 - cfg compatibility, module reachability, imports/re-exports, selected macro
   output, lexical scopes, and direct-call arity are analyzed across files;
 - repository architecture checks enforce frontend-neutral progress channels, canonical
-  progress lanes, and durable-only task-pool results.
+  progress lanes, durable-only task-pool results, and a Dispatcher-only task execution model
+  (no class-specific `std::thread`/`Condvar` worker pools or synchronous dispatch bridge).
 
 Useful policy overrides:
 
