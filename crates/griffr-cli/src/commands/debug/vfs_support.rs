@@ -343,7 +343,7 @@ pub fn file_md5(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(griffr_common::to_hex(&hasher.finalize()))
 }
 
 pub fn resolve_endfield_data_root(path: &Path) -> Result<PathBuf> {

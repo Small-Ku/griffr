@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
-use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
+use griffr_common::runtime::task_pool::TaskPoolRunner;
 use griffr_common::runtime::{
     inspect_reuse_installations, is_launcher_metadata_path, run_integrity_pool,
     sync_launcher_metadata, IntegritySelection, ProgressLane, ProgressSender,
@@ -173,10 +173,17 @@ pub async fn verify(
         Vec::new()
     };
 
-    let pool_cfg = TaskPoolConfig::with_progress_buffers(
-        opts.extraction_progress_buffer_bytes,
-        opts.download_progress_buffer_bytes,
-    );
+    let pool_cfg = opts.task_pool_config();
+    let volume_policy = pool_cfg.default_volume_policy;
+    opts.verbose(format!(
+        "Volume policy: mode={:?} reads={} writes={} metadata={} pressure={} reuse_pipeline_window={}",
+        volume_policy.streaming_mode,
+        volume_policy.read_limit,
+        volume_policy.write_limit,
+        volume_policy.metadata_limit,
+        volume_policy.streaming_pressure_limit,
+        pool_cfg.reuse_pipeline_window
+    ));
     if repair && !extra_tasks.is_empty() {
         opts.verbose(format!(
             "Using {} shared network slots with weighted VFS/archive fairness",

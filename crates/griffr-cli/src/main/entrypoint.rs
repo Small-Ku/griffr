@@ -44,6 +44,12 @@ pub(crate) async fn run() -> Result<()> {
         keep_pack_archives: false,
         extraction_progress_buffer_bytes: cli.extraction_progress_buffer_bytes,
         download_progress_buffer_bytes: cli.download_progress_buffer_bytes,
+        volume_read_limit: cli.volume_read_limit,
+        volume_write_limit: cli.volume_write_limit,
+        volume_metadata_limit: cli.volume_metadata_limit,
+        volume_streaming_pressure_limit: cli.volume_streaming_pressure_limit,
+        volume_streaming_mode: cli.volume_streaming_mode.into(),
+        reuse_pipeline_window: cli.reuse_pipeline_window,
         output: cli.output,
     };
 

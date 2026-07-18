@@ -349,10 +349,34 @@ pub struct GlobalOptions {
     pub keep_pack_archives: bool,
     pub extraction_progress_buffer_bytes: usize,
     pub download_progress_buffer_bytes: usize,
+    pub volume_read_limit: usize,
+    pub volume_write_limit: usize,
+    pub volume_metadata_limit: usize,
+    pub volume_streaming_pressure_limit: usize,
+    pub volume_streaming_mode: griffr_common::runtime::task_pool::VolumeStreamingMode,
+    pub reuse_pipeline_window: usize,
     pub output: OutputFormat,
 }
 
 impl GlobalOptions {
+    pub fn task_pool_config(&self) -> griffr_common::runtime::task_pool::TaskPoolConfig {
+        use griffr_common::runtime::task_pool::{TaskPoolConfig, VolumeIoPolicy};
+
+        let mut config = TaskPoolConfig::with_progress_buffers(
+            self.extraction_progress_buffer_bytes,
+            self.download_progress_buffer_bytes,
+        );
+        config.default_volume_policy = VolumeIoPolicy::new(
+            self.volume_read_limit,
+            self.volume_write_limit,
+            self.volume_metadata_limit,
+            self.volume_streaming_pressure_limit,
+            self.volume_streaming_mode,
+        );
+        config.reuse_pipeline_window = self.reuse_pipeline_window.max(1);
+        config
+    }
+
     /// Print a message if verbose mode is enabled
     pub fn verbose(&self, msg: impl AsRef<str>) {
         if self.verbose {

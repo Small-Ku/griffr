@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
+use griffr_common::runtime::task_pool::TaskPoolRunner;
 use griffr_common::runtime::{
     plan_vfs_tasks, resolve_staged_patch_recovery_dir, select_update_package,
     streaming_assets_path, UpdatePackageKind, VfsFilePlanOptions,
@@ -86,10 +86,7 @@ pub(super) async fn update_internal(
         &overrides.clone().into(),
     )?;
     let api_client = ApiClient::new()?;
-    let task_pool_cfg = TaskPoolConfig::with_progress_buffers(
-        opts.extraction_progress_buffer_bytes,
-        opts.download_progress_buffer_bytes,
-    );
+    let task_pool_cfg = opts.task_pool_config();
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
 
     let mut version_info = api_client

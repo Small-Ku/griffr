@@ -1,6 +1,11 @@
+use clap::builder::TypedValueParser;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use griffr_common::api::protocol::DEFAULT_LANGUAGE;
-use griffr_common::runtime::task_pool::DEFAULT_PROGRESS_BUFFER_BYTES;
+use griffr_common::runtime::task_pool::{
+    DEFAULT_PROGRESS_BUFFER_BYTES, DEFAULT_REUSE_PIPELINE_WINDOW, DEFAULT_VOLUME_METADATA_LIMIT,
+    DEFAULT_VOLUME_READ_LIMIT, DEFAULT_VOLUME_STREAMING_MODE,
+    DEFAULT_VOLUME_STREAMING_PRESSURE_LIMIT, DEFAULT_VOLUME_WRITE_LIMIT,
+};
 use griffr_common::runtime::VfsBootstrapScope;
 
 use crate::debug_cli::{AccountCommands, DebugCommands, PredownloadCommands};
@@ -40,6 +45,60 @@ pub(crate) struct Cli {
     /// Download progress buffer size in bytes (controls progress update granularity)
     #[arg(long, global = true, default_value_t = DEFAULT_PROGRESS_BUFFER_BYTES)]
     pub(crate) download_progress_buffer_bytes: usize,
+
+    /// Maximum concurrent streaming readers per physical volume
+    #[arg(
+        long,
+        global = true,
+        default_value_t = DEFAULT_VOLUME_READ_LIMIT,
+        value_parser = clap::value_parser!(u64).range(1..).map(|v| v as usize)
+    )]
+    pub(crate) volume_read_limit: usize,
+
+    /// Maximum concurrent streaming writers per physical volume
+    #[arg(
+        long,
+        global = true,
+        default_value_t = DEFAULT_VOLUME_WRITE_LIMIT,
+        value_parser = clap::value_parser!(u64).range(1..).map(|v| v as usize)
+    )]
+    pub(crate) volume_write_limit: usize,
+
+    /// Maximum concurrent metadata mutations per physical volume
+    #[arg(
+        long,
+        global = true,
+        default_value_t = DEFAULT_VOLUME_METADATA_LIMIT,
+        value_parser = clap::value_parser!(u64).range(1..).map(|v| v as usize)
+    )]
+    pub(crate) volume_metadata_limit: usize,
+
+    /// Maximum combined streaming read/write pressure per physical volume
+    #[arg(
+        long,
+        global = true,
+        default_value_t = DEFAULT_VOLUME_STREAMING_PRESSURE_LIMIT,
+        value_parser = clap::value_parser!(u64).range(1..).map(|v| v as usize)
+    )]
+    pub(crate) volume_streaming_pressure_limit: usize,
+
+    /// Whether streaming reads and writes may overlap on the same physical volume
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = VolumeStreamingModeArg::from_policy(DEFAULT_VOLUME_STREAMING_MODE)
+    )]
+    pub(crate) volume_streaming_mode: VolumeStreamingModeArg,
+
+    /// Maximum verified reuse files waiting for hardlink/copy commit
+    #[arg(
+        long,
+        global = true,
+        default_value_t = DEFAULT_REUSE_PIPELINE_WINDOW,
+        value_parser = clap::value_parser!(u64).range(1..).map(|v| v as usize)
+    )]
+    pub(crate) reuse_pipeline_window: usize,
 
     #[command(subcommand)]
     pub(crate) command: Commands,
@@ -382,6 +441,30 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: AccountCommands,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum VolumeStreamingModeArg {
+    Exclusive,
+    Mixed,
+}
+
+impl VolumeStreamingModeArg {
+    pub const fn from_policy(mode: griffr_common::runtime::task_pool::VolumeStreamingMode) -> Self {
+        match mode {
+            griffr_common::runtime::task_pool::VolumeStreamingMode::Exclusive => Self::Exclusive,
+            griffr_common::runtime::task_pool::VolumeStreamingMode::Mixed => Self::Mixed,
+        }
+    }
+}
+
+impl From<VolumeStreamingModeArg> for griffr_common::runtime::task_pool::VolumeStreamingMode {
+    fn from(mode: VolumeStreamingModeArg) -> Self {
+        match mode {
+            VolumeStreamingModeArg::Exclusive => Self::Exclusive,
+            VolumeStreamingModeArg::Mixed => Self::Mixed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]

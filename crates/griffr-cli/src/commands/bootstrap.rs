@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::runtime::task_pool::{TaskPoolConfig, TaskPoolRunner};
+use griffr_common::runtime::task_pool::TaskPoolRunner;
 use griffr_common::runtime::{
     bootstrap_persistent_vfs_with_runner, inspect_reuse_installations, ProgressLane,
     VfsBootstrapConfig, VfsBootstrapScope,
@@ -125,10 +125,7 @@ pub async fn bootstrap(
     ));
     ui::print_info(format!("Persistent target: {}", persistent_root.display()));
 
-    let pool_cfg = TaskPoolConfig::with_progress_buffers(
-        opts.extraction_progress_buffer_bytes,
-        opts.download_progress_buffer_bytes,
-    );
+    let pool_cfg = opts.task_pool_config();
     let mut task_pool_runner = TaskPoolRunner::new(pool_cfg)?;
 
     let progress = CountAndByteProgress::new(

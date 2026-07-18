@@ -3,9 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::{GetLatestGameResponse, PackFile, PrePatchInfo};
-use griffr_common::runtime::task_pool::{
-    Task, TaskOutcome, TaskPoolConfig, TaskPoolRunner, TaskProgress,
-};
+use griffr_common::runtime::task_pool::{Task, TaskOutcome, TaskPoolRunner, TaskProgress};
 use griffr_common::runtime::{
     classify_patch_recovery, write_predownload_stage_metadata, PatchRecoveryState,
     PredownloadStageMetadata, ProgressLane, StagedArchivePart, DELETE_FILES_MANIFEST_NAME,
@@ -214,8 +212,7 @@ pub async fn fetch(path: PathBuf, output_dir: Option<PathBuf>, opts: GlobalOptio
         .await
         .with_context(|| format!("Failed to create {}", stage_dir.display()))?;
 
-    let task_pool_cfg =
-        TaskPoolConfig::with_download_progress_buffer(opts.download_progress_buffer_bytes);
+    let task_pool_cfg = opts.task_pool_config();
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
     let tasks = build_predownload_tasks(&stage_dir, &pre_patch.patches)?;
 
@@ -321,7 +318,7 @@ pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
         install_root.display()
     ));
 
-    let task_pool_cfg = TaskPoolConfig::default();
+    let task_pool_cfg = opts.task_pool_config();
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
     let progress = ArchivePipelineProgress::new("predownload.resume", opts.verbose);
     let verify_lane = ProgressLane::ARCHIVE_VERIFY;

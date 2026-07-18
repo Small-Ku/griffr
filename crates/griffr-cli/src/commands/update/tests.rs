@@ -29,9 +29,40 @@ fn test_global_options() -> GlobalOptions {
         keep_pack_archives: false,
         extraction_progress_buffer_bytes: DEFAULT_PROGRESS_BUFFER_BYTES,
         download_progress_buffer_bytes: DEFAULT_PROGRESS_BUFFER_BYTES,
+        volume_read_limit: griffr_common::runtime::task_pool::DEFAULT_VOLUME_READ_LIMIT,
+        volume_write_limit: griffr_common::runtime::task_pool::DEFAULT_VOLUME_WRITE_LIMIT,
+        volume_metadata_limit: griffr_common::runtime::task_pool::DEFAULT_VOLUME_METADATA_LIMIT,
+        volume_streaming_pressure_limit:
+            griffr_common::runtime::task_pool::DEFAULT_VOLUME_STREAMING_PRESSURE_LIMIT,
+        volume_streaming_mode: griffr_common::runtime::task_pool::DEFAULT_VOLUME_STREAMING_MODE,
+        reuse_pipeline_window: griffr_common::runtime::task_pool::DEFAULT_REUSE_PIPELINE_WINDOW,
         output: OutputFormat::Text,
     }
 }
 mod archive_pipeline;
 mod live_api;
 mod package_selection;
+
+#[test]
+fn global_options_apply_explicit_task_pool_volume_policy() {
+    let mut opts = test_global_options();
+    opts.volume_read_limit = 3;
+    opts.volume_write_limit = 1;
+    opts.volume_metadata_limit = 2;
+    opts.volume_streaming_pressure_limit = 4;
+    opts.volume_streaming_mode = griffr_common::runtime::task_pool::VolumeStreamingMode::Exclusive;
+    opts.reuse_pipeline_window = 24;
+
+    let config = opts.task_pool_config();
+    assert_eq!(
+        config.default_volume_policy,
+        griffr_common::runtime::task_pool::VolumeIoPolicy::new(
+            3,
+            1,
+            2,
+            4,
+            griffr_common::runtime::task_pool::VolumeStreamingMode::Exclusive,
+        )
+    );
+    assert_eq!(config.reuse_pipeline_window, 24);
+}

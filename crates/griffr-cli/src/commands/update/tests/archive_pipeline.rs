@@ -104,12 +104,12 @@ async fn download_and_extract_archives_recovers_partial_part_on_rerun() {
     let archives = vec![
         PackFile {
             url: format!("{}/{}", base_url, part1_name),
-            md5: format!("{:x}", md5::Md5::digest(&part1)),
+            md5: griffr_common::to_hex(&md5::Md5::digest(&part1)),
             package_size: part1.len().to_string(),
         },
         PackFile {
             url: format!("{}/{}", base_url, part2_name),
-            md5: format!("{:x}", md5::Md5::digest(&part2)),
+            md5: griffr_common::to_hex(&md5::Md5::digest(&part2)),
             package_size: part2.len().to_string(),
         },
     ];
@@ -184,7 +184,7 @@ async fn download_and_extract_archives_applies_delete_files_manifest() {
 
     let archives = vec![PackFile {
         url: format!("{}/{}", base_url, part_name),
-        md5: format!("{:x}", md5::Md5::digest(&zip_bytes)),
+        md5: griffr_common::to_hex(&md5::Md5::digest(&zip_bytes)),
         package_size: zip_bytes.len().to_string(),
     }];
 

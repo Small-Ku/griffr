@@ -6,7 +6,7 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::PackageInfo;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::{
-    plan_archive_groups, Task, TaskOutcome, TaskPoolConfig, TaskPoolRunner, TaskProgress,
+    plan_archive_groups, Task, TaskOutcome, TaskPoolRunner, TaskProgress,
 };
 use griffr_common::runtime::{directory_has_entries, is_launcher_metadata_path};
 use griffr_common::runtime::{
@@ -138,10 +138,7 @@ pub async fn install(
         ui::print_info(format!("Reuse sources: {}", reuse_paths.len()));
     }
 
-    let task_pool_cfg = TaskPoolConfig::with_progress_buffers(
-        opts.extraction_progress_buffer_bytes,
-        opts.download_progress_buffer_bytes,
-    );
+    let task_pool_cfg = opts.task_pool_config();
     let mut task_pool = TaskPoolRunner::new(task_pool_cfg)?;
 
     if reuse_paths.is_empty() {
