@@ -1,6 +1,22 @@
 use crate::error::{Error, Result};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::types::Task;
+
+static DEPENDENCY_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Stable handle used by dynamically discovered work to depend on a node that
+/// was installed by an earlier graph expansion. Tokens are command-local in
+/// practice, but globally unique so accidental cross-graph reuse cannot alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct TaskDependencyToken(u64);
+
+impl TaskDependencyToken {
+    pub(crate) fn new() -> Self {
+        Self(DEPENDENCY_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(u32);
@@ -135,6 +151,7 @@ impl TaskGraphBuilder {
             nodes: graph_nodes,
             unresolved,
             dynamic_expansions: 0,
+            bindings: HashMap::new(),
         })
     }
 }
@@ -158,6 +175,7 @@ pub struct TaskGraph {
     nodes: Vec<TaskNode>,
     unresolved: usize,
     dynamic_expansions: usize,
+    bindings: HashMap<TaskDependencyToken, NodeId>,
 }
 
 impl TaskGraph {
@@ -268,6 +286,25 @@ impl TaskGraph {
         Ok(ready)
     }
 
+    /// Returns every existing node whose completion currently depends on
+    /// `root`, either through an ordinary DAG edge or through a dynamic-parent
+    /// waiter edge. A newly expanded child must not depend on any node in this
+    /// set, otherwise the parent would wait for a child that waits for the
+    /// parent (directly or transitively).
+    fn completion_dependents_of(&self, root: NodeId) -> BTreeSet<NodeId> {
+        let mut reachable = BTreeSet::new();
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            if !reachable.insert(id) {
+                continue;
+            }
+            let node = &self.nodes[id.index()];
+            pending.extend(node.dependents.iter().copied());
+            pending.extend(node.waiters.iter().copied());
+        }
+        reachable
+    }
+
     fn install_expansion(
         &mut self,
         parent: NodeId,
@@ -284,8 +321,30 @@ impl TaskGraph {
         let global_ids = (0..nodes.len())
             .map(|offset| NodeId::new(base.saturating_add(offset)))
             .collect::<Result<Vec<_>>>()?;
+
+        // Resolve bindings and all dependency references before mutating the
+        // graph. A token may refer to an existing node or to an earlier node in
+        // this same append-only expansion, never to a forward node.
+        let mut local_bindings = HashMap::new();
+        for (local_index, node) in nodes.iter().enumerate() {
+            if let Some(binding) = node.binding {
+                if self.bindings.contains_key(&binding)
+                    || local_bindings.insert(binding, local_index).is_some()
+                {
+                    return Err(Error::TaskPool(format!(
+                        "dynamic graph dependency token {:?} is bound more than once",
+                        binding,
+                    )));
+                }
+            }
+        }
+
+        let completion_dependents = self.completion_dependents_of(parent);
+        let mut resolved_dependencies = Vec::with_capacity(nodes.len());
+        let mut blocked = vec![false; nodes.len()];
         let mut out_degree = vec![0usize; nodes.len()];
         for (local_index, node) in nodes.iter().enumerate() {
+            let mut dependencies = BTreeSet::new();
             for dependency in &node.dependencies {
                 if dependency.0 >= local_index {
                     return Err(Error::TaskPool(format!(
@@ -293,27 +352,78 @@ impl TaskGraph {
                         dependency.0,
                     )));
                 }
-                out_degree[dependency.0] = out_degree[dependency.0].saturating_add(1);
+                dependencies.insert(global_ids[dependency.0]);
             }
+            for token in &node.token_dependencies {
+                let dependency = if let Some(existing) = self.bindings.get(token).copied() {
+                    if completion_dependents.contains(&existing) {
+                        return Err(Error::TaskPool(format!(
+                            "dynamic graph node {local_index} creates a cycle through token {:?}",
+                            token,
+                        )));
+                    }
+                    existing
+                } else if let Some(bound_local) = local_bindings.get(token).copied() {
+                    if bound_local >= local_index {
+                        return Err(Error::TaskPool(format!(
+                            "dynamic graph node {local_index} has a forward token dependency"
+                        )));
+                    }
+                    global_ids[bound_local]
+                } else {
+                    return Err(Error::TaskPool(format!(
+                        "dynamic graph node {local_index} depends on unbound token {:?}",
+                        token,
+                    )));
+                };
+                dependencies.insert(dependency);
+            }
+
+            let dependencies = dependencies.into_iter().collect::<Vec<_>>();
+            for dependency in &dependencies {
+                if dependency.index() >= base {
+                    out_degree[dependency.index() - base] =
+                        out_degree[dependency.index() - base].saturating_add(1);
+                } else if matches!(
+                    self.nodes[dependency.index()].state,
+                    NodeState::Failed | NodeState::Cancelled
+                ) {
+                    blocked[local_index] = true;
+                }
+            }
+            resolved_dependencies.push(dependencies);
         }
 
-        for node in &nodes {
+        for (local_index, node) in nodes.iter().enumerate() {
+            let unresolved_dependencies = resolved_dependencies[local_index]
+                .iter()
+                .filter(|dependency| {
+                    dependency.index() >= base
+                        || self.nodes[dependency.index()].state != NodeState::Succeeded
+                })
+                .count();
             self.nodes.push(TaskNode {
                 task: None,
                 state: NodeState::Pending,
-                remaining_dependencies: node.dependencies.len(),
+                remaining_dependencies: unresolved_dependencies,
                 dependents: Vec::new(),
                 waiters: Vec::new(),
                 waiting_remaining: 0,
                 continuation: true,
             });
+            if let Some(binding) = node.binding {
+                self.bindings.insert(binding, global_ids[local_index]);
+            }
         }
-        for (local_index, node) in nodes.iter().enumerate() {
+
+        for (local_index, dependencies) in resolved_dependencies.iter().enumerate() {
             let node_id = global_ids[local_index];
-            for dependency in &node.dependencies {
-                self.nodes[global_ids[dependency.0].index()]
-                    .dependents
-                    .push(node_id);
+            for dependency in dependencies {
+                if dependency.index() >= base
+                    || self.nodes[dependency.index()].state != NodeState::Succeeded
+                {
+                    self.nodes[dependency.index()].dependents.push(node_id);
+                }
             }
         }
         for (global_id, node) in global_ids.iter().copied().zip(nodes) {
@@ -339,6 +449,11 @@ impl TaskGraph {
         parent_node.waiting_remaining = terminals.len();
         for terminal in terminals {
             self.nodes[terminal.index()].waiters.push(parent);
+        }
+        for (local_index, id) in global_ids.iter().copied().enumerate() {
+            if blocked[local_index] {
+                self.cancel_node(id, ready);
+            }
         }
         for id in global_ids {
             self.activate_if_ready(id, ready);
@@ -466,9 +581,13 @@ pub(crate) struct ExpansionNodeId(usize);
 struct ExpansionNode {
     task: Task,
     dependencies: Vec<ExpansionNodeId>,
+    token_dependencies: Vec<TaskDependencyToken>,
+    binding: Option<TaskDependencyToken>,
 }
 
-/// Append-only dynamic subgraph produced by one task execution.
+/// Append-only dynamic subgraph produced by one task execution. Local node
+/// dependencies model joins discovered in this execution; dependency tokens
+/// connect later discoveries to nodes installed by earlier expansions.
 #[derive(Debug, Default)]
 pub(crate) struct GraphExpansion {
     nodes: Vec<ExpansionNode>,
@@ -498,17 +617,53 @@ impl GraphExpansion {
             .expect("root expansion task insertion cannot fail")
     }
 
+    pub(crate) fn add_root_bound(
+        &mut self,
+        task: Task,
+        binding: TaskDependencyToken,
+    ) -> ExpansionNodeId {
+        self.add_task_internal(task, std::iter::empty(), std::iter::empty(), Some(binding))
+            .expect("bound root expansion task insertion cannot fail")
+    }
+
+    pub(crate) fn add_root_with_tokens(
+        &mut self,
+        task: Task,
+        token_dependencies: impl IntoIterator<Item = TaskDependencyToken>,
+    ) -> Result<ExpansionNodeId> {
+        self.add_task_internal(task, std::iter::empty(), token_dependencies, None)
+    }
+
     pub(crate) fn add_task(
         &mut self,
         task: Task,
         dependencies: impl IntoIterator<Item = ExpansionNodeId>,
     ) -> Result<ExpansionNodeId> {
+        self.add_task_internal(task, dependencies, std::iter::empty(), None)
+    }
+
+    pub(crate) fn add_task_with_tokens(
+        &mut self,
+        task: Task,
+        dependencies: impl IntoIterator<Item = ExpansionNodeId>,
+        token_dependencies: impl IntoIterator<Item = TaskDependencyToken>,
+    ) -> Result<ExpansionNodeId> {
+        self.add_task_internal(task, dependencies, token_dependencies, None)
+    }
+
+    fn add_task_internal(
+        &mut self,
+        task: Task,
+        dependencies: impl IntoIterator<Item = ExpansionNodeId>,
+        token_dependencies: impl IntoIterator<Item = TaskDependencyToken>,
+        binding: Option<TaskDependencyToken>,
+    ) -> Result<ExpansionNodeId> {
         let id = ExpansionNodeId(self.nodes.len());
-        let dependencies = dependencies
+        let dependencies: Vec<ExpansionNodeId> = dependencies
             .into_iter()
-            .collect::<std::collections::BTreeSet<_>>()
+            .collect::<BTreeSet<_>>()
             .into_iter()
-            .collect::<Vec<_>>();
+            .collect();
         for dependency in &dependencies {
             if dependency.0 >= self.nodes.len() {
                 return Err(Error::TaskPool(format!(
@@ -517,7 +672,17 @@ impl GraphExpansion {
                 )));
             }
         }
-        self.nodes.push(ExpansionNode { task, dependencies });
+        let token_dependencies: Vec<TaskDependencyToken> = token_dependencies
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        self.nodes.push(ExpansionNode {
+            task,
+            dependencies,
+            token_dependencies,
+            binding,
+        });
         Ok(id)
     }
 
@@ -581,7 +746,9 @@ impl TaskExecution {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{GraphExpansion, NodeState, TaskExecution, TaskGraphBuilder};
+    use super::{
+        GraphExpansion, NodeId, NodeState, TaskDependencyToken, TaskExecution, TaskGraphBuilder,
+    };
     use crate::runtime::task_pool::Task;
 
     fn task(name: &str) -> Task {
@@ -694,5 +861,170 @@ mod tests {
         assert_eq!(graph.node_state(child), Some(NodeState::Cancelled));
         assert_eq!(graph.node_state(parent), Some(NodeState::Failed));
         assert_eq!(graph.node_state(dependent), Some(NodeState::Cancelled));
+    }
+    #[test]
+    fn dynamic_node_waits_for_bound_node_from_an_earlier_expansion() {
+        let mut builder = TaskGraphBuilder::new();
+        let producer = builder.add_root(task("producer"));
+        let planner = builder.add_root(task("planner"));
+        let mut graph = builder.build_checked().unwrap();
+        let _ = graph.start();
+
+        graph.mark_running(producer).unwrap();
+        let token = TaskDependencyToken::new();
+        let mut produced = GraphExpansion::new();
+        produced.add_root_bound(task("volume"), token);
+        let ready = graph
+            .complete(producer, TaskExecution::expand(produced))
+            .unwrap();
+        let volume = ready[0].id;
+
+        graph.mark_running(planner).unwrap();
+        let mut planned = GraphExpansion::new();
+        planned
+            .add_root_with_tokens(task("index"), [token])
+            .unwrap();
+        let ready = graph
+            .complete(planner, TaskExecution::expand(planned))
+            .unwrap();
+        assert!(ready.is_empty());
+        assert_eq!(graph.node_state(planner), Some(NodeState::Waiting));
+
+        graph.mark_running(volume).unwrap();
+        let ready = graph.complete(volume, TaskExecution::succeeded()).unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(graph.node_state(producer), Some(NodeState::Succeeded));
+    }
+
+    #[test]
+    fn failed_bound_node_cancels_token_dependent_terminal_and_waiting_parent() {
+        let mut builder = TaskGraphBuilder::new();
+        let producer = builder.add_root(task("producer"));
+        let planner = builder.add_root(task("planner"));
+        let mut graph = builder.build_checked().unwrap();
+        let _ = graph.start();
+
+        graph.mark_running(producer).unwrap();
+        let token = TaskDependencyToken::new();
+        let mut produced = GraphExpansion::new();
+        produced.add_root_bound(task("volume"), token);
+        let ready = graph
+            .complete(producer, TaskExecution::expand(produced))
+            .unwrap();
+        let volume = ready[0].id;
+
+        graph.mark_running(planner).unwrap();
+        let mut planned = GraphExpansion::new();
+        planned
+            .add_root_with_tokens(task("commit"), [token])
+            .unwrap();
+        assert!(graph
+            .complete(planner, TaskExecution::expand(planned))
+            .unwrap()
+            .is_empty());
+
+        graph.mark_running(volume).unwrap();
+        graph
+            .complete(volume, TaskExecution::failed("bad package part"))
+            .unwrap();
+
+        assert_eq!(graph.node_state(volume), Some(NodeState::Failed));
+        assert_eq!(
+            graph.node_state(NodeId::from_index(3)),
+            Some(NodeState::Cancelled)
+        );
+        assert_eq!(graph.node_state(producer), Some(NodeState::Failed));
+        assert_eq!(graph.node_state(planner), Some(NodeState::Failed));
+    }
+
+    #[test]
+    fn token_dependency_can_join_work_installed_by_a_waiting_parent() {
+        let mut builder = TaskGraphBuilder::new();
+        let parent = builder.add_root(task("parent"));
+        let mut graph = builder.build_checked().unwrap();
+        let _ = graph.start();
+        graph.mark_running(parent).unwrap();
+
+        let token = TaskDependencyToken::new();
+        let mut expansion = GraphExpansion::new();
+        let volume = expansion.add_root_bound(task("volume"), token);
+        expansion
+            .add_root_with_tokens(task("index"), [token])
+            .unwrap();
+        let ready = graph
+            .complete(parent, TaskExecution::expand(expansion))
+            .unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id.index(), volume.0 + 1);
+
+        let volume_id = ready[0].id;
+        graph.mark_running(volume_id).unwrap();
+        let ready = graph
+            .complete(volume_id, TaskExecution::succeeded())
+            .unwrap();
+        assert_eq!(ready.len(), 1);
+    }
+
+    #[test]
+    fn token_dependency_cannot_wait_on_its_expanding_parent() {
+        let mut builder = TaskGraphBuilder::new();
+        let producer = builder.add_root(task("producer"));
+        let mut graph = builder.build_checked().unwrap();
+        let _ = graph.start();
+        graph.mark_running(producer).unwrap();
+
+        let token = TaskDependencyToken::new();
+        let mut produced = GraphExpansion::new();
+        produced.add_root_bound(task("bound-parent"), token);
+        let ready = graph
+            .complete(producer, TaskExecution::expand(produced))
+            .unwrap();
+        let bound_parent = ready[0].id;
+        graph.mark_running(bound_parent).unwrap();
+
+        let mut recursive = GraphExpansion::new();
+        recursive
+            .add_root_with_tokens(task("cycle"), [token])
+            .unwrap();
+        let error = graph
+            .complete(bound_parent, TaskExecution::expand(recursive))
+            .unwrap_err();
+        assert!(error.to_string().contains("creates a cycle"));
+    }
+
+    #[test]
+    fn token_dependency_cannot_wait_on_a_dynamic_ancestor() {
+        let mut builder = TaskGraphBuilder::new();
+        let outer = builder.add_root(task("outer"));
+        let mut graph = builder.build_checked().unwrap();
+        let _ = graph.start();
+        graph.mark_running(outer).unwrap();
+
+        let ancestor_token = TaskDependencyToken::new();
+        let mut outer_expansion = GraphExpansion::new();
+        outer_expansion.add_root_bound(task("ancestor"), ancestor_token);
+        let ready = graph
+            .complete(outer, TaskExecution::expand(outer_expansion))
+            .unwrap();
+        let ancestor = ready[0].id;
+        graph.mark_running(ancestor).unwrap();
+
+        let ready = graph
+            .complete(
+                ancestor,
+                TaskExecution::expand(GraphExpansion::single(task("inner-parent"))),
+            )
+            .unwrap();
+        let inner_parent = ready[0].id;
+        graph.mark_running(inner_parent).unwrap();
+
+        let mut recursive = GraphExpansion::new();
+        recursive
+            .add_root_with_tokens(task("cycle"), [ancestor_token])
+            .unwrap();
+        let error = graph
+            .complete(inner_parent, TaskExecution::expand(recursive))
+            .unwrap_err();
+        assert!(error.to_string().contains("creates a cycle"));
     }
 }

@@ -152,8 +152,18 @@ pub(crate) fn execute_blocking_task(
             password,
             patch_options,
         ),
-        Task::PrepareArchive { work } => {
-            archive::execute_prepare_archive(work, extract_shards, event_tx)
+        Task::DiscoverArchiveDirectory {
+            work,
+            required_range,
+        } => archive::execute_discover_archive_directory(work, required_range),
+        Task::InspectArchiveIndex { work, directory } => {
+            archive::execute_inspect_archive_index(work, directory)
+        }
+        Task::ReadArchiveControls { work, inspection } => {
+            archive::execute_read_archive_controls(work, inspection)
+        }
+        Task::PlanArchiveExtraction { work, inspection } => {
+            archive::execute_plan_archive_extraction(work, inspection, extract_shards, event_tx)
         }
         Task::ExtractArchiveShard { shard } => archive::execute_extract_archive_shard(
             shard,

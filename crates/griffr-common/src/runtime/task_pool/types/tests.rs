@@ -1,4 +1,7 @@
-use super::{FileEnsureTask, Task, TaskOutcome, TransferClass, WorkerEvent};
+use super::{
+    ArchiveWork, FileEnsureTask, PreparedArchive, Task, TaskOutcome, TransferClass, WorkerEvent,
+};
+use crate::download::extractor::MultiVolumeLayout;
 use std::path::PathBuf;
 
 #[test]
@@ -149,24 +152,54 @@ fn reuse_group_defers_cross_volume_copy_until_hardlink_probes_fail() {
 }
 
 #[test]
-fn archive_shard_group_reports_the_last_finisher() {
-    let group = super::ArchiveExtractionGroup::new(2);
+fn archive_shard_state_waits_for_active_shards_before_cleanup() {
+    let state = super::ArchiveShardExecutionState::new();
+    state.try_begin().unwrap();
+    state.try_begin().unwrap();
 
-    assert!(!group.finish_shard(true));
-    assert!(group.finish_shard(true));
-    assert!(!group.is_failed());
+    let (report_failure, cleanup_staging) = state.finish(false);
+    assert!(report_failure);
+    assert!(!cleanup_staging);
+    assert!(state.is_failed());
+
+    let (report_failure, cleanup_staging) = state.finish(true);
+    assert!(!report_failure);
+    assert!(cleanup_staging);
 }
 
 #[test]
-fn archive_shard_failure_is_recorded_once() {
-    let group = super::ArchiveExtractionGroup::new(2);
+fn archive_shard_state_rejects_new_work_after_failure() {
+    let state = super::ArchiveShardExecutionState::new();
+    state.try_begin().unwrap();
+    assert_eq!(state.finish(false), (true, true));
+    assert_eq!(state.try_begin(), Err(true));
+}
 
-    assert!(group.record_failure());
-    assert!(
-        !group.record_failure(),
-        "only the first failure is reported"
-    );
-    assert!(!group.finish_shard(false));
-    assert!(group.finish_shard(true));
-    assert!(group.is_failed());
+#[test]
+fn archive_work_drop_removes_abandoned_staging() {
+    let temp = tempfile::tempdir().unwrap();
+    let volume = temp.path().join("archive.zip.001");
+    std::fs::write(&volume, b"volume").unwrap();
+    let staging = temp.path().join("staging");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(staging.join("partial.bin"), b"partial").unwrap();
+
+    let layout = MultiVolumeLayout::from_expected(vec![(volume, 6)]).unwrap();
+    let work = ArchiveWork::new(
+        "archive".to_string(),
+        layout,
+        vec![None],
+        temp.path().join("install"),
+        false,
+        None,
+        crate::runtime::PatchApplyOptions::default(),
+    )
+    .unwrap();
+    *work.prepared.lock().unwrap() = Some(PreparedArchive {
+        staging_dir: staging.clone(),
+        patch_plan: None,
+    });
+
+    drop(work);
+    assert!(!staging.exists());
 }

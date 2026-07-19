@@ -1,11 +1,12 @@
-use crate::download::extractor::ArchiveInspection;
+use crate::download::extractor::{ArchiveDirectory, ArchiveInspection, MultiVolumeLayout};
 use crate::error::{Error, Result};
 use crate::runtime::{PatchApplyOptions, PatchExecutionPlan, PatchPreflightReport};
 use md5::Md5;
-use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+use super::graph::TaskDependencyToken;
 
 /// Selects the download throttle. Local verification and reuse never use the
 /// VFS CDN queue, even when a later fallback download is VFS-classified.
@@ -251,7 +252,8 @@ pub(crate) struct PreparedArchive {
 #[derive(Debug)]
 pub struct ArchiveWork {
     pub(crate) base_name: String,
-    pub(crate) volumes: Vec<PathBuf>,
+    pub(crate) layout: MultiVolumeLayout,
+    pub(crate) volume_tokens: Vec<Option<TaskDependencyToken>>,
     pub(crate) dest: PathBuf,
     pub(crate) cleanup: bool,
     pub(crate) password: Option<String>,
@@ -263,56 +265,151 @@ pub struct ArchiveWork {
 impl ArchiveWork {
     pub(crate) fn new(
         base_name: String,
-        volumes: Vec<PathBuf>,
+        layout: MultiVolumeLayout,
+        volume_tokens: Vec<Option<TaskDependencyToken>>,
         dest: PathBuf,
         cleanup: bool,
         password: Option<String>,
         patch_options: PatchApplyOptions,
-    ) -> Arc<Self> {
-        Arc::new(Self {
+    ) -> Result<Arc<Self>> {
+        if volume_tokens.len() != layout.volume_count() {
+            return Err(Error::TaskPool(format!(
+                "archive {} has {} volume tokens for {} volumes",
+                base_name,
+                volume_tokens.len(),
+                layout.volume_count()
+            )));
+        }
+        Ok(Arc::new(Self {
             base_name,
-            volumes,
+            layout,
+            volume_tokens,
             dest,
             cleanup,
             password,
             patch_options,
             prepared: Mutex::new(None),
             extracted_bytes: AtomicU64::new(0),
-        })
+        }))
+    }
+
+    pub(crate) fn tokens_for_range(&self, range: std::ops::Range<u64>) -> Vec<TaskDependencyToken> {
+        self.tokens_for_indices(&self.layout.volume_indices_for_range(range))
+    }
+
+    pub(crate) fn tokens_for_indices(&self, indices: &[usize]) -> Vec<TaskDependencyToken> {
+        indices
+            .iter()
+            .filter_map(|index| self.volume_tokens.get(*index).copied().flatten())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn all_tokens(&self) -> Vec<TaskDependencyToken> {
+        self.volume_tokens
+            .iter()
+            .copied()
+            .flatten()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn paths_for_indices(&self, indices: &[usize]) -> Vec<PathBuf> {
+        indices
+            .iter()
+            .filter_map(|index| self.layout.path(*index).map(Path::to_path_buf))
+            .collect()
+    }
+
+    pub(crate) fn cleanup_prepared(&self) {
+        let Some(prepared) = self.prepared.lock().unwrap().take() else {
+            return;
+        };
+        if let Err(error) = std::fs::remove_dir_all(&prepared.staging_dir) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %prepared.staging_dir.display(),
+                    %error,
+                    "failed to remove abandoned archive staging directory"
+                );
+            }
+        }
+    }
+}
+
+impl Drop for ArchiveWork {
+    fn drop(&mut self) {
+        let Ok(prepared) = self.prepared.get_mut() else {
+            return;
+        };
+        let Some(prepared) = prepared.take() else {
+            return;
+        };
+        if let Err(error) = std::fs::remove_dir_all(&prepared.staging_dir) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %prepared.staging_dir.display(),
+                    %error,
+                    "failed to remove archive staging directory during work cleanup"
+                );
+            }
+        }
     }
 }
 
 #[doc(hidden)]
 #[derive(Debug)]
-pub struct ArchiveExtractionGroup {
-    remaining: AtomicUsize,
+pub struct ArchiveShardExecutionState {
+    active: AtomicUsize,
     failed: AtomicBool,
     failure_reported: AtomicBool,
 }
 
-impl ArchiveExtractionGroup {
-    pub(crate) fn new(shard_count: usize) -> Arc<Self> {
+impl ArchiveShardExecutionState {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            remaining: AtomicUsize::new(shard_count),
+            active: AtomicUsize::new(0),
             failed: AtomicBool::new(false),
             failure_reported: AtomicBool::new(false),
         })
     }
 
-    pub(crate) fn record_failure(&self) -> bool {
-        self.failed.store(true, Ordering::Release);
-        !self.failure_reported.swap(true, Ordering::AcqRel)
+    /// Registers one actually executing shard. A shard that loses the race
+    /// against an earlier failure never touches staging. The boolean in the
+    /// error indicates that no active shard remains and abandoned staging may
+    /// be removed immediately.
+    pub(crate) fn try_begin(&self) -> std::result::Result<(), bool> {
+        if self.failed.load(Ordering::Acquire) {
+            return Err(self.active.load(Ordering::Acquire) == 0);
+        }
+        self.active.fetch_add(1, Ordering::AcqRel);
+        if self.failed.load(Ordering::Acquire) {
+            let was_last = self.active.fetch_sub(1, Ordering::AcqRel) == 1;
+            return Err(was_last);
+        }
+        Ok(())
+    }
+
+    /// Records completion of a shard that previously called `try_begin`.
+    /// Returns `(report_failure, cleanup_staging)`.
+    pub(crate) fn finish(&self, succeeded: bool) -> (bool, bool) {
+        let report_failure = if succeeded {
+            false
+        } else {
+            self.failed.store(true, Ordering::Release);
+            !self.failure_reported.swap(true, Ordering::AcqRel)
+        };
+        let was_last = self.active.fetch_sub(1, Ordering::AcqRel) == 1;
+        (
+            report_failure,
+            was_last && self.failed.load(Ordering::Acquire),
+        )
     }
 
     pub(crate) fn is_failed(&self) -> bool {
         self.failed.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn finish_shard(&self, succeeded: bool) -> bool {
-        if !succeeded {
-            self.failed.store(true, Ordering::Release);
-        }
-        self.remaining.fetch_sub(1, Ordering::AcqRel) == 1
     }
 }
 
@@ -322,8 +419,10 @@ pub struct ArchiveShardTask {
     pub(crate) work: Arc<ArchiveWork>,
     pub(crate) inspection: Arc<ArchiveInspection>,
     pub(crate) staging_dir: PathBuf,
-    pub(crate) range: Range<usize>,
-    pub(crate) group: Arc<ArchiveExtractionGroup>,
+    pub(crate) entries: Vec<usize>,
+    pub(crate) volume_indices: Vec<usize>,
+    pub(crate) uncompressed_bytes: u64,
+    pub(crate) execution_state: Arc<ArchiveShardExecutionState>,
 }
 
 #[derive(Debug, Clone)]
@@ -417,8 +516,24 @@ pub enum Task {
         patch_options: PatchApplyOptions,
     },
     #[doc(hidden)]
-    PrepareArchive {
+    DiscoverArchiveDirectory {
         work: Arc<ArchiveWork>,
+        required_range: Option<std::ops::Range<u64>>,
+    },
+    #[doc(hidden)]
+    InspectArchiveIndex {
+        work: Arc<ArchiveWork>,
+        directory: ArchiveDirectory,
+    },
+    #[doc(hidden)]
+    ReadArchiveControls {
+        work: Arc<ArchiveWork>,
+        inspection: Arc<ArchiveInspection>,
+    },
+    #[doc(hidden)]
+    PlanArchiveExtraction {
+        work: Arc<ArchiveWork>,
+        inspection: Arc<ArchiveInspection>,
     },
     #[doc(hidden)]
     ExtractArchiveShard {

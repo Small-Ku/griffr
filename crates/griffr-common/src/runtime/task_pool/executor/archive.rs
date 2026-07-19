@@ -1,12 +1,18 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::download::extractor::{
+    ArchiveDirectory, ArchiveDirectoryDiscovery, ArchiveInspection, MultiVolumeExtractor,
+    MultiVolumeLayout,
+};
 use crate::error::Error;
 use crate::runtime::{build_patch_execution_plan_with_cache, PatchApplyOptions};
 
 use super::super::fs_ops::{
     commit_staged_extract, execute_patch_transaction, make_extract_staging_dir,
 };
-use super::super::graph::{GraphExpansion, TaskExecution};
+use super::super::graph::{GraphExpansion, TaskDependencyToken, TaskExecution};
 use super::super::types::{
     ArchivePart, ArchiveShardTask, ArchiveWork, PreparedArchive, Task, WorkerEvent,
 };
@@ -29,26 +35,64 @@ pub(super) fn execute_install_archive(
         return TaskExecution::failed("install archive has no parts");
     }
 
-    let volumes = parts.iter().map(|part| part.dest.clone()).collect();
-    let mut expansion = GraphExpansion::new();
-    let part_nodes = parts
-        .into_iter()
-        .map(|part| {
-            expansion.add_root(Task::InstallArchivePart {
-                part,
-                retry_count: 0,
-            })
-        })
+    let layout = match MultiVolumeLayout::from_expected(
+        parts
+            .iter()
+            .map(|part| (part.dest.clone(), part.expected_size))
+            .collect(),
+    ) {
+        Ok(layout) => layout,
+        Err(error) => return TaskExecution::failed(error.to_string()),
+    };
+    let tokens = (0..parts.len())
+        .map(|_| TaskDependencyToken::new())
         .collect::<Vec<_>>();
-    let extract = Task::Extract {
+    let work = match ArchiveWork::new(
         base_name,
-        volumes,
+        layout.clone(),
+        tokens.iter().copied().map(Some).collect(),
         dest,
         cleanup,
         password,
         patch_options,
+    ) {
+        Ok(work) => work,
+        Err(error) => return TaskExecution::failed(error.to_string()),
     };
-    match expansion.add_task(extract, part_nodes) {
+
+    // Tail volumes are inserted first so the dispatcher can obtain the EOCD
+    // and central directory while earlier package parts continue downloading.
+    let tail_indices = layout.volume_indices_for_range(layout.tail_probe_range());
+    let tail_set = tail_indices.iter().copied().collect::<BTreeSet<_>>();
+    let order = tail_indices
+        .iter()
+        .rev()
+        .copied()
+        .chain((0..parts.len()).filter(|index| !tail_set.contains(index)))
+        .collect::<Vec<_>>();
+    let mut expansion = GraphExpansion::new();
+    let mut nodes = vec![None; parts.len()];
+    for index in order {
+        let node = expansion.add_root_bound(
+            Task::InstallArchivePart {
+                part: parts[index].clone(),
+                retry_count: 0,
+            },
+            tokens[index],
+        );
+        nodes[index] = Some(node);
+    }
+    let tail_dependencies = tail_indices
+        .into_iter()
+        .filter_map(|index| nodes[index])
+        .collect::<Vec<_>>();
+    match expansion.add_task(
+        Task::DiscoverArchiveDirectory {
+            work,
+            required_range: None,
+        },
+        tail_dependencies,
+    ) {
         Ok(_) => TaskExecution::expand(expansion),
         Err(error) => TaskExecution::failed(error.to_string()),
     }
@@ -217,7 +261,6 @@ pub(super) async fn execute_transfer_archive_part(
         }
     }
 }
-
 pub(super) fn execute_schedule_extract(
     base_name: String,
     volumes: Vec<PathBuf>,
@@ -226,19 +269,128 @@ pub(super) fn execute_schedule_extract(
     password: Option<String>,
     patch_options: PatchApplyOptions,
 ) -> TaskExecution {
-    TaskExecution::then(Task::PrepareArchive {
-        work: ArchiveWork::new(base_name, volumes, dest, cleanup, password, patch_options),
+    let layout = match MultiVolumeLayout::from_files(volumes) {
+        Ok(layout) => layout,
+        Err(error) => return TaskExecution::failed(error.to_string()),
+    };
+    let work = match ArchiveWork::new(
+        base_name,
+        layout.clone(),
+        vec![None; layout.volume_count()],
+        dest,
+        cleanup,
+        password,
+        patch_options,
+    ) {
+        Ok(work) => work,
+        Err(error) => return TaskExecution::failed(error.to_string()),
+    };
+    TaskExecution::then(Task::DiscoverArchiveDirectory {
+        work,
+        required_range: None,
     })
 }
 
-pub(super) fn execute_prepare_archive(
-    work: std::sync::Arc<ArchiveWork>,
+pub(super) fn execute_discover_archive_directory(
+    work: Arc<ArchiveWork>,
+    required_range: Option<std::ops::Range<u64>>,
+) -> TaskExecution {
+    if let Some(range) = required_range.as_ref() {
+        if !work.layout.range_is_available(range) {
+            return TaskExecution::failed(format!(
+                "archive dependency completed without making byte range {}..{} available",
+                range.start, range.end
+            ));
+        }
+    }
+    let extractor = MultiVolumeExtractor::from_layout(work.layout.clone());
+    match extractor.discover_archive_directory() {
+        Ok(ArchiveDirectoryDiscovery::Ready(directory)) => {
+            let mut required_indices = work
+                .layout
+                .volume_indices_for_range(directory.central_directory.clone());
+            required_indices.extend(
+                work.layout
+                    .volume_indices_for_range(directory.end_records.clone()),
+            );
+            required_indices.sort_unstable();
+            required_indices.dedup();
+            let dependencies = work.tokens_for_indices(&required_indices);
+            let mut expansion = GraphExpansion::new();
+            match expansion
+                .add_root_with_tokens(Task::InspectArchiveIndex { work, directory }, dependencies)
+            {
+                Ok(_) => TaskExecution::expand(expansion),
+                Err(error) => TaskExecution::failed(error.to_string()),
+            }
+        }
+        Ok(ArchiveDirectoryDiscovery::NeedsRange(range)) => {
+            let dependencies = work.tokens_for_range(range.clone());
+            if dependencies.is_empty() {
+                return TaskExecution::failed(format!(
+                    "archive directory needs unavailable range {}..{}",
+                    range.start, range.end
+                ));
+            }
+            let mut expansion = GraphExpansion::new();
+            match expansion.add_root_with_tokens(
+                Task::DiscoverArchiveDirectory {
+                    work,
+                    required_range: Some(range),
+                },
+                dependencies,
+            ) {
+                Ok(_) => TaskExecution::expand(expansion),
+                Err(error) => TaskExecution::failed(error.to_string()),
+            }
+        }
+        Err(error) => TaskExecution::failed(error.to_string()),
+    }
+}
+
+pub(super) fn execute_inspect_archive_index(
+    work: Arc<ArchiveWork>,
+    directory: ArchiveDirectory,
+) -> TaskExecution {
+    let extractor = MultiVolumeExtractor::from_layout(work.layout.clone());
+    match extractor.inspect_archive_index(&directory) {
+        Ok(inspection) => {
+            let inspection = Arc::new(inspection);
+            let control_volumes = MultiVolumeExtractor::control_volume_indices(&inspection);
+            let dependencies = work.tokens_for_indices(&control_volumes);
+            let mut expansion = GraphExpansion::new();
+            match expansion
+                .add_root_with_tokens(Task::ReadArchiveControls { work, inspection }, dependencies)
+            {
+                Ok(_) => TaskExecution::expand(expansion),
+                Err(error) => TaskExecution::failed(error.to_string()),
+            }
+        }
+        Err(error) => TaskExecution::failed(error.to_string()),
+    }
+}
+
+pub(super) fn execute_read_archive_controls(
+    work: Arc<ArchiveWork>,
+    inspection: Arc<ArchiveInspection>,
+) -> TaskExecution {
+    let extractor = MultiVolumeExtractor::from_layout(work.layout.clone());
+    match extractor.read_control_payloads(&inspection, work.password.as_deref()) {
+        Ok(inspection) => TaskExecution::then(Task::PlanArchiveExtraction {
+            work,
+            inspection: Arc::new(inspection),
+        }),
+        Err(error) => TaskExecution::failed(error.to_string()),
+    }
+}
+
+pub(super) fn execute_plan_archive_extraction(
+    work: Arc<ArchiveWork>,
+    inspection: Arc<ArchiveInspection>,
     extract_shards: usize,
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskExecution {
     let result: Result<GraphExpansion, Error> = (|| {
-        let extractor =
-            crate::download::extractor::MultiVolumeExtractor::new(work.volumes.clone())?;
         let patch_options = work.patch_options.resolved_for_install(&work.dest)?;
         let staging_dir = make_extract_staging_dir(
             &work.dest,
@@ -249,9 +401,13 @@ pub(super) fn execute_prepare_archive(
             path: staging_dir.clone(),
             source,
         })?;
+        *work.prepared.lock().unwrap() = Some(PreparedArchive {
+            staging_dir: staging_dir.clone(),
+            patch_plan: None,
+        });
 
-        let inspection =
-            std::sync::Arc::new(extractor.inspect_patch_payload(work.password.as_deref())?);
+        // Transaction preflight deliberately remains before any shard becomes
+        // ready, preserving the destructive-update safety barrier.
         let verification_cache = VerifiedArtifactCache::default();
         let patch_plan = if inspection.patch_manifest.is_some() {
             Some(build_patch_execution_plan_with_cache(
@@ -270,15 +426,13 @@ pub(super) fn execute_prepare_archive(
                 report: report.clone(),
             });
         }
-
-        *work.prepared.lock().unwrap() = Some(PreparedArchive {
-            staging_dir: staging_dir.clone(),
-            patch_plan,
-        });
-        let ranges = crate::download::extractor::MultiVolumeExtractor::extraction_ranges(
-            &inspection,
-            extract_shards,
-        );
+        work.prepared
+            .lock()
+            .unwrap()
+            .as_mut()
+            .expect("archive staging state disappeared during preflight")
+            .patch_plan = patch_plan;
+        let plans = MultiVolumeExtractor::extraction_shards(&inspection, extract_shards);
         let _ = event_tx.send(WorkerEvent::ExtractedBytes {
             path: work.base_name.clone(),
             bytes: 0,
@@ -286,36 +440,44 @@ pub(super) fn execute_prepare_archive(
         });
 
         let mut expansion = GraphExpansion::new();
-        if ranges.is_empty() {
-            expansion.add_root(Task::CommitArchive { work: work.clone() });
+        let commit_tokens = work.all_tokens();
+        if plans.is_empty() {
+            expansion
+                .add_root_with_tokens(Task::CommitArchive { work: work.clone() }, commit_tokens)?;
             return Ok(expansion);
         }
-
-        let group = super::super::types::ArchiveExtractionGroup::new(ranges.len());
-        let shard_nodes = ranges
-            .into_iter()
-            .map(|range| {
-                expansion.add_root(Task::ExtractArchiveShard {
+        let execution_state = super::super::types::ArchiveShardExecutionState::new();
+        let mut shard_nodes = Vec::with_capacity(plans.len());
+        for plan in plans {
+            let dependencies = work.tokens_for_indices(&plan.volume_indices);
+            let node = expansion.add_root_with_tokens(
+                Task::ExtractArchiveShard {
                     shard: ArchiveShardTask {
                         work: work.clone(),
                         inspection: inspection.clone(),
                         staging_dir: staging_dir.clone(),
-                        range,
-                        group: group.clone(),
+                        entries: plan.entries,
+                        volume_indices: plan.volume_indices,
+                        uncompressed_bytes: plan.uncompressed_bytes,
+                        execution_state: execution_state.clone(),
                     },
-                })
-            })
-            .collect::<Vec<_>>();
-        expansion.add_task(Task::CommitArchive { work: work.clone() }, shard_nodes)?;
+                },
+                dependencies,
+            )?;
+            shard_nodes.push(node);
+        }
+        expansion.add_task_with_tokens(
+            Task::CommitArchive { work: work.clone() },
+            shard_nodes,
+            commit_tokens,
+        )?;
         Ok(expansion)
     })();
 
     match result {
         Ok(expansion) => TaskExecution::expand(expansion),
         Err(error) => {
-            if let Some(prepared) = work.prepared.lock().unwrap().take() {
-                let _ = std::fs::remove_dir_all(prepared.staging_dir);
-            }
+            work.cleanup_prepared();
             TaskExecution::failed(error.to_string())
         }
     }
@@ -329,49 +491,43 @@ pub(super) fn execute_extract_archive_shard(
     let work = shard.work.clone();
     let inspection = shard.inspection.clone();
     let staging_dir = shard.staging_dir.clone();
-    let range = shard.range.clone();
-    let group = shard.group.clone();
-    if group.is_failed() {
-        if group.finish_shard(false) {
-            let _ = std::fs::remove_dir_all(&staging_dir);
-            work.prepared.lock().unwrap().take();
+    let entries = shard.entries.clone();
+    let execution_state = shard.execution_state.clone();
+    match execution_state.try_begin() {
+        Ok(()) => {}
+        Err(cleanup_staging) => {
+            if cleanup_staging {
+                work.cleanup_prepared();
+            }
+            return TaskExecution::cancelled();
         }
-        return TaskExecution::cancelled();
     }
 
-    let extractor = crate::download::extractor::MultiVolumeExtractor::new(work.volumes.clone());
-    let result = extractor.and_then(|extractor| {
-        extractor.extract_range_with_progress(
-            &staging_dir,
-            work.password.as_deref(),
-            &inspection,
-            range,
-            extraction_progress_buffer_bytes,
-            |bytes| {
-                let extracted = work
-                    .extracted_bytes
-                    .fetch_add(bytes, std::sync::atomic::Ordering::AcqRel)
-                    .saturating_add(bytes);
-                let _ = event_tx.send(WorkerEvent::ExtractedBytes {
-                    path: work.base_name.clone(),
-                    bytes: extracted.min(inspection.total_uncompressed_bytes),
-                    total_bytes: inspection.total_uncompressed_bytes,
-                });
-            },
-        )
-    });
+    let extractor = MultiVolumeExtractor::from_layout(work.layout.clone());
+    let result = extractor.extract_entries_with_progress(
+        &staging_dir,
+        work.password.as_deref(),
+        &inspection,
+        &entries,
+        extraction_progress_buffer_bytes,
+        |bytes| {
+            let extracted = work
+                .extracted_bytes
+                .fetch_add(bytes, std::sync::atomic::Ordering::AcqRel)
+                .saturating_add(bytes);
+            let _ = event_tx.send(WorkerEvent::ExtractedBytes {
+                path: work.base_name.clone(),
+                bytes: extracted.min(inspection.total_uncompressed_bytes),
+                total_bytes: inspection.total_uncompressed_bytes,
+            });
+        },
+    );
 
     let succeeded = result.is_ok();
-    let report_failure = if result.is_err() {
-        group.record_failure()
-    } else {
-        false
-    };
-    let last = group.finish_shard(succeeded);
-    if last && group.is_failed() {
-        let _ = std::fs::remove_dir_all(&staging_dir);
-        work.prepared.lock().unwrap().take();
-    } else if succeeded && !group.is_failed() {
+    let (report_failure, cleanup_staging) = execution_state.finish(succeeded);
+    if cleanup_staging {
+        work.cleanup_prepared();
+    } else if succeeded && !execution_state.is_failed() {
         let extracted = work
             .extracted_bytes
             .load(std::sync::atomic::Ordering::Acquire);
@@ -469,21 +625,26 @@ pub(super) fn execute_commit_archive(
         Ok(needs_manifest_follow_up) => {
             work.prepared.lock().unwrap().take();
             let mut expansion = GraphExpansion::new();
-            if needs_manifest_follow_up {
+            let cleanup_dependencies = work.all_tokens();
+            let result = if needs_manifest_follow_up {
                 let apply = expansion.add_root(Task::ApplyExtractedVfsPatchManifest {
                     install_root: work.dest.clone(),
                 });
-                if let Err(error) = expansion.add_task(Task::CleanupArchive { work }, [apply]) {
-                    return TaskExecution::failed(error.to_string());
-                }
+                expansion.add_task_with_tokens(
+                    Task::CleanupArchive { work },
+                    [apply],
+                    cleanup_dependencies,
+                )
             } else {
-                expansion.add_root(Task::CleanupArchive { work });
+                expansion.add_root_with_tokens(Task::CleanupArchive { work }, cleanup_dependencies)
+            };
+            match result {
+                Ok(_) => TaskExecution::expand(expansion),
+                Err(error) => TaskExecution::failed(error.to_string()),
             }
-            TaskExecution::expand(expansion)
         }
         Err(error) => {
-            let _ = std::fs::remove_dir_all(&prepared.staging_dir);
-            work.prepared.lock().unwrap().take();
+            work.cleanup_prepared();
             TaskExecution::failed(error.to_string())
         }
     }
@@ -494,8 +655,7 @@ pub(super) fn execute_cleanup_archive(
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskExecution {
     let result = if work.cleanup {
-        crate::download::extractor::MultiVolumeExtractor::new(work.volumes.clone())
-            .and_then(|extractor| extractor.cleanup())
+        MultiVolumeExtractor::from_layout(work.layout.clone()).cleanup()
     } else {
         Ok(())
     };
