@@ -9,6 +9,7 @@ use futures_util::FutureExt;
 use tracing::debug;
 
 use super::executor::{execute_async_task, execute_blocking_task};
+use super::graph::{ReadyTask, TaskExecution, TaskGraph};
 use super::types::{
     Task, TaskOutcome, TaskPoolConfig, TaskPoolResult, TaskPoolRunner, TaskProgress, WorkerEvent,
 };
@@ -35,12 +36,12 @@ pub(crate) enum TaskPriority {
 }
 
 struct TaskCompletion {
+    node_id: super::graph::NodeId,
     path: String,
     resources: ResourceRequest,
     queue_wait: Duration,
     run_time: Duration,
-    spawned: Vec<Task>,
-    panicked: bool,
+    execution: TaskExecution,
 }
 
 enum DispatchAttempt {
@@ -92,14 +93,18 @@ impl TaskPoolRunner {
         initial_tasks: Vec<Task>,
         progress: TaskProgress,
     ) -> Result<TaskPoolResult> {
+        self.run_graph(TaskGraph::from_tasks(initial_tasks), progress)
+    }
+
+    pub fn run_graph(
+        &mut self,
+        mut graph: TaskGraph,
+        progress: TaskProgress,
+    ) -> Result<TaskPoolResult> {
         while self.event_rx.try_recv().is_ok() {}
         let metrics = SchedulerMetrics::default();
         let mut queue = SchedulerQueue::default();
-        let mut pending = 0usize;
-        for task in initial_tasks {
-            enqueue_task(&mut queue, task, TaskPriority::Bulk);
-            pending = pending.saturating_add(1);
-        }
+        enqueue_ready_tasks(&mut queue, graph.start());
 
         let (completion_tx, completion_rx) = flume::unbounded::<TaskCompletion>();
         let mut in_flight = 0usize;
@@ -108,7 +113,7 @@ impl TaskPoolRunner {
         let mut last_heartbeat_at = Instant::now();
         let mut idle_blocking_dispatch_retries = 0usize;
 
-        while pending > 0 {
+        while graph.has_unresolved() {
             while let Ok(event) = self.event_rx.try_recv() {
                 record_worker_event(&mut progress, &mut outcomes, event);
                 last_heartbeat_at = Instant::now();
@@ -117,8 +122,14 @@ impl TaskPoolRunner {
             let mut blocking_pool_busy = false;
             let mut blocking_dispatch_available = true;
             while let Some(scheduled) = queue.pop_next(&self.config, blocking_dispatch_available) {
+                if !graph.is_ready(scheduled.node_id) {
+                    queue.release(&scheduled.resources);
+                    continue;
+                }
+                let node_id = scheduled.node_id;
                 match self.dispatch_scheduled(scheduled, completion_tx.clone())? {
                     DispatchAttempt::Submitted => {
+                        graph.mark_running(node_id)?;
                         in_flight = in_flight.saturating_add(1);
                         idle_blocking_dispatch_retries = 0;
                     }
@@ -130,7 +141,7 @@ impl TaskPoolRunner {
                 }
             }
 
-            if pending == 0 {
+            if !graph.has_unresolved() {
                 break;
             }
 
@@ -152,8 +163,8 @@ impl TaskPoolRunner {
                     continue;
                 }
                 return Err(Error::TaskPool(format!(
-                    "task admission deadlock: {} pending task(s), {} queued, none in flight",
-                    pending,
+                    "task graph admission deadlock: {} unresolved node(s), {} queued, none in flight",
+                    graph.unresolved_count(),
                     queue.queued_len(),
                 )));
             }
@@ -161,33 +172,31 @@ impl TaskPoolRunner {
             match completion_rx.recv_timeout(COORDINATOR_POLL_INTERVAL) {
                 Ok(completion) => {
                     in_flight = in_flight.saturating_sub(1);
-                    pending = pending.saturating_sub(1);
                     queue.release(&completion.resources);
                     metrics.record(
                         completion.queue_wait,
                         completion.run_time,
                         &completion.resources,
                     );
-                    if completion.panicked {
-                        let _ = self.event_tx.send(WorkerEvent::Failed {
-                            path: completion.path,
-                            reason: "task execution panicked".to_string(),
-                        });
-                    } else {
-                        for task in completion.spawned {
-                            enqueue_task(&mut queue, task, TaskPriority::Continuation);
-                            pending = pending.saturating_add(1);
+                    if let Some((reason, report)) = completion.execution.failure_details() {
+                        if report {
+                            let _ = self.event_tx.send(WorkerEvent::Failed {
+                                path: completion.path.clone(),
+                                reason: reason.to_string(),
+                            });
                         }
                     }
+                    let ready = graph.complete(completion.node_id, completion.execution)?;
+                    enqueue_ready_tasks(&mut queue, ready);
                 }
                 Err(flume::RecvTimeoutError::Timeout)
                     if last_heartbeat_at.elapsed() >= PROGRESS_HEARTBEAT_INTERVAL =>
                 {
                     debug!(
-                        pending_tasks = pending,
+                        unresolved_nodes = graph.unresolved_count(),
                         in_flight_tasks = in_flight,
                         queued_tasks = queue.queued_len(),
-                        "task pool still running without a recent progress event"
+                        "task graph still running without a recent progress event"
                     );
                     last_heartbeat_at = Instant::now();
                 }
@@ -204,15 +213,26 @@ impl TaskPoolRunner {
             record_worker_event(&mut progress, &mut outcomes, event);
         }
         progress.finish();
-        let metrics = metrics.snapshot();
+        let graph_summary = graph.summary();
+        let mut metrics = metrics.snapshot();
+        metrics.graph = graph_summary.clone();
         debug!(
             completed_tasks = metrics.completed_tasks,
+            graph_nodes = graph_summary.total_nodes,
+            graph_pending = graph_summary.pending_nodes,
+            graph_ready = graph_summary.ready_nodes,
+            graph_running = graph_summary.running_nodes,
+            graph_waiting = graph_summary.waiting_nodes,
+            graph_succeeded = graph_summary.succeeded_nodes,
+            graph_failed = graph_summary.failed_nodes,
+            graph_cancelled = graph_summary.cancelled_nodes,
+            graph_expansions = graph_summary.dynamic_expansions,
             queue_wait_p50_ms = metrics.queue_wait_p50.as_millis(),
             queue_wait_p95_ms = metrics.queue_wait_p95.as_millis(),
             task_duration_p50_ms = metrics.task_duration_p50.as_millis(),
             task_duration_p95_ms = metrics.task_duration_p95.as_millis(),
             volume_count = metrics.volumes.len(),
-            "task pool batch metrics"
+            "task graph batch metrics"
         );
         Ok(TaskPoolResult { outcomes, metrics })
     }
@@ -236,6 +256,7 @@ impl TaskPoolRunner {
                         .take()
                         .expect("dispatched async task missing");
                     let ScheduledTask {
+                        node_id,
                         task,
                         resources,
                         enqueued_at,
@@ -243,25 +264,26 @@ impl TaskPoolRunner {
                     } = scheduled;
                     let path = task_path(&task);
                     let queue_wait = started_at.saturating_duration_since(enqueued_at);
-                    let mut spawned = Vec::new();
-                    let panicked = AssertUnwindSafe(execute_async_task(
+                    let execution = match AssertUnwindSafe(execute_async_task(
                         task,
                         config.max_retries,
                         config.download_progress_buffer_bytes,
                         &config.user_agent,
-                        &mut spawned,
                         &event_tx,
                     ))
                     .catch_unwind()
                     .await
-                    .is_err();
+                    {
+                        Ok(execution) => execution,
+                        Err(_) => TaskExecution::failed("task execution panicked"),
+                    };
                     let _ = completion_tx.send(TaskCompletion {
+                        node_id,
                         path,
                         resources,
                         queue_wait,
                         run_time: started_at.elapsed(),
-                        spawned,
-                        panicked,
+                        execution,
                     });
                 }) {
                     Ok(receiver) => {
@@ -293,6 +315,7 @@ impl TaskPoolRunner {
                         .take()
                         .expect("dispatched blocking task missing");
                     let ScheduledTask {
+                        node_id,
                         task,
                         resources,
                         enqueued_at,
@@ -300,25 +323,25 @@ impl TaskPoolRunner {
                     } = scheduled;
                     let path = task_path(&task);
                     let queue_wait = started_at.saturating_duration_since(enqueued_at);
-                    let mut spawned = Vec::new();
-                    let panicked = catch_unwind(AssertUnwindSafe(|| {
+                    let execution = match catch_unwind(AssertUnwindSafe(|| {
                         execute_blocking_task(
                             task,
                             config.max_retries,
                             config.extraction_progress_buffer_bytes,
                             config.extract_shards,
-                            &mut spawned,
                             &event_tx,
-                        );
-                    }))
-                    .is_err();
+                        )
+                    })) {
+                        Ok(execution) => execution,
+                        Err(_) => TaskExecution::failed("task execution panicked"),
+                    };
                     let _ = completion_tx.send(TaskCompletion {
+                        node_id,
                         path,
                         resources,
                         queue_wait,
                         run_time: started_at.elapsed(),
-                        spawned,
-                        panicked,
+                        execution,
                     });
                 }) {
                     Ok(receiver) => {
@@ -368,22 +391,41 @@ fn validate_config(config: &TaskPoolConfig) -> Result<()> {
     Ok(())
 }
 
+pub fn run_task_graph_with_progress(
+    graph: TaskGraph,
+    config: TaskPoolConfig,
+    progress: TaskProgress,
+) -> Result<TaskPoolResult> {
+    let mut runner = TaskPoolRunner::new(config)?;
+    runner.run_graph(graph, progress)
+}
+
+pub fn run_task_graph(graph: TaskGraph, config: TaskPoolConfig) -> Result<TaskPoolResult> {
+    run_task_graph_with_progress(graph, config, TaskProgress::disabled())
+}
+
 pub fn run_tasks_with_progress(
     initial_tasks: Vec<Task>,
     config: TaskPoolConfig,
     progress: TaskProgress,
 ) -> Result<TaskPoolResult> {
-    let mut runner = TaskPoolRunner::new(config)?;
-    runner.run_batch(initial_tasks, progress)
+    run_task_graph_with_progress(TaskGraph::from_tasks(initial_tasks), config, progress)
 }
 
 pub fn run_tasks(initial_tasks: Vec<Task>, config: TaskPoolConfig) -> Result<TaskPoolResult> {
     run_tasks_with_progress(initial_tasks, config, TaskProgress::disabled())
 }
 
-fn enqueue_task(queue: &mut SchedulerQueue, task: Task, priority: TaskPriority) {
-    let resources = task_resources(&task);
-    queue.push(task, resources, priority);
+fn enqueue_ready_tasks(queue: &mut SchedulerQueue, ready: Vec<ReadyTask>) {
+    for ready in ready {
+        let resources = task_resources(&ready.task);
+        let priority = if ready.continuation {
+            TaskPriority::Continuation
+        } else {
+            TaskPriority::Bulk
+        };
+        queue.push(ready.id, ready.task, resources, priority);
+    }
 }
 
 #[cfg(test)]

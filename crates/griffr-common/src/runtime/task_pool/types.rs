@@ -1,4 +1,5 @@
 use crate::download::extractor::ArchiveInspection;
+use crate::error::{Error, Result};
 use crate::runtime::{PatchApplyOptions, PatchExecutionPlan, PatchPreflightReport};
 use md5::Md5;
 use std::ops::Range;
@@ -63,39 +64,6 @@ pub struct FileEnsureTask {
 }
 
 #[derive(Debug)]
-pub struct ArchiveInstallGroup {
-    remaining: AtomicUsize,
-    failed: AtomicBool,
-    continuation: Mutex<Option<Task>>,
-}
-
-impl ArchiveInstallGroup {
-    pub(crate) fn new(part_count: usize, continuation: Task) -> Arc<Self> {
-        Arc::new(Self {
-            remaining: AtomicUsize::new(part_count),
-            failed: AtomicBool::new(false),
-            continuation: Mutex::new(Some(continuation)),
-        })
-    }
-
-    pub(crate) fn finish_part(&self, succeeded: bool, spawned: &mut Vec<Task>) {
-        if !succeeded {
-            self.failed.store(true, Ordering::Release);
-        }
-        if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
-            return;
-        }
-        if self.failed.load(Ordering::Acquire) {
-            self.continuation.lock().unwrap().take();
-            return;
-        }
-        if let Some(task) = self.continuation.lock().unwrap().take() {
-            spawned.push(task);
-        }
-    }
-}
-
-#[derive(Debug)]
 pub struct ReuseCandidateGroup {
     remaining: AtomicUsize,
     resolved: AtomicBool,
@@ -155,37 +123,35 @@ impl ReuseCandidateGroup {
         &self,
         copy_only: bool,
         source: Option<PathBuf>,
-        spawned: &mut Vec<Task>,
-        event_tx: &flume::Sender<WorkerEvent>,
-    ) {
+    ) -> Result<Vec<Task>> {
         if let Some(source) = source {
             if self
                 .resolved
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
+                .is_err()
             {
-                let remaining_source_candidates = self
-                    .all_sources
-                    .iter()
-                    .filter(|candidate| *candidate != &source)
-                    .cloned()
-                    .collect();
-                spawned.push(Task::ReuseFile {
-                    source,
-                    copy_only,
-                    remaining_source_candidates,
-                    dest: self.dest.clone(),
-                    logical_path: self.logical_path.clone(),
-                    expected_md5: self.expected_md5.clone(),
-                    expected_size: self.expected_size,
-                    download_url: self.download_url.clone(),
-                    allow_copy_fallback: self.allow_copy_fallback,
-                    verify_destination_fallback: self.verify_destination_fallback,
-                    retry_count: self.retry_count,
-                    transfer_class: self.transfer_class,
-                });
+                return Ok(Vec::new());
             }
-            return;
+            let remaining_source_candidates = self
+                .all_sources
+                .iter()
+                .filter(|candidate| *candidate != &source)
+                .cloned()
+                .collect();
+            return Ok(vec![Task::ReuseFile {
+                source,
+                copy_only,
+                remaining_source_candidates,
+                dest: self.dest.clone(),
+                logical_path: self.logical_path.clone(),
+                expected_md5: self.expected_md5.clone(),
+                expected_size: self.expected_size,
+                download_url: self.download_url.clone(),
+                allow_copy_fallback: self.allow_copy_fallback,
+                verify_destination_fallback: self.verify_destination_fallback,
+                retry_count: self.retry_count,
+                transfer_class: self.transfer_class,
+            }]);
         }
 
         if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1
@@ -194,11 +160,10 @@ impl ReuseCandidateGroup {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
         {
-            return;
+            return Ok(Vec::new());
         }
 
-        let copy_groups = self.copy_phase_groups.lock().unwrap().take();
-        if let Some(copy_groups) = copy_groups {
+        if let Some(copy_groups) = self.copy_phase_groups.lock().unwrap().take() {
             let group = Self::new(
                 copy_groups.len(),
                 Vec::new(),
@@ -213,37 +178,34 @@ impl ReuseCandidateGroup {
                 self.retry_count,
                 self.transfer_class,
             );
-            spawned.extend(
-                copy_groups
-                    .into_iter()
-                    .map(|candidates| Task::VerifyReuseVolume {
-                        copy_only: true,
-                        candidates,
-                        logical_path: self.logical_path.clone(),
-                        expected_md5: self.expected_md5.clone(),
-                        expected_size: self.expected_size,
-                        group: group.clone(),
-                    }),
-            );
-        } else {
-            enqueue_destination_or_download(
-                self.dest.clone(),
-                self.logical_path.clone(),
-                self.expected_md5.clone(),
-                self.expected_size,
-                self.download_url.clone(),
-                self.verify_destination_fallback,
-                self.retry_count,
-                self.transfer_class,
-                spawned,
-                event_tx,
-            );
+            return Ok(copy_groups
+                .into_iter()
+                .map(|candidates| Task::VerifyReuseVolume {
+                    copy_only: true,
+                    candidates,
+                    logical_path: self.logical_path.clone(),
+                    expected_md5: self.expected_md5.clone(),
+                    expected_size: self.expected_size,
+                    group: group.clone(),
+                })
+                .collect());
         }
+
+        destination_or_download_tasks(
+            self.dest.clone(),
+            self.logical_path.clone(),
+            self.expected_md5.clone(),
+            self.expected_size,
+            self.download_url.clone(),
+            self.verify_destination_fallback,
+            self.retry_count,
+            self.transfer_class,
+        )
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn enqueue_destination_or_download(
+pub(crate) fn destination_or_download_tasks(
     dest: PathBuf,
     logical_path: String,
     expected_md5: String,
@@ -252,9 +214,7 @@ pub(crate) fn enqueue_destination_or_download(
     verify_destination_fallback: bool,
     retry_count: u32,
     transfer_class: TransferClass,
-    spawned: &mut Vec<Task>,
-    event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> Result<Vec<Task>> {
     let download = download_url.map(|url| Task::Download {
         url,
         dest: dest.clone(),
@@ -265,21 +225,20 @@ pub(crate) fn enqueue_destination_or_download(
         transfer_class,
     });
     if verify_destination_fallback {
-        spawned.push(Task::Verify {
+        return Ok(vec![Task::Verify {
             path: dest,
             logical_path,
             expected_md5,
             expected_size: Some(expected_size),
             on_fail: download.map(Box::new),
-        });
-    } else if let Some(download) = download {
-        spawned.push(download);
-    } else {
-        let _ = event_tx.send(WorkerEvent::Failed {
-            path: logical_path,
-            reason: "no usable source candidates".to_string(),
-        });
+        }]);
     }
+    if let Some(download) = download {
+        return Ok(vec![download]);
+    }
+    Err(Error::TaskPool(format!(
+        "no usable source candidates for {logical_path}"
+    )))
 }
 
 #[derive(Debug, Clone)]
@@ -329,16 +288,14 @@ pub struct ArchiveExtractionGroup {
     remaining: AtomicUsize,
     failed: AtomicBool,
     failure_reported: AtomicBool,
-    continuation: Mutex<Option<Task>>,
 }
 
 impl ArchiveExtractionGroup {
-    pub(crate) fn new(shard_count: usize, continuation: Task) -> Arc<Self> {
+    pub(crate) fn new(shard_count: usize) -> Arc<Self> {
         Arc::new(Self {
             remaining: AtomicUsize::new(shard_count),
             failed: AtomicBool::new(false),
             failure_reported: AtomicBool::new(false),
-            continuation: Mutex::new(Some(continuation)),
         })
     }
 
@@ -351,21 +308,11 @@ impl ArchiveExtractionGroup {
         self.failed.load(Ordering::Acquire)
     }
 
-    pub(crate) fn finish_shard(&self, succeeded: bool, spawned: &mut Vec<Task>) -> bool {
+    pub(crate) fn finish_shard(&self, succeeded: bool) -> bool {
         if !succeeded {
             self.failed.store(true, Ordering::Release);
         }
-        if self.remaining.fetch_sub(1, Ordering::AcqRel) != 1 {
-            return false;
-        }
-        if self.failed.load(Ordering::Acquire) {
-            self.continuation.lock().unwrap().take();
-            return true;
-        }
-        if let Some(task) = self.continuation.lock().unwrap().take() {
-            spawned.push(task);
-        }
-        false
+        self.remaining.fetch_sub(1, Ordering::AcqRel) == 1
     }
 }
 
@@ -391,12 +338,10 @@ pub enum Task {
     },
     InstallArchivePart {
         part: ArchivePart,
-        group: Arc<ArchiveInstallGroup>,
         retry_count: u32,
     },
     TransferArchivePart {
         part: ArchivePart,
-        group: Arc<ArchiveInstallGroup>,
         retry_count: u32,
         resume: DownloadResumeState,
     },

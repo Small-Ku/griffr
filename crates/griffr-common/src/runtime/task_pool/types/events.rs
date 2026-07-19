@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use super::super::graph::TaskGraphSummary;
 use crate::runtime::issues::FileIssue;
 use crate::runtime::PatchPreflightReport;
 
@@ -158,6 +159,7 @@ impl VolumeTaskMetrics {
 #[derive(Debug, Clone, Default)]
 pub struct TaskPoolMetrics {
     pub completed_tasks: usize,
+    pub graph: TaskGraphSummary,
     pub queue_wait_p50: Duration,
     pub queue_wait_p95: Duration,
     pub task_duration_p50: Duration,

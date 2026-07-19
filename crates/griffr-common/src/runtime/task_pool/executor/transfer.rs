@@ -5,8 +5,9 @@ use super::super::fs_ops::{
     classify_reuse_mode, create_hardlink_async, reuse_verified_file, storage_volume_group_key,
     storage_volume_id, ReuseMethod, ReuseMode,
 };
+use super::super::graph::{GraphExpansion, TaskExecution};
 use super::super::types::{
-    enqueue_destination_or_download, ReuseCandidateGroup, Task, TransferClass, WorkerEvent,
+    destination_or_download_tasks, ReuseCandidateGroup, Task, TransferClass, WorkerEvent,
 };
 
 pub(super) struct DownloadExecInput {
@@ -50,9 +51,8 @@ pub(super) struct ReuseFileInput {
 
 pub(super) fn execute_prepare_download(
     input: DownloadExecInput,
-    spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> TaskExecution {
     match super::super::download::prepare_download(
         &input.dest,
         &input.expected_md5,
@@ -68,9 +68,10 @@ pub(super) fn execute_prepare_download(
                 ok: true,
                 issue: None,
             });
+            TaskExecution::succeeded()
         }
         Ok(super::super::download::DownloadPreparation::Ready(resume)) => {
-            spawned.push(Task::TransferDownload {
+            TaskExecution::then(Task::TransferDownload {
                 url: input.url,
                 dest: input.dest,
                 logical_path: input.logical_path,
@@ -79,9 +80,9 @@ pub(super) fn execute_prepare_download(
                 retry_count: input.retry_count,
                 transfer_class: input.transfer_class,
                 resume,
-            });
+            })
         }
-        Err(error) => retry_or_fail_download(input, error, spawned, event_tx),
+        Err(error) => retry_or_fail_download(input, error, event_tx),
     }
 }
 
@@ -90,9 +91,8 @@ pub(super) async fn execute_transfer_download(
     resume: super::super::types::DownloadResumeState,
     download_progress_buffer_bytes: usize,
     user_agent: &str,
-    spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> TaskExecution {
     let event_tx_clone = event_tx.clone();
     let logical_path_clone = input.logical_path.clone();
     let expected_size_val = input.expected_size;
@@ -136,17 +136,17 @@ pub(super) async fn execute_transfer_download(
                 ok: true,
                 issue: None,
             });
+            TaskExecution::succeeded()
         }
-        Err(error) => retry_or_fail_download(input, error, spawned, event_tx),
+        Err(error) => retry_or_fail_download(input, error, event_tx),
     }
 }
 
 fn retry_or_fail_download(
     input: DownloadExecInput,
     error: crate::error::Error,
-    spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> TaskExecution {
     if input.retry_count < input.max_retries {
         let _ = event_tx.send(WorkerEvent::Retried {
             path: input.logical_path.clone(),
@@ -156,7 +156,7 @@ fn retry_or_fail_download(
                 error
             ),
         });
-        spawned.push(Task::Download {
+        TaskExecution::then(Task::Download {
             url: input.url,
             dest: input.dest,
             logical_path: input.logical_path,
@@ -164,20 +164,13 @@ fn retry_or_fail_download(
             expected_size: input.expected_size,
             retry_count: input.retry_count + 1,
             transfer_class: input.transfer_class,
-        });
+        })
     } else {
-        let _ = event_tx.send(WorkerEvent::Failed {
-            path: input.logical_path,
-            reason: format!("download failed after retries: {}", error),
-        });
+        TaskExecution::failed(format!("download failed after retries: {error}"))
     }
 }
 
-pub(super) fn execute_repair_file(
-    input: RepairFileInput,
-    spawned: &mut Vec<Task>,
-    event_tx: &flume::Sender<WorkerEvent>,
-) {
+pub(super) fn execute_repair_file(input: RepairFileInput) -> TaskExecution {
     let RepairFileInput {
         dest,
         logical_path,
@@ -226,7 +219,7 @@ pub(super) fn execute_repair_file(
     }
 
     if hardlink_groups.is_empty() && copy_groups.is_empty() {
-        enqueue_destination_or_download(
+        return task_list_execution(destination_or_download_tasks(
             dest,
             logical_path,
             expected_md5,
@@ -235,10 +228,7 @@ pub(super) fn execute_repair_file(
             verify_destination_fallback,
             retry_count,
             transfer_class,
-            spawned,
-            event_tx,
-        );
-        return;
+        ));
     }
 
     let (initial_groups, initial_copy_only, deferred_copy_groups) = if hardlink_groups.is_empty() {
@@ -260,18 +250,16 @@ pub(super) fn execute_repair_file(
         retry_count,
         transfer_class,
     );
-    spawned.extend(
-        initial_groups
-            .into_iter()
-            .map(|candidates| Task::VerifyReuseVolume {
-                copy_only: initial_copy_only,
-                candidates,
-                logical_path: logical_path.clone(),
-                expected_md5: expected_md5.clone(),
-                expected_size,
-                group: group.clone(),
-            }),
-    );
+    TaskExecution::expand(GraphExpansion::parallel(initial_groups.into_iter().map(
+        |candidates| Task::VerifyReuseVolume {
+            copy_only: initial_copy_only,
+            candidates,
+            logical_path: logical_path.clone(),
+            expected_md5: expected_md5.clone(),
+            expected_size,
+            group: group.clone(),
+        },
+    )))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -282,11 +270,9 @@ pub(super) fn execute_verify_reuse_volume(
     expected_md5: String,
     expected_size: u64,
     group: std::sync::Arc<ReuseCandidateGroup>,
-    spawned: &mut Vec<Task>,
-    event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> TaskExecution {
     if group.is_resolved() {
-        return;
+        return TaskExecution::succeeded();
     }
     let source = candidates.into_iter().find(|source| {
         if group.is_resolved() {
@@ -302,26 +288,24 @@ pub(super) fn execute_verify_reuse_volume(
             super::super::verify::CandidateVerification::Valid
         )
     });
-    group.finish_volume(copy_only, source, spawned, event_tx);
+    task_list_execution(group.finish_volume(copy_only, source))
 }
 
 pub(super) async fn execute_hardlink_reuse_file(
     input: ReuseFileInput,
-    spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> TaskExecution {
     assert!(!input.copy_only, "copy reuse routed to async executor");
     let result = create_hardlink_async(&input.source, &input.dest)
         .await
         .map(|()| ReuseMethod::Hardlink);
-    finish_reuse_file(input, result, spawned, event_tx);
+    finish_reuse_file(input, result, event_tx)
 }
 
 pub(super) fn execute_copy_reuse_file(
     input: ReuseFileInput,
-    spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> TaskExecution {
     assert!(
         input.copy_only,
         "hardlink reuse routed to blocking executor"
@@ -334,15 +318,14 @@ pub(super) fn execute_copy_reuse_file(
         ReuseMode::CopyOnly,
         true,
     );
-    finish_reuse_file(input, result, spawned, event_tx);
+    finish_reuse_file(input, result, event_tx)
 }
 
 fn finish_reuse_file(
     input: ReuseFileInput,
     result: crate::error::Result<ReuseMethod>,
-    spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> TaskExecution {
     let ReuseFileInput {
         source,
         copy_only,
@@ -365,6 +348,7 @@ fn finish_reuse_file(
                 ok: true,
                 issue: None,
             });
+            TaskExecution::succeeded()
         }
         Ok(ReuseMethod::Copy) => {
             let _ = event_tx.send(WorkerEvent::Copied { path: dest });
@@ -373,6 +357,7 @@ fn finish_reuse_file(
                 ok: true,
                 issue: None,
             });
+            TaskExecution::succeeded()
         }
         Err(error) if !copy_only && allow_copy_fallback => {
             let _ = event_tx.send(WorkerEvent::Retried {
@@ -381,7 +366,7 @@ fn finish_reuse_file(
                     "verified-source hardlink failed; scheduling copy fallback: {error}"
                 ),
             });
-            spawned.push(Task::ReuseFile {
+            TaskExecution::then(Task::ReuseFile {
                 source,
                 copy_only: true,
                 remaining_source_candidates,
@@ -394,7 +379,7 @@ fn finish_reuse_file(
                 verify_destination_fallback,
                 retry_count,
                 transfer_class,
-            });
+            })
         }
         Err(error) => {
             let _ = event_tx.send(WorkerEvent::Retried {
@@ -402,7 +387,7 @@ fn finish_reuse_file(
                 reason: format!("verified-source reuse failed: {error}"),
             });
             if !remaining_source_candidates.is_empty() {
-                spawned.push(Task::RepairFile {
+                TaskExecution::then(Task::RepairFile {
                     dest,
                     logical_path,
                     expected_md5,
@@ -413,9 +398,9 @@ fn finish_reuse_file(
                     verify_destination_fallback,
                     retry_count,
                     transfer_class,
-                });
+                })
             } else {
-                enqueue_destination_or_download(
+                task_list_execution(destination_or_download_tasks(
                     dest,
                     logical_path,
                     expected_md5,
@@ -424,10 +409,15 @@ fn finish_reuse_file(
                     verify_destination_fallback,
                     retry_count,
                     transfer_class,
-                    spawned,
-                    event_tx,
-                );
+                ))
             }
         }
+    }
+}
+
+fn task_list_execution(tasks: crate::error::Result<Vec<Task>>) -> TaskExecution {
+    match tasks {
+        Ok(tasks) => TaskExecution::expand(GraphExpansion::parallel(tasks)),
+        Err(error) => TaskExecution::failed(error.to_string()),
     }
 }

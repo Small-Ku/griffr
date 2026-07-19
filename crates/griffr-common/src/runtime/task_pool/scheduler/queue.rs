@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use super::routing::{ExecutionClass, NetworkClass, ResourceRequest};
 use super::TaskPriority;
-use crate::runtime::task_pool::{Task, TaskPoolConfig, VolumeStreamingMode};
+use crate::runtime::task_pool::{NodeId, Task, TaskPoolConfig, VolumeStreamingMode};
 
 const CONTINUATION_BURST: usize = 3;
 const EXECUTION_SCHEDULE: [ExecutionClass; 3] = [
@@ -24,6 +24,7 @@ const NETWORK_SCHEDULE: [NetworkClass; 7] = [
 
 #[derive(Debug)]
 struct QueuedTask {
+    node_id: NodeId,
     task: Task,
     resources: ResourceRequest,
     enqueued_at: Instant,
@@ -449,6 +450,7 @@ fn runnable_index(
 
 #[derive(Debug)]
 pub(super) struct ScheduledTask {
+    pub(super) node_id: NodeId,
     pub(super) task: Task,
     pub(super) resources: ResourceRequest,
     pub(super) enqueued_at: Instant,
@@ -461,8 +463,15 @@ pub(super) struct SchedulerQueue {
 }
 
 impl SchedulerQueue {
-    pub(super) fn push(&mut self, task: Task, resources: ResourceRequest, priority: TaskPriority) {
+    pub(super) fn push(
+        &mut self,
+        node_id: NodeId,
+        task: Task,
+        resources: ResourceRequest,
+        priority: TaskPriority,
+    ) {
         let queued = QueuedTask {
+            node_id,
             task,
             resources,
             enqueued_at: Instant::now(),
@@ -476,6 +485,7 @@ impl SchedulerQueue {
     pub(super) fn restore_front(&mut self, scheduled: ScheduledTask) {
         self.state.resources.release(&scheduled.resources);
         self.state.continuation.push_front(QueuedTask {
+            node_id: scheduled.node_id,
             task: scheduled.task,
             resources: scheduled.resources,
             enqueued_at: scheduled.enqueued_at,
@@ -490,6 +500,7 @@ impl SchedulerQueue {
         let queued = self.state.pop_next(config, blocking_dispatch_available)?;
         self.state.resources.acquire(&queued.resources);
         Some(ScheduledTask {
+            node_id: queued.node_id,
             task: queued.task,
             resources: queued.resources,
             enqueued_at: queued.enqueued_at,
@@ -514,7 +525,9 @@ mod tests {
     use super::{AdmissionSnapshot, ResourceState, SchedulerQueue};
     use crate::runtime::task_pool::scheduler::routing::{ExecutionClass, ResourceRequest};
     use crate::runtime::task_pool::scheduler::TaskPriority;
-    use crate::runtime::task_pool::{Task, TaskPoolConfig, VolumeIoPolicy, VolumeStreamingMode};
+    use crate::runtime::task_pool::{
+        NodeId, Task, TaskPoolConfig, VolumeIoPolicy, VolumeStreamingMode,
+    };
     use std::path::PathBuf;
 
     fn hardlink(name: &str) -> Task {
@@ -561,6 +574,7 @@ mod tests {
         let mut queue = SchedulerQueue::default();
         let config = TaskPoolConfig::default();
         queue.push(
+            NodeId::from_index(0),
             hardlink("blocking"),
             ResourceRequest {
                 execution: ExecutionClass::Blocking,
@@ -569,6 +583,7 @@ mod tests {
             TaskPriority::Bulk,
         );
         queue.push(
+            NodeId::from_index(1),
             hardlink("async"),
             ResourceRequest {
                 execution: ExecutionClass::AsyncIo,
@@ -597,8 +612,18 @@ mod tests {
     fn volume_writer_blocks_only_the_same_volume() {
         let mut queue = SchedulerQueue::default();
         let config = TaskPoolConfig::default();
-        queue.push(hardlink("a"), resources("volume-a"), TaskPriority::Bulk);
-        queue.push(hardlink("b"), resources("volume-b"), TaskPriority::Bulk);
+        queue.push(
+            NodeId::from_index(0),
+            hardlink("a"),
+            resources("volume-a"),
+            TaskPriority::Bulk,
+        );
+        queue.push(
+            NodeId::from_index(1),
+            hardlink("b"),
+            resources("volume-b"),
+            TaskPriority::Bulk,
+        );
 
         let first = queue.pop_next(&config, true).unwrap();
         let second = queue.pop_next(&config, true).unwrap();
@@ -759,8 +784,18 @@ mod tests {
         let mut small = resources("volume-a");
         small.execution = ExecutionClass::Blocking;
         small.estimated_bytes = 1;
-        queue.push(hardlink("large"), large, TaskPriority::Bulk);
-        queue.push(hardlink("small"), small, TaskPriority::Bulk);
+        queue.push(
+            NodeId::from_index(0),
+            hardlink("large"),
+            large,
+            TaskPriority::Bulk,
+        );
+        queue.push(
+            NodeId::from_index(1),
+            hardlink("small"),
+            small,
+            TaskPriority::Bulk,
+        );
 
         let selected = queue.pop_next(&config, true).unwrap();
         assert!(matches!(

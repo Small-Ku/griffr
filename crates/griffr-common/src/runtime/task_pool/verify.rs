@@ -21,9 +21,8 @@ pub(crate) fn execute_verify(
     expected_md5: &str,
     expected_size: Option<u64>,
     on_fail: Option<Box<super::types::Task>>,
-    spawned: &mut Vec<super::types::Task>,
     event_tx: &flume::Sender<super::types::WorkerEvent>,
-) {
+) -> super::graph::TaskExecution {
     let issue = build_issue(path, logical_path, expected_md5, expected_size);
     match issue {
         None => {
@@ -32,6 +31,7 @@ pub(crate) fn execute_verify(
                 ok: true,
                 issue: None,
             });
+            super::graph::TaskExecution::succeeded()
         }
         Some(issue) => {
             if let Some(task) = on_fail {
@@ -39,8 +39,7 @@ pub(crate) fn execute_verify(
                     path: logical_path.to_string(),
                     reason: format!("verification failed ({:?})", issue.kind),
                 });
-                spawned.push(*task);
-                return;
+                return super::graph::TaskExecution::then(*task);
             }
 
             let _ = event_tx.send(super::types::WorkerEvent::Verified {
@@ -48,10 +47,7 @@ pub(crate) fn execute_verify(
                 ok: false,
                 issue: Some(issue.clone()),
             });
-            let _ = event_tx.send(super::types::WorkerEvent::Failed {
-                path: logical_path.to_string(),
-                reason: format!("verification failed ({:?})", issue.kind),
-            });
+            super::graph::TaskExecution::failed(format!("verification failed ({:?})", issue.kind))
         }
     }
 }

@@ -109,17 +109,14 @@ fn reuse_group_claims_first_verified_source_immediately() {
         0,
         TransferClass::General,
     );
-    let (event_tx, _event_rx) = flume::unbounded();
-    let mut spawned = Vec::new();
-
-    group.finish_volume(false, Some(source.clone()), &mut spawned, &event_tx);
+    let tasks = group.finish_volume(false, Some(source.clone())).unwrap();
     assert!(matches!(
-        spawned.as_slice(),
+        tasks.as_slice(),
         [Task::ReuseFile { source: winner, copy_only: false, .. }] if winner == &source
     ));
 
-    group.finish_volume(false, None, &mut spawned, &event_tx);
-    assert_eq!(spawned.len(), 1, "late probes must not replace the winner");
+    let late = group.finish_volume(false, None).unwrap();
+    assert!(late.is_empty(), "late probes must not replace the winner");
 }
 
 #[test]
@@ -139,14 +136,11 @@ fn reuse_group_defers_cross_volume_copy_until_hardlink_probes_fail() {
         0,
         TransferClass::General,
     );
-    let (event_tx, _event_rx) = flume::unbounded();
-    let mut spawned = Vec::new();
-
-    group.finish_volume(false, None, &mut spawned, &event_tx);
-    assert!(spawned.is_empty());
-    group.finish_volume(false, None, &mut spawned, &event_tx);
+    let first = group.finish_volume(false, None).unwrap();
+    assert!(first.is_empty());
+    let tasks = group.finish_volume(false, None).unwrap();
     assert!(matches!(
-        spawned.as_slice(),
+        tasks.as_slice(),
         [Task::VerifyReuseVolume {
             copy_only: true,
             ..
@@ -155,35 +149,24 @@ fn reuse_group_defers_cross_volume_copy_until_hardlink_probes_fail() {
 }
 
 #[test]
-fn archive_shards_release_commit_only_after_all_succeed() {
-    let continuation = Task::Hardlink {
-        src: PathBuf::from("stage/source.bin"),
-        dest: PathBuf::from("game/source.bin"),
-    };
-    let group = super::ArchiveExtractionGroup::new(2, continuation);
-    let mut spawned = Vec::new();
+fn archive_shard_group_reports_the_last_finisher() {
+    let group = super::ArchiveExtractionGroup::new(2);
 
-    assert!(!group.finish_shard(true, &mut spawned));
-    assert!(spawned.is_empty());
-    assert!(!group.finish_shard(true, &mut spawned));
-    assert!(matches!(spawned.as_slice(), [Task::Hardlink { .. }]));
+    assert!(!group.finish_shard(true));
+    assert!(group.finish_shard(true));
+    assert!(!group.is_failed());
 }
 
 #[test]
-fn archive_shard_failure_suppresses_commit_continuation() {
-    let continuation = Task::Hardlink {
-        src: PathBuf::from("stage/source.bin"),
-        dest: PathBuf::from("game/source.bin"),
-    };
-    let group = super::ArchiveExtractionGroup::new(2, continuation);
-    let mut spawned = Vec::new();
+fn archive_shard_failure_is_recorded_once() {
+    let group = super::ArchiveExtractionGroup::new(2);
 
     assert!(group.record_failure());
     assert!(
         !group.record_failure(),
         "only the first failure is reported"
     );
-    assert!(!group.finish_shard(false, &mut spawned));
-    assert!(group.finish_shard(true, &mut spawned));
-    assert!(spawned.is_empty());
+    assert!(!group.finish_shard(false));
+    assert!(group.finish_shard(true));
+    assert!(group.is_failed());
 }

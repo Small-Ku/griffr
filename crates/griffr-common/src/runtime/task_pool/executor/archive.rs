@@ -6,9 +6,9 @@ use crate::runtime::{build_patch_execution_plan_with_cache, PatchApplyOptions};
 use super::super::fs_ops::{
     commit_staged_extract, execute_patch_transaction, make_extract_staging_dir,
 };
+use super::super::graph::{GraphExpansion, TaskExecution};
 use super::super::types::{
-    ArchiveInstallGroup, ArchivePart, ArchiveShardTask, ArchiveWork, PreparedArchive, Task,
-    WorkerEvent,
+    ArchivePart, ArchiveShardTask, ArchiveWork, PreparedArchive, Task, WorkerEvent,
 };
 use super::super::verify::VerifiedArtifactCache;
 
@@ -19,24 +19,28 @@ pub(super) fn execute_install_archive(
     password: Option<String>,
     patch_options: PatchApplyOptions,
     mut parts: Vec<ArchivePart>,
-    spawned: &mut Vec<Task>,
-    event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> TaskExecution {
     parts.sort_by(|left, right| {
         left.sequence
             .cmp(&right.sequence)
             .then_with(|| left.logical_path.cmp(&right.logical_path))
     });
     if parts.is_empty() {
-        let _ = event_tx.send(WorkerEvent::Failed {
-            path: base_name,
-            reason: "install archive has no parts".to_string(),
-        });
-        return;
+        return TaskExecution::failed("install archive has no parts");
     }
 
     let volumes = parts.iter().map(|part| part.dest.clone()).collect();
-    let continuation = Task::Extract {
+    let mut expansion = GraphExpansion::new();
+    let part_nodes = parts
+        .into_iter()
+        .map(|part| {
+            expansion.add_root(Task::InstallArchivePart {
+                part,
+                retry_count: 0,
+            })
+        })
+        .collect::<Vec<_>>();
+    let extract = Task::Extract {
         base_name,
         volumes,
         dest,
@@ -44,22 +48,18 @@ pub(super) fn execute_install_archive(
         password,
         patch_options,
     };
-    let group = ArchiveInstallGroup::new(parts.len(), continuation);
-    spawned.extend(parts.into_iter().map(|part| Task::InstallArchivePart {
-        part,
-        group: group.clone(),
-        retry_count: 0,
-    }));
+    match expansion.add_task(extract, part_nodes) {
+        Ok(_) => TaskExecution::expand(expansion),
+        Err(error) => TaskExecution::failed(error.to_string()),
+    }
 }
 
 pub(super) fn execute_install_archive_part(
     part: ArchivePart,
-    group: std::sync::Arc<ArchiveInstallGroup>,
     retry_count: u32,
     max_retries: u32,
-    spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> TaskExecution {
     if super::super::verify::build_issue(
         &part.dest,
         &part.logical_path,
@@ -69,12 +69,11 @@ pub(super) fn execute_install_archive_part(
     .is_none()
     {
         let _ = event_tx.send(WorkerEvent::Verified {
-            path: part.logical_path.clone(),
+            path: part.logical_path,
             ok: true,
             issue: None,
         });
-        group.finish_part(true, spawned);
-        return;
+        return TaskExecution::succeeded();
     }
 
     match super::super::download::prepare_download(
@@ -88,19 +87,18 @@ pub(super) fn execute_install_archive_part(
                 bytes,
             });
             let _ = event_tx.send(WorkerEvent::Verified {
-                path: part.logical_path.clone(),
+                path: part.logical_path,
                 ok: true,
                 issue: None,
             });
-            group.finish_part(true, spawned);
+            TaskExecution::succeeded()
         }
         Ok(super::super::download::DownloadPreparation::Ready(resume)) => {
-            spawned.push(Task::TransferArchivePart {
+            TaskExecution::then(Task::TransferArchivePart {
                 part,
-                group,
                 retry_count,
                 resume,
-            });
+            })
         }
         Err(error) if retry_count < max_retries => {
             let _ = event_tx.send(WorkerEvent::Retried {
@@ -111,11 +109,10 @@ pub(super) fn execute_install_archive_part(
                     error
                 ),
             });
-            spawned.push(Task::InstallArchivePart {
+            TaskExecution::then(Task::InstallArchivePart {
                 part,
-                group,
                 retry_count: retry_count + 1,
-            });
+            })
         }
         Err(error) => {
             let _ = event_tx.send(WorkerEvent::Verified {
@@ -128,29 +125,22 @@ pub(super) fn execute_install_archive_part(
                     Some(part.expected_size),
                 ),
             });
-            let _ = event_tx.send(WorkerEvent::Failed {
-                path: part.logical_path.clone(),
-                reason: format!(
-                    "install-archive preparation failed after retries: {}",
-                    error
-                ),
-            });
-            group.finish_part(false, spawned);
+            TaskExecution::failed(format!(
+                "install-archive preparation failed after retries: {error}"
+            ))
         }
     }
 }
 
 pub(super) async fn execute_transfer_archive_part(
     part: ArchivePart,
-    group: std::sync::Arc<ArchiveInstallGroup>,
     retry_count: u32,
     resume: super::super::types::DownloadResumeState,
     max_retries: u32,
     download_progress_buffer_bytes: usize,
     user_agent: &str,
-    spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> TaskExecution {
     let event_tx_clone = event_tx.clone();
     let logical_path_clone = part.logical_path.clone();
     let expected_size = part.expected_size;
@@ -190,11 +180,11 @@ pub(super) async fn execute_transfer_archive_part(
                 bytes,
             });
             let _ = event_tx.send(WorkerEvent::Verified {
-                path: part.logical_path.clone(),
+                path: part.logical_path,
                 ok: true,
                 issue: None,
             });
-            group.finish_part(true, spawned);
+            TaskExecution::succeeded()
         }
         Err(error) if retry_count < max_retries => {
             let _ = event_tx.send(WorkerEvent::Retried {
@@ -205,11 +195,10 @@ pub(super) async fn execute_transfer_archive_part(
                     error
                 ),
             });
-            spawned.push(Task::InstallArchivePart {
+            TaskExecution::then(Task::InstallArchivePart {
                 part,
-                group,
                 retry_count: retry_count + 1,
-            });
+            })
         }
         Err(error) => {
             let _ = event_tx.send(WorkerEvent::Verified {
@@ -222,11 +211,9 @@ pub(super) async fn execute_transfer_archive_part(
                     Some(part.expected_size),
                 ),
             });
-            let _ = event_tx.send(WorkerEvent::Failed {
-                path: part.logical_path.clone(),
-                reason: format!("install-archive download failed after retries: {}", error),
-            });
-            group.finish_part(false, spawned);
+            TaskExecution::failed(format!(
+                "install-archive download failed after retries: {error}"
+            ))
         }
     }
 }
@@ -238,20 +225,18 @@ pub(super) fn execute_schedule_extract(
     cleanup: bool,
     password: Option<String>,
     patch_options: PatchApplyOptions,
-    spawned: &mut Vec<Task>,
-) {
-    spawned.push(Task::PrepareArchive {
+) -> TaskExecution {
+    TaskExecution::then(Task::PrepareArchive {
         work: ArchiveWork::new(base_name, volumes, dest, cleanup, password, patch_options),
-    });
+    })
 }
 
 pub(super) fn execute_prepare_archive(
     work: std::sync::Arc<ArchiveWork>,
     extract_shards: usize,
-    spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
-) {
-    let result: Result<(), Error> = (|| {
+) -> TaskExecution {
+    let result: Result<GraphExpansion, Error> = (|| {
         let extractor =
             crate::download::extractor::MultiVolumeExtractor::new(work.volumes.clone())?;
         let patch_options = work.patch_options.resolved_for_install(&work.dest)?;
@@ -299,57 +284,61 @@ pub(super) fn execute_prepare_archive(
             bytes: 0,
             total_bytes: inspection.total_uncompressed_bytes,
         });
+
+        let mut expansion = GraphExpansion::new();
         if ranges.is_empty() {
-            spawned.push(Task::CommitArchive { work: work.clone() });
-            return Ok(());
+            expansion.add_root(Task::CommitArchive { work: work.clone() });
+            return Ok(expansion);
         }
 
-        let group = super::super::types::ArchiveExtractionGroup::new(
-            ranges.len(),
-            Task::CommitArchive { work: work.clone() },
-        );
-        spawned.extend(ranges.into_iter().map(|range| Task::ExtractArchiveShard {
-            shard: ArchiveShardTask {
-                work: work.clone(),
-                inspection: inspection.clone(),
-                staging_dir: staging_dir.clone(),
-                range,
-                group: group.clone(),
-            },
-        }));
-        Ok(())
+        let group = super::super::types::ArchiveExtractionGroup::new(ranges.len());
+        let shard_nodes = ranges
+            .into_iter()
+            .map(|range| {
+                expansion.add_root(Task::ExtractArchiveShard {
+                    shard: ArchiveShardTask {
+                        work: work.clone(),
+                        inspection: inspection.clone(),
+                        staging_dir: staging_dir.clone(),
+                        range,
+                        group: group.clone(),
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        expansion.add_task(Task::CommitArchive { work: work.clone() }, shard_nodes)?;
+        Ok(expansion)
     })();
 
-    if let Err(error) = result {
-        if let Some(prepared) = work.prepared.lock().unwrap().take() {
-            let _ = std::fs::remove_dir_all(prepared.staging_dir);
+    match result {
+        Ok(expansion) => TaskExecution::expand(expansion),
+        Err(error) => {
+            if let Some(prepared) = work.prepared.lock().unwrap().take() {
+                let _ = std::fs::remove_dir_all(prepared.staging_dir);
+            }
+            TaskExecution::failed(error.to_string())
         }
-        let _ = event_tx.send(WorkerEvent::Failed {
-            path: work.base_name.clone(),
-            reason: error.to_string(),
-        });
     }
 }
 
 pub(super) fn execute_extract_archive_shard(
     shard: ArchiveShardTask,
     extraction_progress_buffer_bytes: usize,
-    spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> TaskExecution {
     let work = shard.work.clone();
     let inspection = shard.inspection.clone();
     let staging_dir = shard.staging_dir.clone();
     let range = shard.range.clone();
     let group = shard.group.clone();
     if group.is_failed() {
-        let last_failed = group.finish_shard(false, spawned);
-        if last_failed {
+        if group.finish_shard(false) {
             let _ = std::fs::remove_dir_all(&staging_dir);
             work.prepared.lock().unwrap().take();
         }
-        return;
+        return TaskExecution::cancelled();
     }
+
     let extractor = crate::download::extractor::MultiVolumeExtractor::new(work.volumes.clone());
     let result = extractor.and_then(|extractor| {
         extractor.extract_range_with_progress(
@@ -373,16 +362,13 @@ pub(super) fn execute_extract_archive_shard(
     });
 
     let succeeded = result.is_ok();
-    if let Err(error) = result {
-        if group.record_failure() {
-            let _ = event_tx.send(WorkerEvent::Failed {
-                path: work.base_name.clone(),
-                reason: error.to_string(),
-            });
-        }
-    }
-    let last_failed = group.finish_shard(succeeded, spawned);
-    if last_failed {
+    let report_failure = if result.is_err() {
+        group.record_failure()
+    } else {
+        false
+    };
+    let last = group.finish_shard(succeeded);
+    if last && group.is_failed() {
         let _ = std::fs::remove_dir_all(&staging_dir);
         work.prepared.lock().unwrap().take();
     } else if succeeded && !group.is_failed() {
@@ -397,24 +383,25 @@ pub(super) fn execute_extract_archive_shard(
             });
         }
     }
+
+    match result {
+        Ok(()) => TaskExecution::succeeded(),
+        Err(error) if report_failure => TaskExecution::failed(error.to_string()),
+        Err(error) => TaskExecution::silent_failure(error.to_string()),
+    }
 }
 
 pub(super) fn execute_commit_archive(
     work: std::sync::Arc<ArchiveWork>,
-    spawned: &mut Vec<Task>,
     event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> TaskExecution {
     let prepared = match work.prepared.lock().unwrap().clone() {
         Some(prepared) => prepared,
         None => {
-            let _ = event_tx.send(WorkerEvent::Failed {
-                path: work.base_name.clone(),
-                reason: "archive commit started without prepared state".to_string(),
-            });
-            return;
+            return TaskExecution::failed("archive commit started without prepared state");
         }
     };
-    let result: Result<(), Error> = (|| {
+    let result: Result<bool, Error> = (|| {
         let mut on_commit = |path: &std::path::Path, completed: usize, total: usize| {
             let normalized = path.to_string_lossy().replace('\\', "/");
             if completed > 0 {
@@ -455,8 +442,6 @@ pub(super) fn execute_commit_archive(
         };
         let verification_cache = VerifiedArtifactCache::default();
         if let Some((plan, report)) = prepared.patch_plan.clone() {
-            // Patch entries are dependency ordered. Run each wave serially here;
-            // concurrency belongs to the task scheduler rather than nested threads.
             execute_patch_transaction(
                 &plan,
                 Some(&report),
@@ -473,27 +458,33 @@ pub(super) fn execute_commit_archive(
                     }
                 })?;
             }
+            Ok(false)
         } else {
             commit_staged_extract(&prepared.staging_dir, &work.dest, Some(&mut on_commit))?;
-            spawned.push(Task::ApplyExtractedVfsPatchManifest {
-                install_root: work.dest.clone(),
-            });
+            Ok(true)
         }
-        Ok(())
     })();
 
     match result {
-        Ok(()) => {
+        Ok(needs_manifest_follow_up) => {
             work.prepared.lock().unwrap().take();
-            spawned.push(Task::CleanupArchive { work });
+            let mut expansion = GraphExpansion::new();
+            if needs_manifest_follow_up {
+                let apply = expansion.add_root(Task::ApplyExtractedVfsPatchManifest {
+                    install_root: work.dest.clone(),
+                });
+                if let Err(error) = expansion.add_task(Task::CleanupArchive { work }, [apply]) {
+                    return TaskExecution::failed(error.to_string());
+                }
+            } else {
+                expansion.add_root(Task::CleanupArchive { work });
+            }
+            TaskExecution::expand(expansion)
         }
         Err(error) => {
             let _ = std::fs::remove_dir_all(&prepared.staging_dir);
             work.prepared.lock().unwrap().take();
-            let _ = event_tx.send(WorkerEvent::Failed {
-                path: work.base_name.clone(),
-                reason: error.to_string(),
-            });
+            TaskExecution::failed(error.to_string())
         }
     }
 }
@@ -501,7 +492,7 @@ pub(super) fn execute_commit_archive(
 pub(super) fn execute_cleanup_archive(
     work: std::sync::Arc<ArchiveWork>,
     event_tx: &flume::Sender<WorkerEvent>,
-) {
+) -> TaskExecution {
     let result = if work.cleanup {
         crate::download::extractor::MultiVolumeExtractor::new(work.volumes.clone())
             .and_then(|extractor| extractor.cleanup())
@@ -513,12 +504,8 @@ pub(super) fn execute_cleanup_archive(
             let _ = event_tx.send(WorkerEvent::Extracted {
                 path: work.dest.clone(),
             });
+            TaskExecution::succeeded()
         }
-        Err(error) => {
-            let _ = event_tx.send(WorkerEvent::Failed {
-                path: work.base_name.clone(),
-                reason: error.to_string(),
-            });
-        }
+        Err(error) => TaskExecution::failed(error.to_string()),
     }
 }
