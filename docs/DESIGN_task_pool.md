@@ -56,6 +56,8 @@ Expand(GraphExpansion)
 
 `GraphExpansion` is itself append-only and locally acyclic. The coordinator remaps its local node IDs into the command graph, marks the producer as `Waiting`, and attaches the producer to all terminal leaves.
 
+Stable dependency tokens let a later expansion depend on a node installed by an earlier expansion. Archive volume tasks use this to expose verified byte ranges to central-directory, control-file, extraction-shard, and cleanup nodes without flattening the whole pipeline into one initial graph.
+
 This replaces the former implicit `spawned.push(task)` continuation model. Dynamic expansion is used when the graph cannot be known up front:
 
 - partial-download inspection selects resume, restart, or completion;
@@ -175,40 +177,56 @@ Reuse candidates are grouped by physical volume. Probes run as parallel DAG root
 
 ---
 
-## 7. Archive DAG
+## 7. Range-Aware Archive DAG
 
-Archive install now has two explicit fan-in barriers.
+Archive install no longer places one global barrier between all split-volume downloads and extraction. The package manifest first provides an immutable expected byte layout. Each volume download is bound to a stable dependency token, and tail volumes are queued first so archive planning can start on the critical path.
 
 ```text
 InstallArchive
-|- InstallArchivePart 001 -> optional TransferArchivePart / retry -|
-|- InstallArchivePart 002 -> optional TransferArchivePart / retry -+-> Extract
-`- InstallArchivePart N   -> optional TransferArchivePart / retry -|
-
-Extract -> PrepareArchive
-           |- inspect central directory once
-           |- build patch plan
-           `- create extraction ranges
-                 |- ExtractArchiveShard 1 -|
-                 |- ExtractArchiveShard 2 -+-> CommitArchive
-                 `- ExtractArchiveShard N -|
-                                            `-> manifest follow-up
-                                                 `-> CleanupArchive
+|- tail InstallArchivePart nodes first -----------------------|
+|- remaining InstallArchivePart nodes continue in parallel   |
+`- tail token(s) -> DiscoverArchiveDirectory                 |
+                       |- EOCD / ZIP64 locator needs range ---+
+                       `-> central-directory token(s)
+                           -> InspectArchiveIndex
+                           -> control-entry token(s)
+                           -> ReadArchiveControls
+                           -> PlanArchiveExtraction
 ```
 
-`Extract` cannot become ready until every split part succeeds. `CommitArchive` cannot become ready until every extraction shard succeeds. A failed part cancels extraction and all descendants; an independent archive or file branch continues.
+`DiscoverArchiveDirectory` reads only the final EOCD search window. If a ZIP64 locator or end record crosses into an earlier unavailable volume, it returns the required byte range and dynamically creates another discovery node depending on exactly those volume tokens. Griffr accepts raw externally split ZIP streams and rejects true spanned/multi-disk ZIP metadata. Central-directory parsing then derives a conservative source range for every entry, from its local-header offset to the next local header or the central directory.
 
-Extraction still keeps a small shared failure group solely to coordinate first-error reporting and staging cleanup after the final in-flight shard exits. It no longer releases the commit continuation; the DAG owns that barrier.
-
-For a normal staged commit, the explicit dependency order is:
+Extraction shards carry explicit entry lists and the union of only the source volumes those entries can touch:
 
 ```text
-CommitArchive -> ApplyExtractedVfsPatchManifest
-              -> ApplyDeleteManifest
-              -> CleanupArchive
+Verify volume 001 ----|
+Verify volume 002 ----+-> Extract shard A (entries using 001..002) --|
+                                                                    |
+Verify volume 017 ----+-> Extract shard B (entries using 017) -------+-> shard join
+                                                                    |
+Verify volume 038 ----|
+Verify volume 039 ----+-> Extract shard C (entries using 038..039) --|
 ```
 
-A transaction-based patch already performs commit, patch, and delete atomically inside the transaction and therefore expands only cleanup.
+This permits download and extraction overlap without reading a partial or unverified volume. The ranges intentionally over-approximate through the next local header so data descriptors, encryption headers, and alignment padding remain covered. Shards are ordered by their latest required volume and balanced by uncompressed bytes, which keeps early-volume work available without creating one node per ZIP entry.
+
+The destructive-update barriers remain stricter than the data pipeline:
+
+1. patch and delete control entries must be available and parsed;
+2. patch transaction preflight completes before any shard mutates staging;
+3. every extraction shard **and every package-part token** succeeds before `CommitArchive` becomes ready;
+4. normal staged commit applies VFS and delete manifests in order;
+5. archive cleanup remains downstream of commit and the manifest follow-up chain.
+
+```text
+required shard tokens -> extraction shards --|
+                                              +-> CommitArchive -> manifest follow-up -> CleanupArchive
+all archive volume tokens --------------------|
+```
+
+The all-volume join is intentionally placed at the irreversible commit boundary rather than at extraction. It preserves download/extraction overlap while preventing a late MD5 failure in an otherwise unused archive range from leaving a committed install.
+
+A failed volume cancels only shards that need that volume and their commit descendant. Independent downloads and shards remain runnable. `ArchiveWork` owns the staging lifecycle and removes abandoned staging when the final graph references are dropped, covering cancellation paths where a shard never enters its executor. The small shared shard execution state remains only for first-error reporting and earlier cleanup after all actually started shards exit; it does not implement the commit barrier.
 
 ---
 
@@ -225,6 +243,8 @@ On failure:
 - only failures with `report = true` create a durable `WorkerEvent::Failed` outcome.
 
 Task execution is wrapped with `catch_unwind` at the Dispatcher boundary. A panic becomes a reported node failure. Stale queued entries belonging to cancelled nodes are discarded and their acquired permits are immediately released.
+
+Cross-expansion token dependencies are checked before graph mutation. A child cannot depend on its expanding parent, a static descendant of that parent, or a dynamic ancestor currently waiting on it; those references are rejected as cycles instead of surfacing later as an admission deadlock.
 
 The coordinator reports an admission deadlock when unresolved graph nodes remain but there is neither runnable/in-flight work nor a transiently full Dispatcher blocking pool.
 
