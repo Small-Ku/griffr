@@ -33,7 +33,11 @@ The default policy favors recall:
   output, lexical scopes, and direct-call arity are analyzed across files;
 - repository architecture checks enforce frontend-neutral progress channels, canonical
   progress lanes, durable-only task-pool results, and a Dispatcher-only task execution model
-  (no class-specific `std::thread`/`Condvar` worker pools or synchronous dispatch bridge).
+  (no class-specific `std::thread`/`Condvar` worker pools or synchronous dispatch bridge);
+- `DAG001` checks exhaustive `Task` routing matches that deliberately omit a catch-all, while
+  `DAG002` keeps struct-like `Task::Variant { ... }` constructors synchronized with the canonical
+  enum payload. These are high-confidence structural fallbacks for large DAG refactors, not a
+  replacement for rustc type checking.
 
 Useful policy overrides:
 

@@ -45,6 +45,243 @@ def run(host: ArchitectureHost) -> None:
     _check_transient_outcome_leaks(host)
     _check_lane_unit_conflicts(host)
     _check_dispatcher_task_model(host)
+    _check_task_enum_construction(host)
+    _check_task_match_exhaustiveness(host)
+    _check_archive_token_barriers(host)
+
+
+def _task_enum_shape(
+    host: ArchitectureHost,
+) -> tuple[set[str], dict[str, set[str]]] | None:
+    seen: set[tuple[Path, int]] = set()
+    for target in host.targets:
+        for module in target.iter_modules():
+            for item in module.body.named_children:
+                if item.type != "enum_item":
+                    continue
+                name = item.child_by_field_name("name")
+                if name is None or module.source.text(name) != "Task":
+                    continue
+                coordinate = (module.source.path, item.start_byte)
+                if coordinate in seen:
+                    continue
+                seen.add(coordinate)
+                body = item.child_by_field_name("body")
+                if body is None:
+                    continue
+                variants: set[str] = set()
+                fields: dict[str, set[str]] = {}
+                for variant in body.named_children:
+                    if variant.type != "enum_variant":
+                        continue
+                    variant_name = variant.child_by_field_name("name")
+                    if variant_name is None:
+                        continue
+                    variant_text = module.source.text(variant_name)
+                    variants.add(variant_text)
+                    field_names: set[str] = set()
+                    variant_body = variant.child_by_field_name("body")
+                    if variant_body is not None and variant_body.type == "field_declaration_list":
+                        for field in variant_body.named_children:
+                            if field.type != "field_declaration":
+                                continue
+                            field_name = field.child_by_field_name("name")
+                            if field_name is not None:
+                                field_names.add(module.source.text(field_name))
+                    fields[variant_text] = field_names
+                if variants:
+                    return variants, fields
+    return None
+
+
+def _task_variant_from_name(text: str) -> str | None:
+    normalized = re.sub(r"\s+", "", text)
+    match = re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_]*::)*Task::([A-Za-z_][A-Za-z0-9_]*)", normalized)
+    return match.group(1) if match else None
+
+
+def _check_task_enum_construction(host: ArchitectureHost) -> None:
+    shape = _task_enum_shape(host)
+    if shape is None:
+        return
+    variants, fields = shape
+    seen: set[tuple[Path, int]] = set()
+    for target in host.targets:
+        for module in target.iter_modules():
+            for node in walk_named(module.body):
+                if node.type != "struct_expression":
+                    continue
+                coordinate = (module.source.path, node.start_byte)
+                if coordinate in seen:
+                    continue
+                seen.add(coordinate)
+                name = node.child_by_field_name("name")
+                body = node.child_by_field_name("body")
+                if name is None or body is None:
+                    continue
+                variant = _task_variant_from_name(module.source.text(name))
+                if variant is None:
+                    continue
+                if variant not in variants:
+                    host.add(
+                        "DAG002",
+                        "error",
+                        f"Task constructor references unknown variant {variant}",
+                        source=module.source,
+                        node=name,
+                        confidence="definite",
+                        evidence=("constructor path resolves textually to Task::" + variant,),
+                        hint="Update the constructor or the canonical Task enum before changing executor routing.",
+                    )
+                    continue
+                provided: set[str] = set()
+                has_base_update = False
+                for field in body.named_children:
+                    if field.type == "field_initializer":
+                        field_name = field.child_by_field_name("field")
+                        if field_name is not None:
+                            provided.add(module.source.text(field_name))
+                    elif field.type == "shorthand_field_initializer":
+                        identifier = next(
+                            (child for child in field.named_children if child.type == "identifier"),
+                            None,
+                        )
+                        if identifier is not None:
+                            provided.add(module.source.text(identifier))
+                    elif field.type == "base_field_initializer":
+                        has_base_update = True
+                expected = fields[variant]
+                unknown = sorted(provided - expected)
+                missing = [] if has_base_update else sorted(expected - provided)
+                if not unknown and not missing:
+                    continue
+                details = []
+                if missing:
+                    details.append(f"missing fields {missing!r}")
+                if unknown:
+                    details.append(f"unknown fields {unknown!r}")
+                host.add(
+                    "DAG002",
+                    "error",
+                    f"Task::{variant} constructor has " + " and ".join(details),
+                    source=module.source,
+                    node=node,
+                    confidence="definite",
+                    evidence=(
+                        f"canonical fields: {sorted(expected)!r}",
+                        f"provided fields: {sorted(provided)!r}",
+                    ),
+                    hint="Keep Task enum payloads and every constructor synchronized; rustc remains authoritative for type checking.",
+                )
+
+
+def _check_task_match_exhaustiveness(host: ArchitectureHost) -> None:
+    shape = _task_enum_shape(host)
+    if shape is None:
+        return
+    variants, _ = shape
+    seen: set[tuple[Path, int]] = set()
+    pattern_re = re.compile(r"\bTask\s*::\s*([A-Za-z_][A-Za-z0-9_]*)")
+    for target in host.targets:
+        for module in target.iter_modules():
+            for node in walk_named(module.body):
+                if node.type != "match_expression":
+                    continue
+                coordinate = (module.source.path, node.start_byte)
+                if coordinate in seen:
+                    continue
+                seen.add(coordinate)
+                body = node.child_by_field_name("body")
+                if body is None:
+                    continue
+                covered: set[str] = set()
+                catch_all = False
+                task_pattern_arms = 0
+                for arm in body.named_children:
+                    if arm.type != "match_arm":
+                        continue
+                    pattern = arm.child_by_field_name("pattern")
+                    if pattern is None:
+                        continue
+                    pattern_text = module.source.text(pattern)
+                    arm_variants = set(pattern_re.findall(pattern_text))
+                    if arm_variants:
+                        task_pattern_arms += 1
+                        covered.update(arm_variants)
+                    else:
+                        catch_all = True
+                if catch_all or task_pattern_arms < 2 or not covered.issubset(variants):
+                    continue
+                missing = sorted(variants - covered)
+                if not missing:
+                    continue
+                host.add(
+                    "DAG001",
+                    "error",
+                    f"Task match is missing variants {missing!r}",
+                    source=module.source,
+                    node=node,
+                    confidence="definite",
+                    evidence=(
+                        f"covered variants: {sorted(covered)!r}",
+                        "no wildcard or binding catch-all arm was found",
+                    ),
+                    hint="Update executor, resource routing, path, estimate, and execution-class matches whenever Task gains a variant.",
+                )
+
+
+def _check_archive_token_barriers(host: ArchitectureHost) -> None:
+    """Keep range-local extraction separate from the all-volume commit barrier."""
+    required_methods = {
+        "CommitArchive": {"add_root_with_tokens", "add_task_with_tokens"},
+        "ExtractArchiveShard": {"add_root_with_tokens", "add_task_with_tokens"},
+    }
+    seen: set[tuple[Path, int]] = set()
+    for target in host.targets:
+        for module in target.iter_modules():
+            for node in walk_named(module.body):
+                if node.type != "struct_expression":
+                    continue
+                coordinate = (module.source.path, node.start_byte)
+                if coordinate in seen:
+                    continue
+                seen.add(coordinate)
+                name = node.child_by_field_name("name")
+                if name is None:
+                    continue
+                variant = _task_variant_from_name(module.source.text(name))
+                allowed = required_methods.get(variant or "")
+                if allowed is None:
+                    continue
+
+                current = node.parent
+                insertion = None
+                while current is not None:
+                    if current.type == "call_expression":
+                        function = current.child_by_field_name("function")
+                        if function is not None:
+                            function_text = re.sub(r"\s+", "", module.source.text(function))
+                            insertion = function_text.rsplit(".", 1)[-1]
+                        break
+                    current = current.parent
+                if insertion in allowed:
+                    continue
+                host.add(
+                    "DAG003",
+                    "error",
+                    f"Task::{variant} must be inserted through a token-aware graph API",
+                    source=module.source,
+                    node=node,
+                    confidence="definite",
+                    evidence=(
+                        f"nearest insertion call: {insertion or 'none'}",
+                        f"allowed methods: {sorted(allowed)!r}",
+                    ),
+                    hint=(
+                        "Use add_root_with_tokens/add_task_with_tokens so extraction waits for "
+                        "its source ranges and commit also joins every package-part token."
+                    ),
+                )
 
 
 def _progress_protocol_packages(host: ArchitectureHost) -> list[Package]:

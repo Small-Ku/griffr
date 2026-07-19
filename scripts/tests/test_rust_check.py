@@ -90,6 +90,72 @@ class RustCheckTests(unittest.TestCase):
         )
         self.assertNotIn("DSP001", self.codes(self.run_checker(root)))
 
+    def test_task_match_must_cover_new_variants_without_catch_all(self) -> None:
+        root = self.make_workspace(
+            "pub enum Task { A { value: u32 }, B { value: u32 }, C { value: u32 } }\n"
+            "fn route(task: &Task) {\n"
+            "    match task {\n"
+            "        Task::A { .. } => {},\n"
+            "        Task::B { .. } => {},\n"
+            "    }\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DAG001")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("C", diagnostics[0].message)
+
+    def test_task_match_catch_all_remains_allowed(self) -> None:
+        root = self.make_workspace(
+            "pub enum Task { A { value: u32 }, B { value: u32 }, C { value: u32 } }\n"
+            "fn route(task: &Task) {\n"
+            "    match task {\n"
+            "        Task::A { .. } => {},\n"
+            "        _ => {},\n"
+            "    }\n"
+            "}\n"
+        )
+        self.assertNotIn("DAG001", self.codes(self.run_checker(root)))
+
+    def test_task_constructor_fields_follow_canonical_variant(self) -> None:
+        root = self.make_workspace(
+            "pub enum Task { Download { url: String, size: u64 } }\n"
+            "fn task() -> Task {\n"
+            "    Task::Download { url: String::new(), retry: 1 }\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DAG002")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("missing fields", diagnostics[0].message)
+        self.assertIn("unknown fields", diagnostics[0].message)
+
+    def test_archive_commit_requires_token_aware_graph_insertion(self) -> None:
+        root = self.make_workspace(
+            "pub enum Task { CommitArchive { work: usize }, ExtractArchiveShard { shard: usize } }\n"
+            "struct Expansion;\n"
+            "impl Expansion { fn add_root(&mut self, _task: Task) {} }\n"
+            "fn plan(expansion: &mut Expansion) {\n"
+            "    expansion.add_root(Task::CommitArchive { work: 1 });\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DAG003")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("CommitArchive", diagnostics[0].message)
+
+    def test_archive_range_tasks_allow_token_aware_graph_insertion(self) -> None:
+        root = self.make_workspace(
+            "pub enum Task { CommitArchive { work: usize }, ExtractArchiveShard { shard: usize } }\n"
+            "struct Expansion;\n"
+            "impl Expansion {\n"
+            "    fn add_root_with_tokens(&mut self, _task: Task, _tokens: [usize; 1]) {}\n"
+            "    fn add_task_with_tokens(&mut self, _task: Task, _deps: [usize; 1], _tokens: [usize; 1]) {}\n"
+            "}\n"
+            "fn plan(expansion: &mut Expansion) {\n"
+            "    expansion.add_root_with_tokens(Task::ExtractArchiveShard { shard: 1 }, [1]);\n"
+            "    expansion.add_task_with_tokens(Task::CommitArchive { work: 1 }, [1], [1]);\n"
+            "}\n"
+        )
+        self.assertNotIn("DAG003", self.codes(self.run_checker(root)))
+
     def test_cfg_guarded_duplicate_functions_are_not_reported(self) -> None:
         root = self.make_workspace(
             "#[cfg(windows)]\nfn platform() {}\n"
