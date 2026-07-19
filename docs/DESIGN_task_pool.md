@@ -1,26 +1,91 @@
-# Task Pool Design
+# Task Pool and DAG Design
 
-A frontend-neutral task pool drives install, update, verify, repair, VFS sync, and predownload apply. Public operations are decomposed into continuation tasks; one coordinator admits ready work only when every required resource permit is available.
+A frontend-neutral, command-scoped task DAG drives install, update, verify, repair, VFS sync, and predownload apply. The DAG describes ordering; the resource-aware scheduler decides when a ready node may run; `compio::Dispatcher` remains the only execution backend.
+
+```text
+planner -> TaskGraph -> resource-aware scheduler -> Dispatcher
+                                               |-> dispatch()
+                                               `-> dispatch_blocking()
+```
 
 ---
 
-## 1. Scheduling Model
+## 1. Graph Model
 
-One coordinator owns the ready queues, admission state, pending count, progress reduction, and continuation scheduling. It does not execute task bodies itself and it does not spawn class-specific worker loops.
+`TaskGraphBuilder` constructs an append-only static DAG. A node may depend only on nodes already present in the builder, which rejects forward references and makes cycles unrepresentable. Duplicate dependency IDs are collapsed.
+
+```rust
+let mut graph = TaskGraph::builder();
+let left = graph.add_root(left_task);
+let right = graph.add_root(right_task);
+let join = graph.add_task(join_task, [left, right])?;
+let graph = graph.build_checked()?;
+```
+
+A node moves through:
+
+```text
+Pending -> Ready -> Running -> Succeeded
+                         |-> Failed
+Running -> Waiting -> Succeeded / Failed
+Pending / Ready -> Cancelled
+```
+
+`Waiting` means the task body discovered and installed a dynamic subgraph. Its original node does not succeed until every terminal leaf of that subgraph succeeds.
+
+The graph natively supports:
+
+- fan-out: several nodes depend on one predecessor;
+- fan-in: one node depends on several predecessors;
+- dynamic expansion after a manifest, local hash, or archive inspection is known;
+- descendant-only cancellation after failure;
+- final graph metrics and per-node state inspection.
+
+---
+
+## 2. Dynamic Expansion
+
+Executors return one `TaskExecution` value:
+
+```text
+Succeeded
+Failed { reason, report }
+Cancelled
+Expand(GraphExpansion)
+```
+
+`GraphExpansion` is itself append-only and locally acyclic. The coordinator remaps its local node IDs into the command graph, marks the producer as `Waiting`, and attaches the producer to all terminal leaves.
+
+This replaces the former implicit `spawned.push(task)` continuation model. Dynamic expansion is used when the graph cannot be known up front:
+
+- partial-download inspection selects resume, restart, or completion;
+- verify failure selects repair;
+- reuse probing selects hardlink, copy, another source, or download;
+- archive inspection discovers extraction shards;
+- a staged commit discovers manifest follow-up work.
+
+Policy choices are resolved before adding work. Mutually exclusive alternatives are not represented as AND dependencies. For example, a matching reuse source creates only the chosen reuse branch; failed reuse may then expand another repair branch.
+
+---
+
+## 3. Scheduling Model
+
+One coordinator owns graph state, ready queues, admission state, progress reduction, outcomes, and metrics. It does not execute task bodies and does not create class-specific worker loops.
 
 ```text
 resource-aware coordinator
-├── acquire network / CPU / blocking / extract / volume / path permits
-├── Dispatcher::dispatch()          async HTTP and compio file I/O
-├── Dispatcher::dispatch_blocking() MD5, ZIP, HDIFF, sync filesystem work
-└── receive TaskCompletion
-      ├── release every acquired permit
-      ├── update metrics and pending count
-      ├── reduce progress/outcomes
-      └── enqueue continuations
+|- activate graph nodes whose dependency count reached zero
+|- acquire network / CPU / blocking / extract / volume / path permits
+|- Dispatcher::dispatch()          async HTTP and compio file I/O
+|- Dispatcher::dispatch_blocking() MD5, ZIP, HDIFF, sync filesystem work
+`- receive TaskCompletion
+   |- release every acquired permit
+   |- update metrics
+   |- apply Succeeded / Failed / Expand to the graph
+   `- enqueue newly ready nodes
 ```
 
-Every task is assigned a `ResourceRequest` containing the resources it actually competes for:
+Every ready task is assigned one `ResourceRequest`:
 
 ```rust
 struct ResourceRequest {
@@ -37,189 +102,160 @@ struct ResourceRequest {
 }
 ```
 
-A task starts only after all requested permits can be acquired atomically. `network_slots`, `cpu_slots`, and `blocking_slots` are coordinator admission limits rather than thread counts.
+Dependency readiness and resource admission are deliberately separate. A node runs only when both are satisfied. `network_slots`, `cpu_slots`, and `blocking_slots` are admission limits, not custom thread counts.
 
-Async transfers execute on a Dispatcher runtime and return continuations via `TaskCompletion`. CPU and blocking tasks run in the Dispatcher's bounded blocking pool. If the pool transiently rejects a task, the coordinator restores it to the queue to avoid stalling other work.
-
----
-
-## 2. Ready-Queue Priority and Fairness
-
-Initial scan work enters the bulk queue. Tasks produced by completed work enter the continuation queue.
-
-The scheduler admits up to three continuations before forcing a bulk admission when bulk work is runnable. This keeps repair, retry, and dependency-unblocking work near the critical path without starving a large initial verification scan.
-
-Among runnable tasks in one priority class, admission considers:
-
-1. five-second age buckets, so old work eventually wins;
-2. physical-volume backlog, so congested volumes are drained deliberately;
-3. estimated byte cost, preferring smaller work when age and backlog are equal;
-4. original queue order as the final tie-breaker.
-
-Network work uses one shared capacity pool. General, archive, and VFS transfers receive weighted opportunities in a `4:2:1` cycle, but unused capacity is borrowable by another class.
-
-*   **Writer Priority:** A streaming writer waiting over 15 ms reserves a streaming-pressure slot. In mixed mode, readers utilize remaining capacity; in exclusive mode, the reservation blocks new reads until the volume drains.
-*   **Metadata Isolation:** Metadata mutations run in a separate lane. In mixed mode, they may overlap streaming tasks; in exclusive mode, they are isolated to prevent seek-heavy interleaving.
+Async transfers execute on Dispatcher runtimes. CPU and blocking work uses the Dispatcher's bounded blocking pool. A transient blocking-pool rejection restores the same graph node to the queue without losing its resource or dependency identity.
 
 ---
 
-## 3. Physical-Volume Admission
+## 4. Ready-Queue Priority and Fairness
 
-All reads and writes are keyed by stable physical-volume identity rather than by task kind or path spelling.
+Initial roots enter the bulk queue. Nodes created by dynamic expansion enter the continuation queue.
 
-The scheduler uses a `VolumeIoPolicy` per physical volume:
-*   `read_limit` / `write_limit` / `metadata_limit`: Concurrency limits for each task type.
-*   `streaming_pressure_limit`: Upper bound on concurrent read/write pressure.
-*   `streaming_mode`: `Mixed` (overlapping operations) or `Exclusive` (mutual exclusion between reads, writes, and metadata mutations).
+The scheduler admits up to three continuations before forcing a bulk admission when bulk work is runnable. This keeps retries and dependency-unblocking work near the critical path without starving a large initial scan.
 
-Per-volume overrides can be supplied via `TaskPoolConfig::with_volume_policy` (or CLI parameters like `--volume-read-limit`).
+Within one priority class, selection considers:
 
-Examples of work covered by the policy include:
-- full-file MD5 verification;
-- partial-download prefix hashing and metadata commit;
-- reuse-source verification;
-- archive reads and staging writes;
-- same-volume and cross-volume copy fallback;
-- patch-base reads and output writes;
-- archive commit, hardlink, delete, and cleanup operations.
+1. five-second age buckets;
+2. physical-volume backlog;
+3. waiting-writer reservation;
+4. metadata rank;
+5. estimated byte cost;
+6. original queue order.
 
-Install-root mutation additionally uses a root permit so patch, commit, delete, and cleanup operations cannot modify the same installation tree concurrently.
+General, archive, and VFS network tasks receive weighted opportunities in a `4:2:1` cycle, while unused capacity remains borrowable.
 
 ---
 
-## 4. Download Flow
+## 5. Physical-Volume Admission
+
+Reads, writes, and metadata operations are keyed by stable physical-volume identity. A `VolumeIoPolicy` controls:
+
+- `read_limit`, `write_limit`, and `metadata_limit`;
+- `streaming_pressure_limit`;
+- `streaming_mode`: `Mixed` or `Exclusive`.
+
+Install-root mutation additionally uses a path permit, so commit, patch, delete, hardlink, and cleanup tasks cannot mutate the same target concurrently.
+
+The graph does not encode these capacity constraints as edges. Doing so would make the graph machine-specific and would serialize work unnecessarily. The graph expresses correctness ordering; admission expresses current hardware capacity.
+
+---
+
+## 6. Download, Verify, Repair, and Reuse DAGs
+
+Download preparation and transfer form a dynamic chain:
 
 ```text
-Download / InstallArchivePart
-    ├── inspect .part metadata
-    ├── complete-size .part -> verify once
-    │      ├── valid -> commit without HTTP
-    │      └── invalid -> discard and restart
-    └── partial .part -> hash existing prefix once
-             │
-             └── TransferDownload / TransferArchivePart
-                    ├── shared HTTP client
-                    ├── shared weighted network permit
-                    └── destination-volume write permit
+Download
+|- complete and valid --------------------------> success
+|- resumable --------------------> TransferDownload
+`- preparation failure and retry -> Download(next attempt)
 ```
 
-The CPU preparation task passes `DownloadResumeState { offset, hasher }` to the transfer task.
+A transfer failure expands another preparation node until the shared retry budget is exhausted.
 
-- `206 Partial Content`: continue writing and MD5 from the saved offset.
-- `200 OK` after a Range request: truncate and restart from byte zero.
-- `416 Range Not Satisfiable`: delete the stale partial file and retry without Range.
-
-Each Dispatcher runtime thread lazily reuses a thread-local `cyper::Client`. After download, `.part` files are promoted via async `compio::fs::rename`; copy fallbacks are dispatched as blocking jobs.
-
----
-
-## 5. Verify, Repair, and Reuse
+Normal repair and explicit relink use conditional subgraphs:
 
 ```text
-Normal repair
-    Verify destination
-        ├── valid -> Verified
-        └── invalid -> reuse candidates -> download fallback
+normal repair
+Verify destination
+|- valid -> success
+`- invalid -> RepairFile
 
-Explicit relink
-    Reuse candidates
-        ├── verified source -> hardlink/copy commit
-        └── no usable source -> verify destination
-                                  ├── valid -> preserve destination
-                                  └── invalid -> download fallback
+explicit relink
+RepairFile
+|- verified source -> ReuseFile
+|                    |- hardlink success -> success
+|                    |- hardlink failure -> copy fallback
+|                    `- reuse failure -> another RepairFile
+`- no source -> Verify destination -> optional Download
 ```
 
-Candidate order remains the caller's original order. It is not reordered by volume-key sorting.
-
-The winner is claimed immediately rather than after every source volume finishes. A successful hardlink trusts the already-verified inode. Copy fallback hashes while copying and commits only after size and MD5 verification. A failed reuse operation re-enters repair so another source is verified before use.
-
-Reuse commits are pipelined (default limit: 16) to overlap verification and disk commits. Normal `verify --repair` verifies the destination first, querying reuse only on failure. `--relink-reuse` skips initial verification to force relinking, but verifies the destination before fallback download to avoid redownloads.
-
-Combined integrity/VFS batches are keyed by normalized physical destination. VFS index tasks own shared destinations, preventing races. Duplicate tasks collapse; conflicts fail planning. Read-only `verify` runs VFS index tasks without repair continuations.
+Reuse candidates are grouped by physical volume. Probes run as parallel DAG roots; the winning probe expands the selected commit node. The enclosing repair node waits for all probe terminals and the selected commit chain. Failed candidates do not release an unrelated download branch prematurely.
 
 ---
 
-## 6. Archive DAG
+## 7. Archive DAG
 
-Archive work is no longer one coarse task containing nested thread pools.
+Archive install now has two explicit fan-in barriers.
 
 ```text
-Extract (public request)
-    ↓
-PrepareArchive
-    ├── inspect central directory once
-    ├── create staging directory
-    ├── build and persist patch plan
-    └── split contiguous entry ranges
-         ↓
-ExtractArchiveShard × N
-    ├── archive-volume read permit
-    ├── staging-volume write permit
-    └── shared extract permit
-         ↓ all successful
-CommitArchive
-    ├── install-root mutation permit
-    ├── staged commit, or dependency-ordered patch transaction
-    └── schedule manifest follow-up where applicable
-         ↓
-CleanupArchive
-    └── remove split volumes only after successful commit
+InstallArchive
+|- InstallArchivePart 001 -> optional TransferArchivePart / retry -|
+|- InstallArchivePart 002 -> optional TransferArchivePart / retry -+-> Extract
+`- InstallArchivePart N   -> optional TransferArchivePart / retry -|
+
+Extract -> PrepareArchive
+           |- inspect central directory once
+           |- build patch plan
+           `- create extraction ranges
+                 |- ExtractArchiveShard 1 -|
+                 |- ExtractArchiveShard 2 -+-> CommitArchive
+                 `- ExtractArchiveShard N -|
+                                            `-> manifest follow-up
+                                                 `-> CleanupArchive
 ```
 
-Extraction shard completion uses a failure-aware fan-in barrier. The commit continuation is released only when every shard succeeds. The first shard failure is reported once; the remaining shards finish or observe cancellation state, and the staging directory is removed after the final shard exits.
+`Extract` cannot become ready until every split part succeeds. `CommitArchive` cannot become ready until every extraction shard succeeds. A failed part cancels extraction and all descendants; an independent archive or file branch continues.
 
-Patch waves and staged commits run without hidden per-task thread fan-out. Parallelism belongs to the central scheduler, so configured permits match actual concurrency.
+Extraction still keeps a small shared failure group solely to coordinate first-error reporting and staging cleanup after the final in-flight shard exits. It no longer releases the commit continuation; the DAG owns that barrier.
+
+For a normal staged commit, the explicit dependency order is:
+
+```text
+CommitArchive -> ApplyExtractedVfsPatchManifest
+              -> ApplyDeleteManifest
+              -> CleanupArchive
+```
+
+A transaction-based patch already performs commit, patch, and delete atomically inside the transaction and therefore expands only cleanup.
 
 ---
 
-## 7. Safety and Failure Propagation
+## 8. Failure and Cancellation
 
-Each task produces exactly one completion. Resource permits are released exclusively by the coordinator.
+Each dispatched node produces exactly one completion. Resource permits are released only by the coordinator.
 
-Task execution is wrapped with `catch_unwind` at the Dispatcher boundary. A panic produces a durable failure outcome. Rejected blocking submissions are restored to the queue; a stopped Dispatcher triggers a session failure.
+On failure:
 
-Retries share one counter across preparation and transfer phases. Archive split-part fan-in releases extraction only after every required part succeeds.
+- the node becomes `Failed`;
+- its not-yet-running descendants become `Cancelled`;
+- independent branches remain runnable;
+- a dynamic parent waiting on the failed terminal becomes `Failed`;
+- only failures with `report = true` create a durable `WorkerEvent::Failed` outcome.
+
+Task execution is wrapped with `catch_unwind` at the Dispatcher boundary. A panic becomes a reported node failure. Stale queued entries belonging to cancelled nodes are discarded and their acquired permits are immediately released.
+
+The coordinator reports an admission deadlock when unresolved graph nodes remain but there is neither runnable/in-flight work nor a transiently full Dispatcher blocking pool.
 
 ---
 
-## 8. Progress, Outcomes, and Metrics
+## 9. Progress and Metrics
 
-`WorkerEvent` carries transient progress, retries, resets, and durable facts. `TaskPoolResult` retains durable `TaskOutcome` values and a `TaskPoolMetrics` snapshot.
+`WorkerEvent` remains the frontend-neutral stream for byte progress, retries, resets, and durable outcomes. DAG state is not encoded as renderer-specific callbacks.
 
-The metrics snapshot contains:
+`TaskPoolMetrics` contains scheduler timing and a `TaskGraphSummary`:
 
-- completed task count;
+- total, pending, ready, running, waiting, succeeded, failed, and cancelled nodes;
+- dynamic expansion count;
+- completed dispatch count;
 - queue-wait p50 and p95;
 - task-duration p50 and p95;
-- per-volume estimated read/write bytes;
-- per-volume read/write/metadata task counts;
-- accumulated read/write/metadata service time and derived streaming bytes per second.
+- per-volume read/write/metadata counts, estimated bytes, and service time.
 
-Estimated bytes come from manifest or task metadata. They are intended for comparative tuning and bottleneck diagnosis, not billing-grade byte accounting.
+`run_tasks*` remains a convenience wrapper that turns a vector into independent root nodes. Callers that need explicit ordering use `TaskGraphBuilder` and `run_task_graph*` or `TaskPoolRunner::run_graph`.
 
 ---
 
-## 9. Configuration Defaults
+## 10. Granularity and Boundaries
 
-Defaults are deliberately bounded rather than proportional without limit:
+DAG nodes represent meaningful restartable work:
 
-- compio Dispatcher runtime threads: `2..=8`;
-- shared network in-flight slots: `4..=12`;
-- CPU admission slots: `1..=12`;
-- blocking admission slots: `2..=8`;
-- shared Dispatcher blocking-pool limit: CPU + blocking slots + 4 reserve slots, clamped to `8..=32`;
-- simultaneous extraction transactions: `1..=2`;
-- extraction shards per archive: `1..=4`;
-- default volume policy: mixed I/O (4 readers, 2 writers, 2 metadata, pressure 6);
-- reuse commit pipeline window: 16 files;
-- write-reservation delay: 15 ms.
+- one archive volume;
+- one file verification, repair, or materialization;
+- one extraction shard;
+- one archive commit or manifest mutation.
 
-Shared permits make concurrency resource-adaptive: idle network class capacity is borrowed, independent volumes progress concurrently, and a saturated volume blocks only tasks that need that volume.
+Network chunks, read buffers, and individual hashing blocks are intentionally not nodes. Fine-grained byte processing stays inside one executor to avoid millions of scheduler entries.
 
----
-
-## 10. Design Boundaries
-
-Patch transaction ordering and recovery are documented in [`DESIGN_patch_pipeline.md`](DESIGN_patch_pipeline.md).
-
-File allocation and Windows storage-reservation strategy are documented in [`DESIGN_optimizations.md`](DESIGN_optimizations.md).
+Patch transaction ordering and recovery are documented in [`DESIGN_patch_pipeline.md`](DESIGN_patch_pipeline.md). File allocation and Windows storage strategy are documented in [`DESIGN_optimizations.md`](DESIGN_optimizations.md).
