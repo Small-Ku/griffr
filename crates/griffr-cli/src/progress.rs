@@ -165,14 +165,6 @@ impl StepProgress {
         self.bar.set_position(clamped);
     }
 
-    pub fn start(&self, lane: ProgressLane, unit: ProgressUnit) -> ProgressSession {
-        ProgressSession::spawn(vec![ProgressRoute {
-            lane,
-            unit,
-            bar: self.clone(),
-        }])
-    }
-
     pub fn finish(&self) {
         if !self.started.load(Ordering::Acquire) {
             return;
