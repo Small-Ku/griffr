@@ -12,29 +12,31 @@ use super::super::archive_index::*;
 use super::index::MultiVolumeExtractor;
 
 const MAX_STREAMING_SHARD_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_STREAMING_SHARD_ENTRIES: usize = 512;
+const ENTRY_METADATA_COST: u64 = 256 * 1024;
 
 impl MultiVolumeExtractor {
     pub(crate) fn extraction_shards(
         archive_index: &ArchiveIndex,
-        max_shards: usize,
+        target_shards: usize,
     ) -> Vec<ArchiveExtractionShardPlan> {
         Self::extraction_shards_with_source_limit(
             archive_index,
-            max_shards,
+            target_shards,
             MAX_STREAMING_SHARD_SOURCE_BYTES,
         )
     }
 
     pub(crate) fn extraction_shards_with_source_limit(
         archive_index: &ArchiveIndex,
-        max_shards: usize,
+        target_shards: usize,
         max_source_bytes: u64,
     ) -> Vec<ArchiveExtractionShardPlan> {
         let entry_count = archive_index.entry_sizes.len();
         if entry_count == 0 {
             return Vec::new();
         }
-        let shard_budget = max_shards.max(1).min(entry_count);
+        let shard_budget = target_shards.max(1).min(entry_count);
 
         let mut buckets = BTreeMap::<usize, Vec<usize>>::new();
         for index in 0..entry_count {
@@ -52,10 +54,11 @@ impl MultiVolumeExtractor {
         let base_groups = buckets
             .into_values()
             .flat_map(|entries| {
-                Self::partition_entries_by_source_limit(
+                Self::partition_entries_by_limits(
                     archive_index,
                     entries,
                     max_source_bytes.max(1),
+                    MAX_STREAMING_SHARD_ENTRIES,
                 )
             })
             .collect::<Vec<_>>();
@@ -68,13 +71,8 @@ impl MultiVolumeExtractor {
                 .enumerate()
                 .filter(|(index, entries)| entries.len() > allocations[*index])
                 .max_by_key(|(index, entries)| {
-                    let bytes = entries
-                        .iter()
-                        .map(|entry| archive_index.entry_sizes[*entry])
-                        .sum::<u64>();
-                    bytes
+                    Self::entries_estimated_cost(archive_index, entries)
                         .div_ceil((allocations[*index] + 1) as u64)
-                        .max(entries.len() as u64)
                 })
                 .map(|(index, _)| index);
             let Some(index) = candidate else {
@@ -92,28 +90,26 @@ impl MultiVolumeExtractor {
 
         groups
             .into_iter()
-            .map(|entries| {
-                let bytes = entries
-                    .iter()
-                    .map(|index| archive_index.entry_sizes[*index])
-                    .sum();
-                Self::build_shard(archive_index, entries, bytes)
-            })
+            .map(|entries| Self::build_shard(archive_index, entries))
             .collect()
     }
 
-    fn partition_entries_by_source_limit(
+    fn partition_entries_by_limits(
         archive_index: &ArchiveIndex,
         entries: Vec<usize>,
         max_source_bytes: u64,
+        max_entries: usize,
     ) -> Vec<Vec<usize>> {
+        let max_entries = max_entries.max(1);
         let mut groups = Vec::new();
         let mut current = Vec::new();
         let mut current_bytes = 0u64;
         for entry in entries {
             let source = &archive_index.entry_sources[entry].range;
             let source_bytes = source.end.saturating_sub(source.start);
-            if !current.is_empty() && current_bytes.saturating_add(source_bytes) > max_source_bytes
+            if !current.is_empty()
+                && (current_bytes.saturating_add(source_bytes) > max_source_bytes
+                    || current.len() >= max_entries)
             {
                 groups.push(std::mem::take(&mut current));
                 current_bytes = 0;
@@ -136,27 +132,25 @@ impl MultiVolumeExtractor {
         if parts == 1 {
             return vec![entries];
         }
-        let total_bytes = entries
-            .iter()
-            .map(|index| archive_index.entry_sizes[*index])
-            .sum::<u64>();
-        let target = total_bytes.div_ceil(parts as u64).max(1);
+        let total_cost = Self::entries_estimated_cost(archive_index, &entries);
+        let target = total_cost.div_ceil(parts as u64).max(1);
         let entry_count = entries.len();
         let mut groups = Vec::with_capacity(parts);
         let mut current = Vec::new();
-        let mut current_bytes = 0u64;
+        let mut current_cost = 0u64;
 
         for (position, entry) in entries.into_iter().enumerate() {
-            current_bytes = current_bytes.saturating_add(archive_index.entry_sizes[entry]);
+            current_cost =
+                current_cost.saturating_add(Self::entry_estimated_cost(archive_index, entry));
             current.push(entry);
             let remaining_entries = entry_count.saturating_sub(position + 1);
             let remaining_groups = parts.saturating_sub(groups.len() + 1);
             if remaining_groups > 0
                 && remaining_entries >= remaining_groups
-                && (current_bytes >= target || remaining_entries == remaining_groups)
+                && (current_cost >= target || remaining_entries == remaining_groups)
             {
                 groups.push(std::mem::take(&mut current));
-                current_bytes = 0;
+                current_cost = 0;
             }
         }
         if !current.is_empty() {
@@ -165,10 +159,32 @@ impl MultiVolumeExtractor {
         groups
     }
 
+    fn entries_estimated_cost(archive_index: &ArchiveIndex, entries: &[usize]) -> u64 {
+        entries.iter().fold(0u64, |cost, entry| {
+            cost.saturating_add(Self::entry_estimated_cost(archive_index, *entry))
+        })
+    }
+
+    fn entry_estimated_cost(archive_index: &ArchiveIndex, entry: usize) -> u64 {
+        let compressed_bytes = archive_index.entry_compressed_sizes[entry];
+        let output_bytes = archive_index.entry_sizes[entry];
+        let compression_weight = match archive_index.entry_compression_methods[entry] {
+            0 => 1,            // stored
+            8 => 4,            // deflate
+            9 => 5,            // deflate64
+            12 | 14 | 95 => 6, // bzip2, lzma, xz
+            93 => 3,           // zstd
+            _ => 4,
+        };
+        compressed_bytes
+            .saturating_mul(compression_weight)
+            .saturating_add(output_bytes.saturating_mul(2))
+            .saturating_add(ENTRY_METADATA_COST)
+    }
+
     fn build_shard(
         archive_index: &ArchiveIndex,
         entries: Vec<usize>,
-        uncompressed_bytes: u64,
     ) -> ArchiveExtractionShardPlan {
         let volume_indices = entries
             .iter()
@@ -181,10 +197,11 @@ impl MultiVolumeExtractor {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        let estimated_cost = Self::entries_estimated_cost(archive_index, &entries);
         ArchiveExtractionShardPlan {
             entries,
             volume_indices,
-            uncompressed_bytes,
+            estimated_cost,
         }
     }
 

@@ -179,6 +179,7 @@ impl MultiVolumeExtractor {
         let mut cursor = 0usize;
         let mut entries = BTreeMap::new();
         let mut entry_sizes = Vec::with_capacity(directory.entry_count);
+        let mut entry_compression_methods = Vec::with_capacity(directory.entry_count);
         let mut compressed_sizes = Vec::with_capacity(directory.entry_count);
         let mut starts = Vec::with_capacity(directory.entry_count);
         let mut control_indices = Vec::new();
@@ -190,6 +191,7 @@ impl MultiVolumeExtractor {
                     "Invalid central-directory record at entry {index}"
                 )));
             }
+            let compression_method = read_u16(&central, cursor + 10)?;
             let compressed_32 = read_u32(&central, cursor + 20)?;
             let uncompressed_32 = read_u32(&central, cursor + 24)?;
             let name_len = usize::from(read_u16(&central, cursor + 28)?);
@@ -284,6 +286,7 @@ impl MultiVolumeExtractor {
             }
             starts.push((absolute_start, index));
             compressed_sizes.push(compressed_size);
+            entry_compression_methods.push(compression_method);
             let is_directory = name.ends_with('/');
             entry_sizes.push(if is_directory { 0 } else { size });
             if !normalized.is_empty() && !is_directory {
@@ -347,6 +350,8 @@ impl MultiVolumeExtractor {
             archive,
             total_uncompressed_bytes,
             entry_sizes,
+            entry_compressed_sizes: compressed_sizes,
+            entry_compression_methods,
             entry_sources,
             control_indices,
             patch_manifest: None,

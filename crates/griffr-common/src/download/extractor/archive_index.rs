@@ -39,6 +39,8 @@ pub struct ArchiveIndex {
     pub(crate) archive: zip::ZipArchive<MultiVolumeStream>,
     pub total_uncompressed_bytes: u64,
     pub(crate) entry_sizes: Vec<u64>,
+    pub(crate) entry_compressed_sizes: Vec<u64>,
+    pub(crate) entry_compression_methods: Vec<u16>,
     pub(crate) entry_sources: Vec<ArchiveEntrySource>,
     pub(crate) control_indices: Vec<usize>,
     pub patch_manifest: Option<ResourcePatch>,
@@ -49,7 +51,7 @@ pub struct ArchiveIndex {
 pub(crate) struct ArchiveExtractionShardPlan {
     pub(crate) entries: Vec<usize>,
     pub(crate) volume_indices: Vec<usize>,
-    pub(crate) uncompressed_bytes: u64,
+    pub(crate) estimated_cost: u64,
 }
 
 pub(crate) fn read_u16(bytes: &[u8], offset: usize) -> Result<u16> {

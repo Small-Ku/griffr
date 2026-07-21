@@ -306,6 +306,75 @@ fn extraction_shards_never_merge_distinct_release_frontiers() -> Result<()> {
 }
 
 #[test]
+fn extraction_shard_cost_accounts_for_compression_method() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let zip_path = temp_dir.path().join("compression-cost.zip");
+    let file = std::fs::File::create(&zip_path)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let stored =
+        zip::write::FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored);
+    let deflated = zip::write::FileOptions::<()>::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let mut state = 0x9e37_79b9_u32;
+    let payload = (0..256 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect::<Vec<_>>();
+    zip.start_file("stored.bin", stored)?;
+    zip.write_all(&payload)?;
+    zip.start_file("deflated.bin", deflated)?;
+    zip.write_all(&payload)?;
+    zip.finish()?;
+
+    let extractor = MultiVolumeExtractor::new(vec![zip_path])?;
+    let archive_index = extractor.read_patch_payload(None)?;
+    assert_eq!(archive_index.entry_compression_methods, vec![0, 8]);
+
+    let shards = MultiVolumeExtractor::extraction_shards(&archive_index, 2);
+    assert_eq!(shards.len(), 2);
+    assert_eq!(shards[0].entries, vec![0]);
+    assert_eq!(shards[1].entries, vec![1]);
+    assert!(
+        shards[1].estimated_cost > shards[0].estimated_cost,
+        "deflate work should carry more scheduler cost than stored output of the same size"
+    );
+    Ok(())
+}
+
+#[test]
+fn extraction_shards_cap_small_file_metadata_batches() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let zip_path = temp_dir.path().join("many-small-files.zip");
+    let file = std::fs::File::create(&zip_path)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options =
+        zip::write::FileOptions::<()>::default().compression_method(zip::CompressionMethod::Stored);
+    for index in 0..1_025 {
+        zip.start_file(format!("small-{index:04}.bin"), options)?;
+        zip.write_all(&[index as u8])?;
+    }
+    zip.finish()?;
+
+    let extractor = MultiVolumeExtractor::new(vec![zip_path])?;
+    let archive_index = extractor.read_patch_payload(None)?;
+    let shards = MultiVolumeExtractor::extraction_shards(&archive_index, 1);
+    assert_eq!(shards.len(), 3);
+    assert!(shards.iter().all(|shard| shard.entries.len() <= 512));
+    assert_eq!(
+        shards
+            .iter()
+            .map(|shard| shard.entries.len())
+            .sum::<usize>(),
+        1_025
+    );
+    Ok(())
+}
+
+#[test]
 fn spanned_zip_metadata_is_rejected() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let zip_path = temp_dir.path().join("spanned.zip");
