@@ -111,7 +111,7 @@ class RustCheckTests(unittest.TestCase):
         root = self.make_workspace(
             "#[cfg(test)]\n"
             "mod tests {\n"
-            "    async fn fixture(path: &std::path::Path) {\n"
+            "    async fn test_data_setup(path: &std::path::Path) {\n"
             "        let _ = std::fs::read(path);\n"
             "    }\n"
             "}\n"
@@ -750,11 +750,11 @@ class RustCheckTests(unittest.TestCase):
 
     def test_manual_checked_division_is_reported_and_fixed(self) -> None:
         root = self.make_workspace(
-            "fn bucket(completed: u64, total: u64) -> u64 {\n"
+            "fn bucket(finished: u64, total: u64) -> u64 {\n"
             "    if total == 0 {\n"
             "        0\n"
             "    } else {\n"
-            "        ((completed.saturating_mul(100) / total) / 5) * 5\n"
+            "        ((finished.saturating_mul(100) / total) / 5) * 5\n"
             "    }\n"
             "}\n"
         )
@@ -801,8 +801,8 @@ class RustCheckTests(unittest.TestCase):
     def test_manual_checked_ops_allow_is_respected(self) -> None:
         root = self.make_workspace(
             "#[allow(clippy::manual_checked_ops)]\n"
-            "fn bucket(completed: u64, total: u64) -> u64 {\n"
-            "    if total == 0 { 0 } else { completed / total }\n"
+            "fn bucket(finished: u64, total: u64) -> u64 {\n"
+            "    if total == 0 { 0 } else { finished / total }\n"
             "}\n"
         )
         self.assertNotIn("CLP008", self.codes(self.run_checker(root)))
@@ -892,6 +892,87 @@ class RustCheckTests(unittest.TestCase):
         diagnostics_op = self.diagnostics(self.run_checker(root_op), "WRD001")
         self.assertEqual(1, len(diagnostics_op))
 
+    def test_restricted_name_segments_are_reported(self) -> None:
+        snake_root = self.make_workspace("fn update(completed_tasks: u64) {}\n")
+        snake = self.diagnostics(self.run_checker(snake_root), "WRD001")
+        self.assertEqual(1, len(snake))
+        self.assertIn("completed_tasks", snake[0].evidence[-1])
+
+        camel_root = self.make_workspace("struct TaskCompletion;\n")
+        camel = self.diagnostics(self.run_checker(camel_root), "WRD001")
+        self.assertEqual(1, len(camel))
+        self.assertIn("TaskCompletion", camel[0].evidence[-1])
+
+        first_root = self.make_workspace("struct InitialGraph;\n")
+        first = self.diagnostics(self.run_checker(first_root), "WRD001")
+        self.assertEqual(1, len(first))
+
+        setup_root = self.make_workspace(
+            "struct TaskInitializer;\nfn update(initialized_state: bool) {}\n"
+        )
+        setup = self.diagnostics(self.run_checker(setup_root), "WRD001")
+        self.assertEqual(2, len(setup))
+
+    def test_restricted_path_segments_are_reported(self) -> None:
+        root = self.make_workspace(
+            "mod worker;\n",
+            {"src/completion_worker.rs": "pub fn run() {}\n"},
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "WRD001")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("completion_worker.rs", diagnostics[0].evidence[0])
+
+    def test_fixed_external_wording_is_allowed(self) -> None:
+        root = self.make_workspace(
+            "fn hash(mut hasher: Md5) { let _ = hasher.finalize(); }\n"
+            "struct ResourceIndex { index_initial: String, pref_initial: String }\n"
+            "const RESOURCE_GROUP_BASE: &str = \"initial\";\n"
+            "fn stop() { TerminateProcess(handle, 1); }\n",
+            {
+                "docs/io.md": "Windows uses an I/O completion port (IOCP).\n"
+                "The game log says `Assets initialized`.\n",
+                "src/grammar.rs": 'const NODE: &str = "field_initializer";\n',
+            },
+        )
+        self.assertNotIn("WRD001", self.codes(self.run_checker(root)))
+
+    def test_external_import_name_is_not_a_project_definition(self) -> None:
+        root = self.make_workspace(
+            "use outside::TaskCompletion;\n"
+            "fn run(value: TaskCompletion) { let _ = value; }\n",
+            manifest=(
+                '[package]\nname = "sample"\nversion = "0.1.0"\nedition = "2021"\n'
+                '[dependencies]\noutside = "1"\n'
+            ),
+        )
+        self.assertNotIn("WRD001", self.codes(self.run_checker(root)))
+
+    def test_internal_method_name_is_checked_but_method_calls_are_not(self) -> None:
+        call_root = self.make_workspace(
+            "fn hash(mut hasher: Md5) { let _ = hasher.finalize(); }\n"
+        )
+        self.assertNotIn("WRD001", self.codes(self.run_checker(call_root)))
+
+        definition_root = self.make_workspace(
+            "struct Hash;\nimpl Hash { fn finalize(&self) {} }\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(definition_root), "WRD001")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("internal definition: finalize", diagnostics[0].evidence)
+
+    def test_wording_definition_keeps_resolved_source_evidence(self) -> None:
+        root = self.make_workspace(
+            "mod task;\n",
+            {"src/task.rs": "pub struct TaskCompletion;\n"},
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "WRD001")
+        self.assertEqual(1, len(diagnostics))
+        self.assertEqual("src/task.rs", diagnostics[0].path)
+        self.assertIn(
+            "source file resolved from the crate module graph",
+            diagnostics[0].evidence,
+        )
+
     def test_vague_file_name_is_reported(self) -> None:
         vague_name = "models" + ".rs"
         root = self.make_workspace(
@@ -906,6 +987,275 @@ class RustCheckTests(unittest.TestCase):
         checker = self.run_checker(root)
         self.assertNotIn("WRD001", self.codes(checker))
         self.assertNotIn("WRD002", self.codes(checker))
+
+
+    def test_removed_data_structure_name_is_reported(self) -> None:
+        root = self.make_workspace("struct DownloadExecInput { value: u32 }\n")
+        diagnostics = self.diagnostics(self.run_checker(root), "DST001")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("DownloadExecInput", diagnostics[0].message)
+
+    def test_canonical_data_structure_names_are_allowed(self) -> None:
+        root = self.make_workspace(
+            "struct DownloadResumeState;\n"
+            "enum PathReuseMethod { Hardlink, Copy }\n"
+            "enum Task { Download { resume: Option<DownloadResumeState> } }\n"
+        )
+        self.assertNotIn("DST001", self.codes(self.run_checker(root)))
+
+    def test_worker_event_terminal_mirror_is_reported(self) -> None:
+        root = self.make_workspace(
+            "enum ProgressPhase { Download }\n"
+            "enum TaskOutcome { ArchiveCheck, Downloaded, Verified, Changed, Hardlinked, Copied, Failed }\n"
+            "enum WorkerEvent {\n"
+            "    Progress { phase: ProgressPhase, path: String, finished: u64, total: u64, reset: bool },\n"
+            "    Retried { path: String, reason: String },\n"
+            "    Outcome(TaskOutcome),\n"
+            "    Downloaded { path: String },\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DST002")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("WorkerEvent", diagnostics[0].message)
+
+    def test_canonical_worker_event_model_is_allowed(self) -> None:
+        root = self.make_workspace(
+            "enum ProgressPhase { Download }\n"
+            "enum TaskOutcome { ArchiveCheck, Downloaded, Verified, Changed, Hardlinked, Copied, Failed }\n"
+            "enum WorkerEvent {\n"
+            "    Progress { phase: ProgressPhase, path: String, finished: u64, total: u64, reset: bool },\n"
+            "    Retried { path: String, reason: String },\n"
+            "    Outcome(TaskOutcome),\n"
+            "}\n"
+        )
+        self.assertNotIn("DST002", self.codes(self.run_checker(root)))
+
+    def test_download_task_requires_optional_resume(self) -> None:
+        root = self.make_workspace(
+            "enum TransferClass { Package }\n"
+            "enum Task { Download {\n"
+            "    url: String, dest: String, logical_path: String, expected_md5: String,\n"
+            "    expected_size: Option<u64>, retry_count: u32, transfer_class: TransferClass,\n"
+            "} }\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DST003")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("Task::Download", diagnostics[0].message)
+
+    def test_canonical_download_task_is_allowed(self) -> None:
+        root = self.make_workspace(
+            "struct DownloadResumeState; enum TransferClass { Package }\n"
+            "enum Task { Download {\n"
+            "    url: String, dest: String, logical_path: String, expected_md5: String,\n"
+            "    expected_size: Option<u64>, retry_count: u32, transfer_class: TransferClass,\n"
+            "    resume: Option<DownloadResumeState>,\n"
+            "} }\n"
+        )
+        self.assertNotIn("DST003", self.codes(self.run_checker(root)))
+
+    def test_unsupported_resource_result_requires_option(self) -> None:
+        root = self.make_workspace(
+            "type Result<T> = std::result::Result<T, ()>; struct Response;\n"
+            "fn get_latest_resources() -> Result<Response> { todo!() }\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DST004")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("Result<Option", diagnostics[0].message)
+
+    def test_optional_resource_result_is_allowed(self) -> None:
+        root = self.make_workspace(
+            "type Result<T> = std::result::Result<T, ()>; struct Response;\n"
+            "fn get_latest_resources() -> Result<Option<Response>> { Ok(None) }\n"
+        )
+        self.assertNotIn("DST004", self.codes(self.run_checker(root)))
+
+    def test_legacy_error_variants_are_reported(self) -> None:
+        root = self.make_workspace(
+            "enum Error {\n"
+            "    IoAt { action: &'static str, path: String, source: std::io::Error },\n"
+            "    IoBetween { action: &'static str, src: String, dest: String, source: std::io::Error },\n"
+            "    Message { context: &'static str, detail: String },\n"
+            "    Download(String),\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DST005")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("canonical", diagnostics[0].message)
+
+    def test_canonical_error_payloads_are_allowed(self) -> None:
+        root = self.make_workspace(
+            "enum Error {\n"
+            "    IoAt { action: &'static str, path: String, source: std::io::Error },\n"
+            "    IoBetween { action: &'static str, src: String, dest: String, source: std::io::Error },\n"
+            "    Message { context: &'static str, detail: String },\n"
+            "}\n"
+        )
+        self.assertNotIn("DST005", self.codes(self.run_checker(root)))
+
+    def test_error_constructor_fields_follow_canonical_payload(self) -> None:
+        root = self.make_workspace(
+            "enum Error {\n"
+            "    IoAt { action: &'static str, path: String, source: std::io::Error },\n"
+            "    IoBetween { action: &'static str, src: String, dest: String, source: std::io::Error },\n"
+            "    Message { context: &'static str, detail: String },\n"
+            "}\n"
+            "fn make() { let _ = Error::Message { context: \"x\" }; }\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DST008")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("missing fields", diagnostics[0].message)
+
+    def test_legacy_error_constructor_reference_is_reported(self) -> None:
+        root = self.make_workspace(
+            "enum Error {\n"
+            "    IoAt { action: &'static str, path: String, source: std::io::Error },\n"
+            "    IoBetween { action: &'static str, src: String, dest: String, source: std::io::Error },\n"
+            "    Message { context: &'static str, detail: String },\n"
+            "}\n"
+            "fn make() { let _ = Error::Download(String::new()); }\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DST008")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("Legacy Error::Download", diagnostics[0].message)
+
+    def test_canonical_error_constructor_is_allowed(self) -> None:
+        root = self.make_workspace(
+            "enum Error {\n"
+            "    IoAt { action: &'static str, path: String, source: std::io::Error },\n"
+            "    IoBetween { action: &'static str, src: String, dest: String, source: std::io::Error },\n"
+            "    Message { context: &'static str, detail: String },\n"
+            "}\n"
+            "fn make() { let _ = Error::Message { context: \"x\", detail: String::new() }; }\n"
+        )
+        self.assertNotIn("DST008", self.codes(self.run_checker(root)))
+
+    def test_download_stage_routing_is_checked(self) -> None:
+        root = self.make_workspace(
+            "fn run_blocking_task() {}\n"
+            "async fn run_async_task() {}\n"
+            "fn run_class() {}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DST009")
+        self.assertEqual(3, len(diagnostics))
+
+    def test_canonical_download_stage_routing_is_allowed(self) -> None:
+        root = self.make_workspace(
+            "enum Task { Download { resume: Option<()> } }\n"
+            "enum RunClass { AsyncIo, Cpu }\n"
+            "fn run_blocking_task(task: Task) {\n"
+            "    match task { Task::Download { resume: None, .. } => {}, _ => {} }\n"
+            "}\n"
+            "async fn run_async_task(task: Task) {\n"
+            "    match task { Task::Download { resume: Some(_), .. } => {}, _ => {} }\n"
+            "}\n"
+            "fn run_class(task: &Task) -> RunClass {\n"
+            "    match task { Task::Download { resume, .. } => {\n"
+            "        if resume.is_some() { RunClass::AsyncIo } else { RunClass::Cpu }\n"
+            "    } }\n"
+            "}\n"
+        )
+        self.assertNotIn("DST009", self.codes(self.run_checker(root)))
+
+    def test_duplicate_runtime_reuse_result_is_reported(self) -> None:
+        root = self.make_workspace(
+            "mod runtime;\n",
+            {
+                "src/runtime.rs": (
+                    "pub enum PathReuseMethod { Hardlink, Copy }\n"
+                    "enum FileReuseResult { Hardlink, Copy }\n"
+                )
+            },
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DST010")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("duplicates PathReuseMethod", diagnostics[0].message)
+
+    def test_canonical_runtime_reuse_result_is_allowed(self) -> None:
+        root = self.make_workspace(
+            "mod runtime;\n",
+            {"src/runtime.rs": "pub enum PathReuseMethod { Hardlink, Copy }\n"},
+        )
+        self.assertNotIn("DST010", self.codes(self.run_checker(root)))
+
+    def test_repeated_nested_if_condition_is_reported(self) -> None:
+        root = self.make_workspace(
+            "fn run(a: bool) -> u32 {\n"
+            "    if a {\n"
+            "        if a { return 1; }\n"
+            "        return 2;\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DST007")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("same condition", diagnostics[0].message)
+
+    def test_distinct_nested_if_conditions_are_allowed(self) -> None:
+        root = self.make_workspace(
+            "fn run(a: bool, b: bool) -> u32 {\n"
+            "    if a {\n"
+            "        if b { return 1; }\n"
+            "    }\n"
+            "    0\n"
+            "}\n"
+        )
+        self.assertNotIn("DST007", self.codes(self.run_checker(root)))
+
+    def test_identical_adjacent_let_is_reported(self) -> None:
+        root = self.make_workspace(
+            "fn run() {\n"
+            "    let mut heartbeat = 1u32;\n"
+            "    let mut heartbeat = 1u32;\n"
+            "    heartbeat += 1;\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DST011")
+        self.assertEqual(1, len(diagnostics))
+
+    def test_distinct_adjacent_lets_are_allowed(self) -> None:
+        root = self.make_workspace(
+            "fn run() {\n"
+            "    let heartbeat = 1u32;\n"
+            "    let retries = 1u32;\n"
+            "    let _ = heartbeat + retries;\n"
+            "}\n"
+        )
+        self.assertNotIn("DST011", self.codes(self.run_checker(root)))
+
+    def test_runner_task_payload_mirror_is_reported(self) -> None:
+        root = self.make_workspace(
+            "mod runtime;\n",
+            {
+                "src/runtime.rs": "pub mod task_pool;\n",
+                "src/runtime/task_pool.rs": (
+                    "pub mod runner;\n"
+                    "pub enum Task { RepairFile { url: String, dest: String, md5: String, size: u64 } }\n"
+                ),
+                "src/runtime/task_pool/runner/mod.rs": (
+                    "struct RepairInput { url: String, dest: String, md5: String, size: u64 }\n"
+                ),
+            },
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DST006")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("mirrors Task::RepairFile", diagnostics[0].message)
+
+    def test_runner_distinct_state_is_not_a_task_payload_mirror(self) -> None:
+        root = self.make_workspace(
+            "mod runtime;\n",
+            {
+                "src/runtime.rs": "pub mod task_pool;\n",
+                "src/runtime/task_pool.rs": (
+                    "pub mod runner;\n"
+                    "pub enum Task { RepairFile { url: String, dest: String, md5: String, size: u64 } }\n"
+                ),
+                "src/runtime/task_pool/runner/mod.rs": (
+                    "struct RetryState { attempts: u32, delay_ms: u64, last_status: u16, server: String }\n"
+                ),
+            },
+        )
+        self.assertNotIn("DST006", self.codes(self.run_checker(root)))
 
 
 if __name__ == "__main__":

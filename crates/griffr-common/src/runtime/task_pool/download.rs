@@ -28,8 +28,8 @@ fn duration_from_env_secs(var: &str, default_secs: u64) -> std::time::Duration {
 }
 
 pub(crate) enum DownloadPreparation {
-    Complete(u64),
-    Ready(DownloadResumeState),
+    Done(u64),
+    Resume(DownloadResumeState),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,33 +49,38 @@ pub(crate) fn prepare_download(
     let metadata = match std::fs::metadata(&part_path) {
         Ok(metadata) => metadata,
         Err(source) if source.kind() == ErrorKind::NotFound => {
-            return Ok(DownloadPreparation::Ready(DownloadResumeState::new(
+            return Ok(DownloadPreparation::Resume(DownloadResumeState::new(
                 0,
                 Md5::new(),
             )));
         }
         Err(source) => {
-            return Err(Error::StatFailed {
+            return Err(Error::IoAt {
+                action: "query file metadata/stat for",
                 path: part_path,
                 source,
             });
         }
     };
     if !metadata.is_file() {
-        return Err(Error::Download(format!(
-            "Partial download path is not a file: {}",
-            part_path.display()
-        )));
+        return Err(Error::Message {
+            context: "Download error: ",
+            detail: format!(
+                "Partial download path is not a file: {}",
+                part_path.display()
+            ),
+        });
     }
 
     let partial_len = metadata.len();
     if let Some(expected_size) = expected_size {
         if partial_len > expected_size {
-            std::fs::remove_file(&part_path).map_err(|source| Error::RemoveFailed {
+            std::fs::remove_file(&part_path).map_err(|source| Error::IoAt {
+                action: "remove file or directory",
                 path: part_path.clone(),
                 source,
             })?;
-            return Ok(DownloadPreparation::Ready(DownloadResumeState::new(
+            return Ok(DownloadPreparation::Resume(DownloadResumeState::new(
                 0,
                 Md5::new(),
             )));
@@ -84,13 +89,14 @@ pub(crate) fn prepare_download(
             let actual_md5 = super::verify::file_md5(&part_path)?;
             if actual_md5 == expected_md5.to_ascii_lowercase() {
                 super::fs_ops::commit_partial_download(&part_path, dest)?;
-                return Ok(DownloadPreparation::Complete(partial_len));
+                return Ok(DownloadPreparation::Done(partial_len));
             }
-            std::fs::remove_file(&part_path).map_err(|source| Error::RemoveFailed {
+            std::fs::remove_file(&part_path).map_err(|source| Error::IoAt {
+                action: "remove file or directory",
                 path: part_path.clone(),
                 source,
             })?;
-            return Ok(DownloadPreparation::Ready(DownloadResumeState::new(
+            return Ok(DownloadPreparation::Resume(DownloadResumeState::new(
                 0,
                 Md5::new(),
             )));
@@ -99,7 +105,7 @@ pub(crate) fn prepare_download(
 
     let mut hasher = Md5::new();
     super::fs_ops::hash_file_prefix_into_hasher(&part_path, partial_len, &mut hasher)?;
-    Ok(DownloadPreparation::Ready(DownloadResumeState::new(
+    Ok(DownloadPreparation::Resume(DownloadResumeState::new(
         partial_len,
         hasher,
     )))
@@ -137,12 +143,16 @@ pub(crate) async fn do_prepared_download(
         let mut request = client.get(&url_owned)?;
         request = request
             .header(USER_AGENT_HEADER, user_agent_owned.clone())
-            .map_err(|e| Error::Download(format!("Failed to attach User-Agent header: {e}")))?;
+            .map_err(|e| Error::Message {
+                context: "Download error: ",
+                detail: format!("Failed to attach User-Agent header: {e}"),
+            })?;
         if resume_offset > 0 {
             request = request
                 .header(RANGE_HEADER, byte_range_from(resume_offset))
-                .map_err(|e| {
-                    Error::Download(format!("Failed to set Range header for resume: {e}"))
+                .map_err(|e| Error::Message {
+                    context: "Download error: ",
+                    detail: format!("Failed to set Range header for resume: {e}"),
                 })?;
             debug!(
                 "resuming download from byte {} for {}",
@@ -151,14 +161,18 @@ pub(crate) async fn do_prepared_download(
         }
         let mut response = compio::time::timeout(send_timeout, request.send())
             .await?
-            .map_err(|e| Error::Download(format!("Failed to download {}: {e}", url_owned)))?;
+            .map_err(|e| Error::Message {
+                context: "Download error: ",
+                detail: format!("Failed to download {}: {e}", url_owned),
+            })?;
         let mut progress_reset = false;
         if resume_offset > 0 && response.status().as_u16() == 416 {
             match compio::fs::remove_file(&part_path_for_write).await {
                 Ok(()) => {}
                 Err(source) if source.kind() == ErrorKind::NotFound => {}
                 Err(source) => {
-                    return Err(Error::RemoveFailed {
+                    return Err(Error::IoAt {
+                        action: "remove file or directory",
                         path: part_path_for_write.clone(),
                         source,
                     })
@@ -176,26 +190,34 @@ pub(crate) async fn do_prepared_download(
             let retry_request = client
                 .get(&url_owned)?
                 .header(USER_AGENT_HEADER, user_agent_owned.clone())
-                .map_err(|e| Error::Download(format!("Failed to attach User-Agent header: {e}")))?;
+                .map_err(|e| Error::Message {
+                    context: "Download error: ",
+                    detail: format!("Failed to attach User-Agent header: {e}"),
+                })?;
             response = compio::time::timeout(send_timeout, retry_request.send())
                 .await?
-                .map_err(|e| {
-                    Error::Download(format!(
+                .map_err(|e| Error::Message {
+                    context: "Download error: ",
+                    detail: format!(
                         "Failed to restart download {} after HTTP 416: {e}",
                         url_owned
-                    ))
+                    ),
                 })?;
         }
 
         let status = response.status();
         if !status.is_success() {
-            return Err(Error::Download(format!("HTTP error {}", status)));
+            return Err(Error::Message {
+                context: "Download error: ",
+                detail: format!("HTTP error {}", status),
+            });
         }
 
         if let Some(parent) = part_path_for_write.parent() {
             compio::fs::create_dir_all(parent)
                 .await
-                .map_err(|e| Error::CreateDirFailed {
+                .map_err(|e| Error::IoAt {
+                    action: "create directory",
                     path: parent.to_path_buf(),
                     source: e,
                 })?;
@@ -216,14 +238,14 @@ pub(crate) async fn do_prepared_download(
             .create(true)
             .write(true)
             .truncate(!resume_effective);
-        let mut out =
-            open_options
-                .open(&part_path_for_write)
-                .await
-                .map_err(|e| Error::OpenFileFailed {
-                    path: part_path_for_write.clone(),
-                    source: e,
-                })?;
+        let mut out = open_options
+            .open(&part_path_for_write)
+            .await
+            .map_err(|e| Error::IoAt {
+                action: "open file",
+                path: part_path_for_write.clone(),
+                source: e,
+            })?;
 
         if let Some(expected_size) = expected_size {
             preallocate_file(&out, &part_path_for_write, expected_size)?;
@@ -244,22 +266,26 @@ pub(crate) async fn do_prepared_download(
             let next: Option<std::result::Result<Bytes, cyper::Error>> =
                 compio::time::timeout(body_timeout, stream.next())
                     .await
-                    .map_err(|_| {
-                        Error::Download(format!(
+                    .map_err(|_| Error::Message {
+                        context: "Download error: ",
+                        detail: format!(
                             "Timed out reading response body from {} (timeout={}s)",
                             url_owned,
                             body_timeout.as_secs()
-                        ))
+                        ),
                     })?;
             let Some(chunk) = next else {
                 break;
             };
-            let chunk: Bytes = chunk
-                .map_err(|e| Error::Download(format!("Failed to read response body chunk: {e}")))?;
+            let chunk: Bytes = chunk.map_err(|e| Error::Message {
+                context: "Download error: ",
+                detail: format!("Failed to read response body chunk: {e}"),
+            })?;
             md5::Digest::update(&mut hasher, chunk.as_ref());
             let chunk_len = chunk.len() as u64;
             let BufResult(write_result, _) = out.write_all_at(chunk, write_offset).await;
-            write_result.map_err(|e| Error::WriteFileFailed {
+            write_result.map_err(|e| Error::IoAt {
+                action: "write to file",
                 path: part_path_for_write.clone(),
                 source: e,
             })?;
@@ -282,17 +308,21 @@ pub(crate) async fn do_prepared_download(
             }
         }
 
-        out.sync_data().await.map_err(|e| Error::WriteFileFailed {
+        out.sync_data().await.map_err(|e| Error::IoAt {
+            action: "write to file",
             path: part_path_for_write.clone(),
             source: e,
         })?;
 
         if let Some(expected) = expected_size {
             if total_written != expected {
-                return Err(Error::Download(format!(
-                    "Downloaded size mismatch for {}: expected {}, got {}",
-                    url_owned, expected, total_written
-                )));
+                return Err(Error::Message {
+                    context: "Download error: ",
+                    detail: format!(
+                        "Downloaded size mismatch for {}: expected {}, got {}",
+                        url_owned, expected, total_written
+                    ),
+                });
             }
         }
 
@@ -301,16 +331,20 @@ pub(crate) async fn do_prepared_download(
     }?;
 
     if actual_md5 != expected_md5.to_ascii_lowercase() {
-        return Err(Error::Download(format!(
-            "MD5 mismatch: expected {}, got {}",
-            expected_md5, actual_md5
-        )));
+        return Err(Error::Message {
+            context: "Download error: ",
+            detail: format!(
+                "MD5 mismatch: expected {}, got {}",
+                expected_md5, actual_md5
+            ),
+        });
     }
 
     super::fs_ops::commit_partial_download_async(&part_path, dest).await?;
     let metadata = compio::fs::metadata(dest)
         .await
-        .map_err(|source| Error::StatFailed {
+        .map_err(|source| Error::IoAt {
+            action: "query file metadata/stat for",
             path: dest.to_path_buf(),
             source,
         })?;

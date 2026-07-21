@@ -16,7 +16,7 @@ pub struct SourceInstallInput {
     pub install_path: PathBuf,
 }
 
-/// Configuration for the manifest-driven game-file ensure operation.
+/// Configuration for the manifest-driven game-file ensure work.
 #[derive(Debug, Clone)]
 pub struct FileReuseConfig {
     /// Allow copying files when hardlink creation fails.

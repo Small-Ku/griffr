@@ -3,9 +3,8 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use crate::error::{Error, Result};
-use crate::runtime::patch_transaction::{
-    write_patch_storage_layout, PatchPlan, PatchStorageLayout, PATCH_DEFERRED_DIR,
-    PATCH_TRANSACTION_DIR,
+use crate::runtime::patch_apply::{
+    write_patch_storage_layout, PatchPlan, PatchStorageLayout, PATCH_DEFERRED_DIR, PATCH_WORK_DIR,
 };
 use crate::runtime::task_pool::verify::file_md5;
 use crate::runtime::{DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR};
@@ -17,17 +16,20 @@ use super::super::super::extract::{
 pub(super) fn remove_path_if_exists(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-            std::fs::remove_dir_all(path).map_err(|source| Error::RemoveFailed {
+            std::fs::remove_dir_all(path).map_err(|source| Error::IoAt {
+                action: "remove file or directory",
                 path: path.to_path_buf(),
                 source,
             })
         }
-        Ok(_) => std::fs::remove_file(path).map_err(|source| Error::RemoveFailed {
+        Ok(_) => std::fs::remove_file(path).map_err(|source| Error::IoAt {
+            action: "remove file or directory",
             path: path.to_path_buf(),
             source,
         }),
         Err(source) if source.kind() == ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(Error::StatFailed {
+        Err(source) => Err(Error::IoAt {
+            action: "query file metadata/stat for",
             path: path.to_path_buf(),
             source,
         }),
@@ -40,44 +42,49 @@ pub(super) fn move_file_cross_volume(source: &Path, target: &Path) -> Result<()>
 
 pub(super) fn move_directory_contents(source: &Path, target: &Path) -> Result<()> {
     if !source.exists() {
-        std::fs::create_dir_all(target).map_err(|source_error| Error::CreateDirFailed {
+        std::fs::create_dir_all(target).map_err(|source_error| Error::IoAt {
+            action: "create directory",
             path: target.to_path_buf(),
             source: source_error,
         })?;
         return Ok(());
     }
-    std::fs::create_dir_all(target).map_err(|source_error| Error::CreateDirFailed {
+    std::fs::create_dir_all(target).map_err(|source_error| Error::IoAt {
+        action: "create directory",
         path: target.to_path_buf(),
         source: source_error,
     })?;
-    for entry in std::fs::read_dir(source).map_err(|source_error| Error::ReadDirFailed {
+    for entry in std::fs::read_dir(source).map_err(|source_error| Error::IoAt {
+        action: "read directory",
         path: source.to_path_buf(),
         source: source_error,
     })? {
-        let entry = entry.map_err(|source_error| Error::ReadDirFailed {
+        let entry = entry.map_err(|source_error| Error::IoAt {
+            action: "read directory",
             path: source.to_path_buf(),
             source: source_error,
         })?;
         let source_path = entry.path();
         let target_path = target.join(entry.file_name());
-        let file_type = entry
-            .file_type()
-            .map_err(|source_error| Error::StatFailed {
-                path: source_path.clone(),
-                source: source_error,
-            })?;
+        let file_type = entry.file_type().map_err(|source_error| Error::IoAt {
+            action: "query file metadata/stat for",
+            path: source_path.clone(),
+            source: source_error,
+        })?;
         if file_type.is_dir() {
             move_directory_contents(&source_path, &target_path)?;
             let _ = std::fs::remove_dir(&source_path);
         } else {
             if target_path.exists() {
                 let source_metadata =
-                    std::fs::metadata(&source_path).map_err(|source_error| Error::StatFailed {
+                    std::fs::metadata(&source_path).map_err(|source_error| Error::IoAt {
+                        action: "query file metadata/stat for",
                         path: source_path.clone(),
                         source: source_error,
                     })?;
                 let target_metadata =
-                    std::fs::metadata(&target_path).map_err(|source_error| Error::StatFailed {
+                    std::fs::metadata(&target_path).map_err(|source_error| Error::IoAt {
+                        action: "query file metadata/stat for",
                         path: target_path.clone(),
                         source: source_error,
                     })?;
@@ -85,12 +92,16 @@ pub(super) fn move_directory_contents(source: &Path, target: &Path) -> Result<()
                     || source_metadata.len() != target_metadata.len()
                     || file_md5(&source_path)? != file_md5(&target_path)?
                 {
-                    return Err(Error::Vfs(format!(
-                        "External VFS relocation conflict at {}",
-                        target_path.display()
-                    )));
+                    return Err(Error::Message {
+                        context: "VFS error: ",
+                        detail: format!(
+                            "External VFS relocation conflict at {}",
+                            target_path.display()
+                        ),
+                    });
                 }
-                std::fs::remove_file(&source_path).map_err(|source_error| Error::RemoveFailed {
+                std::fs::remove_file(&source_path).map_err(|source_error| Error::IoAt {
+                    action: "remove file or directory",
                     path: source_path.clone(),
                     source: source_error,
                 })?;
@@ -105,30 +116,32 @@ pub(super) fn move_directory_contents(source: &Path, target: &Path) -> Result<()
 pub(super) fn create_directory_link(link: &Path, target: &Path) -> Result<()> {
     #[cfg(windows)]
     {
-        std::os::windows::fs::symlink_dir(target, link).map_err(|source| Error::Other(format!(
+        std::os::windows::fs::symlink_dir(target, link).map_err(|source| Error::Message { context: "", detail: format!(
             "Failed to create external VFS directory link {} -> {}: {}. Enable Windows Developer Mode or run with permission to create symbolic links",
             link.display(),
             target.display(),
             source
-        )))
+        ) })
     }
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(target, link).map_err(|source| {
-            Error::Other(format!(
+        std::os::unix::fs::symlink(target, link).map_err(|source| Error::Message {
+            context: "",
+            detail: format!(
                 "Failed to create external VFS directory link {} -> {}: {}",
                 link.display(),
                 target.display(),
                 source
-            ))
+            ),
         })
     }
     #[cfg(not(any(windows, unix)))]
     {
         let _ = (link, target);
-        Err(Error::Other(
-            "External VFS roots are unsupported on this platform".to_string(),
-        ))
+        Err(Error::Message {
+            context: "",
+            detail: "External VFS roots are unsupported on this platform".to_string(),
+        })
     }
 }
 
@@ -147,11 +160,10 @@ pub(super) fn prepare_external_vfs_root(plan: &PatchPlan) -> Result<()> {
                 .join(&existing_target)
         };
         if resolved_target == plan.vfs_destination {
-            std::fs::create_dir_all(&plan.vfs_destination).map_err(|source| {
-                Error::CreateDirFailed {
-                    path: plan.vfs_destination.clone(),
-                    source,
-                }
+            std::fs::create_dir_all(&plan.vfs_destination).map_err(|source| Error::IoAt {
+                action: "create directory",
+                path: plan.vfs_destination.clone(),
+                source,
             })?;
             return write_patch_storage_layout(
                 &plan.install_root,
@@ -162,22 +174,27 @@ pub(super) fn prepare_external_vfs_root(plan: &PatchPlan) -> Result<()> {
                 },
             );
         }
-        return Err(Error::Vfs(format!(
-            "VFS path {} already links to {}, not requested external root {}",
-            logical.display(),
-            existing_target.display(),
-            plan.vfs_destination.display()
-        )));
+        return Err(Error::Message {
+            context: "VFS error: ",
+            detail: format!(
+                "VFS path {} already links to {}, not requested external root {}",
+                logical.display(),
+                existing_target.display(),
+                plan.vfs_destination.display()
+            ),
+        });
     }
     if let Some(parent) = logical.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirFailed {
+        std::fs::create_dir_all(parent).map_err(|source| Error::IoAt {
+            action: "create directory",
             path: parent.to_path_buf(),
             source,
         })?;
     }
     move_directory_contents(&logical, &plan.vfs_destination)?;
     if logical.exists() {
-        std::fs::remove_dir_all(&logical).map_err(|source| Error::RemoveFailed {
+        std::fs::remove_dir_all(&logical).map_err(|source| Error::IoAt {
+            action: "remove file or directory",
             path: logical.clone(),
             source,
         })?;
@@ -217,7 +234,7 @@ pub(super) fn commit_top_level_files(
         .map(|(source, relative)| {
             let destination = if deferred.contains(&relative) {
                 plan.install_root
-                    .join(PATCH_TRANSACTION_DIR)
+                    .join(PATCH_WORK_DIR)
                     .join(PATCH_DEFERRED_DIR)
                     .join(&relative)
             } else {

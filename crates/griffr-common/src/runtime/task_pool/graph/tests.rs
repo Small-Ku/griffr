@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{
-    GraphExpansion, NodeId, NodeState, TaskDependencyToken, TaskExecution, TaskGraphBuilder,
-};
+use super::{GraphExpansion, NodeId, NodeState, TaskDependencyToken, TaskGraphBuilder, TaskRun};
 use crate::runtime::task_pool::Task;
 
 static TEST_DEPENDENCY_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -40,14 +38,11 @@ fn fan_in_releases_only_after_all_dependencies_succeed() {
     let ready = graph.start();
     assert_eq!(ready.len(), 2);
     graph.mark_running(left).unwrap();
-    assert!(graph
-        .complete(left, TaskExecution::succeeded())
-        .unwrap()
-        .is_empty());
+    assert!(graph.finish(left, TaskRun::succeeded()).unwrap().is_empty());
     assert_eq!(graph.node_state(join), Some(NodeState::Pending));
 
     graph.mark_running(right).unwrap();
-    let ready = graph.complete(right, TaskExecution::succeeded()).unwrap();
+    let ready = graph.finish(right, TaskRun::succeeded()).unwrap();
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, join);
 }
@@ -62,9 +57,9 @@ fn dynamic_expansion_keeps_parent_waiting_for_leaf() {
     graph.mark_running(parent).unwrap();
 
     let ready = graph
-        .complete(
+        .finish(
             parent,
-            TaskExecution::expand(GraphExpansion::single(task("child"))),
+            TaskRun::expand(GraphExpansion::single(task("child"))),
         )
         .unwrap();
     assert_eq!(graph.node_state(parent), Some(NodeState::Waiting));
@@ -73,7 +68,7 @@ fn dynamic_expansion_keeps_parent_waiting_for_leaf() {
 
     let child = ready[0].id;
     graph.mark_running(child).unwrap();
-    let ready = graph.complete(child, TaskExecution::succeeded()).unwrap();
+    let ready = graph.finish(child, TaskRun::succeeded()).unwrap();
     assert_eq!(graph.node_state(parent), Some(NodeState::Succeeded));
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, dependent);
@@ -88,9 +83,7 @@ fn failed_dependency_cancels_only_its_descendants() {
     let mut graph = builder.build_checked().unwrap();
     let _ = graph.start();
     graph.mark_running(failed_root).unwrap();
-    graph
-        .complete(failed_root, TaskExecution::failed("boom"))
-        .unwrap();
+    graph.finish(failed_root, TaskRun::failed("boom")).unwrap();
 
     assert_eq!(graph.node_state(dependent), Some(NodeState::Cancelled));
     assert_eq!(graph.node_state(independent), Some(NodeState::Ready));
@@ -105,7 +98,7 @@ fn duplicate_dependencies_are_collapsed() {
     let _ = graph.start();
     graph.mark_running(root).unwrap();
 
-    let ready = graph.complete(root, TaskExecution::succeeded()).unwrap();
+    let ready = graph.finish(root, TaskRun::succeeded()).unwrap();
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, dependent);
 }
@@ -120,14 +113,14 @@ fn cooperative_cancellation_fails_the_waiting_parent_without_reporting_failure()
     graph.mark_running(parent).unwrap();
 
     let ready = graph
-        .complete(
+        .finish(
             parent,
-            TaskExecution::expand(GraphExpansion::single(task("child"))),
+            TaskRun::expand(GraphExpansion::single(task("child"))),
         )
         .unwrap();
     let child = ready[0].id;
     graph.mark_running(child).unwrap();
-    graph.complete(child, TaskExecution::cancelled()).unwrap();
+    graph.finish(child, TaskRun::cancelled()).unwrap();
 
     assert_eq!(graph.node_state(child), Some(NodeState::Cancelled));
     assert_eq!(graph.node_state(parent), Some(NodeState::Failed));
@@ -146,9 +139,7 @@ fn dynamic_node_waits_for_bound_node_from_an_earlier_expansion() {
     let token = TaskDependencyToken::new();
     let mut produced = GraphExpansion::new();
     produced.add_root_bound(task("volume"), token);
-    let ready = graph
-        .complete(producer, TaskExecution::expand(produced))
-        .unwrap();
+    let ready = graph.finish(producer, TaskRun::expand(produced)).unwrap();
     let volume = ready[0].id;
 
     graph.mark_running(planner).unwrap();
@@ -156,14 +147,12 @@ fn dynamic_node_waits_for_bound_node_from_an_earlier_expansion() {
     planned
         .add_root_with_tokens(task("index"), [token])
         .unwrap();
-    let ready = graph
-        .complete(planner, TaskExecution::expand(planned))
-        .unwrap();
+    let ready = graph.finish(planner, TaskRun::expand(planned)).unwrap();
     assert!(ready.is_empty());
     assert_eq!(graph.node_state(planner), Some(NodeState::Waiting));
 
     graph.mark_running(volume).unwrap();
-    let ready = graph.complete(volume, TaskExecution::succeeded()).unwrap();
+    let ready = graph.finish(volume, TaskRun::succeeded()).unwrap();
     assert_eq!(ready.len(), 1);
     assert_eq!(graph.node_state(producer), Some(NodeState::Succeeded));
 }
@@ -180,9 +169,7 @@ fn failed_bound_node_cancels_token_dependent_terminal_and_waiting_parent() {
     let token = TaskDependencyToken::new();
     let mut produced = GraphExpansion::new();
     produced.add_root_bound(task("volume"), token);
-    let ready = graph
-        .complete(producer, TaskExecution::expand(produced))
-        .unwrap();
+    let ready = graph.finish(producer, TaskRun::expand(produced)).unwrap();
     let volume = ready[0].id;
 
     graph.mark_running(planner).unwrap();
@@ -191,13 +178,13 @@ fn failed_bound_node_cancels_token_dependent_terminal_and_waiting_parent() {
         .add_root_with_tokens(task("commit"), [token])
         .unwrap();
     assert!(graph
-        .complete(planner, TaskExecution::expand(planned))
+        .finish(planner, TaskRun::expand(planned))
         .unwrap()
         .is_empty());
 
     graph.mark_running(volume).unwrap();
     graph
-        .complete(volume, TaskExecution::failed("bad package part"))
+        .finish(volume, TaskRun::failed("bad package part"))
         .unwrap();
 
     assert_eq!(graph.node_state(volume), Some(NodeState::Failed));
@@ -223,17 +210,13 @@ fn token_dependency_can_join_work_installed_by_a_waiting_parent() {
     expansion
         .add_root_with_tokens(task("index"), [token])
         .unwrap();
-    let ready = graph
-        .complete(parent, TaskExecution::expand(expansion))
-        .unwrap();
+    let ready = graph.finish(parent, TaskRun::expand(expansion)).unwrap();
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id.index(), volume + 1);
 
     let volume_id = ready[0].id;
     graph.mark_running(volume_id).unwrap();
-    let ready = graph
-        .complete(volume_id, TaskExecution::succeeded())
-        .unwrap();
+    let ready = graph.finish(volume_id, TaskRun::succeeded()).unwrap();
     assert_eq!(ready.len(), 1);
 }
 
@@ -248,9 +231,7 @@ fn token_dependency_cannot_wait_on_its_expanding_parent() {
     let token = TaskDependencyToken::new();
     let mut produced = GraphExpansion::new();
     produced.add_root_bound(task("bound-parent"), token);
-    let ready = graph
-        .complete(producer, TaskExecution::expand(produced))
-        .unwrap();
+    let ready = graph.finish(producer, TaskRun::expand(produced)).unwrap();
     let bound_parent = ready[0].id;
     graph.mark_running(bound_parent).unwrap();
 
@@ -259,7 +240,7 @@ fn token_dependency_cannot_wait_on_its_expanding_parent() {
         .add_root_with_tokens(task("cycle"), [token])
         .unwrap();
     let error = graph
-        .complete(bound_parent, TaskExecution::expand(recursive))
+        .finish(bound_parent, TaskRun::expand(recursive))
         .unwrap_err();
     assert!(error.to_string().contains("creates a cycle"));
 }
@@ -276,15 +257,15 @@ fn token_dependency_cannot_wait_on_a_dynamic_ancestor() {
     let mut outer_expansion = GraphExpansion::new();
     outer_expansion.add_root_bound(task("ancestor"), ancestor_token);
     let ready = graph
-        .complete(outer, TaskExecution::expand(outer_expansion))
+        .finish(outer, TaskRun::expand(outer_expansion))
         .unwrap();
     let ancestor = ready[0].id;
     graph.mark_running(ancestor).unwrap();
 
     let ready = graph
-        .complete(
+        .finish(
             ancestor,
-            TaskExecution::expand(GraphExpansion::single(task("inner-parent"))),
+            TaskRun::expand(GraphExpansion::single(task("inner-parent"))),
         )
         .unwrap();
     let inner_parent = ready[0].id;
@@ -295,7 +276,7 @@ fn token_dependency_cannot_wait_on_a_dynamic_ancestor() {
         .add_root_with_tokens(task("cycle"), [ancestor_token])
         .unwrap();
     let error = graph
-        .complete(inner_parent, TaskExecution::expand(recursive))
+        .finish(inner_parent, TaskRun::expand(recursive))
         .unwrap_err();
     assert!(error.to_string().contains("creates a cycle"));
 }

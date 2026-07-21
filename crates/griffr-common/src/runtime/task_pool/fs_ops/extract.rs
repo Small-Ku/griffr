@@ -46,16 +46,19 @@ pub(crate) fn collect_staged_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(directory) = stack.pop() {
-        for entry in std::fs::read_dir(&directory).map_err(|source| Error::ReadDirFailed {
+        for entry in std::fs::read_dir(&directory).map_err(|source| Error::IoAt {
+            action: "read directory",
             path: directory.clone(),
             source,
         })? {
-            let entry = entry.map_err(|source| Error::ReadDirFailed {
+            let entry = entry.map_err(|source| Error::IoAt {
+                action: "read directory",
                 path: directory.clone(),
                 source,
             })?;
             let path = entry.path();
-            let file_type = entry.file_type().map_err(|source| Error::StatFailed {
+            let file_type = entry.file_type().map_err(|source| Error::IoAt {
+                action: "query file metadata for",
                 path: path.clone(),
                 source,
             })?;
@@ -72,23 +75,26 @@ pub(crate) fn collect_staged_files(root: &Path) -> Result<Vec<PathBuf>> {
 
 pub(crate) fn commit_file_job(job: &CommitFileJob) -> Result<()> {
     if let Some(parent) = job.destination.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirFailed {
+        std::fs::create_dir_all(parent).map_err(|source| Error::IoAt {
+            action: "create directory",
             path: parent.to_path_buf(),
             source,
         })?;
     }
     if job.destination.is_dir() {
-        std::fs::remove_dir_all(&job.destination).map_err(|source| Error::RemoveFailed {
+        std::fs::remove_dir_all(&job.destination).map_err(|source| Error::IoAt {
+            action: "remove file or directory",
             path: job.destination.clone(),
             source,
         })?;
     }
-    move_path_replace_cross_volume(&job.source, &job.destination).map_err(|error| {
-        Error::Other(format!(
+    move_path_replace_cross_volume(&job.source, &job.destination).map_err(|error| Error::Message {
+        context: "",
+        detail: format!(
             "Failed to move extracted file {} -> {}: {error}",
             job.source.display(),
             job.destination.display()
-        ))
+        ),
     })
 }
 
@@ -153,7 +159,8 @@ pub(crate) fn build_commit_batches(jobs: Vec<CommitFileJob>) -> Result<Vec<Commi
     let mut groups = BTreeMap::<(String, String, PathBuf), Vec<(CommitFileJob, u64)>>::new();
     for job in jobs {
         let bytes = std::fs::metadata(&job.source)
-            .map_err(|source| Error::StatFailed {
+            .map_err(|source| Error::IoAt {
+                action: "query file metadata for",
                 path: job.source.clone(),
                 source,
             })?
@@ -211,7 +218,8 @@ pub(crate) fn commit_staged_extract(
 ) -> Result<()> {
     let jobs = collect_commit_jobs(staging_root, dest_root)?;
     commit_file_jobs(&jobs, progress_callback)?;
-    std::fs::remove_dir_all(staging_root).map_err(|source| Error::RemoveFailed {
+    std::fs::remove_dir_all(staging_root).map_err(|source| Error::IoAt {
+        action: "remove file or directory",
         path: staging_root.to_path_buf(),
         source,
     })
@@ -232,7 +240,8 @@ pub(crate) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
             )
         };
         if moved == 0 {
-            return Err(Error::RenameFailed {
+            return Err(Error::IoBetween {
+                action: "rename file",
                 src: src.to_path_buf(),
                 dest: dest.to_path_buf(),
                 source: std::io::Error::last_os_error(),
@@ -243,12 +252,14 @@ pub(crate) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
     #[cfg(not(windows))]
     {
         if dest.is_dir() {
-            std::fs::remove_dir_all(dest).map_err(|e| Error::RemoveFailed {
+            std::fs::remove_dir_all(dest).map_err(|e| Error::IoAt {
+                action: "remove file or directory",
                 path: dest.to_path_buf(),
                 source: e,
             })?;
         }
-        std::fs::rename(src, dest).map_err(|e| Error::RenameFailed {
+        std::fs::rename(src, dest).map_err(|e| Error::IoBetween {
+            action: "rename file",
             src: src.to_path_buf(),
             dest: dest.to_path_buf(),
             source: e,
@@ -265,7 +276,8 @@ pub(crate) struct CopiedFileDigest {
 /// Copies a file while calculating MD5 from the same buffers written to the
 /// destination. Callers with an expected digest can avoid a second full read.
 pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDigest> {
-    let mut input = File::open(src).map_err(|source| Error::OpenFileFailed {
+    let mut input = File::open(src).map_err(|source| Error::IoAt {
+        action: "open file",
         path: src.to_path_buf(),
         source,
     })?;
@@ -273,14 +285,16 @@ pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDi
         .create_new(true)
         .write(true)
         .open(dest)
-        .map_err(|source| Error::WriteFileFailed {
+        .map_err(|source| Error::IoAt {
+            action: "write to file",
             path: dest.to_path_buf(),
             source,
         })?;
     let copy_result = (|| -> Result<CopiedFileDigest> {
         let expected_size = input
             .metadata()
-            .map_err(|source| Error::StatFailed {
+            .map_err(|source| Error::IoAt {
+                action: "query file metadata for",
                 path: src.to_path_buf(),
                 source,
             })?
@@ -296,14 +310,16 @@ pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDi
             }
             output
                 .write_all(&buffer[..read])
-                .map_err(|source| Error::WriteFileFailed {
+                .map_err(|source| Error::IoAt {
+                    action: "write to file",
                     path: dest.to_path_buf(),
                     source,
                 })?;
             hasher.update(&buffer[..read]);
             copied = copied.saturating_add(read as u64);
         }
-        output.sync_all().map_err(|source| Error::WriteFileFailed {
+        output.sync_all().map_err(|source| Error::IoAt {
+            action: "write to file",
             path: dest.to_path_buf(),
             source,
         })?;
@@ -322,22 +338,32 @@ pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDi
 pub(crate) fn move_path_replace_cross_volume(src: &Path, dest: &Path) -> Result<()> {
     match move_path_replace(src, dest) {
         Ok(()) => return Ok(()),
-        Err(Error::RenameFailed { .. }) => {}
+        Err(Error::IoBetween {
+            action,
+            src: _,
+            dest: _,
+            source,
+        }) if action == "rename file" && source.kind() == std::io::ErrorKind::CrossesDevices => {}
         Err(error) => return Err(error),
     }
 
-    let source_metadata = std::fs::metadata(src).map_err(|source| Error::StatFailed {
+    let source_metadata = std::fs::metadata(src).map_err(|source| Error::IoAt {
+        action: "query file metadata for",
         path: src.to_path_buf(),
         source,
     })?;
     if !source_metadata.is_file() {
-        return Err(Error::Other(format!(
-            "Cross-volume replacement only supports files: {}",
-            src.display()
-        )));
+        return Err(Error::Message {
+            context: "",
+            detail: format!(
+                "Cross-volume replacement only supports files: {}",
+                src.display()
+            ),
+        });
     }
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirFailed {
+        std::fs::create_dir_all(parent).map_err(|source| Error::IoAt {
+            action: "create directory",
             path: parent.to_path_buf(),
             source,
         })?;
@@ -356,14 +382,18 @@ pub(crate) fn move_path_replace_cross_volume(src: &Path, dest: &Path) -> Result<
     // re-read. Expected-checksum callers use the inline digest directly.
     if copied.bytes != source_metadata.len() || copied.md5 != file_md5(&temp)? {
         let _ = std::fs::remove_file(&temp);
-        return Err(Error::Other(format!(
-            "Cross-volume copy verification failed for {} -> {}",
-            src.display(),
-            dest.display()
-        )));
+        return Err(Error::Message {
+            context: "",
+            detail: format!(
+                "Cross-volume copy verification failed for {} -> {}",
+                src.display(),
+                dest.display()
+            ),
+        });
     }
     move_path_replace(&temp, dest)?;
-    std::fs::remove_file(src).map_err(|source| Error::RemoveFailed {
+    std::fs::remove_file(src).map_err(|source| Error::IoAt {
+        action: "remove file or directory",
         path: src.to_path_buf(),
         source,
     })
@@ -409,8 +439,8 @@ mod tests {
         .unwrap();
 
         let mut progress = Vec::new();
-        let mut on_progress = |path: &Path, completed: usize, total: usize| {
-            progress.push((path.to_path_buf(), completed, total));
+        let mut on_progress = |path: &Path, finished: usize, total: usize| {
+            progress.push((path.to_path_buf(), finished, total));
         };
         commit_staged_extract(&staging_root, &dest_root, Some(&mut on_progress)).unwrap();
 

@@ -8,12 +8,11 @@ use crate::api::types::ResourcePatch;
 use super::path_safety::parse_safe_relative_path;
 
 mod apply;
-mod transaction;
+mod apply_steps;
 
-pub(crate) use transaction::{
-    apply_patch_transaction_deletes, apply_patch_transaction_entry, cleanup_patch_transaction,
-    commit_patch_transaction_deferred, prepare_patch_transaction, release_patch_transaction_base,
-    resume_patch_transaction,
+pub(crate) use apply_steps::{
+    apply_patch_deletes, apply_patch_entry, clean_patch_apply, commit_deferred_patch_files,
+    prepare_patch_apply, release_patch_base, resume_patch_apply,
 };
 
 fn resolve_patch_stage_path(
@@ -44,18 +43,20 @@ pub(crate) fn apply_extracted_vfs_patch_manifest(
         return Ok(());
     }
     if !manifest_path.is_file() {
-        return Err(Error::Vfs(format!(
-            "Extracted VFS patch manifest is incomplete: missing {}",
-            manifest_path.display()
-        )));
+        return Err(Error::Message {
+            context: "VFS error: ",
+            detail: format!(
+                "Extracted VFS patch manifest is missing required data: missing {}",
+                manifest_path.display()
+            ),
+        });
     }
 
     let manifest: ResourcePatch =
-        serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|e| {
-            Error::OpenFileFailed {
-                path: manifest_path.clone(),
-                source: e,
-            }
+        serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|e| Error::IoAt {
+            action: "open file",
+            path: manifest_path.clone(),
+            source: e,
         })?)?;
 
     let vfs_base_path =
@@ -70,7 +71,10 @@ pub(crate) fn apply_extracted_vfs_patch_manifest(
     }
     for (index, entry) in manifest.files.iter().enumerate() {
         apply::apply_vfs_patch_entry(install_root, &stage_root, &dest_root, entry).map_err(
-            |e| Error::Other(format!("Failed to apply patch entry {}: {e}", entry.name)),
+            |e| Error::Message {
+                context: "",
+                detail: format!("Failed to apply patch entry {}: {e}", entry.name),
+            },
         )?;
         if let Some(cb) = progress_callback.as_deref_mut() {
             let logical_path = vfs_base_path.join(&entry.name);
@@ -82,12 +86,14 @@ pub(crate) fn apply_extracted_vfs_patch_manifest(
         }
     }
 
-    std::fs::remove_file(&manifest_path).map_err(|e| Error::RemoveFailed {
+    std::fs::remove_file(&manifest_path).map_err(|e| Error::IoAt {
+        action: "remove file or directory",
         path: manifest_path.clone(),
         source: e,
     })?;
     if stage_root.exists() {
-        std::fs::remove_dir_all(&stage_root).map_err(|e| Error::RemoveFailed {
+        std::fs::remove_dir_all(&stage_root).map_err(|e| Error::IoAt {
+            action: "remove file or directory",
             path: stage_root.clone(),
             source: e,
         })?;
@@ -131,8 +137,8 @@ mod tests {
         .unwrap();
 
         let mut progress = Vec::new();
-        let mut on_progress = |path: &str, completed: usize, total: usize| {
-            progress.push((path.to_string(), completed, total));
+        let mut on_progress = |path: &str, finished: usize, total: usize| {
+            progress.push((path.to_string(), finished, total));
         };
         apply_extracted_vfs_patch_manifest(&install_root, Some(&mut on_progress)).unwrap();
 

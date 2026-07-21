@@ -70,7 +70,7 @@ impl SchedulerMetrics {
             }
         }
         TaskPoolMetrics {
-            completed_tasks: samples.len(),
+            finished_tasks: samples.len(),
             graph: Default::default(),
             queue_wait_p50: percentile(&mut queue_waits, 50),
             queue_wait_p95: percentile(&mut queue_waits, 95),
@@ -93,13 +93,13 @@ fn percentile(samples: &mut [Duration], percentile: usize) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::task_pool::scheduler::routing::{ExecutionClass, ResourceRequest};
+    use crate::runtime::task_pool::scheduler::routing::{ResourceRequest, RunClass};
 
     #[test]
     fn snapshot_reports_percentiles_and_volume_service_bytes() {
         let metrics = SchedulerMetrics::default();
         let resources = ResourceRequest {
-            execution: ExecutionClass::Cpu,
+            run: RunClass::Cpu,
             read_volumes: vec!["volume-a".to_string()],
             estimated_bytes: 1024,
             ..ResourceRequest::default()
@@ -116,7 +116,7 @@ mod tests {
         );
 
         let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.completed_tasks, 2);
+        assert_eq!(snapshot.finished_tasks, 2);
         assert_eq!(snapshot.queue_wait_p50, Duration::from_millis(10));
         assert_eq!(snapshot.queue_wait_p95, Duration::from_millis(30));
         assert_eq!(snapshot.volumes["volume-a"].read_bytes, 2048);

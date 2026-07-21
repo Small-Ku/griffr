@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::error::{Error, Result};
 use tracing::{info, warn};
 
-use crate::api::client::{ApiClient, ApiError};
+use crate::api::client::ApiClient;
 use crate::api::crypto::RES_INDEX_KEY;
 use crate::api::protocol::DEFAULT_PLATFORM;
 use crate::config::ApiTarget;
@@ -14,7 +14,7 @@ use crate::runtime::{
     resource_manifest_url, PathOutcomeTracker, ProgressLane, ProgressSender, ResourceManifestKind,
 };
 
-use super::{VfsFilePlanOptions, VfsPlanOutcome, VfsTaskPlan, VfsUpdateOutcome, VfsUpdateResult};
+use super::{VfsFilePlanOptions, VfsTaskPlan, VfsUpdateResult};
 
 fn plan_vfs_file_task(
     dest: std::path::PathBuf,
@@ -56,14 +56,12 @@ pub async fn plan_vfs_tasks(
     rand_str: &str,
     streaming_assets_path: &Path,
     options: &VfsFilePlanOptions,
-) -> Result<VfsPlanOutcome> {
-    let resources = match api_client
+) -> Result<Option<VfsTaskPlan>> {
+    let Some(resources) = api_client
         .get_latest_resources(target, game_version, rand_str, DEFAULT_PLATFORM)
-        .await
-    {
-        Ok(res) => res,
-        Err(ApiError::ResourceApiUnavailable(_)) => return Ok(VfsPlanOutcome::Unsupported),
-        Err(err) => return Err(err.into()),
+        .await?
+    else {
+        return Ok(None);
     };
 
     let mut tasks = Vec::new();
@@ -76,11 +74,9 @@ pub async fn plan_vfs_tasks(
         let index = api_client
             .fetch_res_index(&index_url, RES_INDEX_KEY)
             .await
-            .map_err(|e| {
-                Error::Vfs(format!(
-                    "Failed to fetch resource index for {}: {e}",
-                    resource.name
-                ))
+            .map_err(|e| Error::Message {
+                context: "VFS error: ",
+                detail: format!("Failed to fetch resource index for {}: {e}", resource.name),
             })?;
 
         for file in &index.files {
@@ -124,7 +120,7 @@ pub async fn plan_vfs_tasks(
         }
     }
 
-    Ok(VfsPlanOutcome::Planned(VfsTaskPlan {
+    Ok(Some(VfsTaskPlan {
         tasks,
         total_files,
         total_bytes,
@@ -142,8 +138,8 @@ pub async fn download_vfs_resources(
     options: &VfsFilePlanOptions,
     task_pool_runner: &mut TaskPoolRunner,
     progress: ProgressSender,
-) -> Result<VfsUpdateOutcome> {
-    let plan = match plan_vfs_tasks(
+) -> Result<Option<VfsUpdateResult>> {
+    let Some(plan) = plan_vfs_tasks(
         api_client,
         target,
         game_version,
@@ -152,12 +148,9 @@ pub async fn download_vfs_resources(
         options,
     )
     .await?
-    {
-        VfsPlanOutcome::Planned(p) => p,
-        VfsPlanOutcome::Unsupported => {
-            info!("VFS resources sync is unsupported for this target");
-            return Ok(VfsUpdateOutcome::Unsupported);
-        }
+    else {
+        info!("VFS resources sync is unsupported for this target");
+        return Ok(None);
     };
 
     info!("VFS resource version: {}", plan.res_version);
@@ -175,7 +168,10 @@ pub async fn download_vfs_resources(
         .with_download(ProgressLane::VFS_DOWNLOAD);
     let result = task_pool_runner
         .run_batch(plan.tasks, task_progress)
-        .map_err(|e| Error::TaskPool(format!("Failed to ensure VFS files: {e}")))?;
+        .map_err(|e| Error::Message {
+            context: "Task pool error: ",
+            detail: format!("Failed to ensure VFS files: {e}"),
+        })?;
 
     let mut failed_paths = Vec::<String>::new();
     let mut outcomes = PathOutcomeTracker::new();
@@ -202,17 +198,20 @@ pub async fn download_vfs_resources(
     total_result.skipped_files = summary.skipped_files;
 
     if !failed_paths.is_empty() {
-        return Err(Error::Vfs(format!(
-            "VFS sync failed for {} file(s): {}",
-            failed_paths.len(),
-            failed_paths.join(", ")
-        )));
+        return Err(Error::Message {
+            context: "VFS error: ",
+            detail: format!(
+                "VFS sync failed for {} file(s): {}",
+                failed_paths.len(),
+                failed_paths.join(", ")
+            ),
+        });
     }
 
     // Step 4: Print summary
     if total_result.downloaded_files > 0 {
         info!(
-            "VFS download complete: {} files downloaded ({:.2} GB), {} files up-to-date",
+            "VFS download finished: {} files downloaded ({:.2} GB), {} files up-to-date",
             total_result.downloaded_files,
             total_result.downloaded_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
             total_result.skipped_files,
@@ -224,7 +223,7 @@ pub async fn download_vfs_resources(
         );
     }
 
-    Ok(VfsUpdateOutcome::Updated(total_result))
+    Ok(Some(total_result))
 }
 
 /// Get VFS resource info without downloading (for dry-run / planning)
@@ -236,13 +235,11 @@ pub async fn get_vfs_resource_info(
     game_version: &str,
     rand_str: &str,
 ) -> Result<Option<(String, usize, u64)>> {
-    let resources = match api_client
+    let Some(resources) = api_client
         .get_latest_resources(target, game_version, rand_str, DEFAULT_PLATFORM)
-        .await
-    {
-        Ok(res) => res,
-        Err(ApiError::ResourceApiUnavailable(_)) => return Ok(None),
-        Err(err) => return Err(err.into()),
+        .await?
+    else {
+        return Ok(None);
     };
 
     let mut total_files = 0;
@@ -287,21 +284,15 @@ mod tests {
     #[test]
     fn persistent_vfs_file_set_includes_expected_groups() {
         assert!(file_set_includes_group(
-            PersistentVfsFileSet::Initial,
+            PersistentVfsFileSet::Base,
             "initial"
         ));
-        assert!(!file_set_includes_group(
-            PersistentVfsFileSet::Initial,
-            "main"
-        ));
+        assert!(!file_set_includes_group(PersistentVfsFileSet::Base, "main"));
         assert!(file_set_includes_group(
-            PersistentVfsFileSet::InitialAndMain,
+            PersistentVfsFileSet::All,
             "initial"
         ));
-        assert!(file_set_includes_group(
-            PersistentVfsFileSet::InitialAndMain,
-            "main"
-        ));
+        assert!(file_set_includes_group(PersistentVfsFileSet::All, "main"));
     }
 
     #[test]

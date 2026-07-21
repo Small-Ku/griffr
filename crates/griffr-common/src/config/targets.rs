@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use super::{game_definition, gateway, launcher_appcode, ChannelPair, GameId, RegionId};
 use crate::error::{Error, Result};
 
-/// A complete launcher API destination for one invocation.
+/// A full launcher API destination for one invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiTarget {
     pub gateway: String,
@@ -16,7 +16,7 @@ pub struct ApiTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallTarget {
     pub api: ApiTarget,
-    pub executable: PathBuf,
+    pub exe_name: PathBuf,
     pub data_root: PathBuf,
 }
 
@@ -30,25 +30,32 @@ pub struct ApiTargetOverrides {
 #[derive(Debug, Clone, Default)]
 pub struct InstallTargetOverrides {
     pub api: ApiTargetOverrides,
-    pub executable: Option<String>,
+    pub exe_name: Option<String>,
     pub data_root: Option<String>,
 }
 
 fn safe_relative_path(value: &str, field: &str) -> Result<PathBuf> {
     let path = Path::new(value);
     if value.trim().is_empty() {
-        return Err(Error::Config(format!("{field} cannot be empty")));
+        return Err(Error::Message {
+            context: "Configuration error: ",
+            detail: format!("{field} cannot be empty"),
+        });
     }
     if path.is_absolute() {
-        return Err(Error::Config(format!("{field} must be relative")));
+        return Err(Error::Message {
+            context: "Configuration error: ",
+            detail: format!("{field} must be relative"),
+        });
     }
     if !path
         .components()
         .all(|component| matches!(component, Component::Normal(_)))
     {
-        return Err(Error::Config(format!(
-            "{field} must not contain '.', '..', root, or platform prefixes"
-        )));
+        return Err(Error::Message {
+            context: "Configuration error: ",
+            detail: format!("{field} must not contain '.', '..', root, or platform prefixes"),
+        });
     }
     Ok(path.to_path_buf())
 }
@@ -68,9 +75,9 @@ pub fn resolve_api_target(
                 .map(str::to_owned)
         })
         .ok_or_else(|| {
-            Error::Config(format!(
+            Error::Message { context: "Configuration error: ", detail: format!(
                 "No built-in {region} API target exists for {game}; pass --game-appcode to probe a custom target"
-            ))
+            ) }
         })?;
 
     Ok(ApiTarget {
@@ -96,33 +103,39 @@ pub fn resolve_install_target(
     let api = resolve_api_target(game, region, channels, &overrides.api)?;
     let definition = game_definition(game);
 
-    let executable = match overrides.executable.as_deref() {
-        Some(value) => safe_relative_path(value, "executable")
-            .map_err(|e| Error::Config(format!("Invalid executable override: {e}")))?,
+    let exe_name = match overrides.exe_name.as_deref() {
+        Some(value) => safe_relative_path(value, "exe_name").map_err(|e| Error::Message {
+            context: "Configuration error: ",
+            detail: format!("Invalid exe_name override: {e}"),
+        })?,
         None => definition
-            .map(|definition| PathBuf::from(definition.executable))
-            .ok_or_else(|| {
-                Error::Config(format!(
-                    "Unknown game definition '{game}'; pass --executable for a custom install target"
-                ))
+            .map(|definition| PathBuf::from(definition.exe_name))
+            .ok_or_else(|| Error::Message {
+                context: "Configuration error: ",
+                detail: format!(
+                    "Unknown game definition '{game}'; pass --exe for a custom install target"
+                ),
             })?,
     };
 
     let data_root = match overrides.data_root.as_deref() {
-        Some(value) => safe_relative_path(value, "data-root")
-            .map_err(|e| Error::Config(format!("Invalid data-root override: {e}")))?,
+        Some(value) => safe_relative_path(value, "data-root").map_err(|e| Error::Message {
+            context: "Configuration error: ",
+            detail: format!("Invalid data-root override: {e}"),
+        })?,
         None => definition
             .map(|definition| PathBuf::from(definition.data_root))
-            .ok_or_else(|| {
-                Error::Config(format!(
+            .ok_or_else(|| Error::Message {
+                context: "Configuration error: ",
+                detail: format!(
                     "Unknown game definition '{game}'; pass --data-root for a custom install target"
-                ))
+                ),
             })?,
     };
 
     Ok(InstallTarget {
         api,
-        executable,
+        exe_name,
         data_root,
     })
 }
@@ -219,14 +232,14 @@ mod tests {
                     game_appcode: Some("custom-appcode".to_string()),
                     ..Default::default()
                 },
-                executable: Some("Custom.exe".to_string()),
+                exe_name: Some("Custom.exe".to_string()),
                 data_root: Some("Custom_Data".to_string()),
             },
         )
         .unwrap();
 
         assert_eq!(target.api.game_appcode, "custom-appcode");
-        assert_eq!(target.executable, PathBuf::from("Custom.exe"));
+        assert_eq!(target.exe_name, PathBuf::from("Custom.exe"));
         assert_eq!(target.data_root, PathBuf::from("Custom_Data"));
     }
 }

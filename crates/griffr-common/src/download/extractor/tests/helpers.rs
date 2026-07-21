@@ -75,7 +75,10 @@ pub(crate) fn extract_to_with_progress(
     });
 
     if !errors.is_empty() {
-        return Err(Error::Extraction(errors.join("; ")));
+        return Err(Error::Message {
+            context: "Extraction error: ",
+            detail: errors.join("; "),
+        });
     }
     if let Some(callback) = progress_callback.as_mut() {
         callback(

@@ -1,6 +1,6 @@
 use super::*;
 use crate::runtime::task_pool::verify::{file_md5, VerifiedArtifactCache};
-use crate::runtime::{PlannedPatchEntry, PlannedPatchSource, PATCH_TRANSACTION_DIR};
+use crate::runtime::{PlannedPatchEntry, PlannedPatchSource, PATCH_WORK_DIR};
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
@@ -25,7 +25,7 @@ fn plan(
 }
 
 #[test]
-fn transaction_defers_version_marker_and_preserves_final_output() {
+fn patch_apply_defers_version_marker_and_preserves_final_output() {
     let temp = tempdir().unwrap();
     let install_root = temp.path().join("install");
     let stage_root = temp.path().join("stage");
@@ -51,7 +51,7 @@ fn transaction_defers_version_marker_and_preserves_final_output() {
         vec![PathBuf::from("config.ini")],
     );
 
-    run_patch_transaction(
+    run_patch_apply(
         &plan,
         None,
         None,
@@ -71,7 +71,7 @@ fn transaction_defers_version_marker_and_preserves_final_output() {
         b"version=2"
     );
     assert!(!stage_root.exists());
-    assert!(!install_root.join(PATCH_TRANSACTION_DIR).exists());
+    assert!(!install_root.join(PATCH_WORK_DIR).exists());
 }
 
 #[test]

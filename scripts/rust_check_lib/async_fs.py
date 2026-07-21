@@ -38,12 +38,12 @@ class SyncFsHelper:
     qualified_name: tuple[str, ...]
     source: SourceFile
     node: Node
-    operations: tuple[str, ...]
+    calls: tuple[str, ...]
 
 
-# Operations for which compio 0.19 exposes a direct async primitive, or for
+# Calls for which compio 0.19 exposes a direct async primitive, or for
 # which Griffr already has an owned-buffer async implementation.
-_COMPIO_CAPABLE_OPERATIONS = {
+_COMPIO_CALLS = {
     "copy",
     "create_dir",
     "create_dir_all",
@@ -64,7 +64,7 @@ _COMPIO_CAPABLE_OPERATIONS = {
 # These require a synchronous namespace walk or another compatibility boundary
 # with compio 0.19. Their presence prevents AFS002 from recommending that the
 # whole blocking closure be removed.
-_BLOCKING_ONLY_OPERATIONS = {
+_BLOCKING_ONLY_CALLS = {
     "canonicalize",
     "read_dir",
     "read_link",
@@ -84,7 +84,7 @@ _PATH_METHODS = {
     "try_exists",
 }
 
-_PATH_METHOD_TO_OPERATION = {
+_PATH_METHOD_TO_CALL = {
     "canonicalize": "canonicalize",
     "exists": "metadata",
     "is_dir": "metadata",
@@ -183,8 +183,8 @@ def _collect_sync_fs_helpers(
             name_node = node.child_by_field_name("name")
             if name_node is None:
                 continue
-            operations = _sync_operations_in_function(module, node)
-            if not operations:
+            calls = _sync_calls_in_function(module, node)
+            if not calls:
                 continue
             name = module.source.text(name_node)
             helper = SyncFsHelper(
@@ -192,13 +192,13 @@ def _collect_sync_fs_helpers(
                 qualified_name=(*module.path, name),
                 source=module.source,
                 node=node,
-                operations=tuple(dict.fromkeys(operations)),
+                calls=tuple(dict.fromkeys(calls)),
             )
             helpers.setdefault(name, []).append(helper)
     return helpers
 
 
-def _sync_operations_in_function(module: ModuleUnit, function: Node) -> list[str]:
+def _sync_calls_in_function(module: ModuleUnit, function: Node) -> list[str]:
     source = module.source
     module_aliases, imported_functions, glob_import = _std_fs_imports(module.imports)
     local_modules, local_functions, local_glob = _std_fs_imports(
@@ -206,25 +206,25 @@ def _sync_operations_in_function(module: ModuleUnit, function: Node) -> list[str
     )
     modules = module_aliases | local_modules
     functions = {**imported_functions, **local_functions}
-    operations: list[str] = []
+    calls: list[str] = []
     for node in _walk_scope(function, skip_nested_functions=True):
         if node.type != "call_expression" or _inside_blocking_boundary(
             source, node, function
         ):
             continue
-        operation = _std_fs_call_operation(
+        call = _std_fs_call_name(
             source,
             node,
             modules,
             functions,
             glob_import or local_glob,
         )
-        if operation is None:
-            path_method = _path_method_operation(source, node, function)
-            operation = path_method[0] if path_method is not None else None
-        if operation is not None:
-            operations.append(operation)
-    return operations
+        if call is None:
+            path_method = _path_method_call(source, node, function)
+            call = path_method[0] if path_method is not None else None
+        if call is not None:
+            calls.append(call)
+    return calls
 
 
 def _called_sync_fs_helper(
@@ -337,7 +337,7 @@ def _check_async_contexts(
         local_modules, local_functions, local_glob = _std_fs_imports(local_specs)
         modules = module_aliases | local_modules
         functions = {**imported_functions, **local_functions}
-        operation = _std_fs_call_operation(
+        call = _std_fs_call_name(
             source,
             node,
             modules,
@@ -345,13 +345,13 @@ def _check_async_contexts(
             glob_import or local_glob,
         )
         api_text = ""
-        if operation is not None:
+        if call is not None:
             function = node.child_by_field_name("function")
             api_text = (
                 source.text(function) if function is not None else source.text(node)
             )
         else:
-            path_method = _path_method_operation(source, node, owner)
+            path_method = _path_method_call(source, node, owner)
             if path_method is None:
                 helper = _called_sync_fs_helper(source, node, helper_index)
                 if helper is None:
@@ -367,8 +367,8 @@ def _check_async_contexts(
                         f"async context: {_owner_label(source, owner)}",
                         f"resolved helper: {'::'.join(helper.qualified_name)}",
                         *(
-                            f"helper filesystem operation: {item}"
-                            for item in helper.operations[:4]
+                            f"helper filesystem call: {item}"
+                            for item in helper.calls[:4]
                         ),
                     ),
                     hint=(
@@ -377,7 +377,7 @@ def _check_async_contexts(
                     ),
                 )
                 continue
-            operation, api_text = path_method
+            call, api_text = path_method
 
         host.add(
             "AFS001",
@@ -386,15 +386,15 @@ def _check_async_contexts(
             source=source,
             node=node,
             confidence="definite"
-            if operation in _COMPIO_CAPABLE_OPERATIONS
+            if call in _COMPIO_CALLS
             else "probable",
             evidence=(
                 f"async context: {_owner_label(source, owner)}",
-                f"resolved filesystem operation: {operation}",
+                f"resolved filesystem call: {call}",
                 "no enclosing recognized blocking boundary",
             ),
             hint=(
-                "Use compio::fs and await the operation. If compio has no matching API, isolate only "
+                "Use compio::fs and await the call. If compio has no matching API, isolate only "
                 "the synchronous namespace walk or library call behind spawn_blocking/dispatch_blocking."
             ),
         )
@@ -404,12 +404,12 @@ def _check_redundant_blocking_wrappers(host: AsyncFsHost, module: ModuleUnit) ->
     source = module.source
     module_aliases, imported_functions, glob_import = _std_fs_imports(module.imports)
 
-    for call in walk_named(module.body, skip_inline_modules=True):
-        if call.type != "call_expression" or not _is_blocking_boundary_call(
-            source, call
+    for boundary_call in walk_named(module.body, skip_inline_modules=True):
+        if boundary_call.type != "call_expression" or not _is_blocking_boundary_call(
+            source, boundary_call
         ):
             continue
-        closure = _closure_argument(call)
+        closure = _closure_argument(boundary_call)
         if closure is None:
             continue
 
@@ -418,12 +418,12 @@ def _check_redundant_blocking_wrappers(host: AsyncFsHost, module: ModuleUnit) ->
         modules = module_aliases | local_modules
         functions = {**imported_functions, **local_functions}
 
-        operations: list[tuple[str, Node, str]] = []
+        calls: list[tuple[str, Node, str]] = []
         has_other_calls = False
         for nested in walk_named(closure):
             if nested.type != "call_expression":
                 continue
-            operation = _std_fs_call_operation(
+            fs_call = _std_fs_call_name(
                 source,
                 nested,
                 modules,
@@ -431,7 +431,7 @@ def _check_redundant_blocking_wrappers(host: AsyncFsHost, module: ModuleUnit) ->
                 glob_import or local_glob,
             )
             api_text = ""
-            if operation is not None:
+            if fs_call is not None:
                 function = nested.child_by_field_name("function")
                 api_text = (
                     source.text(function)
@@ -439,7 +439,7 @@ def _check_redundant_blocking_wrappers(host: AsyncFsHost, module: ModuleUnit) ->
                     else source.text(nested)
                 )
             else:
-                path_method = _path_method_operation(source, nested, closure)
+                path_method = _path_method_call(source, nested, closure)
                 if path_method is None:
                     function = nested.child_by_field_name("function")
                     function_text = (
@@ -451,36 +451,32 @@ def _check_redundant_blocking_wrappers(host: AsyncFsHost, module: ModuleUnit) ->
                     if terminal not in _TRIVIAL_CALL_ADAPTERS:
                         has_other_calls = True
                     continue
-                operation, api_text = path_method
-            operations.append((operation, nested, api_text))
+                fs_call, api_text = path_method
+            calls.append((fs_call, nested, api_text))
 
-        if not operations or has_other_calls:
+        if not calls or has_other_calls:
             continue
-        if any(
-            operation in _BLOCKING_ONLY_OPERATIONS for operation, _, _ in operations
-        ):
+        if any(fs_call in _BLOCKING_ONLY_CALLS for fs_call, _, _ in calls):
             continue
-        if not all(
-            operation in _COMPIO_CAPABLE_OPERATIONS for operation, _, _ in operations
-        ):
+        if not all(fs_call in _COMPIO_CALLS for fs_call, _, _ in calls):
             continue
 
-        function = call.child_by_field_name("function")
+        function = boundary_call.child_by_field_name("function")
         boundary = source.text(function) if function is not None else "blocking wrapper"
         evidence = tuple(
-            f"{api_text} resolves to {operation}"
-            for operation, _, api_text in operations[:6]
+            f"{api_text} resolves to {fs_call}"
+            for fs_call, _, api_text in calls[:6]
         )
         host.add(
             "AFS002",
             "warning",
             f"{boundary} contains only filesystem calls that have async compio replacements",
             source=source,
-            node=call,
+            node=boundary_call,
             confidence="probable",
             evidence=evidence
             + (
-                "no read_dir, read_link, remove_dir_all, or canonicalize operation was found in the closure",
+                "no read_dir, read_link, remove_dir_all, or canonicalize call was found in the closure",
             ),
             hint=(
                 "Move this work onto the async Dispatcher path and use compio::fs directly; keep blocking "
@@ -504,11 +500,11 @@ def _std_fs_imports(
                 module_aliases.add(spec.alias)
             continue
         if len(path) >= 3 and path[:2] == ("std", "fs"):
-            operation = "::".join(path[2:])
+            call = "::".join(path[2:])
             if spec.glob:
                 glob_import = True
             elif spec.alias:
-                imported_functions[spec.alias] = operation
+                imported_functions[spec.alias] = call
     return module_aliases, imported_functions, glob_import
 
 
@@ -579,7 +575,7 @@ def _flatten_use_node(
     return [(prefix + path, path[-1] if path else None, False, node)] if path else []
 
 
-def _std_fs_call_operation(
+def _std_fs_call_name(
     source: SourceFile,
     call: Node,
     module_aliases: set[str],
@@ -596,7 +592,7 @@ def _std_fs_call_operation(
         prefix = alias + "::"
         if text.startswith(prefix):
             return base + "::" + text[len(prefix) :]
-    if glob_import and text in _COMPIO_CAPABLE_OPERATIONS | _BLOCKING_ONLY_OPERATIONS:
+    if glob_import and text in _COMPIO_CALLS | _BLOCKING_ONLY_CALLS:
         return text
     for alias in sorted(module_aliases, key=len, reverse=True):
         prefix = alias + "::"
@@ -605,7 +601,7 @@ def _std_fs_call_operation(
     return None
 
 
-def _path_method_operation(
+def _path_method_call(
     source: SourceFile, call: Node, owner: Node
 ) -> tuple[str, str] | None:
     function = call.child_by_field_name("function")
@@ -622,7 +618,7 @@ def _path_method_operation(
     path_bindings = _path_bindings(source, owner)
     if not _path_expression(receiver, path_bindings, method):
         return None
-    return _PATH_METHOD_TO_OPERATION[method], f"{receiver}.{method}"
+    return _PATH_METHOD_TO_CALL[method], f"{receiver}.{method}"
 
 
 def _path_bindings(source: SourceFile, owner: Node) -> set[str]:

@@ -120,7 +120,7 @@ pub async fn capture(
         ));
     }
 
-    ui::print_success("Account capture complete");
+    ui::print_success("Account capture finished");
     Ok(())
 }
 
@@ -228,7 +228,7 @@ pub async fn activate(
         ));
     }
 
-    ui::print_success("Account activate complete");
+    ui::print_success("Account activation finished");
     Ok(())
 }
 
@@ -417,7 +417,7 @@ pub(super) async fn ensure_destination_dir(path: &Path, force: bool) -> Result<(
     }
     if metadata.is_dir() {
         // compio 0.19 does not expose remove_dir_all; keep the recursive namespace
-        // operation on the runtime blocking pool.
+        // work on the runtime blocking pool.
         remove_dir_all(path.to_path_buf()).await?;
     } else {
         compio::fs::remove_file(path)

@@ -25,11 +25,14 @@ pub(crate) fn parse_delete_files_manifest(manifest: &str) -> Result<Vec<PathBuf>
         .filter_map(|(line_idx, line)| match parse_delete_files_entry(line) {
             Ok(Some(relative)) => Some(Ok(relative)),
             Ok(None) => None,
-            Err(err) => Some(Err(Error::Config(format!(
-                "Failed to parse {} line {}: {err}",
-                DELETE_FILES_MANIFEST_NAME,
-                line_idx + 1
-            )))),
+            Err(err) => Some(Err(Error::Message {
+                context: "Configuration error: ",
+                detail: format!(
+                    "Failed to parse {} line {}: {err}",
+                    DELETE_FILES_MANIFEST_NAME,
+                    line_idx + 1
+                ),
+            })),
         })
         .collect()
 }
@@ -47,7 +50,8 @@ where
         Ok(_) => return Ok(()),
         Err(source) if source.kind() == ErrorKind::NotFound => return Ok(()),
         Err(source) => {
-            return Err(Error::StatFailed {
+            return Err(Error::IoAt {
+                action: "query file metadata/stat for",
                 path: manifest_path,
                 source,
             })
@@ -56,11 +60,13 @@ where
 
     let bytes = compio::fs::read(&manifest_path)
         .await
-        .map_err(|source| Error::OpenFileFailed {
+        .map_err(|source| Error::IoAt {
+            action: "open file",
             path: manifest_path.clone(),
             source,
         })?;
-    let manifest = String::from_utf8(bytes).map_err(|source| Error::OpenFileFailed {
+    let manifest = String::from_utf8(bytes).map_err(|source| Error::IoAt {
+        action: "open file",
         path: manifest_path.clone(),
         source: std::io::Error::new(ErrorKind::InvalidData, source),
     })?;
@@ -81,14 +87,16 @@ where
             Ok(_) => {
                 compio::fs::remove_file(&target_path)
                     .await
-                    .map_err(|source| Error::RemoveFailed {
+                    .map_err(|source| Error::IoAt {
+                        action: "remove file or directory",
                         path: target_path.clone(),
                         source,
                     })?;
             }
             Err(source) if source.kind() == ErrorKind::NotFound => {}
             Err(source) => {
-                return Err(Error::StatFailed {
+                return Err(Error::IoAt {
+                    action: "query file metadata/stat for",
                     path: target_path,
                     source,
                 })
@@ -101,7 +109,8 @@ where
 
     compio::fs::remove_file(&manifest_path)
         .await
-        .map_err(|source| Error::RemoveFailed {
+        .map_err(|source| Error::IoAt {
+            action: "remove file or directory",
             path: manifest_path,
             source,
         })?;
@@ -157,8 +166,8 @@ mod tests {
         let mut progress = Vec::new();
         apply_delete_files_manifest_async(
             &dest_root,
-            Some(|path: &Path, completed: usize, total: usize| {
-                progress.push((path.to_path_buf(), completed, total));
+            Some(|path: &Path, finished: usize, total: usize| {
+                progress.push((path.to_path_buf(), finished, total));
             }),
         )
         .await

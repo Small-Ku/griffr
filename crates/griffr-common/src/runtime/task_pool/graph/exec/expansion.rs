@@ -15,7 +15,7 @@ pub(super) struct ExpansionNode {
     pub(super) binding: Option<TaskDependencyToken>,
 }
 
-/// Append-only dynamic subgraph produced by one task execution.
+/// Append-only dynamic subgraph produced by one task run.
 #[derive(Debug, Default)]
 pub(crate) struct GraphExpansion {
     pub(super) nodes: Vec<ExpansionNode>,
@@ -85,10 +85,13 @@ impl GraphExpansion {
             .collect();
         for dependency in &dependencies {
             if dependency.0 >= self.nodes.len() {
-                return Err(Error::TaskPool(format!(
-                    "dynamic graph node {} depends on unknown or forward node {}",
-                    id.0, dependency.0,
-                )));
+                return Err(Error::Message {
+                    context: "Task pool error: ",
+                    detail: format!(
+                        "dynamic graph node {} depends on unknown or forward node {}",
+                        id.0, dependency.0,
+                    ),
+                });
             }
         }
         let token_dependencies: Vec<TaskDependencyToken> = token_dependencies
@@ -111,14 +114,14 @@ impl GraphExpansion {
 }
 
 #[derive(Debug)]
-pub(crate) enum TaskExecution {
+pub(crate) enum TaskRun {
     Succeeded,
     Failed { reason: String, report: bool },
     Cancelled,
     Expand(GraphExpansion),
 }
 
-impl TaskExecution {
+impl TaskRun {
     pub(crate) fn succeeded() -> Self {
         Self::Succeeded
     }

@@ -7,11 +7,11 @@ use super::super::types::{TaskProgress, WorkerEvent};
 
 pub(super) struct TaskProgressReducer {
     config: TaskProgress,
-    verify_completed: u64,
+    verify_finished: u64,
     verified_paths: HashSet<String>,
-    download_completed: RunningByteProgress,
+    download_finished: RunningByteProgress,
     download_totals: RunningByteProgress,
-    extract_completed: RunningByteProgress,
+    extract_finished: RunningByteProgress,
     extract_totals: RunningByteProgress,
     download_started: bool,
     extract_started: bool,
@@ -33,11 +33,11 @@ impl TaskProgressReducer {
         }
         Self {
             config,
-            verify_completed: 0,
+            verify_finished: 0,
             verified_paths: HashSet::new(),
-            download_completed: RunningByteProgress::new(),
+            download_finished: RunningByteProgress::new(),
             download_totals: RunningByteProgress::new(),
-            extract_completed: RunningByteProgress::new(),
+            extract_finished: RunningByteProgress::new(),
             extract_totals: RunningByteProgress::new(),
             download_started: false,
             extract_started: false,
@@ -49,151 +49,129 @@ impl TaskProgressReducer {
 
     pub(super) fn handle(&mut self, event: &WorkerEvent) {
         match event {
-            WorkerEvent::Verified { path, .. } => {
+            WorkerEvent::Outcome(super::super::types::TaskOutcome::Verified { path, .. }) => {
                 if let Some((lane, total)) = self.config.verify {
                     if self.verified_paths.insert(path.clone()) {
-                        self.verify_completed = self.verify_completed.saturating_add(1).min(total);
+                        self.verify_finished = self.verify_finished.saturating_add(1).min(total);
                         self.config.sender.emit(ProgressUpdate::Advanced {
                             lane,
-                            completed: self.verify_completed,
+                            finished: self.verify_finished,
                             total: Some(total),
                             item: Some(path.clone()),
                         });
                     }
                 }
             }
-            WorkerEvent::DownloadStarted { path, total_bytes } => {
+            WorkerEvent::Outcome(super::super::types::TaskOutcome::Downloaded { path, bytes }) => {
                 let Some(lane) = self.config.download else {
                     return;
                 };
-                self.download_totals.record(path, *total_bytes);
-                self.start_download_lane(lane, self.download_totals.total_bytes());
-                self.emit_bytes(
-                    lane,
-                    self.download_completed.total_bytes(),
-                    self.download_totals.total_bytes(),
-                    path,
-                );
-            }
-            WorkerEvent::DownloadedBytes {
-                path,
-                bytes,
-                total_bytes,
-            } => {
-                let Some(lane) = self.config.download else {
-                    return;
-                };
-                self.download_completed.record_max(path, *bytes);
-                self.download_totals.record(path, *total_bytes);
-                self.start_download_lane(lane, self.download_totals.total_bytes());
-                self.emit_bytes(
-                    lane,
-                    self.download_completed.total_bytes(),
-                    self.download_totals.total_bytes(),
-                    path,
-                );
-            }
-            WorkerEvent::DownloadReset { path, bytes } => {
-                let Some(lane) = self.config.download else {
-                    return;
-                };
-                self.download_completed.record(path, *bytes);
-                self.start_download_lane(lane, self.download_totals.total_bytes());
-                self.emit_bytes(
-                    lane,
-                    self.download_completed.total_bytes(),
-                    self.download_totals.total_bytes(),
-                    path,
-                );
-            }
-            WorkerEvent::Downloaded { path, bytes } => {
-                let Some(lane) = self.config.download else {
-                    return;
-                };
-                self.download_completed.record_max(path, *bytes);
+                self.download_finished.record_max(path, *bytes);
                 self.download_totals.record_max(path, *bytes);
                 self.start_download_lane(lane, self.download_totals.total_bytes());
                 self.emit_bytes(
                     lane,
-                    self.download_completed.total_bytes(),
+                    self.download_finished.total_bytes(),
                     self.download_totals.total_bytes(),
                     path,
                 );
             }
-            WorkerEvent::ExtractedBytes {
+            WorkerEvent::Progress {
+                phase,
                 path,
-                bytes,
-                total_bytes,
-            } => {
-                let Some(lane) = self.config.extract else {
-                    return;
-                };
-                self.extract_completed.record_max(path, *bytes);
-                self.extract_totals.record(path, *total_bytes);
-                if !self.extract_started {
-                    self.extract_started = true;
-                    self.config.sender.emit(ProgressUpdate::Started {
-                        lane,
-                        unit: ProgressUnit::Bytes,
-                        total: known_total(self.extract_totals.total_bytes()),
-                    });
-                }
-                self.emit_bytes(
-                    lane,
-                    self.extract_completed.total_bytes(),
-                    self.extract_totals.total_bytes(),
-                    path,
-                );
-            }
-            WorkerEvent::ArchiveCommitProgress {
-                path,
-                completed,
+                finished,
                 total,
-            } => {
-                if let Some(lane) = self.config.commit {
-                    Self::emit_items(
-                        &self.config.sender,
+                reset,
+            } => match phase {
+                crate::runtime::ProgressPhase::Download => {
+                    let Some(lane) = self.config.download else {
+                        return;
+                    };
+                    if *reset {
+                        self.download_finished.record(path, *finished);
+                    } else {
+                        self.download_finished.record_max(path, *finished);
+                    }
+                    if *total > 0 {
+                        self.download_totals.record(path, *total);
+                    }
+                    self.start_download_lane(lane, self.download_totals.total_bytes());
+                    self.emit_bytes(
                         lane,
+                        self.download_finished.total_bytes(),
+                        self.download_totals.total_bytes(),
                         path,
-                        *completed,
-                        *total,
-                        &mut self.commit_started,
                     );
                 }
-            }
-            WorkerEvent::PatchProgress {
-                path,
-                completed,
-                total,
-            } => {
-                if let Some(lane) = self.config.patch {
-                    Self::emit_items(
-                        &self.config.sender,
+                crate::runtime::ProgressPhase::Extract => {
+                    let Some(lane) = self.config.extract else {
+                        return;
+                    };
+                    self.extract_finished.record_max(path, *finished);
+                    if *total > 0 {
+                        self.extract_totals.record(path, *total);
+                    }
+                    if !self.extract_started {
+                        self.extract_started = true;
+                        self.config.sender.emit(ProgressUpdate::Started {
+                            lane,
+                            unit: ProgressUnit::Bytes,
+                            total: known_total(self.extract_totals.total_bytes()),
+                        });
+                    }
+                    self.emit_bytes(
                         lane,
+                        self.extract_finished.total_bytes(),
+                        self.extract_totals.total_bytes(),
                         path,
-                        *completed,
-                        *total,
-                        &mut self.patch_started,
                     );
                 }
-            }
-            WorkerEvent::DeleteProgress {
-                path,
-                completed,
-                total,
-            } => {
-                if let Some(lane) = self.config.delete {
-                    Self::emit_items(
-                        &self.config.sender,
-                        lane,
-                        path,
-                        *completed,
-                        *total,
-                        &mut self.delete_started,
-                    );
+                crate::runtime::ProgressPhase::Commit => {
+                    if let Some(lane) = self.config.commit {
+                        Self::emit_items(
+                            &self.config.sender,
+                            lane,
+                            path,
+                            *finished,
+                            *total,
+                            &mut self.commit_started,
+                        );
+                    }
                 }
-            }
-            _ => {}
+                crate::runtime::ProgressPhase::Patch => {
+                    if let Some(lane) = self.config.patch {
+                        Self::emit_items(
+                            &self.config.sender,
+                            lane,
+                            path,
+                            *finished,
+                            *total,
+                            &mut self.patch_started,
+                        );
+                    }
+                }
+                crate::runtime::ProgressPhase::Delete => {
+                    if let Some(lane) = self.config.delete {
+                        Self::emit_items(
+                            &self.config.sender,
+                            lane,
+                            path,
+                            *finished,
+                            *total,
+                            &mut self.delete_started,
+                        );
+                    }
+                }
+                crate::runtime::ProgressPhase::Verify => {}
+            },
+            WorkerEvent::Retried { .. } => {}
+            WorkerEvent::Outcome(
+                super::super::types::TaskOutcome::ArchiveCheck { .. }
+                | super::super::types::TaskOutcome::Changed { .. }
+                | super::super::types::TaskOutcome::Hardlinked { .. }
+                | super::super::types::TaskOutcome::Copied { .. }
+                | super::super::types::TaskOutcome::Failed { .. },
+            ) => {}
         }
     }
 
@@ -211,13 +189,13 @@ impl TaskProgressReducer {
     fn emit_bytes(
         &self,
         lane: crate::runtime::ProgressLane,
-        completed: u64,
+        finished: u64,
         total: u64,
         item: &str,
     ) {
         self.config.sender.emit(ProgressUpdate::Advanced {
             lane,
-            completed,
+            finished,
             total: known_total(total),
             item: Some(item.to_string()),
         });
@@ -227,8 +205,8 @@ impl TaskProgressReducer {
         sender: &crate::runtime::ProgressSender,
         lane: crate::runtime::ProgressLane,
         item: &str,
-        completed: usize,
-        total: usize,
+        finished: u64,
+        total: u64,
         started: &mut bool,
     ) {
         if !*started {
@@ -236,13 +214,13 @@ impl TaskProgressReducer {
             sender.emit(ProgressUpdate::Started {
                 lane,
                 unit: ProgressUnit::Items,
-                total: Some(total as u64),
+                total: Some(total),
             });
         }
         sender.emit(ProgressUpdate::Advanced {
             lane,
-            completed: completed as u64,
-            total: Some(total as u64),
+            finished,
+            total: Some(total),
             item: Some(item.to_string()),
         });
     }

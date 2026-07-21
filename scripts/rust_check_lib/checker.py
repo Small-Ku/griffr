@@ -35,6 +35,27 @@ from .records import (
 from .parsing import parse
 
 
+def _load_gitignore_patterns(root: Path) -> tuple[str, ...]:
+    gitignore_path = root / ".gitignore"
+    if not gitignore_path.is_file():
+        return ()
+    patterns: list[str] = []
+    try:
+        content = gitignore_path.read_text("utf-8")
+    except OSError:
+        return ()
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("/"):
+            rel = line.lstrip("/")
+            patterns.extend([rel, f"{rel}/**", f"{rel}/*"])
+        else:
+            patterns.extend([line, f"**/{line}", f"**/{line}/**", f"{line}/**"])
+    return tuple(patterns)
+
+
 class Checker:
     def __init__(
         self,
@@ -58,6 +79,7 @@ class Checker:
         self.max_width = max(40, max_width)
         self.min_confidence = min_confidence
         self.fix = fix
+        self.gitignore_patterns = _load_gitignore_patterns(self.root)
 
         self.root_manifest_path = self.root / "Cargo.toml"
         self.root_manifest: dict[str, Any] | None = None
@@ -82,6 +104,8 @@ class Checker:
         path: Path | str | None = None,
         node: Node | None = None,
         source: SourceFile | None = None,
+        line: int | None = None,
+        column: int | None = None,
         hint: str = "",
         confidence: str = "definite",
         evidence: Sequence[str] = (),
@@ -90,7 +114,8 @@ class Checker:
         if CONFIDENCE_ORDER.get(confidence, 2) > threshold:
             return
         rel = ""
-        line = column = 0
+        resolved_line = line or 0
+        resolved_column = column or 0
         if path is not None:
             if isinstance(path, Path):
                 try:
@@ -100,7 +125,7 @@ class Checker:
             else:
                 rel = path
         if node is not None and source is not None:
-            line, column = source.location(node)
+            resolved_line, resolved_column = source.location(node)
             rel = rel or source.rel
         normalized_evidence = tuple(item for item in evidence if item)
         diagnostic = Diagnostic(
@@ -108,8 +133,8 @@ class Checker:
             severity,
             message,
             rel,
-            line,
-            column,
+            resolved_line,
+            resolved_column,
             hint,
             confidence,
             normalized_evidence,
@@ -165,6 +190,8 @@ class Checker:
             ".git/**",
             "target/**",
             "vendor/**",
+            "ref/**",
+            "ref/*/**",
             "node_modules/**",
             ".venv/**",
             ".ruff_cache/**",
@@ -173,7 +200,8 @@ class Checker:
             "**/__pycache__/**",
         )
         return any(
-            fnmatch.fnmatch(rel, pattern) for pattern in (*defaults, *self.excludes)
+            fnmatch.fnmatch(rel, pattern)
+            for pattern in (*defaults, *self.gitignore_patterns, *self.excludes)
         )
 
     def load_toml(self, path: Path) -> dict[str, Any] | None:
@@ -454,11 +482,11 @@ class Checker:
         return applied
 
     def _analyze_once(self) -> None:
-        wording.run(self)
         baseline.compare(self)
         workspace.discover(self)
         module_graph.build(self)
         resolver = name_resolution.analyze(self)
+        wording.run(self, resolver)
         lints.run(self, resolver)
         architecture.run(self)
         async_fs.run(self)

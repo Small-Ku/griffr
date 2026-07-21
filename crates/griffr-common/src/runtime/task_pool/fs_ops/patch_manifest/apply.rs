@@ -26,7 +26,7 @@ pub(super) fn verify_patch_output(
     expected_size: u64,
 ) -> Result<()> {
     if let Some(issue) = build_issue(path, logical_path, expected_md5, Some(expected_size)) {
-        return Err(Error::Vfs(format!(
+        return Err(Error::Message { context: "VFS error: ", detail: format!(
             "Patch output {} failed verification: kind={:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
             logical_path,
             issue.kind,
@@ -34,7 +34,7 @@ pub(super) fn verify_patch_output(
             issue.actual_size,
             issue.expected_md5,
             issue.actual_md5
-        )));
+        ) });
     }
     Ok(())
 }
@@ -58,31 +58,37 @@ fn apply_local_patch_entry(
     let logical_path = dest_relative.to_string_lossy().replace('\\', "/");
 
     if !source_path.is_file() {
-        return Err(Error::Vfs(format!(
-            "patch.json local payload is missing for {}: {}",
-            entry.name,
-            source_path.display()
-        )));
+        return Err(Error::Message {
+            context: "VFS error: ",
+            detail: format!(
+                "patch.json local payload is missing for {}: {}",
+                entry.name,
+                source_path.display()
+            ),
+        });
     }
     if let Some(parent) = dest_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| Error::CreateDirFailed {
+        std::fs::create_dir_all(parent).map_err(|e| Error::IoAt {
+            action: "create directory",
             path: parent.to_path_buf(),
             source: e,
         })?;
     }
-    move_path_replace(&source_path, &dest_path).map_err(|e| {
-        Error::Other(format!(
+    move_path_replace(&source_path, &dest_path).map_err(|e| Error::Message {
+        context: "",
+        detail: format!(
             "Failed to apply local patch payload {} -> {}: {e}",
             source_path.display(),
             dest_path.display()
-        ))
+        ),
     })?;
     verify_patch_output(&dest_path, &logical_path, &entry.md5, entry.size)
 }
 
 fn make_patch_work_path(work_dir: &Path, destination: &Path) -> Result<PathBuf> {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    std::fs::create_dir_all(work_dir).map_err(|source| Error::CreateDirFailed {
+    std::fs::create_dir_all(work_dir).map_err(|source| Error::IoAt {
+        action: "create directory",
         path: work_dir.to_path_buf(),
         source,
     })?;
@@ -104,7 +110,8 @@ pub(super) fn apply_hdiff_patch(
     work_dir: Option<&Path>,
 ) -> Result<()> {
     if let Some(parent) = dest_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| Error::CreateDirFailed {
+        std::fs::create_dir_all(parent).map_err(|e| Error::IoAt {
+            action: "create directory",
             path: parent.to_path_buf(),
             source: e,
         })?;
@@ -121,11 +128,14 @@ pub(super) fn apply_hdiff_patch(
     );
     if !patcher.apply() {
         let _ = std::fs::remove_file(&temp_path);
-        return Err(Error::Extraction(format!(
-            "hdiffpatch-rs failed to apply {} using base {}",
-            patch_path.display(),
-            base_path.display()
-        )));
+        return Err(Error::Message {
+            context: "Extraction error: ",
+            detail: format!(
+                "hdiffpatch-rs failed to apply {} using base {}",
+                patch_path.display(),
+                base_path.display()
+            ),
+        });
     }
     if work_dir.is_some() {
         let local_temp = make_temp_write_path(dest_path)?;
@@ -141,14 +151,14 @@ pub(super) fn apply_hdiff_patch(
         if copied.bytes != expected_size || copied.md5 != expected_md5.to_ascii_lowercase() {
             let _ = std::fs::remove_file(&temp_path);
             let _ = std::fs::remove_file(&local_temp);
-            return Err(Error::Vfs(format!(
+            return Err(Error::Message { context: "VFS error: ", detail: format!(
                 "Patch output {} failed inline copy verification: expected size/md5 {}/{}, got {}/{}",
                 logical_path,
                 expected_size,
                 expected_md5,
                 copied.bytes,
                 copied.md5
-            )));
+            ) });
         }
         if let Err(error) = move_path_replace(&local_temp, dest_path) {
             let _ = std::fs::remove_file(&temp_path);
@@ -164,11 +174,14 @@ pub(super) fn apply_hdiff_patch(
     }
     if let Err(error) = move_path_replace(&temp_path, dest_path) {
         let _ = std::fs::remove_file(&temp_path);
-        return Err(Error::Other(format!(
-            "Failed to replace patched file {} -> {}: {error}",
-            temp_path.display(),
-            dest_path.display()
-        )));
+        return Err(Error::Message {
+            context: "",
+            detail: format!(
+                "Failed to replace patched file {} -> {}: {error}",
+                temp_path.display(),
+                dest_path.display()
+            ),
+        });
     }
     Ok(())
 }
@@ -226,27 +239,34 @@ fn apply_patch_entry(
             entry.size,
             None,
         )
-        .map_err(|err| {
-            Error::Other(format!(
+        .map_err(|err| Error::Message {
+            context: "",
+            detail: format!(
                 "Failed to patch {} from base {}: {err}",
                 entry.name,
                 base_relative.display()
-            ))
+            ),
         });
     }
 
     if candidate_failures.is_empty() {
-        return Err(Error::Vfs(format!(
-            "patch.json entry {} has no applicable patch candidates",
-            entry.name
-        )));
+        return Err(Error::Message {
+            context: "VFS error: ",
+            detail: format!(
+                "patch.json entry {} has no applicable patch candidates",
+                entry.name
+            ),
+        });
     }
 
-    Err(Error::Vfs(format!(
-        "patch.json entry {} has no verified base file to patch: {}",
-        entry.name,
-        candidate_failures.join("; ")
-    )))
+    Err(Error::Message {
+        context: "VFS error: ",
+        detail: format!(
+            "patch.json entry {} has no verified base file to patch: {}",
+            entry.name,
+            candidate_failures.join("; ")
+        ),
+    })
 }
 
 pub(super) fn apply_vfs_patch_entry(

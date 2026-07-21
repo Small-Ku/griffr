@@ -14,8 +14,10 @@ pub struct NodeId(u32);
 
 impl NodeId {
     pub(super) fn new(index: usize) -> Result<Self> {
-        let raw = u32::try_from(index)
-            .map_err(|_| Error::TaskPool("task graph contains more than u32::MAX nodes".into()))?;
+        let raw = u32::try_from(index).map_err(|_| Error::Message {
+            context: "Task pool error: ",
+            detail: "task graph contains more than u32::MAX nodes".into(),
+        })?;
         Ok(Self(raw))
     }
 
@@ -96,11 +98,14 @@ impl TaskGraphBuilder {
             .collect::<Vec<_>>();
         for dependency in &dependencies {
             if dependency.index() >= self.nodes.len() {
-                return Err(Error::TaskPool(format!(
-                    "task graph node {} depends on unknown or forward node {}",
-                    id.index(),
-                    dependency.index(),
-                )));
+                return Err(Error::Message {
+                    context: "Task pool error: ",
+                    detail: format!(
+                        "task graph node {} depends on unknown or forward node {}",
+                        id.index(),
+                        dependency.index(),
+                    ),
+                });
             }
         }
         self.nodes.push(BuilderNode { task, dependencies });

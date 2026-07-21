@@ -1706,9 +1706,19 @@ class NameResolver:
                 )
                 if exported & set(usage):
                     continue
+                severity = (
+                    "note"
+                    if uncertain or spec.visibility.kind != "private"
+                    else "warning"
+                )
+                confidence = (
+                    "speculative"
+                    if uncertain or spec.visibility.kind != "private"
+                    else "probable"
+                )
                 self.host.add(
                     "LINT001",
-                    "warning",
+                    severity,
                     (
                         f"Unverified glob import usage: {'::'.join(spec.path)}::*"
                         if uncertain
@@ -1716,15 +1726,11 @@ class NameResolver:
                     ),
                     source=module.source,
                     node=spec.node,
-                    confidence=(
-                        "speculative"
-                        if uncertain or spec.visibility.kind != "private"
-                        else "probable"
-                    ),
+                    confidence=confidence,
                     hint="Glob use can hide trait/macro resolution; confirm with rustc before removal.",
                     evidence=(
                         f"resolved exported names: {len(exported)}",
-                        "external glob or unexpanded macro prevents a complete proof"
+                        "external glob or unexpanded macro prevents a full proof"
                         if uncertain
                         else "none of the resolved exported names appears outside use declarations",
                     ),
@@ -1746,12 +1752,16 @@ class NameResolver:
                 condition=spec.condition,
                 exclude_symbol=spec.symbol,
             )
-            trait_or_external = result.external_unknown or any(
-                symbol.kind == "trait" for symbol in result.symbols
+            trait_or_external = (
+                result.external_unknown
+                or not result.symbols
+                or any(symbol.kind == "trait" for symbol in result.symbols)
             )
+            severity = "note" if trait_or_external else "warning"
+            confidence = "speculative" if trait_or_external else "probable"
             self.host.add(
                 "LINT002",
-                "warning",
+                severity,
                 (
                     f"Likely unused import: {alias}"
                     if spec.visibility.kind == "private"
@@ -1759,7 +1769,7 @@ class NameResolver:
                 ),
                 source=module.source,
                 node=spec.node,
-                confidence="speculative" if trait_or_external else "probable",
+                confidence=confidence,
                 hint=(
                     "This may be a trait import used only by method resolution; confirm with rustc/Clippy."
                     if trait_or_external

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::fs_ops::path_safety::parse_safe_relative_path;
 
-use super::{PATCH_PLAN_NAME, PATCH_TRANSACTION_DIR};
+use super::{PATCH_PLAN_NAME, PATCH_WORK_DIR};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PatchApplyOptions {
@@ -20,7 +20,8 @@ impl PatchApplyOptions {
             path.to_path_buf()
         } else {
             std::env::current_dir()
-                .map_err(|source| Error::StatFailed {
+                .map_err(|source| Error::IoAt {
+                    action: "query file metadata/stat for",
                     path: path.to_path_buf(),
                     source,
                 })?
@@ -32,10 +33,10 @@ impl PatchApplyOptions {
                 Component::CurDir => {}
                 Component::ParentDir if normalized.pop() => {}
                 Component::ParentDir => {
-                    return Err(Error::Config(format!(
-                        "Path {} escapes its filesystem root",
-                        path.display()
-                    )));
+                    return Err(Error::Message {
+                        context: "Configuration error: ",
+                        detail: format!("Path {} escapes its filesystem root", path.display()),
+                    });
                 }
                 Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
                     normalized.push(component.as_os_str());
@@ -60,31 +61,40 @@ impl PatchApplyOptions {
 
         if let Some(work_dir) = work_dir.as_deref() {
             if work_dir.starts_with(&install_root) {
-                return Err(Error::Config(format!(
-                    "Patch work directory {} must be outside install root {}",
-                    work_dir.display(),
-                    install_root.display()
-                )));
+                return Err(Error::Message {
+                    context: "Configuration error: ",
+                    detail: format!(
+                        "Patch work directory {} must be outside install root {}",
+                        work_dir.display(),
+                        install_root.display()
+                    ),
+                });
             }
         }
         if let Some(external_vfs_root) = external_vfs_root.as_deref() {
             if external_vfs_root.starts_with(&install_root) {
-                return Err(Error::Config(format!(
-                    "External VFS root {} must be outside install root {}",
-                    external_vfs_root.display(),
-                    install_root.display()
-                )));
+                return Err(Error::Message {
+                    context: "Configuration error: ",
+                    detail: format!(
+                        "External VFS root {} must be outside install root {}",
+                        external_vfs_root.display(),
+                        install_root.display()
+                    ),
+                });
             }
         }
         if let (Some(work_dir), Some(external_vfs_root)) =
             (work_dir.as_deref(), external_vfs_root.as_deref())
         {
             if work_dir.starts_with(external_vfs_root) || external_vfs_root.starts_with(work_dir) {
-                return Err(Error::Config(format!(
-                    "Patch work directory {} and external VFS root {} must not overlap",
-                    work_dir.display(),
-                    external_vfs_root.display()
-                )));
+                return Err(Error::Message {
+                    context: "Configuration error: ",
+                    detail: format!(
+                        "Patch work directory {} and external VFS root {} must not overlap",
+                        work_dir.display(),
+                        external_vfs_root.display()
+                    ),
+                });
             }
         }
 
@@ -136,17 +146,18 @@ impl PatchPlan {
     pub const SCHEMA_VERSION: u32 = 2;
 
     pub fn plan_path(&self) -> PathBuf {
-        self.install_root
-            .join(PATCH_TRANSACTION_DIR)
-            .join(PATCH_PLAN_NAME)
+        self.install_root.join(PATCH_WORK_DIR).join(PATCH_PLAN_NAME)
     }
 
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != Self::SCHEMA_VERSION {
-            return Err(Error::Config(format!(
-                "Unsupported patch plan schema version {}",
-                self.schema_version
-            )));
+            return Err(Error::Message {
+                context: "Configuration error: ",
+                detail: format!(
+                    "Unsupported patch plan schema version {}",
+                    self.schema_version
+                ),
+            });
         }
         if !self.install_root.is_absolute()
             || !self.stage_root.is_absolute()
@@ -156,15 +167,19 @@ impl PatchPlan {
                 .as_deref()
                 .is_some_and(|path| !path.is_absolute())
         {
-            return Err(Error::Config(
-                "Patch plan contains a non-absolute runtime path".to_string(),
-            ));
+            return Err(Error::Message {
+                context: "Configuration error: ",
+                detail: "Patch plan contains a non-absolute runtime path".to_string(),
+            });
         }
         if self.stage_root == self.install_root || self.install_root.starts_with(&self.stage_root) {
-            return Err(Error::Config(format!(
-                "Patch staging directory {} must not be the install root or its ancestor",
-                self.stage_root.display()
-            )));
+            return Err(Error::Message {
+                context: "Configuration error: ",
+                detail: format!(
+                    "Patch staging directory {} must not be the install root or its ancestor",
+                    self.stage_root.display()
+                ),
+            });
         }
         let vfs_base_path = parse_safe_relative_path(
             "patch plan vfs_base_path",
@@ -175,25 +190,31 @@ impl PatchPlan {
         for entry in &self.entries {
             let relative = parse_safe_relative_path("patch plan entry name", &entry.name)?;
             if entry.expected_md5.trim().is_empty() || entry.expected_size == 0 {
-                return Err(Error::Config(format!(
-                    "Patch plan entry {} has invalid expected metadata",
-                    entry.name
-                )));
+                return Err(Error::Message {
+                    context: "Configuration error: ",
+                    detail: format!(
+                        "Patch plan entry {} has invalid expected metadata",
+                        entry.name
+                    ),
+                });
             }
             if !names.insert(entry.name.clone()) || !destinations.insert(entry.destination.clone())
             {
-                return Err(Error::Config(format!(
-                    "Patch plan contains a duplicate writer for {}",
-                    entry.name
-                )));
+                return Err(Error::Message {
+                    context: "Configuration error: ",
+                    detail: format!("Patch plan contains a duplicate writer for {}", entry.name),
+                });
             }
             let expected_destination = self.vfs_destination.join(&relative);
             if entry.destination != expected_destination {
-                return Err(Error::Config(format!(
-                    "Patch plan destination {} does not match expected {}",
-                    entry.destination.display(),
-                    expected_destination.display()
-                )));
+                return Err(Error::Message {
+                    context: "Configuration error: ",
+                    detail: format!(
+                        "Patch plan destination {} does not match expected {}",
+                        entry.destination.display(),
+                        expected_destination.display()
+                    ),
+                });
             }
             match &entry.source {
                 PlannedPatchSource::AlreadyPresent => {}
@@ -210,21 +231,27 @@ impl PatchPlan {
                     base_size,
                 } => {
                     if !base.starts_with(&self.vfs_destination) {
-                        return Err(Error::Config(format!(
-                            "Patch plan base {} is outside VFS destination {}",
-                            base.display(),
-                            self.vfs_destination.display()
-                        )));
+                        return Err(Error::Message {
+                            context: "Configuration error: ",
+                            detail: format!(
+                                "Patch plan base {} is outside VFS destination {}",
+                                base.display(),
+                                self.vfs_destination.display()
+                            ),
+                        });
                     }
                     parse_safe_relative_path(
                         "patch plan HDiff payload",
                         &payload.to_string_lossy(),
                     )?;
                     if base_md5.trim().is_empty() || *base_size == 0 {
-                        return Err(Error::Config(format!(
-                            "Patch plan base {} has invalid expected metadata",
-                            base.display()
-                        )));
+                        return Err(Error::Message {
+                            context: "Configuration error: ",
+                            detail: format!(
+                                "Patch plan base {} has invalid expected metadata",
+                                base.display()
+                            ),
+                        });
                     }
                 }
             }
@@ -241,16 +268,19 @@ impl PatchPlan {
             let parsed =
                 parse_safe_relative_path("patch plan delete path", &relative.to_string_lossy())?;
             if !delete_paths.insert(parsed.clone()) {
-                return Err(Error::Config(format!(
-                    "Patch plan contains duplicate delete path {}",
-                    parsed.display()
-                )));
+                return Err(Error::Message {
+                    context: "Configuration error: ",
+                    detail: format!(
+                        "Patch plan contains duplicate delete path {}",
+                        parsed.display()
+                    ),
+                });
             }
             if logical_outputs.contains(&self.install_root.join(&parsed)) {
-                return Err(Error::Config(format!(
-                    "Patch plan deletes planned output {}",
-                    parsed.display()
-                )));
+                return Err(Error::Message {
+                    context: "Configuration error: ",
+                    detail: format!("Patch plan deletes planned output {}", parsed.display()),
+                });
             }
         }
         for relative in &self.deferred_paths {

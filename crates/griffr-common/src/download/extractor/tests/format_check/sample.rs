@@ -7,7 +7,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
-pub(super) struct ArchiveFixture {
+pub(super) struct ArchiveSample {
     pub(super) key: PathBuf,
     pub(super) volumes: Vec<(u64, PathBuf)>,
 }
@@ -38,15 +38,15 @@ pub(super) struct ArchiveFormatReport {
     pub(super) raw_split_error: Option<String>,
 }
 
-pub(super) struct RawSplitFixture {
+pub(super) struct RawSplitSample {
     pub(super) layout: MultiVolumeLayout,
     pub(super) directory: ArchiveDirectory,
     pub(super) archive_index: ArchiveIndex,
 }
 
-pub(super) struct CheckedFixture {
+pub(super) struct CheckedSample {
     pub(super) report: ArchiveFormatReport,
-    pub(super) raw_split: Option<RawSplitFixture>,
+    pub(super) raw_split: Option<RawSplitSample>,
 }
 
 fn tail_has_eocd_at_eof(path: &Path) -> Result<bool> {
@@ -113,11 +113,11 @@ pub(super) fn entry_names(archive_index: &ArchiveIndex) -> Vec<Option<String>> {
         .collect()
 }
 
-pub(super) fn check_fixture_format(
-    fixture: &ArchiveFixture,
+pub(super) fn check_sample_format(
+    sample: &ArchiveSample,
     sample_count: usize,
-) -> Result<CheckedFixture> {
-    let probes = fixture
+) -> Result<CheckedSample> {
+    let probes = sample
         .volumes
         .iter()
         .map(|(sequence, path)| probe_standalone_volume(*sequence, path))
@@ -129,7 +129,7 @@ pub(super) fn check_fixture_format(
         .collect::<Vec<_>>();
 
     let layout = MultiVolumeLayout::from_expected(
-        fixture
+        sample
             .volumes
             .iter()
             .map(|(_, path)| Ok((path.clone(), std::fs::metadata(path)?.len())))
@@ -140,10 +140,13 @@ pub(super) fn check_fixture_format(
         let directory = match extractor.discover_archive_directory()? {
             ArchiveDirectoryDiscovery::Ready(directory) => directory,
             ArchiveDirectoryDiscovery::NeedsRange(range) => {
-                return Err(Error::Extraction(format!(
-                    "complete fixture unexpectedly needs range {}..{}",
-                    range.start, range.end
-                )));
+                return Err(Error::Message {
+                    context: "Extraction error: ",
+                    detail: format!(
+                        "full sample unexpectedly needs range {}..{}",
+                        range.start, range.end
+                    ),
+                });
             }
         };
         let archive_index = extractor.read_archive_index(&directory)?;
@@ -207,7 +210,7 @@ pub(super) fn check_fixture_format(
                 .filter(|source| source.volume_indices.len() > 1)
                 .count();
             let entry_count = archive_index.archive.len();
-            raw_split = Some(RawSplitFixture {
+            raw_split = Some(RawSplitSample {
                 layout,
                 directory,
                 archive_index,
@@ -223,15 +226,15 @@ pub(super) fn check_fixture_format(
             (None, Vec::new(), None, Vec::new(), Vec::new())
         };
 
-    Ok(CheckedFixture {
+    Ok(CheckedSample {
         report: ArchiveFormatReport {
-            archive: fixture.key.display().to_string(),
-            sequences: fixture
+            archive: sample.key.display().to_string(),
+            sequences: sample
                 .volumes
                 .iter()
                 .map(|(sequence, _)| *sequence)
                 .collect(),
-            volume_count: fixture.volumes.len(),
+            volume_count: sample.volumes.len(),
             standalone_zip_volumes,
             format_kind: format_kind.to_string(),
             entry_count,

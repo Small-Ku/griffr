@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::runtime::patch_transaction::{
+use crate::runtime::patch_apply::{
     read_patch_plan, write_patch_plan, PatchCheckReport, PatchPlan, PlannedPatchSource,
 };
 use crate::runtime::task_pool::verify::VerifiedArtifactCache;
@@ -14,12 +14,12 @@ use filesystem::{commit_top_level_files, prepare_external_vfs_root};
 #[cfg(test)]
 use steps::ordered_entries;
 use steps::{
-    apply_planned_entry, apply_remaining_deletes, cleanup_staging, cleanup_transaction,
-    commit_deferred_files, delete_unreferenced_paths_before_patch, entry_waves, final_output_paths,
-    release_base_if_unused,
+    apply_planned_entry, apply_remaining_deletes, cleanup_staging, commit_deferred_files,
+    delete_unreferenced_paths_before_patch, entry_waves, final_output_paths,
+    release_base_if_unused, remove_patch_work_dir,
 };
 
-pub(crate) fn prepare_patch_transaction(
+pub(crate) fn prepare_patch_apply(
     plan: &PatchPlan,
     commit_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
 ) -> Result<()> {
@@ -30,23 +30,25 @@ pub(crate) fn prepare_patch_transaction(
     delete_unreferenced_paths_before_patch(plan)
 }
 
-pub(crate) fn apply_patch_transaction_entry(
+pub(crate) fn apply_patch_entry(
     plan: &PatchPlan,
     entry_index: usize,
     verification_cache: &VerifiedArtifactCache,
 ) -> Result<()> {
-    let entry = plan.entries.get(entry_index).ok_or_else(|| {
-        Error::TaskPool(format!("patch entry index {entry_index} is out of range"))
-    })?;
-    apply_planned_entry(plan, entry, verification_cache).map_err(|error| {
-        Error::Other(format!(
-            "Failed to apply patch entry {}: {}",
-            entry.name, error
-        ))
+    let entry = plan
+        .entries
+        .get(entry_index)
+        .ok_or_else(|| Error::Message {
+            context: "Task pool error: ",
+            detail: format!("patch entry index {entry_index} is out of range"),
+        })?;
+    apply_planned_entry(plan, entry, verification_cache).map_err(|error| Error::Message {
+        context: "",
+        detail: format!("Failed to apply patch entry {}: {}", entry.name, error),
     })
 }
 
-pub(crate) fn release_patch_transaction_base(plan: &PatchPlan, base: &Path) -> Result<()> {
+pub(crate) fn release_patch_base(plan: &PatchPlan, base: &Path) -> Result<()> {
     let delete_set = plan.delete_paths.iter().cloned().collect::<BTreeSet<_>>();
     let outputs = final_output_paths(plan);
     let Some(relative) = steps::relative_install_path(plan, base) else {
@@ -58,23 +60,23 @@ pub(crate) fn release_patch_transaction_base(plan: &PatchPlan, base: &Path) -> R
     Ok(())
 }
 
-pub(crate) fn apply_patch_transaction_deletes(
+pub(crate) fn apply_patch_deletes(
     plan: &PatchPlan,
     callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
 ) -> Result<()> {
     apply_remaining_deletes(plan, callback)
 }
 
-pub(crate) fn commit_patch_transaction_deferred(plan: &PatchPlan) -> Result<()> {
+pub(crate) fn commit_deferred_patch_files(plan: &PatchPlan) -> Result<()> {
     commit_deferred_files(plan)
 }
 
-pub(crate) fn cleanup_patch_transaction(plan: &PatchPlan) -> Result<()> {
+pub(crate) fn clean_patch_apply(plan: &PatchPlan) -> Result<()> {
     cleanup_staging(plan)?;
-    cleanup_transaction(plan)
+    remove_patch_work_dir(plan)
 }
 
-pub(crate) fn run_patch_transaction(
+pub(crate) fn run_patch_apply(
     plan: &PatchPlan,
     _report: Option<&PatchCheckReport>,
     commit_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
@@ -82,7 +84,7 @@ pub(crate) fn run_patch_transaction(
     delete_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
     verification_cache: &VerifiedArtifactCache,
 ) -> Result<()> {
-    prepare_patch_transaction(plan, commit_callback)?;
+    prepare_patch_apply(plan, commit_callback)?;
 
     let delete_set = plan.delete_paths.iter().cloned().collect::<BTreeSet<_>>();
     let outputs = final_output_paths(plan);
@@ -99,24 +101,24 @@ pub(crate) fn run_patch_transaction(
             callback("", 0, total);
         }
     }
-    let mut completed = 0usize;
+    let mut finished = 0usize;
     for wave in waves {
         for entry in &wave {
             apply_planned_entry(plan, entry, verification_cache).map_err(|error| {
-                Error::Other(format!(
-                    "Failed to apply patch entry {}: {}",
-                    entry.name, error
-                ))
+                Error::Message {
+                    context: "",
+                    detail: format!("Failed to apply patch entry {}: {}", entry.name, error),
+                }
             })?;
             if let PlannedPatchSource::Hdiff { base, .. } = &entry.source {
                 release_base_if_unused(plan, base, &mut remaining, &delete_set, &outputs)?;
             }
-            completed = completed.saturating_add(1);
+            finished = finished.saturating_add(1);
             if let Some(callback) = patch_callback.as_deref_mut() {
                 let logical_path = plan.vfs_base_path.join(&entry.name);
                 callback(
                     &logical_path.to_string_lossy().replace('\\', "/"),
-                    completed,
+                    finished,
                     total,
                 );
             }
@@ -125,10 +127,10 @@ pub(crate) fn run_patch_transaction(
     apply_remaining_deletes(plan, delete_callback)?;
     commit_deferred_files(plan)?;
     cleanup_staging(plan)?;
-    cleanup_transaction(plan)
+    remove_patch_work_dir(plan)
 }
 
-pub(crate) fn resume_patch_transaction(
+pub(crate) fn resume_patch_apply(
     install_root: &Path,
     commit_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
     patch_callback: Option<&mut dyn FnMut(&str, usize, usize)>,
@@ -136,7 +138,7 @@ pub(crate) fn resume_patch_transaction(
 ) -> Result<()> {
     let plan = read_patch_plan(install_root)?;
     let verification_cache = VerifiedArtifactCache::default();
-    run_patch_transaction(
+    run_patch_apply(
         &plan,
         None,
         commit_callback,

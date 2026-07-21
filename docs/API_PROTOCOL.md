@@ -43,7 +43,7 @@ Part of the Hypergryph Official API Reference. See [`API.md`](API.md) for the fu
 ### Level 1: Pack-level MD5
 | What | Source | When to Check |
 |------|--------|---------------|
-| Each downloaded `.zip.NNN` volume | `pkg.packs[].md5` / `patch.patches[].md5` from batch API | After each volume download completes |
+| Each downloaded `.zip.NNN` volume | `pkg.packs[].md5` / `patch.patches[].md5` from batch API | After each volume download finishes |
 
 **Process**: After downloading each `.zip.NNN` file, compute MD5 and compare against the pack's `md5` field from the API response.
 
@@ -112,7 +112,7 @@ When the manifest comparison reveals files with mismatched MD5s:
 
 ## 5. URL Pattern Reference
 
-### Complete Game Update URL Template
+### Full Game Update URL Template
 
 ```
 Base: https://<cdn_domain>/<appCode>/{major}.{minor}/update/{channel}/{subChannel}/Windows/{version}_{randStr}/

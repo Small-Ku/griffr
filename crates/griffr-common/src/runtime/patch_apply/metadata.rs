@@ -34,10 +34,13 @@ impl PredownloadStageMetadata {
 
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != Self::SCHEMA_VERSION {
-            return Err(Error::Config(format!(
-                "Unsupported predownload metadata schema version {}",
-                self.schema_version
-            )));
+            return Err(Error::Message {
+                context: "Configuration error: ",
+                detail: format!(
+                    "Unsupported predownload metadata schema version {}",
+                    self.schema_version
+                ),
+            });
         }
         for (label, value) in [
             ("game", self.game.as_str()),
@@ -48,30 +51,35 @@ impl PredownloadStageMetadata {
             ("target_version", self.target_version.as_str()),
         ] {
             if value.trim().is_empty() {
-                return Err(Error::Config(format!(
-                    "Predownload metadata field {label} must not be empty"
-                )));
+                return Err(Error::Message {
+                    context: "Configuration error: ",
+                    detail: format!("Predownload metadata field {label} must not be empty"),
+                });
             }
         }
         if self.archives.is_empty() {
-            return Err(Error::Config(
-                "Predownload metadata must contain at least one archive part".to_string(),
-            ));
+            return Err(Error::Message {
+                context: "Configuration error: ",
+                detail: "Predownload metadata must contain at least one archive part".to_string(),
+            });
         }
         let mut names = BTreeSet::new();
         for part in &self.archives {
             parse_safe_relative_path("predownload metadata archive filename", &part.filename)?;
             if part.size == 0 || part.md5.trim().is_empty() || !names.insert(&part.filename) {
-                return Err(Error::Config(format!(
-                    "Invalid or duplicate predownload archive metadata for {}",
-                    part.filename
-                )));
+                return Err(Error::Message {
+                    context: "Configuration error: ",
+                    detail: format!(
+                        "Invalid or duplicate predownload archive metadata for {}",
+                        part.filename
+                    ),
+                });
             }
         }
         Ok(())
     }
 
-    pub fn archives_complete(&self, stage_dir: &Path) -> Result<bool> {
+    pub fn archives_ready(&self, stage_dir: &Path) -> Result<bool> {
         self.validate()?;
         for part in &self.archives {
             let path = stage_dir.join(&part.filename);
@@ -79,7 +87,13 @@ impl PredownloadStageMetadata {
                 Ok(metadata) if metadata.is_file() && metadata.len() == part.size => {}
                 Ok(_) => return Ok(false),
                 Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
-                Err(err) => return Err(Error::StatFailed { path, source: err }),
+                Err(err) => {
+                    return Err(Error::IoAt {
+                        action: "query file metadata/stat for",
+                        path,
+                        source: err,
+                    })
+                }
             }
         }
         Ok(true)
@@ -88,12 +102,12 @@ impl PredownloadStageMetadata {
 
 pub fn read_predownload_stage_metadata(stage_dir: &Path) -> Result<PredownloadStageMetadata> {
     let path = stage_dir.join(PREDOWNLOAD_STAGE_METADATA_NAME);
-    let metadata: PredownloadStageMetadata = serde_json::from_slice(
-        &std::fs::read(&path).map_err(|source| Error::OpenFileFailed {
+    let metadata: PredownloadStageMetadata =
+        serde_json::from_slice(&std::fs::read(&path).map_err(|source| Error::IoAt {
+            action: "open file",
             path: path.clone(),
             source,
-        })?,
-    )?;
+        })?)?;
     metadata.validate()?;
     Ok(metadata)
 }
@@ -103,14 +117,16 @@ pub fn write_predownload_stage_metadata(
     metadata: &PredownloadStageMetadata,
 ) -> Result<()> {
     metadata.validate()?;
-    std::fs::create_dir_all(stage_dir).map_err(|source| Error::CreateDirFailed {
+    std::fs::create_dir_all(stage_dir).map_err(|source| Error::IoAt {
+        action: "create directory",
         path: stage_dir.to_path_buf(),
         source,
     })?;
     let path = stage_dir.join(PREDOWNLOAD_STAGE_METADATA_NAME);
     let temp = stage_dir.join(format!("{PREDOWNLOAD_STAGE_METADATA_NAME}.tmp"));
     let payload = serde_json::to_vec_pretty(metadata)?;
-    std::fs::write(&temp, payload).map_err(|source| Error::OpenFileFailed {
+    std::fs::write(&temp, payload).map_err(|source| Error::IoAt {
+        action: "open file",
         path: temp.clone(),
         source,
     })?;

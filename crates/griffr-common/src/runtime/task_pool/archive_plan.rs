@@ -15,23 +15,31 @@ pub struct ArchiveGroup {
 
 pub fn plan_archive_groups(packs: &[PackFile], archive_dir: &Path) -> Result<Vec<ArchiveGroup>> {
     if packs.is_empty() {
-        return Err(Error::Config("No archives to process".to_string()));
+        return Err(Error::Message {
+            context: "Configuration error: ",
+            detail: "No archives to process".to_string(),
+        });
     }
 
     let mut grouped: RapidHashMap<String, Vec<ArchivePart>> = RapidHashMap::default();
     for pack in packs {
         let filename = pack
             .filename()
-            .ok_or_else(|| Error::Config("Failed to extract archive filename".to_string()))?
+            .ok_or_else(|| Error::Message {
+                context: "Configuration error: ",
+                detail: "Failed to extract archive filename".to_string(),
+            })?
             .to_string();
         let base_name = pack
             .archive_base_name()
-            .ok_or_else(|| {
-                Error::Config("Pack URL did not end with .zip or a numeric .zip.<part>".to_string())
+            .ok_or_else(|| Error::Message {
+                context: "Configuration error: ",
+                detail: "Pack URL did not end with .zip or a numeric .zip.<part>".to_string(),
             })?
             .to_string();
-        let sequence = pack.archive_sequence().ok_or_else(|| {
-            Error::Config("Pack URL did not contain a valid archive sequence".to_string())
+        let sequence = pack.archive_sequence().ok_or_else(|| Error::Message {
+            context: "Configuration error: ",
+            detail: "Pack URL did not contain a valid archive sequence".to_string(),
         })?;
 
         grouped.entry(base_name).or_default().push(ArchivePart {

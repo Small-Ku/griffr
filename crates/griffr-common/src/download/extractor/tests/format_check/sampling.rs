@@ -1,5 +1,5 @@
 use super::super::super::*;
-use super::fixture::{entry_names, RawSplitFixture};
+use super::sample::{entry_names, RawSplitSample};
 use super::SAMPLE_SEED;
 use crate::error::{Error, Result};
 use std::collections::BTreeSet;
@@ -142,7 +142,10 @@ fn shadow_layout(
     let parent = original
         .path(0)
         .and_then(Path::parent)
-        .ok_or_else(|| Error::Extraction("archive fixture has no parent directory".to_string()))?;
+        .ok_or_else(|| Error::Message {
+            context: "Extraction error: ",
+            detail: "archive sample has no parent directory".to_string(),
+        })?;
     let temp = tempfile::Builder::new()
         .prefix(".griffr-archive-probe-")
         .tempdir_in(parent)?;
@@ -150,11 +153,12 @@ fn shadow_layout(
     for (index, volume) in original.layouts.iter().enumerate() {
         let path = temp.path().join(format!("probe.zip.{:03}", index + 1));
         if present.contains(&index) {
-            std::fs::hard_link(&volume.path, &path).map_err(|source| {
-                Error::Extraction(format!(
-                    "failed to hard-link fixture volume {} for isolated probing: {source}",
+            std::fs::hard_link(&volume.path, &path).map_err(|source| Error::Message {
+                context: "Extraction error: ",
+                detail: format!(
+                    "failed to hard-link sample volume {} for isolated probing: {source}",
                     volume.path.display()
-                ))
+                ),
             })?;
         }
         expected.push((path, volume.end - volume.start));
@@ -163,28 +167,28 @@ fn shadow_layout(
 }
 
 fn read_isolated_index(
-    raw_fixture: &RawSplitFixture,
+    raw_sample: &RawSplitSample,
     required: &BTreeSet<usize>,
 ) -> Result<(tempfile::TempDir, MultiVolumeExtractor, ArchiveIndex)> {
-    let central = raw_fixture
+    let central = raw_sample
         .layout
-        .volume_indices_for_range(raw_fixture.directory.central_directory.clone())
+        .volume_indices_for_range(raw_sample.directory.central_directory.clone())
         .into_iter()
         .chain(
-            raw_fixture
+            raw_sample
                 .layout
-                .volume_indices_for_range(raw_fixture.directory.end_records.clone()),
+                .volume_indices_for_range(raw_sample.directory.end_records.clone()),
         )
         .chain(
-            raw_fixture
+            raw_sample
                 .layout
-                .volume_indices_for_range(raw_fixture.layout.tail_probe_range()),
+                .volume_indices_for_range(raw_sample.layout.tail_probe_range()),
         )
         .collect::<BTreeSet<_>>();
     let present = required.union(&central).copied().collect::<BTreeSet<_>>();
-    let (temp, layout) = shadow_layout(&raw_fixture.layout, &present)?;
+    let (temp, layout) = shadow_layout(&raw_sample.layout, &present)?;
     let extractor = MultiVolumeExtractor::from_layout(layout.clone());
-    let mut archive_index = extractor.read_archive_index(&raw_fixture.directory)?;
+    let mut archive_index = extractor.read_archive_index(&raw_sample.directory)?;
 
     archive_index.archive = archive_index.archive.clone();
     for index in central.difference(required) {
@@ -196,22 +200,23 @@ fn read_isolated_index(
 }
 
 pub(super) fn validate_raw_sample(
-    raw_fixture: &RawSplitFixture,
+    raw_sample: &RawSplitSample,
     index: usize,
     check_missing_start: bool,
 ) -> Result<()> {
-    let required = raw_fixture.archive_index.entry_sources[index]
+    let required = raw_sample.archive_index.entry_sources[index]
         .volume_indices
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
     if required.is_empty() {
-        return Err(Error::Extraction(format!(
-            "entry {index} has no declared source volumes"
-        )));
+        return Err(Error::Message {
+            context: "Extraction error: ",
+            detail: format!("entry {index} has no declared source volumes"),
+        });
     }
 
-    let (temp, extractor, archive_index) = read_isolated_index(raw_fixture, &required)?;
+    let (temp, extractor, archive_index) = read_isolated_index(raw_sample, &required)?;
     let output = temp.path().join("output");
     std::fs::create_dir(&output)?;
     extractor.extract_entries_with_progress(
@@ -226,25 +231,34 @@ pub(super) fn validate_raw_sample(
     let name = archive_index
         .archive
         .name_for_index(index)
-        .ok_or_else(|| Error::Extraction(format!("entry {index} has no name")))?;
+        .ok_or_else(|| Error::Message {
+            context: "Extraction error: ",
+            detail: format!("entry {index} has no name"),
+        })?;
     let extracted = output.join(safe_relative_archive_path(name)?);
     let actual_size = std::fs::metadata(&extracted)?.len();
     if actual_size != archive_index.entry_sizes[index] {
-        return Err(Error::Extraction(format!(
-            "sampled entry {name} extracted {actual_size} bytes, expected {}",
-            archive_index.entry_sizes[index]
-        )));
+        return Err(Error::Message {
+            context: "Extraction error: ",
+            detail: format!(
+                "sampled entry {name} extracted {actual_size} bytes, expected {}",
+                archive_index.entry_sizes[index]
+            ),
+        });
     }
 
     if check_missing_start {
         let missing = *required
             .first()
             .expect("non-empty required volume set has a first item");
-        let (temp, extractor, archive_index) = read_isolated_index(raw_fixture, &required)?;
+        let (temp, extractor, archive_index) = read_isolated_index(raw_sample, &required)?;
         let missing_path = extractor
             .layout
             .path(missing)
-            .ok_or_else(|| Error::Extraction("missing probe volume path".to_string()))?
+            .ok_or_else(|| Error::Message {
+                context: "Extraction error: ",
+                detail: "missing probe volume path".to_string(),
+            })?
             .to_path_buf();
         std::fs::remove_file(missing_path)?;
         let output = temp.path().join("missing-output");
@@ -261,9 +275,12 @@ pub(super) fn validate_raw_sample(
             )
             .is_ok()
         {
-            return Err(Error::Extraction(format!(
-                "entry {index} extracted without its local-header volume {missing}"
-            )));
+            return Err(Error::Message {
+                context: "Extraction error: ",
+                detail: format!(
+                    "entry {index} extracted without its local-header volume {missing}"
+                ),
+            });
         }
     }
     Ok(())

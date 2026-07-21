@@ -51,10 +51,10 @@ pub fn is_running_as_admin() -> bool {
     true
 }
 
-/// Restart the current executable with admin privileges
+/// Restart the current program file with admin privileges
 ///
 /// This function will:
-/// 1. Get the current executable path
+/// 1. Get the current program file path
 /// 2. Get the current command line arguments
 /// 3. Use ShellExecute to relaunch with "runas" verb
 /// 4. Exit the current process
@@ -68,8 +68,8 @@ pub fn restart_as_admin() {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-    // Get current executable path
-    let exe_path = std::env::current_exe().expect("Failed to get current executable path");
+    // Get current program file path
+    let exe_path = std::env::current_exe().expect("Failed to get current program file path");
 
     // Get current arguments (skip the first one which is the exe path)
     let args: Vec<String> = std::env::args().skip(1).collect();

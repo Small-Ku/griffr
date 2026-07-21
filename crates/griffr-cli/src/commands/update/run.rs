@@ -25,31 +25,31 @@ pub(super) async fn update_internal(
     opts: GlobalOptions,
 ) -> Result<()> {
     let mut local = detect_local_install(&path).await?;
-    let mut resumed_pending_transaction = false;
+    let mut resumed_pending_patch = false;
     match griffr_common::runtime::get_patch_recovery_state(&local.install_path, None)? {
         griffr_common::runtime::PatchRecoveryState::ExtractedReady
         | griffr_common::runtime::PatchRecoveryState::DeletePending => {
             if opts.is_dry_run() {
                 opts.dry_run(format!(
-                    "Would resume pending patch transaction under {} before checking for another update",
+                    "Would resume pending patch apply under {} before checking for another update",
                     local.install_path.display()
                 ));
                 return Ok(());
             }
             crate::commands::predownload::resume(local.install_path.clone(), opts).await?;
             local = detect_local_install(&path).await?;
-            resumed_pending_transaction = true;
+            resumed_pending_patch = true;
         }
-        griffr_common::runtime::PatchRecoveryState::ExtractedIncomplete { missing } => {
+        griffr_common::runtime::PatchRecoveryState::ExtractedMissing { missing } => {
             if !require_staged_predownload {
                 anyhow::bail!(
-                    "Pending patch transaction under {} is incomplete: {}. Replay its staged archives with `predownload apply --output-dir`.",
+                    "Pending patch apply under {} is missing required data: {}. Replay its staged archives with `predownload apply --output-dir`.",
                     local.install_path.display(),
                     missing.join(", ")
                 );
             }
             ui::print_info(format!(
-                "Pending extracted patch state is incomplete; replaying staged archives: {}",
+                "Pending extracted patch state is missing required data; replaying staged archives: {}",
                 missing.join(", ")
             ));
         }
@@ -67,10 +67,10 @@ pub(super) async fn update_internal(
             ));
         }
         griffr_common::runtime::PatchRecoveryState::ArchiveReady { .. }
-        | griffr_common::runtime::PatchRecoveryState::Complete => {}
+        | griffr_common::runtime::PatchRecoveryState::Idle => {}
     }
-    if resumed_pending_transaction && require_staged_predownload {
-        ui::print_success("Pending staged predownload transaction completed");
+    if resumed_pending_patch && require_staged_predownload {
+        ui::print_success("Pending staged predownload patch finished");
         return Ok(());
     }
 
@@ -255,7 +255,7 @@ pub(super) async fn update_internal(
             .map(|path| streaming_assets_path(&path.join(install_target.data_root.clone())))
             .collect::<Vec<_>>();
         let rand_str = version_info.rand_str();
-        match plan_vfs_tasks(
+        plan_vfs_tasks(
             &api_client,
             &install_target.api,
             &version_info.version,
@@ -270,10 +270,8 @@ pub(super) async fn update_internal(
         )
         .await
         .context("Failed to plan VFS tasks")?
-        {
-            griffr_common::runtime::VfsPlanOutcome::Planned(plan) => plan.tasks,
-            griffr_common::runtime::VfsPlanOutcome::Unsupported => Vec::new(),
-        }
+        .map(|plan| plan.tasks)
+        .unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -296,7 +294,7 @@ pub(super) async fn update_internal(
     if reuse_paths.is_empty() {
         match package_kind {
             UpdatePackageKind::Patch => {
-                validate_patch_target(&install_target.executable, &local.install_path).await?;
+                validate_patch_target(&install_target.exe_name, &local.install_path).await?;
                 let patch = version_info
                     .patch
                     .as_ref()
@@ -377,7 +375,7 @@ pub(super) async fn update_internal(
     )
     .await?;
 
-    ui::print_success("Update complete");
+    ui::print_success("Update finished");
     Ok(())
 }
 

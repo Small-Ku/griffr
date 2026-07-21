@@ -8,12 +8,12 @@ use crate::api::types::GameFileEntry;
 use crate::download::extractor::MultiVolumeLayout;
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::fs_ops::{commit_partial_download, make_partial_download_path};
-use crate::runtime::task_pool::graph::TaskExecution;
+use crate::runtime::task_pool::graph::TaskRun;
 use crate::runtime::task_pool::types::{ArchivePart, ArchiveRetention, ArchiveWork, Task};
 use crate::runtime::task_pool::verify;
 use crate::runtime::PatchApplyOptions;
 
-pub(crate) fn execute_install_archive(
+pub(crate) fn run_install_archive(
     base_name: String,
     dest: PathBuf,
     retention: ArchiveRetention,
@@ -22,7 +22,7 @@ pub(crate) fn execute_install_archive(
     expected_files: Arc<std::collections::BTreeMap<String, GameFileEntry>>,
     excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
     mut parts: Vec<ArchivePart>,
-) -> TaskExecution {
+) -> TaskRun {
     let result = (|| -> Result<_> {
         parts.sort_by(|left, right| {
             left.sequence
@@ -30,7 +30,10 @@ pub(crate) fn execute_install_archive(
                 .then_with(|| left.logical_path.cmp(&right.logical_path))
         });
         if parts.is_empty() {
-            return Err(Error::TaskPool("install archive has no parts".to_string()));
+            return Err(Error::Message {
+                context: "Task pool error: ",
+                detail: "install archive has no parts".to_string(),
+            });
         }
 
         prepare_trusted_archive_files(&parts)?;
@@ -80,11 +83,11 @@ pub(crate) fn execute_install_archive(
     })();
 
     match result {
-        Ok(work) => TaskExecution::then(Task::DiscoverArchiveDirectory {
+        Ok(work) => TaskRun::then(Task::DiscoverArchiveDirectory {
             work,
             required_range: None,
         }),
-        Err(error) => TaskExecution::failed(error.to_string()),
+        Err(error) => TaskRun::failed(error.to_string()),
     }
 }
 
@@ -121,7 +124,8 @@ fn is_trusted_archive_file(path: &Path, part: &ArchivePart) -> Result<bool> {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(source) => {
-            return Err(Error::StatFailed {
+            return Err(Error::IoAt {
+                action: "query file metadata/stat for",
                 path: path.to_path_buf(),
                 source,
             });
@@ -137,7 +141,8 @@ fn remove_file_if_exists(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(Error::RemoveFailed {
+        Err(source) => Err(Error::IoAt {
+            action: "remove file or directory",
             path: path.to_path_buf(),
             source,
         }),
@@ -149,9 +154,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn completed_volume_partial_is_promoted_before_range_planning() {
+    fn ready_volume_partial_is_promoted_before_range_planning() {
         let temp = tempfile::tempdir().unwrap();
-        let bytes = b"complete-volume";
+        let bytes = b"full-volume";
         let dest = temp.path().join("bundle.zip.001");
         let retained_partial = volume_temp_path(&dest).unwrap();
         std::fs::write(&retained_partial, bytes).unwrap();

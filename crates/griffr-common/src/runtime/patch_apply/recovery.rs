@@ -11,16 +11,16 @@ use crate::runtime::{
 
 use super::{
     read_patch_plan, read_predownload_stage_metadata, PlannedPatchSource, PATCH_DEFERRED_DIR,
-    PATCH_PLAN_NAME, PATCH_TRANSACTION_DIR, PREDOWNLOAD_STAGE_METADATA_NAME,
+    PATCH_PLAN_NAME, PATCH_WORK_DIR, PREDOWNLOAD_STAGE_METADATA_NAME,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatchRecoveryState {
     ArchiveReady { stage_dir: PathBuf },
     ExtractedReady,
-    ExtractedIncomplete { missing: Vec<String> },
+    ExtractedMissing { missing: Vec<String> },
     DeletePending,
-    Complete,
+    Idle,
     Inconsistent { reasons: Vec<String> },
 }
 
@@ -98,13 +98,9 @@ pub fn get_patch_recovery_state(
     let manifest_path = install_root.join(PATCH_MANIFEST_NAME);
     let stage_root = install_root.join(PATCH_STAGE_DIR);
     let delete_manifest = install_root.join(DELETE_FILES_MANIFEST_NAME);
-    let deferred = install_root
-        .join(PATCH_TRANSACTION_DIR)
-        .join(PATCH_DEFERRED_DIR);
+    let deferred = install_root.join(PATCH_WORK_DIR).join(PATCH_DEFERRED_DIR);
 
-    let plan_path = install_root
-        .join(PATCH_TRANSACTION_DIR)
-        .join(PATCH_PLAN_NAME);
+    let plan_path = install_root.join(PATCH_WORK_DIR).join(PATCH_PLAN_NAME);
     if plan_path.is_file() {
         let plan = read_patch_plan(install_root)?;
         let missing_stage = plan.entries.iter().any(|entry| match &entry.source {
@@ -125,22 +121,22 @@ pub fn get_patch_recovery_state(
                 base_md5,
                 base_size,
             } => {
-                let output_incomplete = build_issue(
+                let output_missing = build_issue(
                     &entry.destination,
                     &entry.name,
                     &entry.expected_md5,
                     Some(entry.expected_size),
                 )
                 .is_some();
-                output_incomplete
+                output_missing
                     && (!plan.stage_root.join(payload).is_file()
                         || build_issue(base, &entry.name, base_md5, Some(*base_size)).is_some())
             }
         });
         return if missing_stage {
-            Ok(PatchRecoveryState::ExtractedIncomplete {
+            Ok(PatchRecoveryState::ExtractedMissing {
                 missing: vec![format!(
-                    "Patch transaction staging is incomplete at {}",
+                    "Patch apply staging is missing required data at {}",
                     plan.stage_root.display()
                 )],
             })
@@ -152,7 +148,8 @@ pub fn get_patch_recovery_state(
     if manifest_path.is_file() {
         let manifest: ResourcePatch =
             serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|source| {
-                Error::OpenFileFailed {
+                Error::IoAt {
+                    action: "open file",
                     path: manifest_path.clone(),
                     source,
                 }
@@ -168,7 +165,7 @@ pub fn get_patch_recovery_state(
         if missing.is_empty() {
             return Ok(PatchRecoveryState::ExtractedReady);
         }
-        return Ok(PatchRecoveryState::ExtractedIncomplete { missing });
+        return Ok(PatchRecoveryState::ExtractedMissing { missing });
     }
 
     if stage_root.exists() {
@@ -186,7 +183,7 @@ pub fn get_patch_recovery_state(
     if deferred.exists() {
         return Ok(PatchRecoveryState::Inconsistent {
             reasons: vec![format!(
-                "Deferred patch files exist at {} without a transaction plan",
+                "Deferred patch files exist at {} without a patch plan",
                 deferred.display()
             )],
         });
@@ -195,18 +192,18 @@ pub fn get_patch_recovery_state(
         let metadata_path = stage_dir.join(PREDOWNLOAD_STAGE_METADATA_NAME);
         if metadata_path.is_file() {
             let metadata = read_predownload_stage_metadata(stage_dir)?;
-            if metadata.archives_complete(stage_dir)? {
+            if metadata.archives_ready(stage_dir)? {
                 return Ok(PatchRecoveryState::ArchiveReady {
                     stage_dir: stage_dir.to_path_buf(),
                 });
             }
             return Ok(PatchRecoveryState::Inconsistent {
                 reasons: vec![format!(
-                    "Predownload archives under {} are incomplete",
+                    "Predownload archives under {} are missing required data",
                     stage_dir.display()
                 )],
             });
         }
     }
-    Ok(PatchRecoveryState::Complete)
+    Ok(PatchRecoveryState::Idle)
 }

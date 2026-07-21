@@ -125,7 +125,7 @@ fn run_extra_tasks_without_integrity(
         .with_download(download_lane);
     let _ = task_pool_runner
         .run_batch(extra_tasks, task_progress)
-        .context("Failed to execute extra DAG tasks during skip-verify")?;
+        .context("Failed to run extra DAG tasks during skip-verify")?;
     progress_session.finish();
     progress.finish();
     Ok(())

@@ -29,7 +29,8 @@ pub fn available_space(path: &Path) -> Result<Option<u64>> {
         )
     };
     if ok == 0 {
-        return Err(Error::StatFailed {
+        return Err(Error::IoAt {
+            action: "query file metadata/stat for",
             path: probe.to_path_buf(),
             source: std::io::Error::last_os_error(),
         });

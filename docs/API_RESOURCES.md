@@ -121,7 +121,7 @@ Empirical filesystem observation after wiping both `Persistent` and `StreamingAs
   - `index_main.json` / `pref_main.json` were not present yet.
   - `pref_initial.files` matched the `Persistent\VFS` set exactly.
   - `index_initial.files` had `12` entries, with 2 non-pref files left in `StreamingAssets`.
-- After in-game resource download completion, `Persistent` expanded to:
+- After in-game resource download finish, `Persistent` expanded to:
   - `index_initial.json`, `pref_initial.json`, `index_main.json`, `pref_main.json`
   - `90` VFS files total
   - exact set match: `Persistent\VFS == (pref_initial.files ∪ pref_main.files)`.
@@ -164,7 +164,7 @@ Practical interpretation:
 
 ## 4. File Manifest (`game_files`)
 
-The `game_files` manifest contains the complete list of game files with their MD5 hashes and sizes. It is **AES-256-CBC encrypted**.
+The `game_files` manifest contains the full list of game files with their MD5 hashes and sizes. It is **AES-256-CBC encrypted**.
 
 ### Download URL
 

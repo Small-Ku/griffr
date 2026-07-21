@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::archive::{
-    ArchiveCommitWork, ArchiveShardTask, ArchiveWork, PatchCheckWork, PatchTransactionWork,
+    ArchiveCommitWork, ArchiveShardTask, ArchiveWork, PatchApplyWork, PatchCheckWork,
 };
 
 /// Selects the download throttle. Local verification and reuse never use the
@@ -235,6 +235,7 @@ pub(crate) fn destination_or_download_tasks(
         expected_size: Some(expected_size),
         retry_count,
         transfer_class,
+        resume: None,
     });
     if verify_destination_fallback {
         return Ok(vec![Task::Verify {
@@ -248,28 +249,29 @@ pub(crate) fn destination_or_download_tasks(
     if let Some(download) = download {
         return Ok(vec![download]);
     }
-    Err(Error::TaskPool(format!(
-        "no usable source candidates for {logical_path}"
-    )))
+    Err(Error::Message {
+        context: "Task pool error: ",
+        detail: format!("no usable source candidates for {logical_path}"),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveRetention {
     Ephemeral,
-    KeepCompleteVolumes,
+    KeepFullVolumes,
 }
 
 impl ArchiveRetention {
-    pub const fn from_keep_complete_volumes(keep: bool) -> Self {
+    pub const fn from_keep_full_volumes(keep: bool) -> Self {
         if keep {
-            Self::KeepCompleteVolumes
+            Self::KeepFullVolumes
         } else {
             Self::Ephemeral
         }
     }
 
-    pub const fn keeps_complete_volumes(self) -> bool {
-        matches!(self, Self::KeepCompleteVolumes)
+    pub const fn keeps_full_volumes(self) -> bool {
+        matches!(self, Self::KeepFullVolumes)
     }
 }
 
@@ -295,8 +297,8 @@ pub enum Task {
         excluded_commit_paths: Arc<BTreeSet<String>>,
         parts: Vec<ArchivePart>,
     },
-    /// CPU-side partial-file archive_index and prefix hashing. This task creates
-    /// `TransferDownload` only after the resume state is ready.
+    /// A download changes from CPU preparation to async transfer when `resume`
+    /// becomes `Some`; both stages retain this same canonical task payload.
     Download {
         url: String,
         dest: PathBuf,
@@ -305,17 +307,8 @@ pub enum Task {
         expected_size: Option<u64>,
         retry_count: u32,
         transfer_class: TransferClass,
-    },
-    #[doc(hidden)]
-    TransferDownload {
-        url: String,
-        dest: PathBuf,
-        logical_path: String,
-        expected_md5: String,
-        expected_size: Option<u64>,
-        retry_count: u32,
-        transfer_class: TransferClass,
-        resume: DownloadResumeState,
+        #[doc(hidden)]
+        resume: Option<DownloadResumeState>,
     },
     Verify {
         path: PathBuf,
@@ -405,7 +398,7 @@ pub enum Task {
         patch_check: Arc<PatchCheckWork>,
     },
     #[doc(hidden)]
-    FinalizePatchPlan {
+    SavePatchPlan {
         work: Arc<ArchiveWork>,
         archive_index: Arc<ArchiveIndex>,
         patch_check: Arc<PatchCheckWork>,
@@ -420,12 +413,12 @@ pub enum Task {
         volume_index: usize,
     },
     #[doc(hidden)]
-    FinalizeArchiveVolume {
+    SaveArchiveVolume {
         work: Arc<ArchiveWork>,
         volume_index: usize,
     },
     #[doc(hidden)]
-    ArchiveVolumesComplete {
+    ArchiveVolumesReady {
         work: Arc<ArchiveWork>,
     },
     #[doc(hidden)]
@@ -447,30 +440,30 @@ pub enum Task {
         commit: Arc<ArchiveCommitWork>,
     },
     #[doc(hidden)]
-    PreparePatchTransaction {
-        transaction: Arc<PatchTransactionWork>,
+    PreparePatchApply {
+        patch: Arc<PatchApplyWork>,
     },
     #[doc(hidden)]
     ApplyPatchEntry {
-        transaction: Arc<PatchTransactionWork>,
+        patch: Arc<PatchApplyWork>,
         entry_index: usize,
     },
     #[doc(hidden)]
     ReleasePatchBase {
-        transaction: Arc<PatchTransactionWork>,
+        patch: Arc<PatchApplyWork>,
         base: PathBuf,
     },
     #[doc(hidden)]
     ApplyPatchDeletes {
-        transaction: Arc<PatchTransactionWork>,
+        patch: Arc<PatchApplyWork>,
     },
     #[doc(hidden)]
     CommitPatchDeferred {
-        transaction: Arc<PatchTransactionWork>,
+        patch: Arc<PatchApplyWork>,
     },
     #[doc(hidden)]
-    CleanupPatchTransaction {
-        transaction: Arc<PatchTransactionWork>,
+    CleanPatchApply {
+        patch: Arc<PatchApplyWork>,
         archive: Arc<ArchiveWork>,
     },
     #[doc(hidden)]
@@ -496,7 +489,6 @@ impl Task {
     pub fn target_path(&self) -> Option<&std::path::Path> {
         match self {
             Self::Download { dest, .. }
-            | Self::TransferDownload { dest, .. }
             | Self::RepairFile { dest, .. }
             | Self::ReuseFile { dest, .. } => Some(dest.as_path()),
             Self::Verify { path, .. } => Some(path.as_path()),
@@ -508,7 +500,6 @@ impl Task {
     pub fn logical_path(&self) -> Option<&str> {
         match self {
             Self::Download { logical_path, .. }
-            | Self::TransferDownload { logical_path, .. }
             | Self::Verify { logical_path, .. }
             | Self::RepairFile { logical_path, .. }
             | Self::VerifyReuseVolume { logical_path, .. }

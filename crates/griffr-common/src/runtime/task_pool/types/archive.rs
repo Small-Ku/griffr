@@ -19,17 +19,17 @@ use super::tasks::{ArchivePart, ArchiveRetention};
 
 #[doc(hidden)]
 #[derive(Debug)]
-pub struct PatchTransactionWork {
+pub struct PatchApplyWork {
     plan: Arc<PatchPlan>,
-    completed_entries: AtomicUsize,
+    finished_entries: AtomicUsize,
     verification_cache: VerifiedArtifactCache,
 }
 
-impl PatchTransactionWork {
+impl PatchApplyWork {
     pub(crate) fn new(plan: PatchPlan) -> Arc<Self> {
         Arc::new(Self {
             plan: Arc::new(plan),
-            completed_entries: AtomicUsize::new(0),
+            finished_entries: AtomicUsize::new(0),
             verification_cache: VerifiedArtifactCache::default(),
         })
     }
@@ -47,7 +47,7 @@ impl PatchTransactionWork {
     }
 
     pub(crate) fn finish_entry(&self) -> usize {
-        self.completed_entries.fetch_add(1, Ordering::AcqRel) + 1
+        self.finished_entries.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     pub(crate) fn verification_cache(&self) -> &VerifiedArtifactCache {
@@ -91,10 +91,10 @@ impl PatchCheckWork {
     }
 
     pub(crate) fn run_probe(&self, index: usize) -> Result<()> {
-        let probe = self
-            .probes
-            .get(index)
-            .ok_or_else(|| Error::TaskPool(format!("patch probe index {index} is out of range")))?;
+        let probe = self.probes.get(index).ok_or_else(|| Error::Message {
+            context: "Task pool error: ",
+            detail: format!("patch probe index {index} is out of range"),
+        })?;
         let _ = self.verification_cache.build_issue(
             &probe.path,
             &probe.logical_path,
@@ -113,7 +113,10 @@ impl PatchCheckWork {
             .map(|size| size.unwrap_or(0))
             .map_err(|error| error.to_string());
         *self.relocation_bytes.lock().unwrap() = Some(result.clone());
-        result.map(|_| ()).map_err(Error::TaskPool)
+        result.map(|_| ()).map_err(|detail| Error::Message {
+            context: "Task pool error: ",
+            detail,
+        })
     }
 
     pub(crate) fn measured_relocation_bytes(&self) -> Result<Option<u64>> {
@@ -122,10 +125,15 @@ impl PatchCheckWork {
         }
         match self.relocation_bytes.lock().unwrap().as_ref() {
             Some(Ok(bytes)) => Ok(Some(*bytes)),
-            Some(Err(error)) => Err(Error::TaskPool(error.clone())),
-            None => Err(Error::TaskPool(
-                "patch relocation scan did not finish before the plan was saved".to_string(),
-            )),
+            Some(Err(error)) => Err(Error::Message {
+                context: "Task pool error: ",
+                detail: error.clone(),
+            }),
+            None => Err(Error::Message {
+                context: "Task pool error: ",
+                detail: "patch relocation scan did not finish before the plan was saved"
+                    .to_string(),
+            }),
         }
     }
 
@@ -141,17 +149,20 @@ fn directory_size_sync(path: &Path) -> Result<u64> {
     let mut total = 0u64;
     let mut pending = vec![path.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory).map_err(|source| Error::ReadDirFailed {
+        for entry in std::fs::read_dir(&directory).map_err(|source| Error::IoAt {
+            action: "read directory",
             path: directory.clone(),
             source,
         })? {
-            let entry = entry.map_err(|source| Error::ReadDirFailed {
+            let entry = entry.map_err(|source| Error::IoAt {
+                action: "read directory",
                 path: directory.clone(),
                 source,
             })?;
             let entry_path = entry.path();
             let metadata =
-                std::fs::symlink_metadata(&entry_path).map_err(|source| Error::StatFailed {
+                std::fs::symlink_metadata(&entry_path).map_err(|source| Error::IoAt {
+                    action: "query file metadata for",
                     path: entry_path.clone(),
                     source,
                 })?;
@@ -174,7 +185,7 @@ pub struct ArchiveCommitWork {
     pub(crate) archive: Arc<ArchiveWork>,
     pub(crate) staging_dir: PathBuf,
     pub(crate) batches: Vec<CommitFileBatch>,
-    completed_files: AtomicUsize,
+    finished_files: AtomicUsize,
     total_files: usize,
 }
 
@@ -189,7 +200,7 @@ impl ArchiveCommitWork {
             archive,
             staging_dir,
             batches,
-            completed_files: AtomicUsize::new(0),
+            finished_files: AtomicUsize::new(0),
             total_files,
         })
     }
@@ -203,7 +214,7 @@ impl ArchiveCommitWork {
     }
 
     pub(crate) fn finish_file(&self) -> usize {
-        self.completed_files.fetch_add(1, Ordering::AcqRel) + 1
+        self.finished_files.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     pub(crate) fn total_files(&self) -> usize {
@@ -232,7 +243,7 @@ pub struct ArchiveWork {
     pub(crate) excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
     pub(crate) prepared: Mutex<Option<PreparedArchive>>,
     pub(crate) extracted_bytes: AtomicU64,
-    finalized_volumes: Mutex<Vec<bool>>,
+    saved_volumes: Mutex<Vec<bool>>,
     cache_invalid: AtomicBool,
 }
 
@@ -251,21 +262,27 @@ impl ArchiveWork {
         excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
     ) -> Result<Arc<Self>> {
         if volume_tokens.len() != layout.volume_count() {
-            return Err(Error::TaskPool(format!(
-                "archive {} has {} volume tokens for {} volumes",
-                base_name,
-                volume_tokens.len(),
-                layout.volume_count()
-            )));
+            return Err(Error::Message {
+                context: "Task pool error: ",
+                detail: format!(
+                    "archive {} has {} volume tokens for {} volumes",
+                    base_name,
+                    volume_tokens.len(),
+                    layout.volume_count()
+                ),
+            });
         }
-        if layout.is_remote() && retention.keeps_complete_volumes() {
+        if layout.is_remote() && retention.keeps_full_volumes() {
             if parts.len() != layout.volume_count() {
-                return Err(Error::TaskPool(format!(
-                    "archive {} retains complete volumes but has {} part descriptors for {} volumes",
+                return Err(Error::Message {
+                    context: "Task pool error: ",
+                    detail: format!(
+                    "archive {} retains full volumes but has {} part descriptors for {} volumes",
                     base_name,
                     parts.len(),
                     layout.volume_count()
-                )));
+                ),
+                });
             }
             for (index, part) in parts.iter().enumerate() {
                 let path_matches = layout.path(index) == Some(part.dest.as_path());
@@ -273,10 +290,13 @@ impl ArchiveWork {
                     .volume_range(index)
                     .is_some_and(|range| range.end - range.start == part.expected_size);
                 if !path_matches || !size_matches {
-                    return Err(Error::TaskPool(format!(
-                        "archive {} part {} does not match remote volume {}",
-                        base_name, part.logical_path, index
-                    )));
+                    return Err(Error::Message {
+                        context: "Task pool error: ",
+                        detail: format!(
+                            "archive {} part {} does not match remote volume {}",
+                            base_name, part.logical_path, index
+                        ),
+                    });
                 }
             }
         }
@@ -294,7 +314,7 @@ impl ArchiveWork {
             excluded_commit_paths,
             prepared: Mutex::new(None),
             extracted_bytes: AtomicU64::new(0),
-            finalized_volumes: Mutex::new(vec![false; volume_count]),
+            saved_volumes: Mutex::new(vec![false; volume_count]),
             cache_invalid: AtomicBool::new(false),
         }))
     }
@@ -329,18 +349,18 @@ impl ArchiveWork {
             .collect()
     }
 
-    pub(crate) fn should_complete_volumes(&self) -> bool {
-        self.retention.keeps_complete_volumes() && self.layout.is_remote()
+    pub(crate) fn should_save_full_volumes(&self) -> bool {
+        self.retention.keeps_full_volumes() && self.layout.is_remote()
     }
 
-    pub(crate) fn mark_volume_finalized(&self, index: usize) {
+    pub(crate) fn mark_volume_saved(&self, index: usize) {
         let still_needed = {
-            let mut finalized = self.finalized_volumes.lock().unwrap();
-            let Some(slot) = finalized.get_mut(index) else {
+            let mut saved = self.saved_volumes.lock().unwrap();
+            let Some(slot) = saved.get_mut(index) else {
                 return;
             };
             *slot = true;
-            finalized
+            saved
                 .iter()
                 .enumerate()
                 .filter_map(|(volume_index, done)| {
@@ -398,13 +418,13 @@ impl Drop for ArchiveWork {
 
 #[doc(hidden)]
 #[derive(Debug)]
-pub struct ArchiveShardExecutionState {
+pub struct ArchiveShardRunState {
     active: AtomicUsize,
     failed: AtomicBool,
     failure_reported: AtomicBool,
 }
 
-impl ArchiveShardExecutionState {
+impl ArchiveShardRunState {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             active: AtomicUsize::new(0),
@@ -459,7 +479,7 @@ impl ArchiveRangeReleaseState {
         })
     }
 
-    pub(crate) fn complete_shard(&self, index: usize) {
+    pub(crate) fn finish_shard(&self, index: usize) {
         let still_needed = {
             let mut remaining = self.remaining.lock().unwrap();
             let Some(slot) = remaining.get_mut(index) else {
@@ -488,7 +508,7 @@ pub struct ArchiveShardTask {
     pub(crate) entries: Vec<usize>,
     pub(crate) volume_indices: Vec<usize>,
     pub(crate) estimated_cost: u64,
-    pub(crate) execution_state: Arc<ArchiveShardExecutionState>,
+    pub(crate) run_state: Arc<ArchiveShardRunState>,
     pub(crate) range_release: Option<(Arc<ArchiveRangeReleaseState>, usize)>,
 }
 

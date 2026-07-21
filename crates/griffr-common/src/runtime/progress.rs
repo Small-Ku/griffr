@@ -2,7 +2,7 @@ use std::fmt;
 
 use rapidhash::RapidHashMap as HashMap;
 
-/// Stable operation family used to group frontend-neutral progress lanes.
+/// Stable work family used to group frontend-neutral progress lanes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProgressScope {
     Integrity,
@@ -78,7 +78,7 @@ pub enum ProgressUpdate {
     },
     Advanced {
         lane: ProgressLane,
-        completed: u64,
+        finished: u64,
         total: Option<u64>,
         item: Option<String>,
     },
@@ -114,7 +114,7 @@ impl ProgressSender {
 
     pub fn emit(&self, update: ProgressUpdate) {
         if let Some(tx) = &self.tx {
-            // A closed renderer must never fail the underlying operation.
+            // A closed renderer must never fail the underlying work.
             let _ = tx.send(update);
         }
     }

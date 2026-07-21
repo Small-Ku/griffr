@@ -17,20 +17,26 @@ pub async fn inspect_reuse_installations(
     let mut sources = Vec::new();
 
     for source_path in source_paths {
-        let source = detect_local_install(source_path).await.map_err(|error| {
-            Error::Config(format!(
-                "Failed to inspect reuse source {}: {error}",
-                source_path.display()
-            ))
-        })?;
+        let source = detect_local_install(source_path)
+            .await
+            .map_err(|error| Error::Message {
+                context: "Configuration error: ",
+                detail: format!(
+                    "Failed to inspect reuse source {}: {error}",
+                    source_path.display()
+                ),
+            })?;
         let source_game_id = source.require_known_game()?;
         if &source_game_id != game_id {
-            return Err(Error::Config(format!(
-                "Reuse source {} is {}, expected {}",
-                source.install_path.display(),
-                source_game_id,
-                game_id
-            )));
+            return Err(Error::Message {
+                context: "Configuration error: ",
+                detail: format!(
+                    "Reuse source {} is {}, expected {}",
+                    source.install_path.display(),
+                    source_game_id,
+                    game_id
+                ),
+            });
         }
         if source.install_path != destination {
             sources.push(source);
@@ -41,7 +47,7 @@ pub async fn inspect_reuse_installations(
 }
 
 /// Resolve inspected installations into the metadata required by
-/// the manifest-driven game-file ensure operation.
+/// the manifest-driven game-file ensure work.
 pub async fn resolve_file_reuse_sources(
     game_id: &GameId,
     destination: &Path,

@@ -8,8 +8,8 @@ use compio::dispatcher::Dispatcher;
 use futures_util::FutureExt;
 use tracing::debug;
 
-use super::executor::{execute_async_task, execute_blocking_task};
-use super::graph::{ReadyTask, TaskExecution, TaskGraph};
+use super::graph::{ReadyTask, TaskGraph, TaskRun};
+use super::runner::{run_async_task, run_blocking_task};
 use super::types::{
     Task, TaskOutcome, TaskPoolConfig, TaskPoolResult, TaskPoolRunner, TaskProgress, WorkerEvent,
 };
@@ -27,7 +27,7 @@ mod routing;
 use metrics::SchedulerMetrics;
 use progress::TaskProgressReducer;
 use queue::{ScheduledTask, SchedulerQueue};
-use routing::{task_path, task_resources, ExecutionClass, ResourceRequest};
+use routing::{task_path, task_resources, ResourceRequest, RunClass};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskPriority {
@@ -35,13 +35,13 @@ pub(crate) enum TaskPriority {
     Bulk,
 }
 
-struct TaskCompletion {
+struct TaskFinish {
     node_id: super::graph::NodeId,
     path: String,
     resources: ResourceRequest,
     queue_wait: Duration,
     run_time: Duration,
-    execution: TaskExecution,
+    run: TaskRun,
 }
 
 enum DispatchAttempt {
@@ -54,12 +54,13 @@ fn record_worker_event(
     outcomes: &mut Vec<TaskOutcome>,
     event: WorkerEvent,
 ) {
-    if let WorkerEvent::Retried { path, reason } = &event {
-        debug!(path = %path, reason = %reason, "task retry scheduled");
-    }
     progress.handle(&event);
-    if let Some(outcome) = event.into_outcome() {
-        outcomes.push(outcome);
+    match event {
+        WorkerEvent::Retried { path, reason } => {
+            debug!(path = %path, reason = %reason, "task retry scheduled");
+        }
+        WorkerEvent::Outcome(outcome) => outcomes.push(outcome),
+        WorkerEvent::Progress { .. } => {}
     }
 }
 
@@ -71,12 +72,16 @@ impl TaskPoolRunner {
         let dispatcher = Arc::new(
             Dispatcher::builder()
                 .worker_threads(NonZeroUsize::new(config.dispatcher_threads).ok_or_else(|| {
-                    Error::TaskPool("dispatcher threads must be non-zero".to_string())
+                    Error::Message {
+                        context: "Task pool error: ",
+                        detail: "dispatcher threads must be non-zero".to_string(),
+                    }
                 })?)
                 .proactor_builder(proactor_builder)
                 .build()
-                .map_err(|error| {
-                    Error::TaskPool(format!("Failed to create task-pool dispatcher: {error}"))
+                .map_err(|error| Error::Message {
+                    context: "Task pool error: ",
+                    detail: format!("Failed to create task-pool dispatcher: {error}"),
                 })?,
         );
         let (event_tx, event_rx) = flume::unbounded::<WorkerEvent>();
@@ -90,10 +95,10 @@ impl TaskPoolRunner {
 
     pub fn run_batch(
         &mut self,
-        initial_tasks: Vec<Task>,
+        root_tasks: Vec<Task>,
         progress: TaskProgress,
     ) -> Result<TaskPoolResult> {
-        self.run_graph(TaskGraph::from_tasks(initial_tasks), progress)
+        self.run_graph(TaskGraph::from_tasks(root_tasks), progress)
     }
 
     pub fn run_graph(
@@ -106,7 +111,7 @@ impl TaskPoolRunner {
         let mut queue = SchedulerQueue::default();
         enqueue_ready_tasks(&mut queue, graph.start());
 
-        let (completion_tx, completion_rx) = flume::unbounded::<TaskCompletion>();
+        let (finish_tx, finish_rx) = flume::unbounded::<TaskFinish>();
         let mut in_flight = 0usize;
         let mut progress = TaskProgressReducer::new(progress);
         let mut outcomes = Vec::new();
@@ -127,7 +132,7 @@ impl TaskPoolRunner {
                     continue;
                 }
                 let node_id = scheduled.node_id;
-                match self.dispatch_scheduled(scheduled, completion_tx.clone())? {
+                match self.dispatch_scheduled(scheduled, finish_tx.clone())? {
                     DispatchAttempt::Submitted => {
                         graph.mark_running(node_id)?;
                         in_flight = in_flight.saturating_add(1);
@@ -150,43 +155,41 @@ impl TaskPoolRunner {
                     idle_blocking_dispatch_retries =
                         idle_blocking_dispatch_retries.saturating_add(1);
                     if idle_blocking_dispatch_retries > MAX_IDLE_BLOCKING_DISPATCH_RETRIES {
-                        return Err(Error::TaskPool(format!(
-                            "compio blocking pool remained full with {} queued task(s); \
+                        return Err(Error::Message {
+                            context: "Task pool error: ",
+                            detail: format!(
+                                "compio blocking pool remained full with {} queued task(s); \
                              blocking_pool_limit={} cpu_slots={} blocking_slots={}",
-                            queue.queued_len(),
-                            self.config.blocking_pool_limit,
-                            self.config.cpu_slots,
-                            self.config.blocking_slots,
-                        )));
+                                queue.queued_len(),
+                                self.config.blocking_pool_limit,
+                                self.config.cpu_slots,
+                                self.config.blocking_slots,
+                            ),
+                        });
                     }
                     std::thread::sleep(BLOCKING_DISPATCH_RETRY_DELAY);
                     continue;
                 }
-                return Err(Error::TaskPool(format!(
+                return Err(Error::Message { context: "Task pool error: ", detail: format!(
                     "task graph admission deadlock: {} unresolved node(s), {} queued, none in flight",
                     graph.unresolved_count(),
                     queue.queued_len(),
-                )));
+                ) });
             }
 
-            match completion_rx.recv_timeout(COORDINATOR_POLL_INTERVAL) {
-                Ok(completion) => {
+            match finish_rx.recv_timeout(COORDINATOR_POLL_INTERVAL) {
+                Ok(finish) => {
                     in_flight = in_flight.saturating_sub(1);
-                    queue.release(&completion.resources);
-                    metrics.record(
-                        completion.queue_wait,
-                        completion.run_time,
-                        &completion.resources,
-                    );
-                    if let Some((reason, report)) = completion.execution.failure_details() {
+                    queue.release(&finish.resources);
+                    metrics.record(finish.queue_wait, finish.run_time, &finish.resources);
+                    if let Some((reason, report)) = finish.run.failure_details() {
                         if report {
-                            let _ = self.event_tx.send(WorkerEvent::Failed {
-                                path: completion.path.clone(),
-                                reason: reason.to_string(),
-                            });
+                            let _ = self
+                                .event_tx
+                                .send(WorkerEvent::failed(finish.path.clone(), reason.to_string()));
                         }
                     }
-                    let ready = graph.complete(completion.node_id, completion.execution)?;
+                    let ready = graph.finish(finish.node_id, finish.run)?;
                     enqueue_ready_tasks(&mut queue, ready);
                 }
                 Err(flume::RecvTimeoutError::Timeout)
@@ -202,9 +205,10 @@ impl TaskPoolRunner {
                 }
                 Err(flume::RecvTimeoutError::Timeout) => {}
                 Err(flume::RecvTimeoutError::Disconnected) => {
-                    return Err(Error::TaskPool(
-                        "task completion channel disconnected".to_string(),
-                    ));
+                    return Err(Error::Message {
+                        context: "Task pool error: ",
+                        detail: "task finish channel disconnected".to_string(),
+                    });
                 }
             }
         }
@@ -217,7 +221,7 @@ impl TaskPoolRunner {
         let mut metrics = metrics.snapshot();
         metrics.graph = graph_summary.clone();
         debug!(
-            completed_tasks = metrics.completed_tasks,
+            finished_tasks = metrics.finished_tasks,
             graph_nodes = graph_summary.total_nodes,
             graph_pending = graph_summary.pending_nodes,
             graph_ready = graph_summary.ready_nodes,
@@ -240,12 +244,12 @@ impl TaskPoolRunner {
     fn dispatch_scheduled(
         &self,
         scheduled: ScheduledTask,
-        completion_tx: flume::Sender<TaskCompletion>,
+        finish_tx: flume::Sender<TaskFinish>,
     ) -> Result<DispatchAttempt> {
-        let execution = scheduled.resources.execution;
+        let run = scheduled.resources.run;
         let job = Arc::new(Mutex::new(Some(scheduled)));
-        match execution {
-            ExecutionClass::AsyncIo => {
+        match run {
+            RunClass::AsyncIo => {
                 let job_for_task = Arc::clone(&job);
                 let event_tx = self.event_tx.clone();
                 let config = self.config.clone();
@@ -264,7 +268,7 @@ impl TaskPoolRunner {
                     } = scheduled;
                     let path = task_path(&task);
                     let queue_wait = started_at.saturating_duration_since(enqueued_at);
-                    let execution = match AssertUnwindSafe(execute_async_task(
+                    let run = match AssertUnwindSafe(run_async_task(
                         task,
                         config.max_retries,
                         config.download_progress_buffer_bytes,
@@ -274,16 +278,16 @@ impl TaskPoolRunner {
                     .catch_unwind()
                     .await
                     {
-                        Ok(execution) => execution,
-                        Err(_) => TaskExecution::failed("task execution panicked"),
+                        Ok(run) => run,
+                        Err(_) => TaskRun::failed("task run panicked"),
                     };
-                    let _ = completion_tx.send(TaskCompletion {
+                    let _ = finish_tx.send(TaskFinish {
                         node_id,
                         path,
                         resources,
                         queue_wait,
                         run_time: started_at.elapsed(),
-                        execution,
+                        run,
                     });
                 }) {
                     Ok(receiver) => {
@@ -297,14 +301,14 @@ impl TaskPoolRunner {
                             .unwrap()
                             .take()
                             .expect("rejected async task missing");
-                        Err(Error::TaskPool(format!(
+                        Err(Error::Message { context: "Task pool error: ", detail: format!(
                             "Failed to dispatch async I/O task for {}: all dispatcher runtimes stopped",
                             task_path(&scheduled.task)
-                        )))
+                        ) })
                     }
                 }
             }
-            ExecutionClass::Cpu | ExecutionClass::Blocking => {
+            RunClass::Cpu | RunClass::Blocking => {
                 let job_for_task = Arc::clone(&job);
                 let event_tx = self.event_tx.clone();
                 let config = self.config.clone();
@@ -323,8 +327,8 @@ impl TaskPoolRunner {
                     } = scheduled;
                     let path = task_path(&task);
                     let queue_wait = started_at.saturating_duration_since(enqueued_at);
-                    let execution = match catch_unwind(AssertUnwindSafe(|| {
-                        execute_blocking_task(
+                    let run = match catch_unwind(AssertUnwindSafe(|| {
+                        run_blocking_task(
                             task,
                             config.max_retries,
                             config.extraction_progress_buffer_bytes,
@@ -332,16 +336,16 @@ impl TaskPoolRunner {
                             &event_tx,
                         )
                     })) {
-                        Ok(execution) => execution,
-                        Err(_) => TaskExecution::failed("task execution panicked"),
+                        Ok(run) => run,
+                        Err(_) => TaskRun::failed("task run panicked"),
                     };
-                    let _ = completion_tx.send(TaskCompletion {
+                    let _ = finish_tx.send(TaskFinish {
                         node_id,
                         path,
                         resources,
                         queue_wait,
                         run_time: started_at.elapsed(),
-                        execution,
+                        run,
                     });
                 }) {
                     Ok(receiver) => {
@@ -374,19 +378,25 @@ fn validate_config(config: &TaskPoolConfig) -> Result<()> {
         ("reuse_queue_limit", config.reuse_queue_limit),
     ] {
         if value == 0 {
-            return Err(Error::TaskPool(format!("{name} must be non-zero")));
+            return Err(Error::Message {
+                context: "Task pool error: ",
+                detail: format!("{name} must be non-zero"),
+            });
         }
     }
     let admitted_blocking = config.cpu_slots.saturating_add(config.blocking_slots);
     let required_blocking_pool =
         admitted_blocking.saturating_add(super::types::BLOCKING_POOL_INTERNAL_RESERVE);
     if config.blocking_pool_limit < required_blocking_pool {
-        return Err(Error::TaskPool(format!(
+        return Err(Error::Message {
+            context: "Task pool error: ",
+            detail: format!(
             "blocking_pool_limit ({}) must cover cpu_slots + blocking_slots ({admitted_blocking}) \
              plus {} reserved compio fallback lanes (minimum {required_blocking_pool})",
             config.blocking_pool_limit,
             super::types::BLOCKING_POOL_INTERNAL_RESERVE,
-        )));
+        ),
+        });
     }
     Ok(())
 }
@@ -405,15 +415,15 @@ pub fn run_task_graph(graph: TaskGraph, config: TaskPoolConfig) -> Result<TaskPo
 }
 
 pub fn run_tasks_with_progress(
-    initial_tasks: Vec<Task>,
+    root_tasks: Vec<Task>,
     config: TaskPoolConfig,
     progress: TaskProgress,
 ) -> Result<TaskPoolResult> {
-    run_task_graph_with_progress(TaskGraph::from_tasks(initial_tasks), config, progress)
+    run_task_graph_with_progress(TaskGraph::from_tasks(root_tasks), config, progress)
 }
 
-pub fn run_tasks(initial_tasks: Vec<Task>, config: TaskPoolConfig) -> Result<TaskPoolResult> {
-    run_tasks_with_progress(initial_tasks, config, TaskProgress::disabled())
+pub fn run_tasks(root_tasks: Vec<Task>, config: TaskPoolConfig) -> Result<TaskPoolResult> {
+    run_tasks_with_progress(root_tasks, config, TaskProgress::disabled())
 }
 
 fn enqueue_ready_tasks(queue: &mut SchedulerQueue, ready: Vec<ReadyTask>) {

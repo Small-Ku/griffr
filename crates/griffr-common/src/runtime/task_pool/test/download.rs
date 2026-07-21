@@ -111,11 +111,11 @@ fn relink_mode_keeps_valid_destination_when_no_source_can_be_reused() {
 }
 
 #[test]
-fn completed_partial_is_committed_without_network_request() {
+fn ready_partial_is_saved_without_network_request() {
     let tmp = tempdir().unwrap();
-    let dest = tmp.path().join("complete.chk");
+    let dest = tmp.path().join("done.chk");
     let part = make_partial_download_path(&dest).unwrap();
-    let payload = b"already complete partial download";
+    let payload = b"already finished partial download";
     std::fs::write(&part, payload).unwrap();
     let expected_md5 = crate::to_hex(&Md5::digest(payload));
 
@@ -151,13 +151,13 @@ fn do_download(
     };
 
     match prepare_download(dest, expected_md5, expected_size)? {
-        DownloadPreparation::Complete(bytes) => Ok(bytes),
-        DownloadPreparation::Ready(resume) => {
-            let runtime = compio::runtime::Runtime::new().map_err(|error| {
-                crate::error::Error::TaskPool(format!(
-                    "failed to create async download test runtime: {error}"
-                ))
-            })?;
+        DownloadPreparation::Done(bytes) => Ok(bytes),
+        DownloadPreparation::Resume(resume) => {
+            let runtime =
+                compio::runtime::Runtime::new().map_err(|error| crate::error::Error::Message {
+                    context: "Task pool error: ",
+                    detail: format!("failed to create async download test runtime: {error}"),
+                })?;
             runtime.block_on(do_prepared_download(
                 user_agent,
                 url,

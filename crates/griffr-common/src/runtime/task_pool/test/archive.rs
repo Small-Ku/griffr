@@ -54,7 +54,7 @@ fn extract_task_spawns_vfs_patch_and_delete_manifest_follow_up_tasks() {
         base_name: "bundle".to_string(),
         volumes: vec![source_dir.join("bundle.zip.001")],
         dest: install_dir.clone(),
-        retention: ArchiveRetention::KeepCompleteVolumes,
+        retention: ArchiveRetention::KeepFullVolumes,
         password: None,
         patch_options: crate::runtime::PatchApplyOptions::default(),
         expected_files: crate::runtime::task_pool::archive_expected_files(Vec::new()),
@@ -84,16 +84,16 @@ fn extract_task_spawns_vfs_patch_and_delete_manifest_follow_up_tasks() {
         update,
         crate::runtime::ProgressUpdate::Advanced {
             lane: crate::runtime::ProgressLane::ARCHIVE_COMMIT,
-            completed,
+            finished,
             total: Some(total),
             ..
-        } if completed == total && *total > 0
+        } if finished == total && *total > 0
     )));
     assert!(progress_updates.iter().any(|update| matches!(
         update,
         crate::runtime::ProgressUpdate::Advanced {
             lane: crate::runtime::ProgressLane::ARCHIVE_PATCH,
-            completed: 1,
+            finished: 1,
             total: Some(1),
             ..
         }
@@ -102,7 +102,7 @@ fn extract_task_spawns_vfs_patch_and_delete_manifest_follow_up_tasks() {
         update,
         crate::runtime::ProgressUpdate::Advanced {
             lane: crate::runtime::ProgressLane::ARCHIVE_DELETE,
-            completed: 1,
+            finished: 1,
             total: Some(1),
             ..
         }

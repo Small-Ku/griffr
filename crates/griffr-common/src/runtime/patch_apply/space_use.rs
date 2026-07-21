@@ -102,7 +102,7 @@ pub(super) fn simulate_space_peaks(
     let work_key = plan.work_dir.as_deref().map(storage_volume_group_key);
     let mut ledger = VolumeSpaceLedger::default();
 
-    // Extraction writes the complete archive before commit starts.
+    // Extraction writes the full archive before commit starts.
     ledger.add(&stage_key, archive_uncompressed_bytes);
 
     // First-time external VFS setup copies each file before deleting its source.
@@ -121,7 +121,7 @@ pub(super) fn simulate_space_peaks(
         .collect::<Vec<_>>();
 
     // Cross-volume commit workers may have destination temp copies in flight
-    // while all sources still exist. Treat the complete commit set as one wave;
+    // while all sources still exist. Treat the full commit set as one wave;
     // this is conservative for any configured commit slot count.
     if stage_key != install_key {
         ledger.add(&install_key, top_level.iter().map(|(_, size)| *size).sum());
@@ -150,7 +150,7 @@ pub(super) fn simulate_space_peaks(
         })
         .collect::<BTreeSet<_>>();
 
-    // The executor removes delete-only paths before patching, making that space
+    // The runner removes delete-only paths before patching, making that space
     // available to later waves. Signed deltas preserve this reclaimed capacity.
     for relative in &plan.delete_paths {
         let physical = physical_delete_path(plan, relative);

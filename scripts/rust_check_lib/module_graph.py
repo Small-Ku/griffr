@@ -343,7 +343,7 @@ def _check_orphans(host: ModuleHost) -> None:
             if dynamic_include_roots:
                 hint += " A non-literal include! exists, so verify generated include paths before deleting it."
                 evidence.append(
-                    "At least one non-literal include! prevented complete reachability proof."
+                    "At least one non-literal include! prevented full reachability proof."
                 )
             host.add(
                 "MOD006",

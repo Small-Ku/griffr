@@ -34,14 +34,16 @@ pub(crate) async fn fetch_archive_range_to_cache(
 ) -> Result<u64> {
     let expected = request.local_range.end - request.local_range.start;
     if expected == 0 {
-        return Err(Error::Download(
-            "Cannot download an empty archive byte range".to_string(),
-        ));
+        return Err(Error::Message {
+            context: "Download error: ",
+            detail: "Cannot download an empty archive byte range".to_string(),
+        });
     }
     if let Some(parent) = request.cache_path.parent() {
         compio::fs::create_dir_all(parent)
             .await
-            .map_err(|source| Error::CreateDirFailed {
+            .map_err(|source| Error::IoAt {
+                action: "create directory",
                 path: parent.to_path_buf(),
                 source,
             })?;
@@ -55,7 +57,8 @@ pub(crate) async fn fetch_archive_range_to_cache(
     if resume_offset > expected {
         compio::fs::remove_file(&part_path)
             .await
-            .map_err(|source| Error::RemoveFailed {
+            .map_err(|source| Error::IoAt {
+                action: "remove file or directory",
                 path: part_path.clone(),
                 source,
             })?;
@@ -79,35 +82,42 @@ pub(crate) async fn fetch_archive_range_to_cache(
     let request_builder = CLIENT.with(|client| {
         client
             .get(&request.url)
-            .map_err(|source| Error::Download(format!("HTTP error for {}: {source}", request.url)))?
+            .map_err(|source| Error::Message {
+                context: "Download error: ",
+                detail: format!("HTTP error for {}: {source}", request.url),
+            })?
             .header(USER_AGENT_HEADER, user_agent)
-            .map_err(|source| {
-                Error::Download(format!("HTTP header error for {}: {source}", request.url))
+            .map_err(|source| Error::Message {
+                context: "Download error: ",
+                detail: format!("HTTP header error for {}: {source}", request.url),
             })?
             .header(RANGE_HEADER, range_header)
-            .map_err(|source| {
-                Error::Download(format!("HTTP header error for {}: {source}", request.url))
+            .map_err(|source| Error::Message {
+                context: "Download error: ",
+                detail: format!("HTTP header error for {}: {source}", request.url),
             })
     })?;
 
     let response = timeout(ARCHIVE_RANGE_SEND_TIMEOUT, request_builder.send())
         .await
-        .map_err(|_| {
-            Error::Download(format!(
-                "Timeout requesting archive range for {}",
-                request.url
-            ))
+        .map_err(|_| Error::Message {
+            context: "Download error: ",
+            detail: format!("Timeout requesting archive range for {}", request.url),
         })?
-        .map_err(|source| {
-            Error::Download(format!("HTTP download error for {}: {source}", request.url))
+        .map_err(|source| Error::Message {
+            context: "Download error: ",
+            detail: format!("HTTP download error for {}: {source}", request.url),
         })?;
 
     let status = response.status();
     if status.as_u16() != 206 {
-        return Err(Error::Download(format!(
-            "Server returned {status} for byte range request on {}",
-            request.url
-        )));
+        return Err(Error::Message {
+            context: "Download error: ",
+            detail: format!(
+                "Server returned {status} for byte range request on {}",
+                request.url
+            ),
+        });
     }
 
     let mut file = compio::fs::OpenOptions::new()
@@ -116,7 +126,8 @@ pub(crate) async fn fetch_archive_range_to_cache(
         .truncate(false)
         .open(&part_path)
         .await
-        .map_err(|source| Error::OpenFileFailed {
+        .map_err(|source| Error::IoAt {
+            action: "open file",
             path: part_path.clone(),
             source,
         })?;
@@ -129,24 +140,24 @@ pub(crate) async fn fetch_archive_range_to_cache(
     loop {
         let chunk = timeout(ARCHIVE_RANGE_BODY_TIMEOUT, stream.next())
             .await
-            .map_err(|_| {
-                Error::Download(format!(
-                    "Timeout reading archive range body for {}",
-                    request.url
-                ))
+            .map_err(|_| Error::Message {
+                context: "Download error: ",
+                detail: format!("Timeout reading archive range body for {}", request.url),
             })?;
 
         let Some(chunk_res) = chunk else {
             break;
         };
 
-        let chunk = chunk_res.map_err(|source| {
-            Error::Download(format!("HTTP download error for {}: {source}", request.url))
+        let chunk = chunk_res.map_err(|source| Error::Message {
+            context: "Download error: ",
+            detail: format!("HTTP download error for {}: {source}", request.url),
         })?;
 
         let chunk_len = chunk.len() as u64;
         let BufResult(result, _) = file.write_all_at(chunk, current_offset).await;
-        result.map_err(|source| Error::WriteFileFailed {
+        result.map_err(|source| Error::IoAt {
+            action: "write to file",
             path: part_path.clone(),
             source,
         })?;
@@ -160,18 +171,20 @@ pub(crate) async fn fetch_archive_range_to_cache(
     }
 
     if current_offset != expected {
-        return Err(Error::Download(format!(
-            "Archive range payload size mismatch for {}: expected {} bytes, received {}",
-            request.url, expected, current_offset
-        )));
+        return Err(Error::Message {
+            context: "Download error: ",
+            detail: format!(
+                "Archive range payload size mismatch for {}: expected {} bytes, received {}",
+                request.url, expected, current_offset
+            ),
+        });
     }
 
-    file.close()
-        .await
-        .map_err(|source| Error::WriteFileFailed {
-            path: part_path.clone(),
-            source,
-        })?;
+    file.close().await.map_err(|source| Error::IoAt {
+        action: "write to file",
+        path: part_path.clone(),
+        source,
+    })?;
 
     save_archive_range_file(&part_path, &request.cache_path).await?;
     Ok(expected)
@@ -185,7 +198,8 @@ async fn save_archive_range_file(part_path: &Path, cache_path: &Path) -> Result<
         }
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => {
-            return Err(Error::StatFailed {
+            return Err(Error::IoAt {
+                action: "query file metadata/stat for",
                 path: cache_path.to_path_buf(),
                 source,
             })
@@ -199,7 +213,8 @@ async fn save_archive_range_file(part_path: &Path, cache_path: &Path) -> Result<
             let _ = compio::fs::remove_file(part_path).await;
             return Ok(());
         }
-        return Err(Error::RenameFailed {
+        return Err(Error::IoBetween {
+            action: "rename file",
             src: part_path.to_path_buf(),
             dest: cache_path.to_path_buf(),
             source: error,

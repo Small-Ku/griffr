@@ -25,10 +25,13 @@ pub(crate) fn entry_dependency_indices(plan: &PatchPlan) -> Result<Vec<Vec<usize
                 .insert(destination.clone(), index)
                 .is_some()
             {
-                return Err(Error::Vfs(format!(
-                    "Patch plan has multiple writers for {}",
-                    destination.display()
-                )));
+                return Err(Error::Message {
+                    context: "VFS error: ",
+                    detail: format!(
+                        "Patch plan has multiple writers for {}",
+                        destination.display()
+                    ),
+                });
             }
         }
     }
@@ -66,10 +69,10 @@ fn validate_acyclic(plan: &PatchPlan, dependencies: &[BTreeSet<usize>]) -> Resul
         .enumerate()
         .filter_map(|(index, degree)| (*degree == 0).then_some(index))
         .collect::<BTreeSet<_>>();
-    let mut completed = 0usize;
+    let mut finished = 0usize;
     while let Some(index) = ready.iter().next().copied() {
         ready.remove(&index);
-        completed = completed.saturating_add(1);
+        finished = finished.saturating_add(1);
         for dependent in outgoing[index].iter().copied() {
             indegree[dependent] = indegree[dependent].saturating_sub(1);
             if indegree[dependent] == 0 {
@@ -77,7 +80,7 @@ fn validate_acyclic(plan: &PatchPlan, dependencies: &[BTreeSet<usize>]) -> Resul
             }
         }
     }
-    if completed == plan.entries.len() {
+    if finished == plan.entries.len() {
         return Ok(());
     }
     let blocked = indegree
@@ -85,13 +88,16 @@ fn validate_acyclic(plan: &PatchPlan, dependencies: &[BTreeSet<usize>]) -> Resul
         .enumerate()
         .filter_map(|(index, degree)| (*degree > 0).then_some(plan.entries[index].name.as_str()))
         .collect::<Vec<_>>();
-    Err(Error::Vfs(format!(
-        "Patch dependency graph contains a destructive overwrite cycle: {}",
-        blocked.join(", ")
-    )))
+    Err(Error::Message {
+        context: "VFS error: ",
+        detail: format!(
+            "Patch dependency graph contains a destructive overwrite cycle: {}",
+            blocked.join(", ")
+        ),
+    })
 }
 
-/// Returns topological waves for peak-space simulation and serial fallbacks.
+/// Returns dependency-order waves for peak-space simulation and serial fallbacks.
 pub(crate) fn entry_wave_indices(plan: &PatchPlan) -> Result<Vec<Vec<usize>>> {
     let dependencies = entry_dependency_indices(plan)?;
     let mut outgoing = vec![BTreeSet::<usize>::new(); plan.entries.len()];
@@ -128,7 +134,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::runtime::patch_transaction::{PlannedPatchEntry, PlannedPatchSource};
+    use crate::runtime::patch_apply::{PlannedPatchEntry, PlannedPatchSource};
 
     fn plan(entries: Vec<PlannedPatchEntry>) -> PatchPlan {
         PatchPlan {

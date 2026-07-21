@@ -8,7 +8,7 @@ use crate::progress::StepProgress;
 use crate::{GlobalOptions, SnapshotHashScope, VfsDiffAgainst};
 use griffr_common::runtime::{
     path_is_dir, persistent_path, resource_manifest_filename, streaming_assets_path,
-    ResourceManifestKind, RESOURCE_GROUP_INITIAL, RESOURCE_GROUP_MAIN,
+    ResourceManifestKind, RESOURCE_GROUP_BASE, RESOURCE_GROUP_MAIN,
 };
 
 pub(super) async fn snapshot_root_state(
@@ -49,7 +49,7 @@ pub(super) async fn snapshot_root_state(
             index_initial: try_read_local_res_index(
                 &root.join(resource_manifest_filename(
                     ResourceManifestKind::Index,
-                    RESOURCE_GROUP_INITIAL,
+                    RESOURCE_GROUP_BASE,
                 )),
                 key,
             )
@@ -65,7 +65,7 @@ pub(super) async fn snapshot_root_state(
             pref_initial: try_read_local_res_index(
                 &root.join(resource_manifest_filename(
                     ResourceManifestKind::Pref,
-                    RESOURCE_GROUP_INITIAL,
+                    RESOURCE_GROUP_BASE,
                 )),
                 key,
             )
@@ -225,7 +225,7 @@ pub async fn vfs_diff(
         index_initial: try_read_local_res_index(
             &root.join(resource_manifest_filename(
                 ResourceManifestKind::Index,
-                RESOURCE_GROUP_INITIAL,
+                RESOURCE_GROUP_BASE,
             )),
             &key,
         )
@@ -241,7 +241,7 @@ pub async fn vfs_diff(
         pref_initial: try_read_local_res_index(
             &root.join(resource_manifest_filename(
                 ResourceManifestKind::Pref,
-                RESOURCE_GROUP_INITIAL,
+                RESOURCE_GROUP_BASE,
             )),
             &key,
         )
@@ -314,8 +314,8 @@ pub async fn snapshot_resource_state(
         SnapshotHashScope::Persistent | SnapshotHashScope::All
     );
     let persistent_progress = StepProgress::new("snapshot.persistent-hash", opts.verbose);
-    let persistent_progress_cb = |completed, total, file: &str| {
-        persistent_progress.update_count(completed, total, file);
+    let persistent_progress_cb = |finished, total, file: &str| {
+        persistent_progress.update_count(finished, total, file);
     };
     let persistent_hash_progress: Option<&dyn Fn(usize, usize, &str)> = if persistent_hash_check {
         Some(&persistent_progress_cb)
@@ -334,8 +334,8 @@ pub async fn snapshot_resource_state(
 
     let streaming_hash_check = matches!(hash_check, SnapshotHashScope::All);
     let streaming_progress = StepProgress::new("snapshot.streamingassets-hash", opts.verbose);
-    let streaming_progress_cb = |completed, total, file: &str| {
-        streaming_progress.update_count(completed, total, file);
+    let streaming_progress_cb = |finished, total, file: &str| {
+        streaming_progress.update_count(finished, total, file);
     };
     let streaming_hash_progress: Option<&dyn Fn(usize, usize, &str)> = if streaming_hash_check {
         Some(&streaming_progress_cb)

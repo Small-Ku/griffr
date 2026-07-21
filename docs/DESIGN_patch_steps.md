@@ -1,6 +1,6 @@
 # Patch Steps
 
-This document describes the forward-only patch transaction implemented in `griffr-common`.
+This document describes the forward-only patch step implemented in `griffr-common`.
 
 ---
 
@@ -34,16 +34,16 @@ Apply and resume phases consume `plan.json` directly to avoid re-calculating sou
 
 ---
 
-## 4. Forward-Only Transaction Flow
+## 4. Forward-Only Patch Flow
 
-Rollbacks are not supported. The transaction runs forward:
+Rollbacks are not supported. The patch runs forward:
 
 1.  Write `.griffr-patch/plan.json`.
 2.  Prepare VFS folder/links.
 3.  Commit top-level files; write deferred markers (e.g., `config.ini`) to `.griffr-patch/deferred`.
 4.  Remove files marked for deletion (unless needed as active patch bases).
 5.  Apply each patch entry as a DAG node, verify MD5, and atomically rename. A writer depends only on consumers of the file it will replace.
-6.  Delete a base file after all of its consumer nodes complete.
+6.  Delete a base file after all of its consumer nodes finish.
 7.  Commit deferred markers.
 8.  Clean up staging directories and plan files.
 
@@ -54,22 +54,22 @@ Rollbacks are not supported. The transaction runs forward:
 To prevent a patch output from overwriting a file that another patch still needs as a base, the runner creates exact entry dependencies:
 
 ```text
-PreparePatchTransaction
+PreparePatchApply
   |- ApplyPatchEntry A ---\
   |- ApplyPatchEntry B ---+-> ReleasePatchBase X
   `- ApplyPatchEntry C ---> ApplyPatchEntry D (replaces C's base)
                               |
        all entry/base leaves -+-> ApplyPatchDeletes
                               `-> CommitPatchDeferred
-                              `-> CleanupPatchTransaction
+                              `-> CleanPatchApply
 ```
 
 *   A writer depends only on the consumers of the path it replaces; unrelated entries do not share a wave-wide join.
 *   Each entry declares its base and payload reads, output/work writes, and destination mutation path to the scheduler.
 *   Path mutation locks reject equal, ancestor, and descendant conflicts while allowing unrelated files to run together.
-*   If a dependency cycle is detected, the transaction fails before step work begins.
+*   If a dependency cycle is detected, the patch fails before step work begins.
 *   A command-local `VerifiedArtifactCache` prevents redundant base checks across entry nodes.
-*   Dependency waves remain as a derived view for peak-space simulation and the serial recovery fallback; they no longer control normal archive commit execution.
+*   Dependency waves remain as a derived view for peak-space simulation and the serial recovery fallback; they no longer control normal archive commit runs.
 
 ---
 
@@ -85,7 +85,7 @@ PreparePatchTransaction
 
 `get_patch_recovery_state` selects the recovery path at startup:
 *   If a plan exists, the update skips successfully matched files, re-verifies bases, and resumes work.
-*   The transaction is marked complete only after staging cleanup and deferred version-marker commits succeed.
+*   The patch is marked done only after staging cleanup and deferred version-marker commits succeed.
 
 ---
 

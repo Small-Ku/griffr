@@ -55,23 +55,32 @@ pub(crate) struct ArchiveExtractionShardPlan {
 }
 
 pub(crate) fn read_u16(bytes: &[u8], offset: usize) -> Result<u16> {
-    let raw = bytes.get(offset..offset + 2).ok_or_else(|| {
-        Error::Extraction("Truncated ZIP structure while reading u16".to_string())
-    })?;
+    let raw = bytes
+        .get(offset..offset + 2)
+        .ok_or_else(|| Error::Message {
+            context: "Extraction error: ",
+            detail: "Truncated ZIP structure while reading u16".to_string(),
+        })?;
     Ok(u16::from_le_bytes([raw[0], raw[1]]))
 }
 
 pub(crate) fn read_u32(bytes: &[u8], offset: usize) -> Result<u32> {
-    let raw = bytes.get(offset..offset + 4).ok_or_else(|| {
-        Error::Extraction("Truncated ZIP structure while reading u32".to_string())
-    })?;
+    let raw = bytes
+        .get(offset..offset + 4)
+        .ok_or_else(|| Error::Message {
+            context: "Extraction error: ",
+            detail: "Truncated ZIP structure while reading u32".to_string(),
+        })?;
     Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
 }
 
 pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> Result<u64> {
-    let raw = bytes.get(offset..offset + 8).ok_or_else(|| {
-        Error::Extraction("Truncated ZIP structure while reading u64".to_string())
-    })?;
+    let raw = bytes
+        .get(offset..offset + 8)
+        .ok_or_else(|| Error::Message {
+            context: "Extraction error: ",
+            detail: "Truncated ZIP structure while reading u64".to_string(),
+        })?;
     Ok(u64::from_le_bytes([
         raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
     ]))
@@ -85,16 +94,18 @@ pub(crate) fn open_archive_entry<'a, R: Read + Seek>(
     match password {
         Some(password) => archive
             .by_index_decrypt(index, password.as_bytes())
-            .map_err(|error| {
-                Error::Extraction(format!(
+            .map_err(|error| Error::Message {
+                context: "Extraction error: ",
+                detail: format!(
                     "Failed to decrypt archive entry {index}; package key may be incorrect: {error}"
-                ))
+                ),
             }),
-        None => archive.by_index(index).map_err(|error| {
-            Error::Extraction(format!(
+        None => archive.by_index(index).map_err(|error| Error::Message {
+            context: "Extraction error: ",
+            detail: format!(
                 "Failed to open archive entry {index}; provide a package key for encrypted \
                  archives: {error}"
-            ))
+            ),
         }),
     }
 }
@@ -102,18 +113,20 @@ pub(crate) fn open_archive_entry<'a, R: Read + Seek>(
 pub(crate) fn safe_relative_archive_path(name: &str) -> Result<PathBuf> {
     let rel = Path::new(name);
     if rel.is_absolute() {
-        return Err(Error::InvalidPath(format!(
-            "Zip entry has absolute path: {name}"
-        )));
+        return Err(Error::Message {
+            context: "Invalid path: ",
+            detail: format!("Zip entry has absolute path: {name}"),
+        });
     }
     for component in rel.components() {
         if matches!(
             component,
             Component::ParentDir | Component::Prefix(_) | Component::RootDir
         ) {
-            return Err(Error::InvalidPath(format!(
-                "Zip entry has unsafe path: {name}"
-            )));
+            return Err(Error::Message {
+                context: "Invalid path: ",
+                detail: format!("Zip entry has unsafe path: {name}"),
+            });
         }
     }
     Ok(rel.to_path_buf())
@@ -146,7 +159,10 @@ pub(crate) fn parse_zip64_extra(
         cursor += 4;
         let payload = extra
             .get(cursor..cursor + size)
-            .ok_or_else(|| Error::Extraction("Truncated ZIP extra field".to_string()))?;
+            .ok_or_else(|| Error::Message {
+                context: "Extraction error: ",
+                detail: "Truncated ZIP extra field".to_string(),
+            })?;
         if kind == 0x0001 {
             let mut field = 0usize;
             let mut next_u64 = || -> Result<u64> {

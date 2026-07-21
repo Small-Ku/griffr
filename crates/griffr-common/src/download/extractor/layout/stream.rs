@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use super::volume::MultiVolumeLayout;
 use crate::error::{Error, Result};
 
-/// Seekable view over complete-volume files and downloaded range segments.
+/// Seekable view over full-volume files and downloaded range segments.
 #[derive(Debug)]
 pub struct MultiVolumeStream {
     pub(super) layout: MultiVolumeLayout,
@@ -18,7 +18,10 @@ pub struct MultiVolumeStream {
 impl MultiVolumeStream {
     pub(super) fn from_layout(layout: MultiVolumeLayout) -> Result<Self> {
         if layout.layouts.is_empty() {
-            return Err(Error::Extraction("No volumes provided".to_string()));
+            return Err(Error::Message {
+                context: "Extraction error: ",
+                detail: "No volumes provided".to_string(),
+            });
         }
         Ok(Self {
             layout,

@@ -15,23 +15,23 @@ use md5::{Digest, Md5};
 
 use crate::runtime::issues::{FileIssue, FileIssueKind};
 
-pub(crate) fn execute_verify(
+pub(crate) fn run_verify(
     path: &Path,
     logical_path: &str,
     expected_md5: &str,
     expected_size: Option<u64>,
     on_fail: Option<Box<super::types::Task>>,
     event_tx: &flume::Sender<super::types::WorkerEvent>,
-) -> super::graph::TaskExecution {
+) -> super::graph::TaskRun {
     let issue = build_issue(path, logical_path, expected_md5, expected_size);
     match issue {
         None => {
-            let _ = event_tx.send(super::types::WorkerEvent::Verified {
-                path: logical_path.to_string(),
-                ok: true,
-                issue: None,
-            });
-            super::graph::TaskExecution::succeeded()
+            let _ = event_tx.send(super::types::WorkerEvent::verified(
+                logical_path.to_string(),
+                true,
+                None,
+            ));
+            super::graph::TaskRun::succeeded()
         }
         Some(issue) => {
             if let Some(task) = on_fail {
@@ -39,15 +39,15 @@ pub(crate) fn execute_verify(
                     path: logical_path.to_string(),
                     reason: format!("verification failed ({:?})", issue.kind),
                 });
-                return super::graph::TaskExecution::then(*task);
+                return super::graph::TaskRun::then(*task);
             }
 
-            let _ = event_tx.send(super::types::WorkerEvent::Verified {
-                path: logical_path.to_string(),
-                ok: false,
-                issue: Some(issue.clone()),
-            });
-            super::graph::TaskExecution::failed(format!("verification failed ({:?})", issue.kind))
+            let _ = event_tx.send(super::types::WorkerEvent::verified(
+                logical_path.to_string(),
+                false,
+                Some(issue.clone()),
+            ));
+            super::graph::TaskRun::failed(format!("verification failed ({:?})", issue.kind))
         }
     }
 }
@@ -249,7 +249,8 @@ pub(crate) fn verify_candidate_cancellable(
 }
 
 pub(crate) fn file_md5(path: &Path) -> Result<String> {
-    let mut file = open_sequential_read(path).map_err(|e| Error::OpenFileFailed {
+    let mut file = open_sequential_read(path).map_err(|e| Error::IoAt {
+        action: "open file",
         path: path.to_path_buf(),
         source: e,
     })?;

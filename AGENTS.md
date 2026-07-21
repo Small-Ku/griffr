@@ -2,13 +2,13 @@
 
 Griffr is in active prerelease development. Prefer a clean, maintainable design over backward compatibility. Breaking changes are expected when they remove duplication, improve correctness, or simplify the architecture.
 
-Do not add migration, compatibility, or deprecation layers unless the user explicitly requests them. In prerelease code, obsolete models and APIs should normally be removed completely rather than preserved beside their replacements.
+Do not add migration, compatibility, or deprecation layers unless the user explicitly requests them. In prerelease code, obsolete models and APIs should normally be removed instead of preserved beside their replacements.
 
 ## Repository Scope
 
 Primary workspace crates:
 
-- `crates/griffr-common`: shared domain logic, task execution, protocols, storage, and frontend-neutral runtime APIs.
+- `crates/griffr-common`: shared domain logic, task runs, protocols, storage, and frontend-neutral runtime APIs.
 - `crates/griffr-cli`: command parsing, terminal presentation, and CLI-specific orchestration.
 - Future GUI crates must use shared APIs without terminal-specific dependencies in `griffr-common`.
 
@@ -27,7 +27,7 @@ Always obey the closest nested `AGENTS.md` when working inside a subdirectory.
 1. Record actionable work in `docs/TODO.md` when that file is part of the current workflow.
 2. Select one coherent change set.
 3. Check all producers, users, tests, and public re-exports before you edit an API.
-4. Implement the smallest complete architectural change, not a partial compatibility layer.
+4. Implement the smallest full architectural change, not a partial compatibility layer.
 5. Run structural checks and relevant tests.
 6. Fix findings rather than weakening checks merely to make the patch pass.
 7. Update documentation and `docs/TODO.md` only after successful verification.
@@ -62,19 +62,19 @@ Shared APIs must expose domain semantics, not frontend mechanics.
 1. Use one command-scoped `TaskPoolRunner` per `install`, `update`, or `verify --repair` invocation.
 2. `download_vfs_resources` must use the caller's runner; do not create a hidden internal pool.
 3. Represent dependent work as one DAG batch where practical, including VFS work through `extra_tasks`.
-4. Avoid duplicated executor branches. Build conditional task lists, then run the shared executor once.
+4. Avoid duplicated runner branches. Build conditional task lists, then run the shared runner once.
 5. `verify --repair --relink-reuse` requires `--reuse-from`.
 6. `verify` must retain `--skip-vfs` parity with install and update flows.
 7. Reuse policy:
    - the normal install/update game-file ensure flow and VFS sync use `prefer_reuse = false`;
    - explicit relink mode may use `prefer_reuse = true`.
 8. Preserve correctness barriers:
-   - archive and game-file ensure completion before dependent verification;
-   - do not verify files before their ensure dependencies complete unless those dependencies are represented in the same DAG.
+   - archive and game-file ensure finish before dependent verification;
+   - do not verify files before their ensure dependencies finish unless those dependencies are represented in the same DAG.
 9. New install/update/verify phases should integrate with the shared runner and DAG model by default. Other pools require a code comment that explains why the shared runner cannot be used.
-10. Preserve forward-only patch transaction barriers:
+10. Preserve forward-only patch apply barriers:
     - check the archive and save the selected plan before staged files change the install;
-    - defer `config.ini` and other completion markers until VFS patch application and cleanup succeed;
+    - defer `config.ini` and other finish markers until VFS patch application and cleanup succeed;
     - release a patch base only after its final consumer commits;
     - delete-only paths may be removed early, but planned outputs and still-referenced bases must remain protected.
 
@@ -88,7 +88,7 @@ When adding a checker rule:
 - reason about effective Rust visibility and module reachability rather than matching every textual occurrence;
 - attach a stable diagnostic code;
 - include evidence and limitations in inferred diagnostics;
-- add positive and negative regression fixtures under `scripts/tests`;
+- add positive and negative regression samples under `scripts/tests`;
 - document the rule in `scripts/rust_check_lib/README.md`;
 - keep the rule focused on architecture or semantics that rustc and Clippy do not already enforce reliably.
 
@@ -132,7 +132,7 @@ uv run ruff check scripts
 uv run python -m compileall -q scripts
 ```
 
-If Cargo or the Rust toolchain is unavailable, run all available Python checks and state clearly that compiler-level validation was not performed. Never present the structural checker as equivalent to a successful Cargo build.
+If Cargo or the Rust toolchain is unavailable, run all available Python checks and state clearly that compiler-level validation did not run. Never present the structural checker as equivalent to a successful Cargo build.
 
 ## Functional Verification
 
@@ -153,12 +153,12 @@ For progress changes, test at least:
 
 - independent lanes do not overwrite one another;
 - each lane retains one unit;
-- the first visible state is available before the first long item completes;
+- the first visible state is available before the first long item finishes;
 - retries do not move byte progress backward;
 - no-repair and all-reuse paths stop cleanly;
 - receiver closure stops the renderer;
 - disabling progress has negligible behavioral impact;
-- progress delivery failure does not fail the operation;
+- progress delivery failure does not fail the work;
 - durable result history contains no transient samples.
 
 ## Packaging
@@ -183,7 +183,7 @@ In particular, keep the following aligned with code:
 
 - task-pool event and outcome model;
 - progress protocol and lane catalog;
-- patch execution order;
+- patch run order;
 - API/channel configuration;
 - checker diagnostic documentation.
 
@@ -203,4 +203,4 @@ When reviewing or modifying code, prioritize in this order:
 8. performance on the Windows large-file I/O workload;
 9. user-facing polish.
 
-Do not trade correctness for a smoother-looking progress bar. Progress is an observation of work, never the source of truth for work completion.
+Do not trade correctness for a smoother-looking progress bar. Progress is an observation of work, never the source of truth for work state.

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::api::crypto;
 use crate::config::{
-    game_by_appcode, game_by_executable, ChannelPair, GameId, RegionId, GAME_DEFINITIONS,
+    game_by_appcode, game_by_exe_name, ChannelPair, GameId, RegionId, GAME_DEFINITIONS,
 };
 use crate::error::{Error, Result};
 use crate::runtime::CONFIG_INI_NAME;
@@ -53,29 +53,32 @@ pub struct LocalInstall {
 
 impl LocalInstall {
     pub fn require_known_game(&self) -> Result<GameId> {
-        self.game_id.clone().ok_or_else(|| {
-            Error::Config(format!(
+        self.game_id.clone().ok_or_else(|| Error::Message {
+            context: "Configuration error: ",
+            detail: format!(
                 "Could not map local install to a supported game from {}",
                 self.install_path.display()
-            ))
+            ),
         })
     }
 
     pub fn require_known_region(&self) -> Result<RegionId> {
-        self.region_id.ok_or_else(|| {
-            Error::Config(format!(
+        self.region_id.ok_or_else(|| Error::Message {
+            context: "Configuration error: ",
+            detail: format!(
                 "Could not map local install to a supported region from {}",
                 self.install_path.display()
-            ))
+            ),
         })
     }
 
     pub fn require_known_channel(&self) -> Result<ChannelPair> {
-        self.channel_id.clone().ok_or_else(|| {
-            Error::Config(format!(
+        self.channel_id.clone().ok_or_else(|| Error::Message {
+            context: "Configuration error: ",
+            detail: format!(
                 "Could not map local install to a supported channel from {}",
                 self.install_path.display()
-            ))
+            ),
         })
     }
 
@@ -84,11 +87,12 @@ impl LocalInstall {
     /// `config.ini` is the launcher-managed source of truth for installed
     /// versions and is shared by CLI and GUI consumers.
     pub fn require_config_ini_version(&self) -> Result<&str> {
-        self.config_ini.version().ok_or_else(|| {
-            Error::Config(format!(
+        self.config_ini.version().ok_or_else(|| Error::Message {
+            context: "Configuration error: ",
+            detail: format!(
                 "config.ini at {} does not contain a version field",
                 self.config_ini.path.display()
-            ))
+            ),
         })
     }
 }
@@ -113,18 +117,16 @@ pub async fn resolve_named_path(path: &Path, filename: &str) -> PathBuf {
 
 pub async fn decrypt_config_ini(path: &Path) -> Result<ParsedConfigIni> {
     let config_path = resolve_named_path(path, CONFIG_INI_NAME).await;
-    let encrypted =
-        compio::fs::read(&config_path)
-            .await
-            .map_err(|source| Error::OpenFileFailed {
-                path: config_path.clone(),
-                source,
-            })?;
-    let raw = crypto::decrypt_game_files(&encrypted).map_err(|error| {
-        Error::Crypto(format!(
-            "Failed to decrypt {}: {error}",
-            config_path.display()
-        ))
+    let encrypted = compio::fs::read(&config_path)
+        .await
+        .map_err(|source| Error::IoAt {
+            action: "open file",
+            path: config_path.clone(),
+            source,
+        })?;
+    let raw = crypto::decrypt_game_files(&encrypted).map_err(|error| Error::Message {
+        context: "Crypto error: ",
+        detail: format!("Failed to decrypt {}: {error}", config_path.display()),
     })?;
 
     let fields = raw
@@ -146,22 +148,23 @@ pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
     let install_path = resolve_install_path(path).await;
     let config_ini = decrypt_config_ini(&install_path).await?;
 
-    let mut games_with_existing_executable = Vec::new();
+    let mut games_with_existing_exe = Vec::new();
     for game in GAME_DEFINITIONS {
-        let executable = install_path.join(game.executable);
-        match compio::fs::metadata(&executable).await {
-            Ok(_) => games_with_existing_executable.push(game.game_id()),
+        let exe_path = install_path.join(game.exe_name);
+        match compio::fs::metadata(&exe_path).await {
+            Ok(_) => games_with_existing_exe.push(game.game_id()),
             Err(err) if err.kind() == ErrorKind::NotFound => {}
             Err(source) => {
-                return Err(Error::StatFailed {
-                    path: executable,
+                return Err(Error::IoAt {
+                    action: "query file metadata/stat for",
+                    path: exe_path,
                     source,
                 })
             }
         }
     }
 
-    let game_id = detect_game_id(&config_ini, &games_with_existing_executable);
+    let game_id = detect_game_id(&config_ini, &games_with_existing_exe);
     let region_id = detect_region_id(&config_ini);
     let channel_id = detect_channel_id(&config_ini);
 
@@ -176,13 +179,13 @@ pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
 
 fn detect_game_id(
     config_ini: &ParsedConfigIni,
-    games_with_existing_executable: &[GameId],
+    games_with_existing_exe: &[GameId],
 ) -> Option<GameId> {
     config_ini
         .appcode()
         .and_then(game_by_appcode)
-        .or_else(|| config_ini.entry().and_then(game_by_executable))
-        .or_else(|| games_with_existing_executable.first().cloned())
+        .or_else(|| config_ini.entry().and_then(game_by_exe_name))
+        .or_else(|| games_with_existing_exe.first().cloned())
 }
 
 fn detect_region_id(config_ini: &ParsedConfigIni) -> Option<RegionId> {

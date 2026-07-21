@@ -142,9 +142,9 @@ pub struct InstallTargetOverrideArgs {
     #[command(flatten)]
     pub api: ApiTargetOverrideArgs,
 
-    /// Override game executable filename (e.g. Arknights.exe)
-    #[arg(long = "executable")]
-    pub executable: Option<String>,
+    /// Override game program file name (e.g. Arknights.exe)
+    #[arg(long = "exe")]
+    pub exe_name: Option<String>,
 
     /// Override game data-root directory name (e.g. Arknights_Data)
     #[arg(long = "data-root")]
@@ -165,7 +165,7 @@ impl From<InstallTargetOverrideArgs> for griffr_common::config::InstallTargetOve
     fn from(args: InstallTargetOverrideArgs) -> Self {
         Self {
             api: args.api.into(),
-            executable: args.executable,
+            exe_name: args.exe_name,
             data_root: args.data_root,
         }
     }
@@ -336,7 +336,7 @@ pub(crate) enum Commands {
         external_vfs_root: Option<std::path::PathBuf>,
     },
 
-    /// Predownload patch archive operations
+    /// Predownload patch archive calls
     Predownload {
         #[command(subcommand)]
         command: PredownloadCommands,
@@ -392,7 +392,7 @@ pub(crate) enum Commands {
         overrides: InstallTargetOverrideArgs,
 
         /// File set to write in Persistent
-        #[arg(long, default_value_t = PersistentVfsFileSet::Initial)]
+        #[arg(long, default_value_t = PersistentVfsFileSet::Base)]
         file_set: PersistentVfsFileSet,
 
         #[command(flatten)]
@@ -436,7 +436,7 @@ pub(crate) enum Commands {
         command: DebugCommands,
     },
 
-    /// Account session snapshot operations (explicit paths, no central registry)
+    /// Account session snapshot calls (explicit paths, no central registry)
     Account {
         #[command(subcommand)]
         command: AccountCommands,

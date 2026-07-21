@@ -177,7 +177,7 @@ pub async fn setup_vfs(
                 result.failed_files
             );
         }
-        ui::print_success("Persistent VFS setup is complete");
+        ui::print_success("Persistent VFS setup finished");
     } else {
         ui::print_info(
             "Persistent VFS setup was skipped because this target does not support VFS.",

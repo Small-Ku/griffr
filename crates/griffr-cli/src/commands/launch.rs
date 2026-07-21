@@ -30,11 +30,15 @@ pub async fn launch(path: PathBuf, force: bool, opts: GlobalOptions) -> Result<(
     match compio::fs::metadata(&exe_path).await {
         Ok(_) => {}
         Err(err) if err.kind() == ErrorKind::NotFound => {
-            anyhow::bail!("Executable not found: {}", exe_path.display());
+            anyhow::bail!("Program file not found: {}", exe_path.display());
         }
         Err(err) => {
-            return Err(anyhow::Error::from(err))
-                .with_context(|| format!("Failed to stat executable {}", exe_path.display()))
+            return Err(anyhow::Error::from(err)).with_context(|| {
+                format!(
+                    "Failed to read program file metadata for {}",
+                    exe_path.display()
+                )
+            })
         }
     }
 

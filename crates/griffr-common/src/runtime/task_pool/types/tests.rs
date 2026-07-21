@@ -6,21 +6,27 @@ use crate::download::extractor::MultiVolumeLayout;
 use std::path::PathBuf;
 
 #[test]
-fn transient_worker_progress_is_not_retained_as_an_outcome() {
-    assert!(WorkerEvent::DownloadedBytes {
-        path: "asset.bin".to_string(),
-        bytes: 64,
-        total_bytes: 128,
-    }
-    .into_outcome()
-    .is_none());
-    assert!(WorkerEvent::PatchProgress {
-        path: "patch.json".to_string(),
-        completed: 1,
-        total: 2,
-    }
-    .into_outcome()
-    .is_none());
+fn transient_worker_progress_is_not_a_durable_outcome() {
+    assert!(matches!(
+        WorkerEvent::progress(
+            crate::runtime::ProgressPhase::Download,
+            "asset.bin".to_string(),
+            64,
+            128,
+            false,
+        ),
+        WorkerEvent::Progress { .. }
+    ));
+    assert!(matches!(
+        WorkerEvent::progress(
+            crate::runtime::ProgressPhase::Patch,
+            "patch.json".to_string(),
+            1,
+            2,
+            false,
+        ),
+        WorkerEvent::Progress { .. }
+    ));
 }
 
 #[test]
@@ -72,25 +78,18 @@ fn explicit_relink_skips_target_verification() {
 }
 
 #[test]
-fn changed_worker_facts_become_task_outcomes() {
+fn changed_worker_facts_are_direct_task_outcomes() {
     assert!(matches!(
-        WorkerEvent::Changed {
-            path: "data/file.bin".to_string(),
-        }
-        .into_outcome(),
-        Some(TaskOutcome::Changed { path }) if path == "data/file.bin"
+        WorkerEvent::changed("data/file.bin".to_string()),
+        WorkerEvent::Outcome(TaskOutcome::Changed { path }) if path == "data/file.bin"
     ));
 }
 
 #[test]
-fn durable_worker_facts_become_task_outcomes() {
+fn durable_worker_facts_are_direct_task_outcomes() {
     assert!(matches!(
-        WorkerEvent::Downloaded {
-            path: "asset.bin".to_string(),
-            bytes: 128,
-        }
-        .into_outcome(),
-        Some(TaskOutcome::Downloaded { path, bytes })
+        WorkerEvent::downloaded("asset.bin".to_string(), 128),
+        WorkerEvent::Outcome(TaskOutcome::Downloaded { path, bytes })
             if path == "asset.bin" && bytes == 128
     ));
 }
@@ -154,7 +153,7 @@ fn reuse_group_defers_cross_volume_copy_until_hardlink_probes_fail() {
 
 #[test]
 fn archive_shard_state_waits_for_active_shards_before_cleanup() {
-    let state = super::ArchiveShardExecutionState::new();
+    let state = super::ArchiveShardRunState::new();
     state.try_begin().unwrap();
     state.try_begin().unwrap();
 
@@ -170,7 +169,7 @@ fn archive_shard_state_waits_for_active_shards_before_cleanup() {
 
 #[test]
 fn archive_shard_state_rejects_new_work_after_failure() {
-    let state = super::ArchiveShardExecutionState::new();
+    let state = super::ArchiveShardRunState::new();
     state.try_begin().unwrap();
     assert_eq!(state.finish(false), (true, true));
     assert_eq!(state.try_begin(), Err(true));
@@ -191,7 +190,7 @@ fn archive_work_drop_removes_abandoned_staging() {
         layout,
         vec![None],
         temp.path().join("install"),
-        ArchiveRetention::KeepCompleteVolumes,
+        ArchiveRetention::KeepFullVolumes,
         Vec::new(),
         None,
         crate::runtime::PatchApplyOptions::default(),
@@ -226,7 +225,7 @@ fn retained_remote_archive_requires_one_descriptor_per_volume() {
         layout,
         vec![None],
         temp.path().join("install"),
-        ArchiveRetention::KeepCompleteVolumes,
+        ArchiveRetention::KeepFullVolumes,
         Vec::new(),
         None,
         crate::runtime::PatchApplyOptions::default(),

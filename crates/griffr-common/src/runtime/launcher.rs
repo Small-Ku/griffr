@@ -24,7 +24,7 @@ pub struct GameProcess {
     pub pid: u32,
     /// Process name
     pub name: String,
-    /// Full path to executable
+    /// Full path to the program file
     pub exe_path: PathBuf,
     /// True for the main game process
     pub is_main: bool,
@@ -50,12 +50,12 @@ impl Launcher {
         }
     }
 
-    /// Get the main game executable name
+    /// Get the main game program file name
     fn main_exe_name(&self) -> &Path {
-        &self.target.executable
+        &self.target.exe_name
     }
 
-    /// Get the full path of the main game executable
+    /// Get the full path of the main game program file
     pub fn game_exe_path(&self) -> Result<PathBuf> {
         Ok(self.install_path.join(self.main_exe_name()))
     }
@@ -118,7 +118,7 @@ impl Launcher {
                     if is_main || is_child {
                         let pid = entry.th32ProcessID;
 
-                        // Get the full executable path.
+                        // Get the full program file path.
                         let exe_path = if let Ok(path) =
                             get_process_exe_path(pid, &self.install_path, &process_name)
                         {
@@ -219,11 +219,14 @@ impl Launcher {
             compio::time::sleep(Duration::from_millis(500)).await;
             let final_check = self.find_game_processes();
             if !final_check.is_empty() {
-                return Err(Error::Launcher(format!(
-                    "Failed to stop {} process(es): {:?}",
-                    final_check.len(),
-                    final_check.iter().map(|p| &p.name).collect::<Vec<_>>()
-                )));
+                return Err(Error::Message {
+                    context: "Launcher/Process error: ",
+                    detail: format!(
+                        "Failed to stop {} process(es): {:?}",
+                        final_check.len(),
+                        final_check.iter().map(|p| &p.name).collect::<Vec<_>>()
+                    ),
+                });
             }
         }
 
@@ -293,20 +296,20 @@ impl Launcher {
         unsafe {
             let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
             if handle.is_null() {
-                return Err(Error::Launcher(format!(
-                    "Failed to open process {} to stop it",
-                    pid
-                )));
+                return Err(Error::Message {
+                    context: "Launcher/Process error: ",
+                    detail: format!("Failed to open process {} to stop it", pid),
+                });
             }
 
             let result = TerminateProcess(handle, 1);
             CloseHandle(handle);
 
             if result == 0 {
-                return Err(Error::Launcher(format!(
-                    "TerminateProcess failed for PID {}",
-                    pid
-                )));
+                return Err(Error::Message {
+                    context: "Launcher/Process error: ",
+                    detail: format!("TerminateProcess failed for PID {}", pid),
+                });
             }
 
             Ok(())
@@ -325,13 +328,14 @@ impl Launcher {
         match compio::fs::metadata(&exe_path).await {
             Ok(_) => {}
             Err(err) if err.kind() == ErrorKind::NotFound => {
-                return Err(Error::Launcher(format!(
-                    "Game executable not found: {}",
-                    exe_path.display()
-                )));
+                return Err(Error::Message {
+                    context: "Launcher/Process error: ",
+                    detail: format!("Game program file not found: {}", exe_path.display()),
+                });
             }
             Err(err) => {
-                return Err(Error::StatFailed {
+                return Err(Error::IoAt {
+                    action: "query file metadata/stat for",
                     path: exe_path,
                     source: err,
                 });
@@ -356,8 +360,9 @@ impl Launcher {
                 .stderr(Stdio::null())
                 .creation_flags(CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT);
 
-            let child = cmd.spawn().map_err(|e| {
-                Error::Launcher(format!("Failed to launch game from {:?}: {e}", exe_path))
+            let child = cmd.spawn().map_err(|e| Error::Message {
+                context: "Launcher/Process error: ",
+                detail: format!("Failed to launch game from {:?}: {e}", exe_path),
             })?;
 
             info!("Game launched with PID: {:?}", child.id());
@@ -371,8 +376,9 @@ impl Launcher {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
 
-            let child = cmd.spawn().map_err(|e| {
-                Error::Launcher(format!("Failed to launch game from {:?}: {e}", exe_path))
+            let child = cmd.spawn().map_err(|e| Error::Message {
+                context: "Launcher/Process error: ",
+                detail: format!("Failed to launch game from {:?}: {e}", exe_path),
             })?;
 
             info!("Game launched with PID: {:?}", child.id());
@@ -381,12 +387,12 @@ impl Launcher {
     }
 }
 
-/// Check if a process executable is within the game installation directory
+/// Check if a process program file is within the game installation directory
 fn is_process_in_game_directory(exe_path: &Path, game_dir: &Path) -> bool {
     exe_path.ancestors().any(|ancestor| ancestor == game_dir)
 }
 
-/// Get the full executable path. for a process
+/// Get the full program file path. for a process
 #[cfg(windows)]
 fn get_process_exe_path(pid: u32, _game_dir: &Path, _fallback_name: &str) -> Result<PathBuf> {
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -398,7 +404,10 @@ fn get_process_exe_path(pid: u32, _game_dir: &Path, _fallback_name: &str) -> Res
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
         if handle.is_null() {
-            return Err(Error::Launcher("Failed to open process".to_string()));
+            return Err(Error::Message {
+                context: "Launcher/Process error: ",
+                detail: "Failed to open process".to_string(),
+            });
         }
 
         let mut buffer = [0u16; 260]; // MAX_PATH
@@ -406,9 +415,10 @@ fn get_process_exe_path(pid: u32, _game_dir: &Path, _fallback_name: &str) -> Res
         CloseHandle(handle);
 
         if result == 0 {
-            return Err(Error::Launcher(
-                "Failed to get process image name".to_string(),
-            ));
+            return Err(Error::Message {
+                context: "Launcher/Process error: ",
+                detail: "Failed to get process image name".to_string(),
+            });
         }
 
         let path = String::from_utf16_lossy(&buffer[..result as usize]);

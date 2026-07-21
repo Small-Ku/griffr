@@ -7,7 +7,7 @@ use md5::{Digest, Md5};
 use crate::error::{Error, Result};
 use crate::runtime::preallocate_file;
 use crate::runtime::task_pool::fs_ops::commit_partial_download;
-use crate::runtime::task_pool::graph::{GraphExpansion, TaskExecution};
+use crate::runtime::task_pool::graph::{GraphExpansion, TaskRun};
 use crate::runtime::task_pool::types::{
     ArchivePart, ArchiveRangePriority, ArchiveWork, Task, WorkerEvent,
 };
@@ -15,24 +15,21 @@ use crate::runtime::task_pool::verify;
 
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
 
-pub(crate) fn execute_fill_archive_volume_gaps(
-    work: Arc<ArchiveWork>,
-    volume_index: usize,
-) -> TaskExecution {
-    if !work.should_complete_volumes() {
-        return TaskExecution::succeeded();
+pub(crate) fn run_fill_archive_volume_gaps(work: Arc<ArchiveWork>, volume_index: usize) -> TaskRun {
+    if !work.should_save_full_volumes() {
+        return TaskRun::succeeded();
     }
     let Some(volume_range) = work.layout.volume_range(volume_index) else {
-        return TaskExecution::failed(format!(
+        return TaskRun::failed(format!(
             "archive volume index {volume_index} is out of range"
         ));
     };
     let requests = match work.layout.missing_range_requests([volume_range]) {
         Ok(requests) => requests,
-        Err(error) => return TaskExecution::failed(error.to_string()),
+        Err(error) => return TaskRun::failed(error.to_string()),
     };
     if requests.is_empty() {
-        return TaskExecution::then(Task::FinalizeArchiveVolume { work, volume_index });
+        return TaskRun::then(Task::SaveArchiveVolume { work, volume_index });
     }
 
     let mut expansion = GraphExpansion::new();
@@ -47,52 +44,57 @@ pub(crate) fn execute_fill_archive_volume_gaps(
             })
         })
         .collect::<Vec<_>>();
-    match expansion.add_task(Task::FinalizeArchiveVolume { work, volume_index }, fetches) {
-        Ok(_) => TaskExecution::expand(expansion),
-        Err(error) => TaskExecution::failed(error.to_string()),
+    match expansion.add_task(Task::SaveArchiveVolume { work, volume_index }, fetches) {
+        Ok(_) => TaskRun::expand(expansion),
+        Err(error) => TaskRun::failed(error.to_string()),
     }
 }
 
-pub(crate) fn execute_finalize_archive_volume(
+pub(crate) fn run_save_archive_volume(
     work: Arc<ArchiveWork>,
     volume_index: usize,
     event_tx: &flume::Sender<WorkerEvent>,
-) -> TaskExecution {
-    let result = finalize_archive_volume(&work, volume_index, event_tx);
+) -> TaskRun {
+    let result = save_archive_volume(&work, volume_index, event_tx);
     match result {
-        Ok(()) => TaskExecution::succeeded(),
+        Ok(()) => TaskRun::succeeded(),
         Err(error) => {
             if matches!(
                 &error,
-                Error::Integrity(_) | Error::Extraction(_) | Error::Io(_)
+                Error::Message {
+                    context: "Integrity error: ",
+                    detail: _,
+                } | Error::Message {
+                    context: "Extraction error: ",
+                    detail: _,
+                } | Error::Io(_)
             ) {
                 work.invalidate_range_cache();
             }
-            TaskExecution::failed(error.to_string())
+            TaskRun::failed(error.to_string())
         }
     }
 }
 
-pub(crate) fn execute_archive_volumes_complete(work: Arc<ArchiveWork>) -> TaskExecution {
-    if work.should_complete_volumes() {
-        TaskExecution::succeeded()
+pub(crate) fn run_archive_volumes_ready(work: Arc<ArchiveWork>) -> TaskRun {
+    if work.should_save_full_volumes() {
+        TaskRun::succeeded()
     } else {
-        TaskExecution::failed("archive volume completion barrier used for an ephemeral archive")
+        TaskRun::failed("archive volume finish barrier used for an ephemeral archive")
     }
 }
 
-fn finalize_archive_volume(
+fn save_archive_volume(
     work: &ArchiveWork,
     volume_index: usize,
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> Result<()> {
-    if !work.should_complete_volumes() {
+    if !work.should_save_full_volumes() {
         return Ok(());
     }
-    let part = work.parts.get(volume_index).ok_or_else(|| {
-        Error::Extraction(format!(
-            "archive volume index {volume_index} is out of range"
-        ))
+    let part = work.parts.get(volume_index).ok_or_else(|| Error::Message {
+        context: "Extraction error: ",
+        detail: format!("archive volume index {volume_index} is out of range"),
     })?;
     if verify::build_issue(
         &part.dest,
@@ -103,52 +105,63 @@ fn finalize_archive_volume(
     .is_none()
     {
         report_verified(part, event_tx);
-        work.mark_volume_finalized(volume_index);
+        work.mark_volume_saved(volume_index);
         return Ok(());
     }
     if let Err(error) = write_archive_volume(work, volume_index, part) {
-        let _ = event_tx.send(WorkerEvent::Verified {
-            path: part.logical_path.clone(),
-            ok: false,
-            issue: verify::build_issue(
+        let _ = event_tx.send(WorkerEvent::verified(
+            part.logical_path.clone(),
+            false,
+            verify::build_issue(
                 &part.dest,
                 &part.logical_path,
                 &part.expected_md5,
                 Some(part.expected_size),
             ),
-        });
+        ));
         return Err(error);
     }
     report_verified(part, event_tx);
-    work.mark_volume_finalized(volume_index);
+    work.mark_volume_saved(volume_index);
     Ok(())
 }
 
 fn write_archive_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) -> Result<()> {
-    let volume_range = work.layout.volume_range(index).ok_or_else(|| {
-        Error::Extraction(format!("archive volume index {index} is out of range"))
-    })?;
+    let volume_range = work
+        .layout
+        .volume_range(index)
+        .ok_or_else(|| Error::Message {
+            context: "Extraction error: ",
+            detail: format!("archive volume index {index} is out of range"),
+        })?;
     let expected_size = volume_range.end - volume_range.start;
     if expected_size != part.expected_size {
-        return Err(Error::Extraction(format!(
-            "archive volume {} has layout size {expected_size}, expected {}",
-            part.logical_path, part.expected_size
-        )));
+        return Err(Error::Message {
+            context: "Extraction error: ",
+            detail: format!(
+                "archive volume {} has layout size {expected_size}, expected {}",
+                part.logical_path, part.expected_size
+            ),
+        });
     }
     if !work.layout.range_is_available(&volume_range) {
-        return Err(Error::Extraction(format!(
-            "archive volume {} is not fully cached before it is saved",
-            part.logical_path
-        )));
+        return Err(Error::Message {
+            context: "Extraction error: ",
+            detail: format!(
+                "archive volume {} is not fully cached before it is saved",
+                part.logical_path
+            ),
+        });
     }
     if let Some(parent) = part.dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirFailed {
+        std::fs::create_dir_all(parent).map_err(|source| Error::IoAt {
+            action: "create directory",
             path: parent.to_path_buf(),
             source,
         })?;
     }
     let temp = volume_temp_path(&part.dest)?;
-    let temp_is_complete = std::fs::metadata(&temp)
+    let temp_is_ready = std::fs::metadata(&temp)
         .map(|metadata| metadata.is_file() && metadata.len() == part.expected_size)
         .unwrap_or(false)
         && verify::build_issue(
@@ -158,7 +171,7 @@ fn write_archive_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) ->
             Some(part.expected_size),
         )
         .is_none();
-    if temp_is_complete {
+    if temp_is_ready {
         commit_partial_download(&temp, &part.dest)?;
         return Ok(());
     }
@@ -166,7 +179,11 @@ fn write_archive_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) ->
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => {
-            return Err(Error::RemoveFailed { path: temp, source });
+            return Err(Error::IoAt {
+                action: "remove file or directory",
+                path: temp,
+                source,
+            });
         }
     }
 
@@ -176,7 +193,8 @@ fn write_archive_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) ->
         .create_new(true)
         .write(true)
         .open(&temp)
-        .map_err(|source| Error::OpenFileFailed {
+        .map_err(|source| Error::IoAt {
+            action: "open file",
             path: temp.clone(),
             source,
         })?;
@@ -191,21 +209,23 @@ fn write_archive_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) ->
                 .min(buffer.len());
             let read = input.read(&mut buffer[..limit])?;
             if read == 0 {
-                return Err(Error::Extraction(format!(
-                    "archive stream ended while saving {}",
-                    part.logical_path
-                )));
+                return Err(Error::Message {
+                    context: "Extraction error: ",
+                    detail: format!("archive stream ended while saving {}", part.logical_path),
+                });
             }
             output
                 .write_all(&buffer[..read])
-                .map_err(|source| Error::WriteFileFailed {
+                .map_err(|source| Error::IoAt {
+                    action: "write to file",
                     path: temp.clone(),
                     source,
                 })?;
             hasher.update(&buffer[..read]);
             remaining -= read as u64;
         }
-        output.sync_all().map_err(|source| Error::WriteFileFailed {
+        output.sync_all().map_err(|source| Error::IoAt {
+            action: "write to file",
             path: temp.clone(),
             source,
         })?;
@@ -223,10 +243,13 @@ fn write_archive_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) ->
     };
     if actual_md5 != part.expected_md5.to_ascii_lowercase() {
         let _ = std::fs::remove_file(&temp);
-        return Err(Error::Integrity(format!(
-            "archive volume {} MD5 mismatch: expected {}, got {actual_md5}",
-            part.logical_path, part.expected_md5
-        )));
+        return Err(Error::Message {
+            context: "Integrity error: ",
+            detail: format!(
+                "archive volume {} MD5 mismatch: expected {}, got {actual_md5}",
+                part.logical_path, part.expected_md5
+            ),
+        });
     }
 
     if let Err(error) = commit_partial_download(&temp, &part.dest) {
@@ -237,11 +260,9 @@ fn write_archive_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) ->
 }
 
 pub(super) fn volume_temp_path(path: &Path) -> Result<PathBuf> {
-    let file_name = path.file_name().ok_or_else(|| {
-        Error::InvalidPath(format!(
-            "archive volume has no filename: {}",
-            path.display()
-        ))
+    let file_name = path.file_name().ok_or_else(|| Error::Message {
+        context: "Invalid path: ",
+        detail: format!("archive volume has no filename: {}", path.display()),
     })?;
     Ok(path.with_file_name(format!(
         ".{}.griffr-volume.part",
@@ -250,11 +271,7 @@ pub(super) fn volume_temp_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn report_verified(part: &ArchivePart, event_tx: &flume::Sender<WorkerEvent>) {
-    let _ = event_tx.send(WorkerEvent::Verified {
-        path: part.logical_path.clone(),
-        ok: true,
-        issue: None,
-    });
+    let _ = event_tx.send(WorkerEvent::verified(part.logical_path.clone(), true, None));
 }
 
 #[cfg(test)]
@@ -332,7 +349,7 @@ mod tests {
             layout,
             vec![None, None],
             temp.path().join("install"),
-            ArchiveRetention::KeepCompleteVolumes,
+            ArchiveRetention::KeepFullVolumes,
             parts,
             None,
             PatchApplyOptions::default(),
@@ -342,14 +359,14 @@ mod tests {
         .unwrap();
         let (event_tx, _event_rx) = flume::unbounded();
 
-        finalize_archive_volume(&work, 1, &event_tx).unwrap();
+        save_archive_volume(&work, 1, &event_tx).unwrap();
         assert_eq!(std::fs::read(&second_dest).unwrap(), second_bytes);
         assert!(work
             .layout
             .volume_range(0)
             .is_some_and(|range| work.layout.range_is_available(&range)));
 
-        finalize_archive_volume(&work, 0, &event_tx).unwrap();
+        save_archive_volume(&work, 0, &event_tx).unwrap();
         assert_eq!(std::fs::read(first_dest).unwrap(), first_bytes);
         assert!(
             std::fs::read_dir(cache).unwrap().all(|entry| entry

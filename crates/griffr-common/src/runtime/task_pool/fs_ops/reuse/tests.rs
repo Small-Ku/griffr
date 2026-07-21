@@ -1,6 +1,6 @@
 use super::{
     classify_reuse_mode, copy_verified_file_async, create_hardlink_async, storage_volume_id,
-    ReuseMethod, ReuseMode,
+    ReuseMode,
 };
 use md5::Md5;
 
@@ -76,7 +76,7 @@ async fn async_copy_hashes_while_writing_and_commits_verified_bytes() {
             .await
             .unwrap();
 
-    assert_eq!(method, ReuseMethod::Copy);
+    assert_eq!(method, crate::runtime::PathReuseMethod::Copy);
     assert_eq!(compio::fs::read(&destination).await.unwrap(), payload);
 }
 

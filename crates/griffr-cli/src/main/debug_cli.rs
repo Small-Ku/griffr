@@ -268,7 +268,7 @@ pub(crate) enum PredownloadCommands {
         #[arg(long)]
         external_vfs_root: Option<std::path::PathBuf>,
     },
-    /// Resume a persisted forward patch transaction or legacy extracted patch state
+    /// Resume a persisted forward patch apply or legacy extracted patch state
     Resume {
         #[command(flatten)]
         path: PathArg,
@@ -391,7 +391,7 @@ impl GlobalOptions {
         }
     }
 
-    /// Check if we should skip actual execution
+    /// Check if we should skip actual run
     pub fn is_dry_run(&self) -> bool {
         self.dry_run
     }

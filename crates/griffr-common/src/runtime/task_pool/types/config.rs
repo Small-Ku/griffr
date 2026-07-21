@@ -88,7 +88,7 @@ impl Default for VolumeIoPolicy {
 
 #[derive(Debug, Clone)]
 pub struct TaskPoolConfig {
-    /// Small compio executor dedicated to native async I/O completions.
+    /// Small compio runner dedicated to native async I/O finishes.
     pub dispatcher_threads: usize,
     /// Shared network capacity across general, archive, and VFS transfers.
     pub network_slots: usize,
@@ -97,9 +97,9 @@ pub struct TaskPoolConfig {
     /// Maximum non-CPU blocking tasks admitted to Dispatcher::dispatch_blocking().
     pub blocking_slots: usize,
     /// Shared compio AsyncifyPool limit. This includes Griffr blocking jobs and
-    /// compio operations that need a blocking fallback, so it must retain headroom.
+    /// compio calls that need a blocking fallback, so it must retain headroom.
     pub blocking_pool_limit: usize,
-    /// Maximum concurrent archive extraction transactions.
+    /// Maximum concurrent archive extraction patch_batches.
     pub extract_slots: usize,
     /// Default physical-volume admission policy. The defaults allow bounded
     /// mixed streaming reads/writes plus a separate metadata lane.

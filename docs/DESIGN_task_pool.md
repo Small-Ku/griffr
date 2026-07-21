@@ -1,6 +1,6 @@
 # Task Pool and DAG Design
 
-A frontend-neutral, command-scoped task DAG drives install, update, verify, repair, VFS sync, and predownload apply. The DAG describes ordering; the resource-aware scheduler decides when a ready node may run; `compio::Dispatcher` remains the only execution backend.
+A frontend-neutral, command-scoped task DAG drives install, update, verify, repair, VFS sync, and predownload apply. The DAG describes ordering; the resource-aware scheduler decides when a ready node may run; `compio::Dispatcher` remains the only run backend.
 
 ```text
 planner -> TaskGraph -> resource-aware scheduler -> Dispatcher
@@ -45,7 +45,7 @@ The graph natively supports:
 
 ## 2. Dynamic Expansion
 
-Executors return one `TaskExecution` value:
+Task runners return one `TaskRun` value:
 
 ```text
 Succeeded
@@ -56,11 +56,11 @@ Expand(GraphExpansion)
 
 `GraphExpansion` is itself append-only and locally acyclic. The coordinator remaps its local node IDs into the command graph, marks the producer as `Waiting`, and attaches the producer to all terminal leaves.
 
-Stable dependency tokens let a later expansion depend on a node installed by an earlier expansion. Archive volume tasks use this to expose verified byte ranges to central-directory, control-file, extraction-shard, and cleanup nodes without putting all work in one initial graph.
+Stable dependency tokens let a later expansion depend on a node installed by an earlier expansion. Archive volume tasks use this to expose verified byte ranges to central-directory, control-file, extraction-shard, and cleanup nodes without putting all work in the first graph.
 
 This replaces the former implicit `spawned.push(task)` continuation model. Dynamic expansion is used when the graph cannot be known up front:
 
-- partial-download inspection selects resume, restart, or completion;
+- partial-download inspection selects resume, restart, or done;
 - verify failure selects repair;
 - reuse probing selects hardlink, copy, another source, or download;
 - archive inspection discovers extraction shards;
@@ -72,7 +72,7 @@ Policy choices are resolved before adding work. Mutually exclusive alternatives 
 
 ## 3. Scheduling Model
 
-One coordinator owns graph state, ready queues, admission state, progress reduction, outcomes, and metrics. It does not execute task bodies and does not create class-specific worker loops.
+One coordinator owns graph state, ready queues, admission state, progress reduction, outcomes, and metrics. It does not run task bodies and does not create class-specific worker loops.
 
 ```text
 resource-aware coordinator
@@ -80,7 +80,7 @@ resource-aware coordinator
 |- acquire network / CPU / blocking / extract / volume / path permits
 |- Dispatcher::dispatch()          async HTTP, compio file I/O, reuse copy, and delete manifests
 |- Dispatcher::dispatch_blocking() MD5, ZIP, HDIFF, and filesystem tasks without async APIs
-`- receive TaskCompletion
+`- receive TaskFinish
    |- release every acquired permit
    |- update metrics
    |- apply Succeeded / Failed / Expand to the graph
@@ -91,7 +91,7 @@ Every ready task is assigned one `ResourceRequest`:
 
 ```rust
 struct ResourceRequest {
-    execution: ExecutionClass, // AsyncIo, Cpu, or Blocking
+    run: RunClass, // AsyncIo, Cpu, or Blocking
     network: Option<NetworkClass>,
     read_volumes: Vec<VolumeId>,
     write_volumes: Vec<VolumeId>,
@@ -112,9 +112,9 @@ Async transfers, hardlink commits, verified reuse copies, and delete-manifest na
 
 ## 4. Ready-Queue Priority and Fairness
 
-Initial roots enter the bulk queue. Nodes created by dynamic expansion enter the continuation queue.
+Root nodes enter the bulk queue. Nodes created by dynamic expansion enter the continuation queue.
 
-The scheduler admits up to three continuations before forcing a bulk admission when bulk work is runnable. This keeps retries and dependency-unblocking work near the critical path without starving a large initial scan.
+The scheduler admits up to three continuations before forcing a bulk admission when bulk work is runnable. This keeps retries and dependency-unblocking work near the critical path without starving a large first scan.
 
 Within one priority class, selection considers:
 
@@ -145,16 +145,16 @@ The graph does not encode these capacity constraints as edges. Doing so would ma
 
 ## 6. Download, Verify, Repair, and Reuse DAGs
 
-Download preparation and transfer form a dynamic chain:
+Download preparation and transfer use one canonical task payload:
 
 ```text
-Download
-|- complete and valid --------------------------> success
-|- resumable --------------------> TransferDownload
-`- preparation failure and retry -> Download(next attempt)
+Download { resume: None }
+|- full and valid ------------------------------> success
+|- resumable -> Download { resume: Some(state) } ---> transfer
+`- preparation failure and retry -> Download { resume: None, retry_count + 1 }
 ```
 
-A transfer failure expands another preparation node until the shared retry budget is exhausted.
+A transfer failure expands another `Download { resume: None }` node until the shared retry budget is exhausted. The scheduler selects CPU preparation or async I/O from `resume.is_some()`; no transfer-only task variant or runner input wrapper duplicates the payload.
 
 Normal repair and explicit relink use conditional subgraphs:
 
@@ -173,13 +173,13 @@ RepairFile
 `- no source -> Verify destination -> optional Download
 ```
 
-Reuse candidates are grouped by physical volume. Probes run as parallel DAG roots; the winning probe expands the selected commit node. Both hardlink and copy commits use the async executor; copy commits stream with positional `compio::fs::File` I/O while verifying MD5 inline. The enclosing repair node waits for all probe terminals and the selected commit chain. Failed candidates do not release an unrelated download branch prematurely.
+Reuse candidates are grouped by physical volume. Probes run as parallel DAG roots; the winning probe expands the selected commit node. Both hardlink and copy commits use the async runner; copy commits stream with positional `compio::fs::File` I/O while verifying MD5 inline. The enclosing repair node waits for all probe terminals and the selected commit chain. Failed candidates do not release an unrelated download branch prematurely.
 
 ---
 
 ## 7. Lazy Range Archive DAG
 
-Normal install and update no longer download complete `.zip.NNN` files before extraction. The launcher response supplies the immutable logical layout—ordered URLs, declared sizes, and package MD5 values—then the DAG fetches only the byte ranges required by the current plan or file-write step.
+Normal install and update no longer download finished `.zip.NNN` files before extraction. The launcher response supplies the immutable logical layout—ordered URLs, declared sizes, and package MD5 values—then the DAG fetches only the byte ranges required by the current plan or file-write step.
 
 ```text
 InstallArchive
@@ -191,30 +191,32 @@ InstallArchive
   2. Planning & Extraction:
      ReadArchiveControls
        |- Probe outputs / bases ------\
-       |- Measure VFS relocation -----+-> FinalizePatchPlan
+  2. Planning & Extraction:
+     ReadArchiveControls
+       |- Probe outputs / bases ------\
+       |- Measure VFS relocation -----+-> SavePatchPlan
        `- Fetch ranges for shards A..C -+-> Extract shards A..C
 
   3. Retention & Cleanup:
      Extract shards A..C
        |- Ephemeral:
        |    `-> CommitArchive -> manifest follow-up -> CleanupArchive
-       `-> Keep complete volumes:
-            |- last reader 001 -> FillArchiveVolumeGaps(001) -> FinalizeArchiveVolume(001) -\
-            |- last reader 002 -> FillArchiveVolumeGaps(002) -> FinalizeArchiveVolume(002) --+-> ArchiveVolumesComplete
+       `-> Keep full volumes:
+            |- last reader 001 -> FillArchiveVolumeGaps(001) -> SaveArchiveVolume(001) -\
+            |- last reader 002 -> FillArchiveVolumeGaps(002) -> SaveArchiveVolume(002) --+-> ArchiveVolumesReady
             `---------------------------------------------------------------------------------/      `-> CommitArchive
                                                                                                          `-> manifest follow-up
                                                                                                          `-> CleanupArchive
 ```
-```
 
-`MultiVolumeLayout` maps one logical ZIP address space onto remote package volumes, retained complete local parts, and small cached range files. `MultiVolumeStream` implements `Read + Seek` over whichever backing segment contains the requested offset. The same EOCD, ZIP64, central-directory, and extraction code therefore serves complete local archives, production HTTP Range installs, and the ignored official sample test.
+`MultiVolumeLayout` maps one logical ZIP address space onto remote package volumes, retained local parts, and small cached range files. `MultiVolumeStream` implements `Read + Seek` over whichever backing segment contains the requested offset. The same EOCD, ZIP64, central-directory, and extraction code therefore serves retained local archives, production HTTP Range installs, and the ignored official sample test.
 
 Range downloads are exact and resumable:
 
 - Every request requires HTTP `206 Partial Content`;
-- Incomplete ranges are cached as `*.range.part`;
+- Partial ranges are cached as `*.range.part`;
 - Retries resume from the existing partial length and request only the missing suffix;
-- Completed segments are renamed atomically to `*.range`;
+- Finished segments are renamed atomically to `*.range`;
 - Nearby requests on the same volume are coalesced to avoid small HTTP requests;
 - Cache directory keys include package sizes and MD5s to prevent stale range reuse.
 
@@ -234,13 +236,13 @@ Fetch range 039:E ----+-> Extract shard C --|
 
 Each regular entry in the target `game_files` manifest is verified while written to staging:
 
-1. Decompression completes and the ZIP CRC check passes;
+1. Decompression finishes and the ZIP CRC check passes;
 2. Written size matches the manifest size;
 3. Written MD5 matches the target file MD5;
 4. Mismatching staged files are deleted and the archive range cache is invalidated;
 5. Invalid cache data is removed after all graph references release the archive work.
 
-Patch/control payloads not appearing in `game_files` are validated by ZIP CRC, patch transaction verification, and the command-level integrity DAG.
+Patch/control payloads not appearing in `game_files` are validated by ZIP CRC, patch step verification, and the command-level integrity DAG.
 
 Patch archive commit expands into dynamic entry DAG tasks after extraction. For exact entry-level dependency graphs, base consumer releases, and forward-only recovery rules, see [`DESIGN_patch_steps.md`](DESIGN_patch_steps.md).
 
@@ -252,23 +254,23 @@ Mutation barriers remain strict during network/extraction overlap:
 
 1. Patch and delete controls are parsed before staging work starts;
 2. Patch output/base MD5 probes and relocation-size measurement run as independent check nodes while extraction-critical range fetches may start in parallel;
-3. `FinalizePatchPlan` joins those probes, replays the full planning rules through the batch-local verification cache, and remains a dependency of every extraction shard;
+3. `SavePatchPlan` joins those probes, replays the full planning rules through the batch-local verification cache, and remains a dependency of every extraction shard;
 4. Every extraction shard must succeed before archive commit;
-5. Ephemeral retention releases cached ranges after their final dependent shard completes;
-6. Complete-volume retention gives each volume a join over only the extraction shards that read that volume;
-7. `FillArchiveVolumeGaps(N)` fetches uncovered byte intervals at background archive priority, then `FinalizeArchiveVolume(N)` reconstructs, verifies, and atomically promotes that one `.zip.NNN` file;
-8. One finalizer per physical volume may run at a time, and a completed volume releases only its own cached ranges while unfinished volumes remain protected;
-9. `ArchiveVolumesComplete` joins all volume finalizers before `CommitArchive`;
+5. Ephemeral retention releases cached ranges after their final dependent shard finishes;
+6. Full-volume retention gives each volume a join over only the extraction shards that read that volume;
+7. `FillArchiveVolumeGaps(N)` fetches uncovered byte intervals at background archive priority, then `SaveArchiveVolume(N)` reconstructs, verifies, and atomically promotes that one `.zip.NNN` file;
+8. One saver per physical volume may run at a time, and a saved volume releases only its own cached ranges while unfinished volumes remain protected;
+9. `ArchiveVolumesReady` joins all volume savers before `CommitArchive`;
 10. VFS/delete follow-up and cache cleanup remain downstream of commit;
 11. The command-level integrity DAG verifies the final installation.
 
-`ArchiveRetention` is the single policy switch across complete and range downloads:
+`ArchiveRetention` is the single policy switch across full-volume and range downloads:
 
 - `Ephemeral`: Streams required ranges, releases them by shard lifetime, and cleans up residual archive data after commit.
-- `KeepCompleteVolumes`: Retains range data until each volume's last reader finishes, fills that volume's gaps, verifies its package MD5, preserves the `.zip.NNN` file, and releases its cache independently.
+- `KeepFullVolumes`: Retains range data until each volume's last reader finishes, fills that volume's gaps, verifies its package MD5, preserves the `.zip.NNN` file, and releases its cache independently.
 - Predownload apply uses the same retention policy for local volumes.
 
-Gap filling starts after the last extraction shard for that volume. Its network class is lower priority than extraction-critical ranges, and finalization is limited to one writer per physical volume.
+Gap filling starts after the last extraction shard for that volume. Its network class is lower priority than extraction-critical ranges, and volume saving is limited to one writer per physical volume.
 
 ### Official archive format check
 
@@ -283,7 +285,7 @@ cargo test -p griffr-common check_official_archive_sample -- --ignored --nocaptu
 It has no custom environment variables. It:
 
 - Queries the launcher API;
-- Caches ranges under `target/griffr-test-fixtures/archive-range-sample/<version>-<payload-id>`;
+- Caches ranges under `target/griffr-test-samples/archive-range-sample/<version>-<payload-id>`;
 - Downloads EOCD tails, ZIP64/end records, central directories, and a bounded set of entry ranges;
 - Fails if multiple volume boundaries expose standalone EOCD records;
 - Compares central-directory paths with the decrypted `game_files` manifest;
@@ -296,7 +298,7 @@ The ignored test checks for format changes without adding runtime support for in
 
 ## 8. Failure and Cancellation
 
-Each dispatched node produces exactly one completion. Only the coordinator releases resource permits.
+Each dispatched node produces exactly one result. Only the coordinator releases resource permits.
 
 On failure:
 
@@ -304,7 +306,7 @@ On failure:
 - its not-yet-running descendants become `Cancelled`;
 - independent branches remain runnable;
 - a dynamic parent waiting on the failed terminal becomes `Failed`;
-- only failures with `report = true` create a durable `WorkerEvent::Failed` outcome.
+- only failures with `report = true` create `WorkerEvent::Outcome(TaskOutcome::Failed { ... })`.
 
 The Dispatcher boundary wraps task runs with `catch_unwind`. A panic becomes a reported node failure. The coordinator discards stale queued entries for cancelled nodes and releases their acquired permits immediately.
 
@@ -316,13 +318,19 @@ The coordinator reports an admission deadlock when unresolved graph nodes remain
 
 ## 9. Progress and Metrics
 
-`WorkerEvent` remains the frontend-neutral stream for byte progress, retries, resets, and durable outcomes. DAG state is not encoded as renderer-specific callbacks.
+`WorkerEvent` is the frontend-neutral stream with exactly three forms:
+
+- `Progress { phase, path, finished, total, reset }` for transient counters;
+- `Retried { path, reason }` for retry notices;
+- `Outcome(TaskOutcome)` for durable scheduler results.
+
+Terminal facts are defined only in `TaskOutcome`; they are not mirrored as separate `WorkerEvent` variants. DAG state is not encoded as renderer-specific callbacks.
 
 `TaskPoolMetrics` contains scheduler timing and a `TaskGraphSummary`:
 
 - total, pending, ready, running, waiting, succeeded, failed, and cancelled nodes;
 - dynamic expansion count;
-- completed dispatch count;
+- finished dispatch count;
 - queue-wait p50 and p95;
 - task-duration p50 and p95;
 - per-volume read/write/metadata counts, estimated bytes, and service time.
@@ -340,6 +348,6 @@ DAG nodes represent meaningful restartable work:
 - one extraction shard;
 - one archive commit or manifest mutation.
 
-Network chunks, read buffers, and individual hashing blocks are intentionally not nodes. Fine-grained byte processing stays inside one executor to avoid millions of scheduler entries.
+Network chunks, read buffers, and individual hashing blocks are intentionally not nodes. Fine-grained byte processing stays inside one runner to avoid millions of scheduler entries.
 
-Patch transaction ordering and recovery are documented in [`DESIGN_patch_steps.md`](DESIGN_patch_steps.md). File allocation and Windows storage strategy are documented in [`DESIGN_optimizations.md`](DESIGN_optimizations.md).
+Patch apply ordering and recovery are documented in [`DESIGN_patch_steps.md`](DESIGN_patch_steps.md). File allocation and Windows storage strategy are documented in [`DESIGN_optimizations.md`](DESIGN_optimizations.md).

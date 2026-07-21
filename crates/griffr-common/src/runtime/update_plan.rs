@@ -18,26 +18,33 @@ pub struct ArchivePlanSummary {
 }
 
 pub fn staged_patch_request_version(stage_dir: &Path, target_version: &str) -> Result<String> {
-    let metadata = read_predownload_stage_metadata(stage_dir).map_err(|error| {
-        Error::Config(format!(
+    let metadata = read_predownload_stage_metadata(stage_dir).map_err(|error| Error::Message {
+        context: "Configuration error: ",
+        detail: format!(
             "Predownload stage {} is missing valid {} metadata: {error}",
             stage_dir.display(),
             PREDOWNLOAD_STAGE_METADATA_NAME
-        ))
+        ),
     })?;
     if metadata.target_version != target_version {
-        return Err(Error::Config(format!(
-            "Predownload stage {} targets {}, not installed target {}",
-            stage_dir.display(),
-            metadata.target_version,
-            target_version
-        )));
+        return Err(Error::Message {
+            context: "Configuration error: ",
+            detail: format!(
+                "Predownload stage {} targets {}, not installed target {}",
+                stage_dir.display(),
+                metadata.target_version,
+                target_version
+            ),
+        });
     }
-    if !metadata.archives_complete(stage_dir)? {
-        return Err(Error::Config(format!(
-            "Predownload stage {} does not contain every archive recorded in metadata",
-            stage_dir.display()
-        )));
+    if !metadata.archives_ready(stage_dir)? {
+        return Err(Error::Message {
+            context: "Configuration error: ",
+            detail: format!(
+                "Predownload stage {} does not contain every archive recorded in metadata",
+                stage_dir.display()
+            ),
+        });
     }
     Ok(metadata.source_version)
 }
@@ -53,7 +60,8 @@ pub fn resolve_staged_patch_recovery_dir(
     }
 
     let root = install_path.join("downloads").join("predownload");
-    let entries = std::fs::read_dir(&root).map_err(|source| Error::ReadDirFailed {
+    let entries = std::fs::read_dir(&root).map_err(|source| Error::IoAt {
+        action: "read directory",
         path: root.clone(),
         source,
     })?;
@@ -74,13 +82,13 @@ pub fn resolve_staged_patch_recovery_dir(
 
     match candidates.len() {
         1 => Ok(candidates.remove(0)),
-        0 => Err(Error::Config(format!(
-            "No complete staged predownload metadata targeting installed version {} was found under {}. Pass --output-dir explicitly.",
+        0 => Err(Error::Message { context: "Configuration error: ", detail: format!(
+            "No ready staged predownload metadata targeting installed version {} was found under {}. Pass --output-dir explicitly.",
             target_version,
             root.display()
-        ))),
-        _ => Err(Error::Config(format!(
-            "Multiple complete staged predownload directories target installed version {} under {}: {}. Pass --output-dir explicitly.",
+        ) }),
+        _ => Err(Error::Message { context: "Configuration error: ", detail: format!(
+            "Multiple ready staged predownload directories target installed version {} under {}: {}. Pass --output-dir explicitly.",
             target_version,
             root.display(),
             candidates
@@ -88,7 +96,7 @@ pub fn resolve_staged_patch_recovery_dir(
                 .map(|(path, _)| path.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
-        ))),
+        ) }),
     }
 }
 
@@ -106,17 +114,21 @@ pub fn select_update_package(
         return Ok(UpdatePackageKind::Full);
     }
     if version_info.has_patch_package() {
-        return Err(Error::Config(format!(
+        return Err(Error::Message {
+            context: "Configuration error: ",
+            detail: format!(
             "Patch package was returned for request version '{}' but the installed version is '{}'",
             version_info.request_version,
             current_version.unwrap_or("<unknown>")
-        )));
+        ),
+        });
     }
 
-    Err(Error::Config(
-        "Update is available but the API returned neither patch nor full package archives"
+    Err(Error::Message {
+        context: "Configuration error: ",
+        detail: "Update is available but the API returned neither patch nor full package archives"
             .to_string(),
-    ))
+    })
 }
 
 pub fn selected_archive_plan(

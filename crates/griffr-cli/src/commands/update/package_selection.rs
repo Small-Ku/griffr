@@ -98,7 +98,7 @@ pub(super) fn build_update_dry_run_plan(
         }
         if keep_pack_archives {
             lines.push(
-                "Would stream archive ranges during extraction, retain them, fill only missing gaps, verify each complete volume, and keep the package archives."
+                "Would stream archive ranges during extraction, retain them, fill only missing gaps, verify each full volume, and keep the package archives."
                     .to_string(),
             );
         } else {

@@ -70,17 +70,20 @@ fn directory_size(path: &Path) -> Result<u64> {
     let mut total = 0u64;
     let mut pending = vec![path.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory).map_err(|source| Error::ReadDirFailed {
+        for entry in std::fs::read_dir(&directory).map_err(|source| Error::IoAt {
+            action: "read directory",
             path: directory.clone(),
             source,
         })? {
-            let entry = entry.map_err(|source| Error::ReadDirFailed {
+            let entry = entry.map_err(|source| Error::IoAt {
+                action: "read directory",
                 path: directory.clone(),
                 source,
             })?;
             let entry_path = entry.path();
             let metadata =
-                std::fs::symlink_metadata(&entry_path).map_err(|source| Error::StatFailed {
+                std::fs::symlink_metadata(&entry_path).map_err(|source| Error::IoAt {
+                    action: "query file metadata/stat for",
                     path: entry_path.clone(),
                     source,
                 })?;
@@ -101,7 +104,8 @@ fn directory_is_empty(path: &Path) -> Result<bool> {
     if !path.exists() {
         return Ok(true);
     }
-    let mut entries = std::fs::read_dir(path).map_err(|source| Error::ReadDirFailed {
+    let mut entries = std::fs::read_dir(path).map_err(|source| Error::IoAt {
+        action: "read directory",
         path: path.to_path_buf(),
         source,
     })?;
@@ -159,13 +163,13 @@ fn verify_space_requirements(
 
     for (path, required, available, labels) in groups {
         if available.is_some_and(|available| available < required) {
-            return Err(Error::Vfs(format!(
+            return Err(Error::Message { context: "VFS error: ", detail: format!(
                 "The patch check needs about {} bytes of peak free space for {} data on the volume that contains {}, but only {} bytes are free",
                 required,
                 labels.join(" + "),
                 path.display(),
                 available.unwrap_or_default()
-            )));
+            ) });
         }
     }
     Ok(())
@@ -213,11 +217,11 @@ pub(crate) fn plan_patch_probes(
     if let Some(storage_layout) = read_patch_storage_layout(install_root)? {
         match options.external_vfs_root.as_ref() {
             Some(requested) if requested != &storage_layout.external_vfs_root => {
-                return Err(Error::Config(format!(
+                return Err(Error::Message { context: "Configuration error: ", detail: format!(
                     "Install already manages VFS storage at {}; requested external root {} does not match",
                     storage_layout.external_vfs_root.display(),
                     requested.display()
-                )));
+                ) });
             }
             Some(_) => {}
             None => options.external_vfs_root = Some(storage_layout.external_vfs_root),
@@ -226,7 +230,10 @@ pub(crate) fn plan_patch_probes(
     let manifest = archive_index
         .patch_manifest
         .as_ref()
-        .ok_or_else(|| Error::Vfs(format!("Patch archive is missing {PATCH_MANIFEST_NAME}")))?;
+        .ok_or_else(|| Error::Message {
+            context: "VFS error: ",
+            detail: format!("Patch archive is missing {PATCH_MANIFEST_NAME}"),
+        })?;
     let vfs_base_path =
         parse_safe_relative_path("patch.json vfs_base_path", manifest.vfs_base_path.trim())?;
     let logical_vfs_destination = install_root.join(&vfs_base_path);
@@ -301,11 +308,11 @@ pub(crate) fn build_patch_plan_with_probe_cache(
     if let Some(storage_layout) = read_patch_storage_layout(install_root)? {
         match options.external_vfs_root.as_ref() {
             Some(requested) if requested != &storage_layout.external_vfs_root => {
-                return Err(Error::Config(format!(
+                return Err(Error::Message { context: "Configuration error: ", detail: format!(
                     "Install already manages VFS storage at {}; requested external root {} does not match",
                     storage_layout.external_vfs_root.display(),
                     requested.display()
-                )));
+                ) });
             }
             Some(_) => {}
             None => options.external_vfs_root = Some(storage_layout.external_vfs_root),
@@ -314,7 +321,10 @@ pub(crate) fn build_patch_plan_with_probe_cache(
     let manifest = archive_index
         .patch_manifest
         .as_ref()
-        .ok_or_else(|| Error::Vfs(format!("Patch archive is missing {PATCH_MANIFEST_NAME}")))?;
+        .ok_or_else(|| Error::Message {
+            context: "VFS error: ",
+            detail: format!("Patch archive is missing {PATCH_MANIFEST_NAME}"),
+        })?;
     let vfs_base_path =
         parse_safe_relative_path("patch.json vfs_base_path", manifest.vfs_base_path.trim())?;
     let logical_vfs_destination = install_root.join(&vfs_base_path);
@@ -324,20 +334,26 @@ pub(crate) fn build_patch_plan_with_probe_cache(
         .unwrap_or_else(|| logical_vfs_destination.clone());
     if options.external_vfs_root.is_some() {
         if vfs_destination == logical_vfs_destination || vfs_destination.starts_with(install_root) {
-            return Err(Error::Vfs(format!(
-                "External VFS root {} must be outside the install root and differ from {}",
-                vfs_destination.display(),
-                logical_vfs_destination.display()
-            )));
+            return Err(Error::Message {
+                context: "VFS error: ",
+                detail: format!(
+                    "External VFS root {} must be outside the install root and differ from {}",
+                    vfs_destination.display(),
+                    logical_vfs_destination.display()
+                ),
+            });
         }
         if !directory_is_empty(&vfs_destination)?
             && !same_link_target(&logical_vfs_destination, &vfs_destination)
         {
-            return Err(Error::Vfs(format!(
-                "External VFS root {} is not empty and is not the current target of {}",
-                vfs_destination.display(),
-                logical_vfs_destination.display()
-            )));
+            return Err(Error::Message {
+                context: "VFS error: ",
+                detail: format!(
+                    "External VFS root {} is not empty and is not the current target of {}",
+                    vfs_destination.display(),
+                    logical_vfs_destination.display()
+                ),
+            });
         }
     }
     let delete_paths =
@@ -451,10 +467,13 @@ pub(crate) fn build_patch_plan_with_probe_cache(
     }
 
     if !missing.is_empty() {
-        return Err(Error::Vfs(format!(
-            "The patch check found entries that cannot be repaired: {}",
-            missing.join(", ")
-        )));
+        return Err(Error::Message {
+            context: "VFS error: ",
+            detail: format!(
+                "The patch check found entries that cannot be repaired: {}",
+                missing.join(", ")
+            ),
+        });
     }
 
     let logical_outputs = entries
@@ -471,10 +490,13 @@ pub(crate) fn build_patch_plan_with_probe_cache(
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>();
     if !conflicting_deletes.is_empty() {
-        return Err(Error::Vfs(format!(
-            "Delete manifest conflicts with patch outputs: {}",
-            conflicting_deletes.join(", ")
-        )));
+        return Err(Error::Message {
+            context: "VFS error: ",
+            detail: format!(
+                "Delete manifest conflicts with patch outputs: {}",
+                conflicting_deletes.join(", ")
+            ),
+        });
     }
 
     let vfs_growth = final_delta.max(0) as u64;

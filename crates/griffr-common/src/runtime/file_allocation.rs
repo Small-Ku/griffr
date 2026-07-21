@@ -21,7 +21,8 @@ where
     if bytes == 0 {
         return Ok(());
     }
-    let allocation_size = i64::try_from(bytes).map_err(|_| Error::WriteFileFailed {
+    let allocation_size = i64::try_from(bytes).map_err(|_| Error::IoAt {
+        action: "write to file",
         path: path.to_path_buf(),
         source: std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -40,7 +41,8 @@ where
         )
     };
     if ok == 0 {
-        return Err(Error::WriteFileFailed {
+        return Err(Error::IoAt {
+            action: "write to file",
             path: path.to_path_buf(),
             source: std::io::Error::last_os_error(),
         });

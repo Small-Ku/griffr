@@ -1,8 +1,8 @@
 # Griffr Architecture & Design Reference
 
-This directory documents the core design, runtime task model, storage layouts, and patch transactions of the `griffr` workspace. 
+This directory documents the core design, runtime task model, storage layouts, and patch batches of the `griffr` workspace.
 
-The primary runtime is optimized for Windows large-file I/O, leveraging `compio` for asynchronous kernel completion events (IOCP) and compio's blocking thread pool for CPU/blocking tasks.
+The primary runtime is optimized for Windows large-file I/O, leveraging `compio` for asynchronous kernel I/O results (IOCP) and compio's blocking thread pool for CPU/blocking tasks.
 
 ---
 
@@ -25,17 +25,17 @@ The primary runtime is optimized for Windows large-file I/O, leveraging `compio`
 
 The workload separates asynchronous I/O and synchronous CPU tasks to prevent scheduler thread blocking and network starvation:
 
-*   **I/O Queue (`compio`):** Run on a single-thread runtime driven by an IOCP completion port. Handles downloading, local copying, folder creation, and hardlink binding.
+*   **I/O Queue (`compio`):** Run on a single-thread runtime driven by an I/O completion port (IOCP). Handles downloading, local copying, folder creation, and hardlink binding.
 *   **CPU Queue (compio blocking pool):** Handles file hash computation (MD5 verification), zip entry parsing, and HDiff patch generation.
 *   **Bridge:** Task bodies send thread-safe messages through bounded channels. Frontend clients read one progress protocol through the `ProgressReceiver` wrapper.
 
-### 2. Patch Transaction Rules
+### 2. Patch Apply Rules
 
-Griffr implements a **forward-only transaction model** with no backward rollback capability:
+Griffr implements a **forward-only patch model** with no backward rollback capability:
 
 1.  **Check:** Scan the destination, build dependencies, select sources, verify hashes, and estimate disk use.
 2.  **Persisted Plan:** Save plan state to `.griffr-patch/plan.json` before starting mutations.
-3.  **Entry DAG Processing:** Process changes as exact entry DAG nodes. Writers depend on consumers of the paths they replace; base files are released after their last consumer node completes.
+3.  **Entry DAG Processing:** Process changes as exact entry DAG nodes. Writers depend on consumers of the paths they replace; base files are released after their last consumer node finishes.
 4.  **Deferred Markers:** Write configuration changes (`config.ini`) only after all VFS and staging directories are successfully processed and cleaned up.
 
 ### 3. File Allocation & Storage

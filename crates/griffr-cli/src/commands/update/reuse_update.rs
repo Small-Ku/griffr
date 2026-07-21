@@ -68,7 +68,7 @@ pub(super) async fn update_via_reuse(
     ));
     if !ensured.issues.is_empty() {
         anyhow::bail!(
-            "Update file ensure operation finished with {} issue(s)",
+            "Update file ensure work finished with {} issue(s)",
             ensured.issues.len()
         );
     }

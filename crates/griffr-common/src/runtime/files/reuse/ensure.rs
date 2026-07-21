@@ -27,10 +27,9 @@ pub async fn ensure_game_files_with_pool(
     let manifest = api_client
         .fetch_game_files(file_path, game_files_md5)
         .await
-        .map_err(|e| {
-            Error::ApiClient(format!(
-                "Failed to fetch target manifest for reuse planning: {e}"
-            ))
+        .map_err(|e| Error::Message {
+            context: "API client wrapper error: ",
+            detail: format!("Failed to fetch target manifest for reuse planning: {e}"),
         })?;
     let files_url_base = files_base_url(file_path)?;
 
@@ -148,11 +147,18 @@ pub async fn ensure_game_files_with_pool(
     let result = if let Some(runner) = task_pool_runner {
         runner
             .run_batch(tasks, task_progress)
-            .map_err(|e| Error::TaskPool(format!("Game-file ensure pool failed: {e}")))?
+            .map_err(|e| Error::Message {
+                context: "Task pool error: ",
+                detail: format!("Game-file ensure pool failed: {e}"),
+            })?
     } else {
         let pool_cfg = crate::runtime::task_pool::TaskPoolConfig::for_file_ensure();
-        crate::runtime::task_pool::run_tasks_with_progress(tasks, pool_cfg, task_progress)
-            .map_err(|e| Error::TaskPool(format!("Game-file ensure pool failed: {e}")))?
+        crate::runtime::task_pool::run_tasks_with_progress(tasks, pool_cfg, task_progress).map_err(
+            |e| Error::Message {
+                context: "Task pool error: ",
+                detail: format!("Game-file ensure pool failed: {e}"),
+            },
+        )?
     };
 
     let mut issues = Vec::new();
@@ -191,7 +197,7 @@ pub async fn ensure_game_files_with_pool(
 
     if !config.dry_run {
         info!(
-            "Game-file ensure complete: reused={} downloaded={} issues={}",
+            "Game-file ensure finished: reused={} downloaded={} issues={}",
             summary.reused_files,
             summary.downloaded_files,
             issues.len()

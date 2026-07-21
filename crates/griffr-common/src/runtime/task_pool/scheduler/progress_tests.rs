@@ -18,11 +18,13 @@ fn worker_events_store_only_durable_task_outcomes() {
     record_worker_event(
         &mut reducer,
         &mut outcomes,
-        WorkerEvent::DownloadedBytes {
-            path: "a.bin".to_string(),
-            bytes: 32,
-            total_bytes: 64,
-        },
+        WorkerEvent::progress(
+            crate::runtime::ProgressPhase::Download,
+            "a.bin".to_string(),
+            32,
+            64,
+            false,
+        ),
     );
     record_worker_event(
         &mut reducer,
@@ -37,10 +39,7 @@ fn worker_events_store_only_durable_task_outcomes() {
     record_worker_event(
         &mut reducer,
         &mut outcomes,
-        WorkerEvent::Downloaded {
-            path: "a.bin".to_string(),
-            bytes: 64,
-        },
+        WorkerEvent::downloaded("a.bin".to_string(), 64),
     );
     assert!(matches!(
         outcomes.as_slice(),
@@ -59,25 +58,28 @@ fn reducer_emits_scoped_updates_without_regressing_retry_bytes() {
             .with_download(download_lane),
     );
 
-    reducer.handle(&WorkerEvent::DownloadStarted {
-        path: "a.bin".to_string(),
-        total_bytes: 100,
-    });
-    reducer.handle(&WorkerEvent::DownloadedBytes {
-        path: "a.bin".to_string(),
-        bytes: 90,
-        total_bytes: 100,
-    });
-    reducer.handle(&WorkerEvent::DownloadedBytes {
-        path: "a.bin".to_string(),
-        bytes: 10,
-        total_bytes: 100,
-    });
-    reducer.handle(&WorkerEvent::Verified {
-        path: "a.bin".to_string(),
-        ok: true,
-        issue: None,
-    });
+    reducer.handle(&WorkerEvent::progress(
+        crate::runtime::ProgressPhase::Download,
+        "a.bin".to_string(),
+        0,
+        100,
+        false,
+    ));
+    reducer.handle(&WorkerEvent::progress(
+        crate::runtime::ProgressPhase::Download,
+        "a.bin".to_string(),
+        90,
+        100,
+        false,
+    ));
+    reducer.handle(&WorkerEvent::progress(
+        crate::runtime::ProgressPhase::Download,
+        "a.bin".to_string(),
+        10,
+        100,
+        false,
+    ));
+    reducer.handle(&WorkerEvent::verified("a.bin".to_string(), true, None));
     reducer.finish();
     drop(reducer);
 
@@ -93,16 +95,16 @@ fn reducer_emits_scoped_updates_without_regressing_retry_bytes() {
     }));
     assert!(updates.contains(&ProgressUpdate::Advanced {
         lane: verify_lane,
-        completed: 1,
+        finished: 1,
         total: Some(2),
         item: Some("a.bin".to_string()),
     }));
     let downloaded_positions = updates
         .iter()
         .filter_map(|update| match update {
-            ProgressUpdate::Advanced {
-                lane, completed, ..
-            } if *lane == download_lane => Some(*completed),
+            ProgressUpdate::Advanced { lane, finished, .. } if *lane == download_lane => {
+                Some(*finished)
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -115,35 +117,45 @@ fn reducer_accepts_explicit_download_reset_after_restart() {
     let (sender, receiver) = ProgressSender::channel();
     let mut reducer = TaskProgressReducer::new(TaskProgress::new(sender).with_download(lane));
 
-    reducer.handle(&WorkerEvent::DownloadStarted {
-        path: "a.bin".to_string(),
-        total_bytes: 100,
-    });
-    reducer.handle(&WorkerEvent::DownloadedBytes {
-        path: "a.bin".to_string(),
-        bytes: 80,
-        total_bytes: 100,
-    });
-    reducer.handle(&WorkerEvent::DownloadReset {
-        path: "a.bin".to_string(),
-        bytes: 0,
-    });
-    reducer.handle(&WorkerEvent::DownloadedBytes {
-        path: "a.bin".to_string(),
-        bytes: 20,
-        total_bytes: 100,
-    });
+    reducer.handle(&WorkerEvent::progress(
+        crate::runtime::ProgressPhase::Download,
+        "a.bin".to_string(),
+        0,
+        100,
+        false,
+    ));
+    reducer.handle(&WorkerEvent::progress(
+        crate::runtime::ProgressPhase::Download,
+        "a.bin".to_string(),
+        80,
+        100,
+        false,
+    ));
+    reducer.handle(&WorkerEvent::progress(
+        crate::runtime::ProgressPhase::Download,
+        "a.bin".to_string(),
+        0,
+        0,
+        true,
+    ));
+    reducer.handle(&WorkerEvent::progress(
+        crate::runtime::ProgressPhase::Download,
+        "a.bin".to_string(),
+        20,
+        100,
+        false,
+    ));
 
     let mut positions = Vec::new();
     while let Some(update) = receiver.try_recv() {
         if let ProgressUpdate::Advanced {
             lane: update_lane,
-            completed,
+            finished,
             ..
         } = update
         {
             if update_lane == lane {
-                positions.push(completed);
+                positions.push(finished);
             }
         }
     }

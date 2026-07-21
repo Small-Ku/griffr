@@ -63,10 +63,10 @@ fn directory_discovery_only_opens_tail_range() -> Result<()> {
     let directory = match extractor.discover_archive_directory()? {
         ArchiveDirectoryDiscovery::Ready(directory) => directory,
         ArchiveDirectoryDiscovery::NeedsRange(range) => {
-            return Err(Error::Extraction(format!(
-                "unexpected ZIP64 dependency {}..{}",
-                range.start, range.end
-            )))
+            return Err(Error::Message {
+                context: "Extraction error: ",
+                detail: format!("unexpected ZIP64 dependency {}..{}", range.start, range.end),
+            })
         }
     };
     assert_eq!(directory.entry_count, 1);
@@ -104,9 +104,10 @@ fn directory_discovery_reports_unavailable_tail_range() -> Result<()> {
     let range = match extractor.discover_archive_directory()? {
         ArchiveDirectoryDiscovery::NeedsRange(range) => range,
         ArchiveDirectoryDiscovery::Ready(_) => {
-            return Err(Error::Extraction(
-                "directory discovery ignored a missing tail volume".into(),
-            ));
+            return Err(Error::Message {
+                context: "Extraction error: ",
+                detail: "directory discovery ignored a missing tail volume".into(),
+            });
         }
     };
     assert!(layout
@@ -135,7 +136,10 @@ fn extraction_shard_does_not_open_unrelated_volumes() -> Result<()> {
     let shard = MultiVolumeExtractor::extraction_shards(&archive_index, 4)
         .into_iter()
         .find(|shard| (0..volumes.len()).any(|index| !shard.volume_indices.contains(&index)))
-        .ok_or_else(|| Error::Extraction("test archive produced no range-local shard".into()))?;
+        .ok_or_else(|| Error::Message {
+            context: "Extraction error: ",
+            detail: "test archive produced no range-local shard".into(),
+        })?;
     let missing_index = (0..volumes.len())
         .find(|index| !shard.volume_indices.contains(index))
         .expect("range-local shard has an unrelated volume");
@@ -443,7 +447,7 @@ fn extraction_checks_manifest_md5_and_removes_bad_output() -> Result<()> {
     let mut invalid_expected = expected;
     invalid_expected
         .get_mut("data/payload.bin")
-        .expect("expected fixture entry")
+        .expect("expected sample entry")
         .md5 = "00000000000000000000000000000000".to_string();
     let error = extractor
         .extract_entries_with_progress(

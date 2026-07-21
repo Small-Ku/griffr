@@ -2,7 +2,7 @@ use crate::error::{Error, Result};
 use rapidhash::RapidHashSet as HashSet;
 use std::path::Path;
 
-use crate::api::client::{ApiClient, ApiError};
+use crate::api::client::ApiClient;
 use crate::api::crypto::RES_INDEX_KEY;
 use crate::api::protocol::DEFAULT_PLATFORM;
 use crate::config::ApiTarget;
@@ -13,7 +13,7 @@ use crate::runtime::{
     collect_files_recursive, logical_path_from_root, normalize_logical_path, path_is_dir,
     path_is_file, remove_empty_dirs_recursive, resource_manifest_filename, resource_manifest_url,
     vfs_path, PathOutcomeTracker, PathReuseMethod, ProgressLane, ProgressSender,
-    ResourceManifestKind, RESOURCE_GROUP_INITIAL, RESOURCE_GROUP_MAIN,
+    ResourceManifestKind, RESOURCE_GROUP_BASE, RESOURCE_GROUP_MAIN,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -28,7 +28,7 @@ pub struct VfsFilePlanOptions {
     pub prefer_reuse: bool,
 }
 
-/// Result of a VFS resource check/download operation
+/// Result of a VFS resource check/download work
 #[derive(Debug, Clone)]
 pub struct VfsUpdateResult {
     /// Total VFS files in the manifest
@@ -51,31 +51,19 @@ pub struct VfsTaskPlan {
     pub res_version: String,
 }
 
-#[derive(Debug, Clone)]
-pub enum VfsPlanOutcome {
-    Planned(VfsTaskPlan),
-    Unsupported,
-}
-
-#[derive(Debug, Clone)]
-pub enum VfsUpdateOutcome {
-    Updated(VfsUpdateResult),
-    Unsupported,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PersistentVfsFileSet {
-    /// Use only the initial pref file set in Persistent.
-    Initial,
-    /// Use the initial and main pref file sets in Persistent.
-    InitialAndMain,
+    /// Use only the base `pref_initial` file set in Persistent.
+    Base,
+    /// Use the base `pref_initial` and main `pref_main` file sets in Persistent.
+    All,
 }
 
 impl PersistentVfsFileSet {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Initial => RESOURCE_GROUP_INITIAL,
-            Self::InitialAndMain => "all",
+            Self::Base => RESOURCE_GROUP_BASE,
+            Self::All => "all",
         }
     }
 }
@@ -91,13 +79,16 @@ impl std::str::FromStr for PersistentVfsFileSet {
 
     fn from_str(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            RESOURCE_GROUP_INITIAL => Ok(Self::Initial),
-            value if value == Self::InitialAndMain.as_str() => Ok(Self::InitialAndMain),
-            other => Err(Error::Config(format!(
-                "invalid Persistent VFS file set {other:?}: expected {} or {}",
-                Self::Initial.as_str(),
-                Self::InitialAndMain.as_str()
-            ))),
+            RESOURCE_GROUP_BASE => Ok(Self::Base),
+            value if value == Self::All.as_str() => Ok(Self::All),
+            other => Err(Error::Message {
+                context: "Configuration error: ",
+                detail: format!(
+                    "invalid Persistent VFS file set {other:?}: expected {} or {}",
+                    Self::Base.as_str(),
+                    Self::All.as_str()
+                ),
+            }),
         }
     }
 }
@@ -151,9 +142,9 @@ pub struct PersistentVfsResult {
 
 pub(super) fn file_set_includes_group(file_set: PersistentVfsFileSet, resource_name: &str) -> bool {
     match file_set {
-        PersistentVfsFileSet::Initial => resource_name.eq_ignore_ascii_case(RESOURCE_GROUP_INITIAL),
-        PersistentVfsFileSet::InitialAndMain => {
-            resource_name.eq_ignore_ascii_case(RESOURCE_GROUP_INITIAL)
+        PersistentVfsFileSet::Base => resource_name.eq_ignore_ascii_case(RESOURCE_GROUP_BASE),
+        PersistentVfsFileSet::All => {
+            resource_name.eq_ignore_ascii_case(RESOURCE_GROUP_BASE)
                 || resource_name.eq_ignore_ascii_case(RESOURCE_GROUP_MAIN)
         }
     }
@@ -164,19 +155,26 @@ async fn read_local_res_index(path: &Path) -> Result<Option<crate::api::types::R
         return Ok(None);
     }
     let encrypted_b64 =
-        String::from_utf8(
-            compio::fs::read(path)
-                .await
-                .map_err(|e| Error::OpenFileFailed {
-                    path: path.to_path_buf(),
-                    source: e,
-                })?,
-        )
-        .map_err(|e| Error::Vfs(format!("{} is not valid UTF-8 text: {e}", path.display())))?;
+        String::from_utf8(compio::fs::read(path).await.map_err(|e| Error::IoAt {
+            action: "open file",
+            path: path.to_path_buf(),
+            source: e,
+        })?)
+        .map_err(|e| Error::Message {
+            context: "VFS error: ",
+            detail: format!("{} is not valid UTF-8 text: {e}", path.display()),
+        })?;
     let decrypted = crate::api::crypto::decrypt_res_index(encrypted_b64.trim(), RES_INDEX_KEY)
-        .map_err(|e| Error::Vfs(format!("Failed to decrypt {}: {e}", path.display())))?;
-    let index = serde_json::from_str::<crate::api::types::ResIndex>(&decrypted)
-        .map_err(|e| Error::Vfs(format!("Failed to parse {}: {e}", path.display())))?;
+        .map_err(|e| Error::Message {
+            context: "VFS error: ",
+            detail: format!("Failed to decrypt {}: {e}", path.display()),
+        })?;
+    let index = serde_json::from_str::<crate::api::types::ResIndex>(&decrypted).map_err(|e| {
+        Error::Message {
+            context: "VFS error: ",
+            detail: format!("Failed to parse {}: {e}", path.display()),
+        }
+    })?;
     Ok(Some(index))
 }
 
@@ -238,13 +236,11 @@ pub async fn plan_persistent_vfs_tasks(
     persistent_root: &Path,
     cfg: &PersistentVfsConfig,
 ) -> Result<Option<PersistentVfsPlan>> {
-    let resources = match api_client
+    let Some(resources) = api_client
         .get_latest_resources(target, game_version, rand_str, DEFAULT_PLATFORM)
-        .await
-    {
-        Ok(res) => res,
-        Err(ApiError::ResourceApiUnavailable(_)) => return Ok(None),
-        Err(err) => return Err(err.into()),
+        .await?
+    else {
+        return Ok(None);
     };
 
     let mut tasks = Vec::new();
@@ -276,10 +272,16 @@ pub async fn plan_persistent_vfs_tasks(
 
         let local_pref = read_local_res_index(&persistent_root.join(&pref_filename))
             .await
-            .map_err(|e| Error::Vfs(format!("Failed to parse local {pref_filename}: {e}")))?;
+            .map_err(|e| Error::Message {
+                context: "VFS error: ",
+                detail: format!("Failed to parse local {pref_filename}: {e}"),
+            })?;
         let local_index = read_local_res_index(&persistent_root.join(&index_filename))
             .await
-            .map_err(|e| Error::Vfs(format!("Failed to parse local {index_filename}: {e}")))?;
+            .map_err(|e| Error::Message {
+                context: "VFS error: ",
+                detail: format!("Failed to parse local {index_filename}: {e}"),
+            })?;
 
         let (selected_index, manifest_kind) = if let Some(pref) = local_pref {
             (pref, "pref-local")
@@ -295,11 +297,12 @@ pub async fn plan_persistent_vfs_tasks(
             let index = api_client
                 .fetch_res_index(&index_url, RES_INDEX_KEY)
                 .await
-                .map_err(|e| {
-                    Error::Vfs(format!(
+                .map_err(|e| Error::Message {
+                    context: "VFS error: ",
+                    detail: format!(
                         "Failed to fetch both pref and index manifests for resource group {}: {e}",
                         resource.name
-                    ))
+                    ),
                 })?;
             manifest_downloads.push(PersistentVfsManifestDownload {
                 url: index_url,
@@ -369,7 +372,8 @@ pub async fn setup_persistent_vfs(
 
     compio::fs::create_dir_all(persistent_root)
         .await
-        .map_err(|e| Error::CreateDirFailed {
+        .map_err(|e| Error::IoAt {
+            action: "create directory",
             path: persistent_root.to_path_buf(),
             source: e,
         })?;
@@ -379,7 +383,10 @@ pub async fn setup_persistent_vfs(
         api_client
             .download_file(&manifest.url, &dest, false)
             .await
-            .map_err(|e| Error::ApiClient(format!("Failed to download {}: {e}", manifest.url)))?;
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to download {}: {e}", manifest.url),
+            })?;
     }
 
     let task_progress = TaskProgress::new(progress)
@@ -387,7 +394,10 @@ pub async fn setup_persistent_vfs(
         .with_download(ProgressLane::VFS_DOWNLOAD);
     let result = task_pool_runner
         .run_batch(plan.tasks, task_progress)
-        .map_err(|e| Error::TaskPool(format!("Failed to set up Persistent VFS files: {e}")))?;
+        .map_err(|e| Error::Message {
+            context: "Task pool error: ",
+            detail: format!("Failed to set up Persistent VFS files: {e}"),
+        })?;
 
     let mut outcomes = PathOutcomeTracker::new();
     for event in result.outcomes {
@@ -428,7 +438,8 @@ pub async fn setup_persistent_vfs(
                 if !plan.expected_paths.contains(&rel_norm) {
                     compio::fs::remove_file(&file)
                         .await
-                        .map_err(|e| Error::RemoveFailed {
+                        .map_err(|e| Error::IoAt {
+                            action: "remove file or directory",
                             path: file.clone(),
                             source: e,
                         })?;

@@ -19,16 +19,20 @@ impl PatchStorageLayout {
 
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != Self::SCHEMA_VERSION {
-            return Err(Error::Config(format!(
-                "Unsupported patch storage metadata schema version {}",
-                self.schema_version
-            )));
+            return Err(Error::Message {
+                context: "Configuration error: ",
+                detail: format!(
+                    "Unsupported patch storage metadata schema version {}",
+                    self.schema_version
+                ),
+            });
         }
         parse_safe_relative_path("external VFS link", &self.vfs_link.to_string_lossy())?;
         if !self.external_vfs_root.is_absolute() {
-            return Err(Error::Config(
-                "External VFS root must be an absolute path".to_string(),
-            ));
+            return Err(Error::Message {
+                context: "Configuration error: ",
+                detail: "External VFS root must be an absolute path".to_string(),
+            });
         }
         Ok(())
     }
@@ -39,12 +43,12 @@ pub fn read_patch_storage_layout(install_root: &Path) -> Result<Option<PatchStor
     if !path.is_file() {
         return Ok(None);
     }
-    let storage_layout: PatchStorageLayout = serde_json::from_slice(
-        &std::fs::read(&path).map_err(|source| Error::OpenFileFailed {
+    let storage_layout: PatchStorageLayout =
+        serde_json::from_slice(&std::fs::read(&path).map_err(|source| Error::IoAt {
+            action: "open file",
             path: path.clone(),
             source,
-        })?,
-    )?;
+        })?)?;
     storage_layout.validate()?;
     Ok(Some(storage_layout))
 }
@@ -57,7 +61,8 @@ pub(crate) fn write_patch_storage_layout(
     let path = install_root.join(PATCH_STORAGE_METADATA_NAME);
     let temp = install_root.join(format!("{PATCH_STORAGE_METADATA_NAME}.tmp"));
     std::fs::write(&temp, serde_json::to_vec_pretty(storage_layout)?).map_err(|source| {
-        Error::OpenFileFailed {
+        Error::IoAt {
+            action: "open file",
             path: temp.clone(),
             source,
         }

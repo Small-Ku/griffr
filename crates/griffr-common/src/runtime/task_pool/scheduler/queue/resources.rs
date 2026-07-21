@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use super::super::routing::{ExecutionClass, ResourceRequest};
+use super::super::routing::{ResourceRequest, RunClass};
 use crate::runtime::task_pool::{TaskPoolConfig, VolumeStreamingMode};
 
 #[derive(Debug, Default)]
@@ -18,7 +18,7 @@ pub(crate) struct ResourceState {
     pub(crate) volume_reads: HashMap<String, usize>,
     pub(crate) volume_writes: HashMap<String, usize>,
     pub(crate) volume_metadata: HashMap<String, usize>,
-    pub(crate) archive_finalizers: HashMap<String, usize>,
+    pub(crate) archive_savers: HashMap<String, usize>,
     pub(crate) archive_commits: HashMap<String, usize>,
     pub(crate) mutation_paths: HashSet<String>,
     pub(crate) reuse_commits_in_use: usize,
@@ -31,13 +31,11 @@ impl ResourceState {
         config: &TaskPoolConfig,
         admission: &AdmissionSnapshot,
     ) -> bool {
-        match request.execution {
-            ExecutionClass::AsyncIo => {}
-            ExecutionClass::Cpu if self.cpu_in_use >= config.cpu_slots => return false,
-            ExecutionClass::Blocking if self.blocking_in_use >= config.blocking_slots => {
-                return false
-            }
-            ExecutionClass::Cpu | ExecutionClass::Blocking => {}
+        match request.run {
+            RunClass::AsyncIo => {}
+            RunClass::Cpu if self.cpu_in_use >= config.cpu_slots => return false,
+            RunClass::Blocking if self.blocking_in_use >= config.blocking_slots => return false,
+            RunClass::Cpu | RunClass::Blocking => {}
         }
         if request.network.is_some() && self.network_in_use >= config.network_slots {
             return false;
@@ -54,9 +52,9 @@ impl ResourceState {
             return false;
         }
         if request
-            .archive_finalize_volumes
+            .archive_save_volumes
             .iter()
-            .any(|volume| self.archive_finalizers.get(volume).copied().unwrap_or(0) > 0)
+            .any(|volume| self.archive_savers.get(volume).copied().unwrap_or(0) > 0)
         {
             return false;
         }
@@ -148,12 +146,10 @@ impl ResourceState {
     }
 
     pub(crate) fn acquire(&mut self, request: &ResourceRequest) {
-        match request.execution {
-            ExecutionClass::AsyncIo => {}
-            ExecutionClass::Cpu => self.cpu_in_use = self.cpu_in_use.saturating_add(1),
-            ExecutionClass::Blocking => {
-                self.blocking_in_use = self.blocking_in_use.saturating_add(1)
-            }
+        match request.run {
+            RunClass::AsyncIo => {}
+            RunClass::Cpu => self.cpu_in_use = self.cpu_in_use.saturating_add(1),
+            RunClass::Blocking => self.blocking_in_use = self.blocking_in_use.saturating_add(1),
         }
         if request.network.is_some() {
             self.network_in_use = self.network_in_use.saturating_add(1);
@@ -170,8 +166,8 @@ impl ResourceState {
         for volume in &request.metadata_volumes {
             *self.volume_metadata.entry(volume.clone()).or_default() += 1;
         }
-        for volume in &request.archive_finalize_volumes {
-            *self.archive_finalizers.entry(volume.clone()).or_default() += 1;
+        for volume in &request.archive_save_volumes {
+            *self.archive_savers.entry(volume.clone()).or_default() += 1;
         }
         for (volume, _) in &request.archive_commit_volumes {
             *self.archive_commits.entry(volume.clone()).or_default() += 1;
@@ -184,12 +180,10 @@ impl ResourceState {
     }
 
     pub(crate) fn release(&mut self, request: &ResourceRequest) {
-        match request.execution {
-            ExecutionClass::AsyncIo => {}
-            ExecutionClass::Cpu => self.cpu_in_use = self.cpu_in_use.saturating_sub(1),
-            ExecutionClass::Blocking => {
-                self.blocking_in_use = self.blocking_in_use.saturating_sub(1)
-            }
+        match request.run {
+            RunClass::AsyncIo => {}
+            RunClass::Cpu => self.cpu_in_use = self.cpu_in_use.saturating_sub(1),
+            RunClass::Blocking => self.blocking_in_use = self.blocking_in_use.saturating_sub(1),
         }
         if request.network.is_some() {
             self.network_in_use = self.network_in_use.saturating_sub(1);
@@ -206,8 +200,8 @@ impl ResourceState {
         for volume in &request.metadata_volumes {
             decrement(&mut self.volume_metadata, volume);
         }
-        for volume in &request.archive_finalize_volumes {
-            decrement(&mut self.archive_finalizers, volume);
+        for volume in &request.archive_save_volumes {
+            decrement(&mut self.archive_savers, volume);
         }
         for (volume, _) in &request.archive_commit_volumes {
             decrement(&mut self.archive_commits, volume);

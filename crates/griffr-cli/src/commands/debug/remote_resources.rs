@@ -191,7 +191,8 @@ pub async fn api_get_latest_resources(
             &effective_rand_str,
             &platform,
         )
-        .await?;
+        .await?
+        .context("The selected target does not provide the launcher resource-index API")?;
 
     let payload = json!({
         "game": game_id.to_string(),
@@ -261,7 +262,8 @@ pub async fn list_resource_files(
             &effective_rand_str,
             &platform,
         )
-        .await?;
+        .await?
+        .context("The selected target does not provide the launcher resource-index API")?;
 
     let mut total_bytes: u64 = 0;
     let mut files = Vec::new();

@@ -9,12 +9,12 @@ use crate::download::extractor::{
 };
 use crate::runtime::PatchApplyOptions;
 
-use crate::runtime::task_pool::graph::{GraphExpansion, TaskExecution};
+use crate::runtime::task_pool::graph::{GraphExpansion, TaskRun};
 use crate::runtime::task_pool::types::{
     ArchiveRangePriority, ArchiveRetention, ArchiveWork, Task, WorkerEvent,
 };
 
-pub(crate) async fn execute_fetch_archive_range(
+pub(crate) async fn run_fetch_archive_range(
     work: Arc<ArchiveWork>,
     request: ArchiveRangeRequest,
     retry_count: u32,
@@ -23,9 +23,9 @@ pub(crate) async fn execute_fetch_archive_range(
     progress_buffer_bytes: usize,
     user_agent: &str,
     event_tx: &flume::Sender<WorkerEvent>,
-) -> TaskExecution {
+) -> TaskRun {
     if work.layout.range_is_available(&request.global_range) {
-        return TaskExecution::succeeded();
+        return TaskRun::succeeded();
     }
     let logical_path = format!(
         "{}#volume-{:03}:{}-{}",
@@ -35,21 +35,26 @@ pub(crate) async fn execute_fetch_archive_range(
         request.local_range.end
     );
     let expected = request.local_range.end - request.local_range.start;
-    let _ = event_tx.send(WorkerEvent::DownloadStarted {
-        path: logical_path.clone(),
-        total_bytes: expected,
-    });
+    let _ = event_tx.send(WorkerEvent::progress(
+        crate::runtime::ProgressPhase::Download,
+        logical_path.clone(),
+        0,
+        expected,
+        false,
+    ));
 
     let result = crate::download::extractor::fetch_archive_range_to_cache(
         &request,
         user_agent,
         progress_buffer_bytes,
         |written| {
-            let _ = event_tx.send(WorkerEvent::DownloadedBytes {
-                path: logical_path.clone(),
-                bytes: written,
-                total_bytes: expected,
-            });
+            let _ = event_tx.send(WorkerEvent::progress(
+                crate::runtime::ProgressPhase::Download,
+                logical_path.clone(),
+                written,
+                expected,
+                false,
+            ));
         },
     )
     .await
@@ -60,36 +65,35 @@ pub(crate) async fn execute_fetch_archive_range(
 
     match result {
         Ok(bytes) => {
-            let _ = event_tx.send(WorkerEvent::DownloadedBytes {
-                path: logical_path.clone(),
+            let _ = event_tx.send(WorkerEvent::progress(
+                crate::runtime::ProgressPhase::Download,
+                logical_path.clone(),
                 bytes,
-                total_bytes: expected,
-            });
-            let _ = event_tx.send(WorkerEvent::Downloaded {
-                path: logical_path,
-                bytes,
-            });
-            TaskExecution::succeeded()
+                expected,
+                false,
+            ));
+            let _ = event_tx.send(WorkerEvent::downloaded(logical_path, bytes));
+            TaskRun::succeeded()
         }
         Err(error) if retry_count < max_retries => {
             let _ = event_tx.send(WorkerEvent::Retried {
                 path: logical_path,
                 reason: format!("archive range attempt {} failed: {error}", retry_count + 1),
             });
-            TaskExecution::then(Task::FetchArchiveRange {
+            TaskRun::then(Task::FetchArchiveRange {
                 work,
                 request,
                 retry_count: retry_count + 1,
                 priority,
             })
         }
-        Err(error) => TaskExecution::failed(format!(
+        Err(error) => TaskRun::failed(format!(
             "archive range download failed after retries: {error}"
         )),
     }
 }
 
-pub(crate) fn execute_schedule_extract(
+pub(crate) fn run_schedule_extract(
     base_name: String,
     volumes: Vec<PathBuf>,
     dest: PathBuf,
@@ -98,10 +102,10 @@ pub(crate) fn execute_schedule_extract(
     patch_options: PatchApplyOptions,
     expected_files: Arc<std::collections::BTreeMap<String, GameFileEntry>>,
     excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
-) -> TaskExecution {
+) -> TaskRun {
     let layout = match MultiVolumeLayout::from_files(volumes) {
         Ok(layout) => layout,
-        Err(error) => return TaskExecution::failed(error.to_string()),
+        Err(error) => return TaskRun::failed(error.to_string()),
     };
     let work = match ArchiveWork::new(
         base_name,
@@ -116,9 +120,9 @@ pub(crate) fn execute_schedule_extract(
         excluded_commit_paths,
     ) {
         Ok(work) => work,
-        Err(error) => return TaskExecution::failed(error.to_string()),
+        Err(error) => return TaskRun::failed(error.to_string()),
     };
-    TaskExecution::then(Task::DiscoverArchiveDirectory {
+    TaskRun::then(Task::DiscoverArchiveDirectory {
         work,
         required_range: None,
     })
@@ -128,7 +132,7 @@ fn fetch_ranges_then(
     work: Arc<ArchiveWork>,
     ranges: impl IntoIterator<Item = std::ops::Range<u64>>,
     next: Task,
-) -> TaskExecution {
+) -> TaskRun {
     let ranges = ranges.into_iter().collect::<Vec<_>>();
     let requests = match work.layout.missing_range_requests(ranges.clone()) {
         Ok(requests) => requests,
@@ -140,18 +144,18 @@ fn fetch_ranges_then(
                 .into_iter()
                 .collect::<Vec<_>>();
             if tokens.is_empty() {
-                return TaskExecution::failed(error.to_string());
+                return TaskRun::failed(error.to_string());
             }
             let mut expansion = GraphExpansion::new();
             return match expansion.add_root_with_tokens(next, tokens) {
-                Ok(_) => TaskExecution::expand(expansion),
-                Err(error) => TaskExecution::failed(error.to_string()),
+                Ok(_) => TaskRun::expand(expansion),
+                Err(error) => TaskRun::failed(error.to_string()),
             };
         }
-        Err(error) => return TaskExecution::failed(error.to_string()),
+        Err(error) => return TaskRun::failed(error.to_string()),
     };
     if requests.is_empty() {
-        return TaskExecution::then(next);
+        return TaskRun::then(next);
     }
     let mut expansion = GraphExpansion::new();
     let mut fetches = Vec::with_capacity(requests.len());
@@ -164,15 +168,15 @@ fn fetch_ranges_then(
         }));
     }
     match expansion.add_task(next, fetches) {
-        Ok(_) => TaskExecution::expand(expansion),
-        Err(error) => TaskExecution::failed(error.to_string()),
+        Ok(_) => TaskRun::expand(expansion),
+        Err(error) => TaskRun::failed(error.to_string()),
     }
 }
 
-pub(crate) fn execute_discover_archive_directory(
+pub(crate) fn run_discover_archive_directory(
     work: Arc<ArchiveWork>,
     required_range: Option<std::ops::Range<u64>>,
-) -> TaskExecution {
+) -> TaskRun {
     if let Some(range) = required_range.as_ref() {
         if !work.layout.range_is_available(range) {
             return fetch_ranges_then(
@@ -205,15 +209,15 @@ pub(crate) fn execute_discover_archive_directory(
         ),
         Err(error) => {
             work.invalidate_range_cache();
-            TaskExecution::failed(error.to_string())
+            TaskRun::failed(error.to_string())
         }
     }
 }
 
-pub(crate) fn execute_read_archive_index(
+pub(crate) fn run_read_archive_index(
     work: Arc<ArchiveWork>,
     directory: ArchiveDirectory,
-) -> TaskExecution {
+) -> TaskRun {
     let extractor = MultiVolumeExtractor::from_layout(work.layout.clone());
     match extractor.read_archive_index(&directory) {
         Ok(archive_index) => {
@@ -230,24 +234,24 @@ pub(crate) fn execute_read_archive_index(
         }
         Err(error) => {
             work.invalidate_range_cache();
-            TaskExecution::failed(error.to_string())
+            TaskRun::failed(error.to_string())
         }
     }
 }
 
-pub(crate) fn execute_read_archive_controls(
+pub(crate) fn run_read_archive_controls(
     work: Arc<ArchiveWork>,
     archive_index: Arc<ArchiveIndex>,
-) -> TaskExecution {
+) -> TaskRun {
     let extractor = MultiVolumeExtractor::from_layout(work.layout.clone());
     match extractor.read_control_payloads(&archive_index, work.password.as_deref()) {
-        Ok(archive_index) => TaskExecution::then(Task::PlanArchiveExtraction {
+        Ok(archive_index) => TaskRun::then(Task::PlanArchiveExtraction {
             work,
             archive_index: Arc::new(archive_index),
         }),
         Err(error) => {
             work.invalidate_range_cache();
-            TaskExecution::failed(error.to_string())
+            TaskRun::failed(error.to_string())
         }
     }
 }

@@ -48,7 +48,645 @@ def run(host: ArchitectureHost) -> None:
     _check_task_enum_construction(host)
     _check_task_match_exhaustiveness(host)
     _check_archive_token_barriers(host)
+    _check_removed_data_structure_names(host)
+    _check_canonical_worker_events(host)
+    _check_canonical_download_task(host)
+    _check_optional_unsupported_results(host)
+    _check_canonical_error_shape(host)
+    _check_canonical_error_construction(host)
+    _check_task_payload_mirrors(host)
+    _check_redundant_nested_conditions(host)
+    _check_download_stage_routing(host)
+    _check_canonical_reuse_result(host)
+    _check_adjacent_duplicate_bindings(host)
 
+
+
+_REMOVED_DATA_STRUCTURE_NAMES = {
+    "ApiError",
+    "DownloadExecInput",
+    "RepairFileInput",
+    "ReuseFileInput",
+    "ReuseMethod",
+    "TransferDownload",
+    "VfsPlanOutcome",
+    "VfsUpdateOutcome",
+}
+
+_LEGACY_ERROR_VARIANTS = {
+    "ApiClient",
+    "Config",
+    "CopyFailed",
+    "CreateDirFailed",
+    "Crypto",
+    "Download",
+    "Extraction",
+    "Game",
+    "Integrity",
+    "InvalidPath",
+    "Launcher",
+    "OpenFileFailed",
+    "Other",
+    "ReadDirFailed",
+    "RemoveFailed",
+    "RenameFailed",
+    "StatFailed",
+    "TaskPool",
+    "Vfs",
+    "WriteFileFailed",
+}
+
+
+def _named_enum_shapes(
+    host: ArchitectureHost, enum_name: str
+) -> list[tuple[ModuleUnit, Node, dict[str, set[str]], dict[str, str]]]:
+    found: list[tuple[ModuleUnit, Node, dict[str, set[str]], dict[str, str]]] = []
+    seen: set[tuple[Path, int]] = set()
+    for target in host.targets:
+        for module in target.iter_modules():
+            for item in module.body.named_children:
+                if item.type != "enum_item":
+                    continue
+                name = item.child_by_field_name("name")
+                if name is None or module.source.text(name) != enum_name:
+                    continue
+                coordinate = (module.source.path, item.start_byte)
+                if coordinate in seen:
+                    continue
+                seen.add(coordinate)
+                body = item.child_by_field_name("body")
+                if body is None:
+                    continue
+                fields: dict[str, set[str]] = {}
+                variant_texts: dict[str, str] = {}
+                for variant in body.named_children:
+                    if variant.type != "enum_variant":
+                        continue
+                    variant_name = variant.child_by_field_name("name")
+                    if variant_name is None:
+                        continue
+                    name_text = module.source.text(variant_name)
+                    variant_texts[name_text] = module.source.text(variant)
+                    field_names: set[str] = set()
+                    variant_body = variant.child_by_field_name("body")
+                    if variant_body is not None and variant_body.type == "field_declaration_list":
+                        for field in variant_body.named_children:
+                            if field.type != "field_declaration":
+                                continue
+                            field_name = field.child_by_field_name("name")
+                            if field_name is not None:
+                                field_names.add(module.source.text(field_name))
+                    fields[name_text] = field_names
+                found.append((module, item, fields, variant_texts))
+    return found
+
+
+def _check_removed_data_structure_names(host: ArchitectureHost) -> None:
+    """Reject legacy wrappers that duplicate canonical task and API state."""
+    seen: set[tuple[Path, str]] = set()
+    for target in host.targets:
+        for module in target.iter_modules():
+            for node in walk_named(module.body):
+                if node.type not in {"identifier", "type_identifier"}:
+                    continue
+                name = module.source.text(node)
+                if name not in _REMOVED_DATA_STRUCTURE_NAMES:
+                    continue
+                key = (module.source.path, name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                host.add(
+                    "DST001",
+                    "error",
+                    f"Removed duplicate data structure {name} is referenced",
+                    source=module.source,
+                    node=node,
+                    confidence="definite",
+                    evidence=(f"legacy identifier: {name}",),
+                    hint=(
+                        "Use the canonical Task payload, Option-based unsupported result, "
+                        "PathReuseMethod, or TaskOutcome model instead of adding another wrapper."
+                    ),
+                )
+
+
+def _check_canonical_worker_events(host: ArchitectureHost) -> None:
+    expected_events = {
+        "Progress": {"phase", "path", "finished", "total", "reset"},
+        "Retried": {"path", "reason"},
+        "Outcome": set(),
+    }
+    expected_outcomes = {
+        "ArchiveCheck",
+        "Changed",
+        "Copied",
+        "Downloaded",
+        "Failed",
+        "Hardlinked",
+        "Verified",
+    }
+    for module, item, fields, texts in _named_enum_shapes(host, "WorkerEvent"):
+        variants = set(fields)
+        bad_fields = {
+            name: sorted(fields.get(name, set()) ^ expected)
+            for name, expected in expected_events.items()
+            if name in fields and fields.get(name, set()) != expected
+        }
+        outcome_text = re.sub(r"\s+", "", texts.get("Outcome", ""))
+        if variants == set(expected_events) and not bad_fields and outcome_text == "Outcome(TaskOutcome)":
+            continue
+        host.add(
+            "DST002",
+            "error",
+            "WorkerEvent must contain only Progress, Retried, and Outcome(TaskOutcome)",
+            source=module.source,
+            node=item,
+            confidence="definite",
+            evidence=(
+                f"observed variants: {sorted(variants)!r}",
+                f"field differences: {bad_fields!r}",
+                f"Outcome form: {outcome_text or 'missing'}",
+            ),
+            hint="Keep transient progress separate from durable TaskOutcome facts; do not mirror terminal variants in WorkerEvent.",
+        )
+    for module, item, fields, _ in _named_enum_shapes(host, "TaskOutcome"):
+        variants = set(fields)
+        if variants == expected_outcomes:
+            continue
+        host.add(
+            "DST002",
+            "error",
+            "TaskOutcome variants differ from the canonical durable result set",
+            source=module.source,
+            node=item,
+            confidence="definite",
+            evidence=(
+                f"observed variants: {sorted(variants)!r}",
+                f"expected variants: {sorted(expected_outcomes)!r}",
+            ),
+            hint="Add only durable scheduler results here and update this explicit architecture contract deliberately.",
+        )
+
+
+def _check_canonical_download_task(host: ArchitectureHost) -> None:
+    expected = {
+        "dest",
+        "expected_md5",
+        "expected_size",
+        "logical_path",
+        "resume",
+        "retry_count",
+        "transfer_class",
+        "url",
+    }
+    for module, item, fields, _ in _named_enum_shapes(host, "Task"):
+        if "Download" not in fields:
+            continue
+        observed = fields["Download"]
+        if observed == expected:
+            continue
+        host.add(
+            "DST003",
+            "error",
+            "Task::Download must be the single canonical prepared/unprepared download payload",
+            source=module.source,
+            node=item,
+            confidence="definite",
+            evidence=(
+                f"observed fields: {sorted(observed)!r}",
+                f"expected fields: {sorted(expected)!r}",
+            ),
+            hint="Keep resume: Option<DownloadResumeState> in Task::Download instead of introducing a transfer-stage variant or input wrapper.",
+        )
+
+
+def _check_optional_unsupported_results(host: ArchitectureHost) -> None:
+    names = {
+        "download_vfs_resources": "VFS update",
+        "get_latest_resources": "launcher resource API",
+        "plan_vfs_tasks": "VFS task plan",
+    }
+    seen: set[tuple[Path, int]] = set()
+    for target in host.targets:
+        for module in target.iter_modules():
+            for node in walk_named(module.body):
+                if node.type != "function_item":
+                    continue
+                name_node = node.child_by_field_name("name")
+                if name_node is None:
+                    continue
+                name = module.source.text(name_node)
+                label = names.get(name)
+                if label is None:
+                    continue
+                coordinate = (module.source.path, node.start_byte)
+                if coordinate in seen:
+                    continue
+                seen.add(coordinate)
+                signature = re.sub(r"\s+", "", _signature_text(module.source, node))
+                if "->Result<Option<" in signature or "->crate::error::Result<Option<" in signature:
+                    continue
+                host.add(
+                    "DST004",
+                    "error",
+                    f"{name} must represent unsupported {label} with Result<Option<...>>",
+                    source=module.source,
+                    node=node,
+                    confidence="definite",
+                    evidence=(f"normalized signature: {signature}",),
+                    hint="Return Ok(None) for a known unsupported target and reserve Err for transport, parse, or protocol failures.",
+                )
+
+
+def _check_canonical_error_shape(host: ArchitectureHost) -> None:
+    canonical = {
+        "IoAt": {"action", "path", "source"},
+        "IoBetween": {"action", "src", "dest", "source"},
+        "Message": {"context", "detail"},
+    }
+    for module, item, fields, _ in _named_enum_shapes(host, "Error"):
+        variants = set(fields)
+        legacy = sorted(variants & _LEGACY_ERROR_VARIANTS)
+        uses_model = bool(variants & set(canonical)) or module.source.rel.endswith("griffr-common/src/error.rs")
+        if not uses_model:
+            continue
+        missing = sorted(set(canonical) - variants)
+        bad_fields = {
+            name: sorted(fields.get(name, set()) ^ expected)
+            for name, expected in canonical.items()
+            if name in fields and fields.get(name, set()) != expected
+        }
+        if not legacy and not missing and not bad_fields:
+            continue
+        host.add(
+            "DST005",
+            "error",
+            "Error must use canonical path, path-pair, and message payloads",
+            source=module.source,
+            node=item,
+            confidence="definite",
+            evidence=(
+                f"legacy variants: {legacy!r}",
+                f"missing canonical variants: {missing!r}",
+                f"canonical field differences: {bad_fields!r}",
+            ),
+            hint="Use IoAt, IoBetween, and Message instead of adding one variant per filesystem verb or display prefix.",
+        )
+
+
+
+def _enum_variant_from_path(text: str, enum_name: str) -> str | None:
+    normalized = re.sub(r"\s+", "", text)
+    match = re.fullmatch(
+        rf"(?:[A-Za-z_][A-Za-z0-9_]*::)*{re.escape(enum_name)}::([A-Za-z_][A-Za-z0-9_]*)",
+        normalized,
+    )
+    return match.group(1) if match else None
+
+
+def _provided_struct_fields(source: SourceFile, body: Node) -> tuple[set[str], bool]:
+    provided: set[str] = set()
+    has_base_update = False
+    for field in body.named_children:
+        if field.type == "field_initializer":
+            field_name = field.child_by_field_name("field")
+            if field_name is not None:
+                provided.add(source.text(field_name))
+        elif field.type == "shorthand_field_initializer":
+            identifier = next(
+                (child for child in field.named_children if child.type == "identifier"),
+                None,
+            )
+            if identifier is not None:
+                provided.add(source.text(identifier))
+        elif field.type == "base_field_initializer":
+            has_base_update = True
+    return provided, has_base_update
+
+
+def _check_canonical_error_construction(host: ArchitectureHost) -> None:
+    canonical = {
+        "IoAt": {"action", "path", "source"},
+        "IoBetween": {"action", "src", "dest", "source"},
+        "Message": {"context", "detail"},
+    }
+    seen: set[tuple[Path, int, str]] = set()
+    for target in host.targets:
+        for module in target.iter_modules():
+            for node in walk_named(module.body):
+                if node.type == "scoped_identifier":
+                    variant = _enum_variant_from_path(module.source.text(node), "Error")
+                    if variant not in _LEGACY_ERROR_VARIANTS:
+                        continue
+                    key = (module.source.path, node.start_byte, variant)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    host.add(
+                        "DST008",
+                        "error",
+                        f"Legacy Error::{variant} constructor is referenced",
+                        source=module.source,
+                        node=node,
+                        confidence="definite",
+                        hint="Use IoAt, IoBetween, or Message and preserve the original source error where available.",
+                    )
+                    continue
+                if node.type != "struct_expression":
+                    continue
+                name = node.child_by_field_name("name")
+                body = node.child_by_field_name("body")
+                if name is None or body is None:
+                    continue
+                variant = _enum_variant_from_path(module.source.text(name), "Error")
+                expected = canonical.get(variant or "")
+                if expected is None:
+                    continue
+                provided, has_base_update = _provided_struct_fields(module.source, body)
+                missing = [] if has_base_update else sorted(expected - provided)
+                unknown = sorted(provided - expected)
+                if not missing and not unknown:
+                    continue
+                key = (module.source.path, node.start_byte, variant or "")
+                if key in seen:
+                    continue
+                seen.add(key)
+                details = []
+                if missing:
+                    details.append(f"missing fields {missing!r}")
+                if unknown:
+                    details.append(f"unknown fields {unknown!r}")
+                host.add(
+                    "DST008",
+                    "error",
+                    f"Error::{variant} constructor has " + " and ".join(details),
+                    source=module.source,
+                    node=node,
+                    confidence="definite",
+                    evidence=(
+                        f"canonical fields: {sorted(expected)!r}",
+                        f"provided fields: {sorted(provided)!r}",
+                    ),
+                    hint="Keep every canonical Error payload synchronized with crates/griffr-common/src/error.rs.",
+                )
+
+def _struct_fields(module: ModuleUnit, item: Node) -> set[str]:
+    body = item.child_by_field_name("body")
+    if body is None or body.type != "field_declaration_list":
+        return set()
+    names: set[str] = set()
+    for field in body.named_children:
+        if field.type != "field_declaration":
+            continue
+        name = field.child_by_field_name("name")
+        if name is not None:
+            names.add(module.source.text(name))
+    return names
+
+
+def _check_task_payload_mirrors(host: ArchitectureHost) -> None:
+    shape = _task_enum_shape(host)
+    if shape is None:
+        return
+    _, task_fields = shape
+    seen: set[tuple[Path, int]] = set()
+    for target in host.targets:
+        for module in target.iter_modules():
+            normalized = module.source.rel.replace("\\", "/")
+            if "/runtime/task_pool/runner/" not in f"/{normalized}":
+                continue
+            for item in module.body.named_children:
+                if item.type != "struct_item":
+                    continue
+                coordinate = (module.source.path, item.start_byte)
+                if coordinate in seen:
+                    continue
+                seen.add(coordinate)
+                name_node = item.child_by_field_name("name")
+                if name_node is None:
+                    continue
+                fields = _struct_fields(module, item)
+                if len(fields) < 4:
+                    continue
+                best_variant = ""
+                best_overlap = 0.0
+                best_fields: set[str] = set()
+                for variant, canonical_fields in task_fields.items():
+                    if len(canonical_fields) < 4:
+                        continue
+                    union = fields | canonical_fields
+                    overlap = len(fields & canonical_fields) / len(union) if union else 0.0
+                    if overlap > best_overlap:
+                        best_variant = variant
+                        best_overlap = overlap
+                        best_fields = canonical_fields
+                if best_overlap < 0.8:
+                    continue
+                host.add(
+                    "DST006",
+                    "error",
+                    f"Runner struct {module.source.text(name_node)} mirrors Task::{best_variant} payload fields",
+                    source=module.source,
+                    node=item,
+                    confidence="definite",
+                    evidence=(
+                        f"struct fields: {sorted(fields)!r}",
+                        f"Task::{best_variant} fields: {sorted(best_fields)!r}",
+                        f"Jaccard overlap: {best_overlap:.2f}",
+                    ),
+                    hint="Pass and destructure the canonical Task variant instead of reconstructing an runner input struct.",
+                )
+
+
+def _check_redundant_nested_conditions(host: ArchitectureHost) -> None:
+    """Reject an immediately nested `if` that repeats its parent's condition.
+
+    This shape is usually left by a duplicated edit and can silently wrap the
+    remainder of a function in the outer branch while still parsing cleanly.
+    """
+    seen: set[tuple[Path, int]] = set()
+    for target in host.targets:
+        for module in target.iter_modules():
+            for node in walk_named(module.body):
+                if node.type != "if_expression":
+                    continue
+                consequence = node.child_by_field_name("consequence")
+                condition = node.child_by_field_name("condition")
+                if consequence is None or condition is None:
+                    continue
+                first = next(iter(consequence.named_children), None)
+                if first is not None and first.type == "expression_statement":
+                    first = next(iter(first.named_children), None)
+                if first is None or first.type != "if_expression":
+                    continue
+                inner_condition = first.child_by_field_name("condition")
+                if inner_condition is None:
+                    continue
+                outer_text = re.sub(r"\s+", "", module.source.text(condition))
+                inner_text = re.sub(r"\s+", "", module.source.text(inner_condition))
+                if not outer_text or outer_text != inner_text:
+                    continue
+                key = (module.source.path, node.start_byte)
+                if key in seen:
+                    continue
+                seen.add(key)
+                host.add(
+                    "DST007",
+                    "error",
+                    "Immediately nested if expressions repeat the same condition",
+                    source=module.source,
+                    node=node,
+                    confidence="definite",
+                    evidence=(f"repeated condition: {module.source.text(condition).strip()}",),
+                    hint=(
+                        "Remove the duplicate condition or make the inner condition distinct. "
+                        "This often indicates that an edit accidentally duplicated an if line."
+                    ),
+                )
+
+
+def _check_download_stage_routing(host: ArchitectureHost) -> None:
+    requirements = {
+        "run_blocking_task": (
+            ("Task::Download{resume:None,..}",),
+            "Blocking run must prepare only Download tasks whose resume state is None",
+        ),
+        "run_async_task": (
+            ("Task::Download{resume:Some(_),..}",),
+            "Async run must transfer only Download tasks with prepared resume state",
+        ),
+        "run_class": (
+            (
+                "Task::Download{resume,..}",
+                "resume.is_some()",
+                "RunClass::AsyncIo",
+                "RunClass::Cpu",
+            ),
+            "Download run class must switch from CPU preparation to async I/O by resume state",
+        ),
+    }
+    seen: set[tuple[Path, int]] = set()
+    for target in host.targets:
+        for module in target.iter_modules():
+            for node in walk_named(module.body):
+                if node.type != "function_item":
+                    continue
+                name_node = node.child_by_field_name("name")
+                if name_node is None:
+                    continue
+                name = module.source.text(name_node)
+                requirement = requirements.get(name)
+                if requirement is None:
+                    continue
+                tokens, message = requirement
+                normalized = re.sub(r"\s+", "", module.source.text(node))
+                missing = [token for token in tokens if token not in normalized]
+                if not missing:
+                    continue
+                key = (module.source.path, node.start_byte)
+                if key in seen:
+                    continue
+                seen.add(key)
+                host.add(
+                    "DST009",
+                    "error",
+                    message,
+                    source=module.source,
+                    node=node,
+                    confidence="definite",
+                    evidence=(f"missing normalized patterns: {missing!r}",),
+                    hint="Keep Task::Download as one payload while routing resume=None to preparation and resume=Some(_) to transfer.",
+                )
+
+
+def _check_canonical_reuse_result(host: ArchitectureHost) -> None:
+    canonical_variants = {"Hardlink", "Copy"}
+    for module, item, fields, _ in _named_enum_shapes(host, "PathReuseMethod"):
+        variants = set(fields)
+        if variants == canonical_variants and all(not value for value in fields.values()):
+            continue
+        host.add(
+            "DST010",
+            "error",
+            "PathReuseMethod must contain only unit variants Hardlink and Copy",
+            source=module.source,
+            node=item,
+            confidence="definite",
+            evidence=(f"observed variants: {sorted(variants)!r}",),
+            hint="Keep reuse policy in ReuseMode and reuse outcome in PathReuseMethod.",
+        )
+
+    seen: set[tuple[Path, int]] = set()
+    for target in host.targets:
+        for module in target.iter_modules():
+            normalized_path = "/" + module.source.rel.replace("\\", "/")
+            if "/runtime" not in normalized_path:
+                continue
+            for item in module.body.named_children:
+                if item.type != "enum_item":
+                    continue
+                name_node = item.child_by_field_name("name")
+                body = item.child_by_field_name("body")
+                if name_node is None or body is None:
+                    continue
+                name = module.source.text(name_node)
+                if name == "PathReuseMethod":
+                    continue
+                variants = {
+                    module.source.text(variant.child_by_field_name("name"))
+                    for variant in body.named_children
+                    if variant.type == "enum_variant"
+                    and variant.child_by_field_name("name") is not None
+                }
+                if variants != canonical_variants:
+                    continue
+                key = (module.source.path, item.start_byte)
+                if key in seen:
+                    continue
+                seen.add(key)
+                host.add(
+                    "DST010",
+                    "error",
+                    f"Runtime enum {name} duplicates PathReuseMethod",
+                    source=module.source,
+                    node=item,
+                    confidence="definite",
+                    evidence=("duplicate unit variants: Copy, Hardlink",),
+                    hint="Use PathReuseMethod directly instead of introducing another reuse-result enum.",
+                )
+
+
+def _check_adjacent_duplicate_bindings(host: ArchitectureHost) -> None:
+    """Reject identical adjacent let declarations that only shadow each other."""
+    seen: set[tuple[Path, int]] = set()
+    for target in host.targets:
+        for module in target.iter_modules():
+            for block in walk_named(module.body):
+                if block.type != "block":
+                    continue
+                children = block.named_children
+                for previous, current in zip(children, children[1:]):
+                    if previous.type != "let_declaration" or current.type != "let_declaration":
+                        continue
+                    previous_text = re.sub(r"\s+", "", module.source.text(previous))
+                    current_text = re.sub(r"\s+", "", module.source.text(current))
+                    if not previous_text or previous_text != current_text:
+                        continue
+                    key = (module.source.path, current.start_byte)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    host.add(
+                        "DST011",
+                        "error",
+                        "Adjacent let declarations are identical",
+                        source=module.source,
+                        node=current,
+                        confidence="definite",
+                        evidence=(f"duplicated declaration: {module.source.text(current).strip()}",),
+                        hint="Remove the duplicate binding; identical adjacent lets only shadow the first value.",
+                    )
 
 def _task_enum_shape(
     host: ArchitectureHost,
@@ -138,7 +776,7 @@ def _check_task_enum_construction(host: ArchitectureHost) -> None:
                         evidence=(
                             "constructor path resolves textually to Task::" + variant,
                         ),
-                        hint="Update the constructor or the canonical Task enum before changing executor routing.",
+                        hint="Update the constructor or the canonical Task enum before changing runner routing.",
                     )
                     continue
                 provided: set[str] = set()
@@ -237,7 +875,7 @@ def _check_task_match_exhaustiveness(host: ArchitectureHost) -> None:
                         f"covered variants: {sorted(covered)!r}",
                         "no wildcard or binding catch-all arm was found",
                     ),
-                    hint="Update executor, resource routing, path, estimate, and execution-class matches whenever Task gains a variant.",
+                    hint="Update runner, resource routing, path, estimate, and run-class matches whenever Task gains a variant.",
                 )
 
 
@@ -840,8 +1478,8 @@ _TASK_POOL_FORBIDDEN_PATTERNS = (
     (re.compile(r"\bfn\s+worker_loop\b"), "class-specific worker loop"),
     (re.compile(r"\bfn\s+dispatch_io\b"), "synchronous Dispatcher bridge"),
     (
-        re.compile(r"\bExecutionClass\s*::\s*Network\b"),
-        "thread-oriented network execution class",
+        re.compile(r"\bExecutionClass\s*::\s*Network\b"),  # wording: allow execution
+        "thread-oriented network run class",
     ),
     (re.compile(r"\b(?:cpu|blocking)_workers\b"), "worker-count configuration"),
 )

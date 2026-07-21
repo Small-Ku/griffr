@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use crate::api::ApiClient;
 use md5::{Digest, Md5};
 
-mod fixture;
+mod sample;
 mod sampling;
 
-use fixture::{check_fixture_format, ArchiveFixture};
+use sample::{check_sample_format, ArchiveSample};
 use sampling::{bounded_samples, deterministic_sample_indices, validate_raw_sample};
 
 const OFFICIAL_SAMPLE_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -21,7 +21,10 @@ fn official_cache_root(version: &str, packs: &[crate::api::types::PackFile]) -> 
     let workspace = manifest_dir
         .parent()
         .and_then(Path::parent)
-        .ok_or_else(|| Error::Extraction("failed to resolve workspace root".to_string()))?;
+        .ok_or_else(|| Error::Message {
+            context: "Extraction error: ",
+            detail: "failed to resolve workspace root".to_string(),
+        })?;
     let version = version
         .chars()
         .map(|character| {
@@ -39,7 +42,7 @@ fn official_cache_root(version: &str, packs: &[crate::api::types::PackFile]) -> 
     }
     let identity = crate::to_hex(&identity.finalize());
     Ok(workspace
-        .join("target/griffr-test-fixtures/archive-range-sample")
+        .join("target/griffr-test-samples/archive-range-sample")
         .join(format!("{version}-{}", &identity[..16])))
 }
 
@@ -121,7 +124,7 @@ fn raw_split_is_not_misclassified_as_independent_archives() -> Result<()> {
         ],
     )?;
     let volumes = super::split_archive(&archive, 24_000)?;
-    let fixture = ArchiveFixture {
+    let sample = ArchiveSample {
         key: temp.path().join("raw.zip"),
         volumes: volumes
             .into_iter()
@@ -129,7 +132,7 @@ fn raw_split_is_not_misclassified_as_independent_archives() -> Result<()> {
             .map(|(index, path)| ((index + 1) as u64, path))
             .collect(),
     };
-    let checked = check_fixture_format(&fixture, 8)?;
+    let checked = check_sample_format(&sample, 8)?;
     assert_eq!(checked.report.format_kind, "raw_split");
     assert!(checked.raw_split.is_some());
     assert!(checked.report.standalone_zip_volumes.len() <= 1);
@@ -149,11 +152,11 @@ fn independent_archives_get_separate_format_results() -> Result<()> {
         make_zip(&path, &[(name.as_str(), payload.as_bytes())])?;
         volumes.push(((index + 1) as u64, path));
     }
-    let fixture = ArchiveFixture {
+    let sample = ArchiveSample {
         key: temp.path().join("independent.zip"),
         volumes,
     };
-    let checked = check_fixture_format(&fixture, 8)?;
+    let checked = check_sample_format(&sample, 8)?;
     assert_eq!(checked.report.format_kind, "independent_archives");
     assert_eq!(checked.report.standalone_zip_volumes, vec![0, 1, 2]);
     assert!(checked.raw_split.is_none());
@@ -177,9 +180,10 @@ fn central_directory_may_cross_a_raw_split_boundary() -> Result<()> {
     let directory = match single.discover_archive_directory()? {
         ArchiveDirectoryDiscovery::Ready(directory) => directory,
         ArchiveDirectoryDiscovery::NeedsRange(_) => {
-            return Err(Error::Extraction(
-                "single-file fixture unexpectedly needs another range".to_string(),
-            ));
+            return Err(Error::Message {
+                context: "Extraction error: ",
+                detail: "single-file sample unexpectedly needs another range".to_string(),
+            });
         }
     };
     let split = directory.central_directory.start
@@ -189,9 +193,10 @@ fn central_directory_may_cross_a_raw_split_boundary() -> Result<()> {
     let split_directory = match extractor.discover_archive_directory()? {
         ArchiveDirectoryDiscovery::Ready(directory) => directory,
         ArchiveDirectoryDiscovery::NeedsRange(_) => {
-            return Err(Error::Extraction(
-                "complete split fixture unexpectedly needs another range".to_string(),
-            ));
+            return Err(Error::Message {
+                context: "Extraction error: ",
+                detail: "full split sample unexpectedly needs another range".to_string(),
+            });
         }
     };
     assert_eq!(
@@ -219,7 +224,7 @@ fn declared_entry_volumes_are_sufficient_for_isolated_extraction() -> Result<()>
         ],
     )?;
     let volumes = super::split_archive(&archive, 24_000)?;
-    let fixture = ArchiveFixture {
+    let sample = ArchiveSample {
         key: temp.path().join("isolated.zip"),
         volumes: volumes
             .into_iter()
@@ -227,13 +232,14 @@ fn declared_entry_volumes_are_sufficient_for_isolated_extraction() -> Result<()>
             .map(|(index, path)| ((index + 1) as u64, path))
             .collect(),
     };
-    let checked = check_fixture_format(&fixture, 8)?;
-    let raw_fixture = checked
-        .raw_split
-        .ok_or_else(|| Error::Extraction("fixture was not raw split".to_string()))?;
-    let samples = deterministic_sample_indices(&raw_fixture.archive_index, &raw_fixture.layout, 8);
+    let checked = check_sample_format(&sample, 8)?;
+    let raw_sample = checked.raw_split.ok_or_else(|| Error::Message {
+        context: "Extraction error: ",
+        detail: "sample was not raw split".to_string(),
+    })?;
+    let samples = deterministic_sample_indices(&raw_sample.archive_index, &raw_sample.layout, 8);
     for (position, index) in samples.into_iter().enumerate() {
-        validate_raw_sample(&raw_fixture, index, position < 2)?;
+        validate_raw_sample(&raw_sample, index, position < 2)?;
     }
     Ok(())
 }
@@ -242,26 +248,26 @@ fn declared_entry_volumes_are_sufficient_for_isolated_extraction() -> Result<()>
 #[ignore = "downloads a bounded sample from the current official full package"]
 fn check_official_archive_sample() -> Result<()> {
     compio::runtime::Runtime::new()
-        .map_err(|error| Error::Extraction(format!("Failed to create compio runtime: {error}")))?
+        .map_err(|error| Error::Message { context: "Extraction error: ", detail: format!("Failed to create compio runtime: {error}") })?
         .block_on(async {
             let client = ApiClient::new()?;
             let target = crate::config::resolve_api_target(
                 &crate::config::GameId::ENDFIELD,
                 crate::config::RegionId::Sg,
                 &crate::config::ChannelPair::from_api("6", None::<String>)
-                    .map_err(|error| Error::Extraction(error.to_string()))?,
+                    .map_err(|error| Error::Message { context: "Extraction error: ", detail: error.to_string() })?,
                 &crate::config::ApiTargetOverrides::default(),
             )
-            .map_err(|error| Error::Extraction(error.to_string()))?;
+            .map_err(|error| Error::Message { context: "Extraction error: ", detail: error.to_string() })?;
             let info = client.get_latest_game(&target, None).await?;
             let package = info.pkg.as_ref().ok_or_else(|| {
-                Error::Extraction("official response has no full package".to_string())
+                Error::Message { context: "Extraction error: ", detail: "official response has no full package".to_string() }
             })?;
             if package.packs.len() < 2 {
-                return Err(Error::Extraction(format!(
+                return Err(Error::Message { context: "Extraction error: ", detail: format!(
                     "official full package is no longer multi-volume ({} part(s))",
                     package.packs.len()
-                )));
+                ) });
             }
 
             let cache_root = official_cache_root(&info.version, &package.packs)?;
@@ -274,7 +280,7 @@ fn check_official_archive_sample() -> Result<()> {
                     .iter()
                     .map(|pack| {
                         let filename = pack.filename().ok_or_else(|| {
-                            Error::Extraction("package URL has no filename".to_string())
+                            Error::Message { context: "Extraction error: ", detail: "package URL has no filename".to_string() }
                         })?;
                         Ok((
                             volume_paths.join(filename),
@@ -296,7 +302,7 @@ fn check_official_archive_sample() -> Result<()> {
             let volume_tails = (0..layout.volume_count())
                 .map(|index| {
                     layout.volume_tail_range(index).ok_or_else(|| {
-                        Error::Extraction(format!("missing layout for volume {index}"))
+                        Error::Message { context: "Extraction error: ", detail: format!("missing layout for volume {index}") }
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -310,14 +316,14 @@ fn check_official_archive_sample() -> Result<()> {
                 }
             }
             if standalone_eocd_volumes.len() > 1 {
-                return Err(Error::Extraction(format!(
+                return Err(Error::Message { context: "Extraction error: ", detail: format!(
                     "official package now exposes independent ZIP end records in volumes {standalone_eocd_volumes:?}"
-                )));
+                ) });
             }
             if standalone_eocd_volumes.is_empty() {
-                return Err(Error::Extraction(
+                return Err(Error::Message { context: "Extraction error: ", detail:
                     "official package has no EOCD record at any volume boundary".to_string(),
-                ));
+                 });
             }
 
             let directory = loop {
@@ -364,10 +370,10 @@ fn check_official_archive_sample() -> Result<()> {
                 .count();
             let minimum_matching = expected.len().saturating_mul(4) / 5;
             if matching < minimum_matching {
-                return Err(Error::Extraction(format!(
+                return Err(Error::Message { context: "Extraction error: ", detail: format!(
                     "official archive index exposes only {matching}/{} manifest files; archive family or path semantics may have changed",
                     expected.len()
-                )));
+                ) });
             }
 
             let mut samples = bounded_samples(
@@ -387,9 +393,9 @@ fn check_official_archive_sample() -> Result<()> {
             .take(OFFICIAL_SAMPLE_COUNT)
             .collect::<Vec<_>>();
             if samples.is_empty() {
-                return Err(Error::Extraction(
+                return Err(Error::Message { context: "Extraction error: ", detail:
                     "official archive sampling found no manifest-backed entries".to_string(),
-                ));
+                 });
             }
             samples.sort_unstable();
             downloaded = downloaded.saturating_add(

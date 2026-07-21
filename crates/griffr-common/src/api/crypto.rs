@@ -27,7 +27,10 @@ pub fn decrypt_game_files(data: &[u8]) -> Result<String> {
     let mut buf = data.to_vec();
     let pt = Aes256CbcDec::new(GAME_FILES_AES_KEY.into(), GAME_FILES_AES_IV.into())
         .decrypt_padded_mut::<Pkcs7>(&mut buf)
-        .map_err(|e| Error::Crypto(format!("AES decryption failed: {e}")))?;
+        .map_err(|e| Error::Message {
+            context: "Crypto error: ",
+            detail: format!("AES decryption failed: {e}"),
+        })?;
 
     let decrypted = String::from_utf8(pt.to_vec())?;
 
@@ -36,7 +39,7 @@ pub fn decrypt_game_files(data: &[u8]) -> Result<String> {
 
 /// Encrypt data using AES-256-CBC (inverse of decrypt_game_files)
 ///
-/// This is primarily useful for generating test fixtures.
+/// This is primarily useful for generating test samples.
 pub fn encrypt_game_files(data: &[u8]) -> Result<Vec<u8>> {
     let pt = data;
     // PKCS7 padding: need at least 1 byte of padding, up to 16
@@ -46,7 +49,10 @@ pub fn encrypt_game_files(data: &[u8]) -> Result<Vec<u8>> {
 
     let encrypted = Aes256CbcEnc::new(GAME_FILES_AES_KEY.into(), GAME_FILES_AES_IV.into())
         .encrypt_padded_mut::<Pkcs7>(&mut buf, pt.len())
-        .map_err(|e| Error::Crypto(format!("AES encryption failed: {e}")))?;
+        .map_err(|e| Error::Message {
+            context: "Crypto error: ",
+            detail: format!("AES encryption failed: {e}"),
+        })?;
 
     Ok(encrypted.to_vec())
 }

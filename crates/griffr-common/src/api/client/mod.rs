@@ -3,4 +3,4 @@ mod requests;
 mod resources;
 
 pub use media::MediaResponse;
-pub use requests::{ApiClient, ApiError};
+pub use requests::ApiClient;

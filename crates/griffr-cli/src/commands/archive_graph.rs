@@ -154,6 +154,7 @@ mod tests {
             expected_size: None,
             retry_count: 0,
             transfer_class: TransferClass::General,
+            resume: None,
         });
         let counts = add_file_tasks(
             &mut graph,

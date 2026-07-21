@@ -150,7 +150,7 @@ pub async fn verify(
                 .iter()
                 .map(|path| streaming_assets_path(&path.join(install_target.data_root.clone())))
                 .collect::<Vec<_>>();
-            match plan_vfs_tasks(
+            plan_vfs_tasks(
                 &api_client,
                 &install_target.api,
                 &version_info.version,
@@ -165,10 +165,8 @@ pub async fn verify(
             )
             .await
             .context("Failed to plan VFS tasks for verify+repair")?
-            {
-                griffr_common::runtime::VfsPlanOutcome::Planned(plan) => plan.tasks,
-                griffr_common::runtime::VfsPlanOutcome::Unsupported => Vec::new(),
-            }
+            .map(|plan| plan.tasks)
+            .unwrap_or_default()
         }
     } else {
         Vec::new()
@@ -324,9 +322,9 @@ pub async fn verify(
 
     if opts.output != OutputFormat::Json {
         ui::print_success(if repair {
-            "Verify+repair complete"
+            "Verify and repair finished"
         } else {
-            "Verify complete"
+            "Verify finished"
         });
     }
     Ok(())

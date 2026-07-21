@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::runtime::patch_transaction::{
+use crate::runtime::patch_apply::{
     entry_wave_indices, PatchPlan, PlannedPatchEntry, PlannedPatchSource, PATCH_DEFERRED_DIR,
-    PATCH_TRANSACTION_DIR,
+    PATCH_WORK_DIR,
 };
 use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 
@@ -29,21 +29,28 @@ pub(super) fn apply_planned_entry(
         return Ok(());
     }
     match &entry.source {
-        PlannedPatchSource::AlreadyPresent => Err(Error::Vfs(format!(
-            "Patch output {} no longer matches its completed state",
-            entry.destination.display()
-        ))),
+        PlannedPatchSource::AlreadyPresent => Err(Error::Message {
+            context: "VFS error: ",
+            detail: format!(
+                "Patch output {} no longer matches its finished state",
+                entry.destination.display()
+            ),
+        }),
         PlannedPatchSource::Local { payload } => {
             let source = plan.stage_root.join(payload);
             if !source.is_file() {
-                return Err(Error::Vfs(format!(
-                    "Missing local patch payload {} for {}",
-                    source.display(),
-                    entry.name
-                )));
+                return Err(Error::Message {
+                    context: "VFS error: ",
+                    detail: format!(
+                        "Missing local patch payload {} for {}",
+                        source.display(),
+                        entry.name
+                    ),
+                });
             }
             if let Some(parent) = entry.destination.parent() {
-                std::fs::create_dir_all(parent).map_err(|source_error| Error::CreateDirFailed {
+                std::fs::create_dir_all(parent).map_err(|source_error| Error::IoAt {
+                    action: "create directory",
                     path: parent.to_path_buf(),
                     source: source_error,
                 })?;
@@ -69,20 +76,26 @@ pub(super) fn apply_planned_entry(
             if let Some(issue) =
                 verification_cache.build_issue(base, &base_logical, base_md5, Some(*base_size))
             {
-                return Err(Error::Vfs(format!(
-                    "Patch base {} failed verification before applying {}: {:?}",
-                    base.display(),
-                    entry.name,
-                    issue.kind
-                )));
+                return Err(Error::Message {
+                    context: "VFS error: ",
+                    detail: format!(
+                        "Patch base {} failed verification before applying {}: {:?}",
+                        base.display(),
+                        entry.name,
+                        issue.kind
+                    ),
+                });
             }
             let payload_path = plan.stage_root.join(payload);
             if !payload_path.is_file() {
-                return Err(Error::Vfs(format!(
-                    "Missing HDiff payload {} for {}",
-                    payload_path.display(),
-                    entry.name
-                )));
+                return Err(Error::Message {
+                    context: "VFS error: ",
+                    detail: format!(
+                        "Missing HDiff payload {} for {}",
+                        payload_path.display(),
+                        entry.name
+                    ),
+                });
             }
             apply_hdiff_patch(
                 base,
@@ -212,7 +225,7 @@ pub(super) fn apply_remaining_deletes(
 pub(super) fn commit_deferred_files(plan: &PatchPlan) -> Result<()> {
     let deferred_root = plan
         .install_root
-        .join(PATCH_TRANSACTION_DIR)
+        .join(PATCH_WORK_DIR)
         .join(PATCH_DEFERRED_DIR);
     for relative in &plan.deferred_paths {
         let source = deferred_root.join(relative);
@@ -221,7 +234,8 @@ pub(super) fn commit_deferred_files(plan: &PatchPlan) -> Result<()> {
         }
         let target = plan.install_root.join(relative);
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|source_error| Error::CreateDirFailed {
+            std::fs::create_dir_all(parent).map_err(|source_error| Error::IoAt {
+                action: "create directory",
                 path: parent.to_path_buf(),
                 source: source_error,
             })?;
@@ -233,7 +247,8 @@ pub(super) fn commit_deferred_files(plan: &PatchPlan) -> Result<()> {
 
 pub(super) fn cleanup_staging(plan: &PatchPlan) -> Result<()> {
     if plan.stage_root.exists() {
-        std::fs::remove_dir_all(&plan.stage_root).map_err(|source| Error::RemoveFailed {
+        std::fs::remove_dir_all(&plan.stage_root).map_err(|source| Error::IoAt {
+            action: "remove file or directory",
             path: plan.stage_root.clone(),
             source,
         })?;
@@ -241,11 +256,12 @@ pub(super) fn cleanup_staging(plan: &PatchPlan) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn cleanup_transaction(plan: &PatchPlan) -> Result<()> {
-    let transaction_root = plan.install_root.join(PATCH_TRANSACTION_DIR);
-    if transaction_root.exists() {
-        std::fs::remove_dir_all(&transaction_root).map_err(|source| Error::RemoveFailed {
-            path: transaction_root,
+pub(super) fn remove_patch_work_dir(plan: &PatchPlan) -> Result<()> {
+    let patch_root = plan.install_root.join(PATCH_WORK_DIR);
+    if patch_root.exists() {
+        std::fs::remove_dir_all(&patch_root).map_err(|source| Error::IoAt {
+            action: "remove file or directory",
+            path: patch_root,
             source,
         })?;
     }

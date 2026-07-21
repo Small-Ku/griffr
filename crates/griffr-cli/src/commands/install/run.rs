@@ -82,7 +82,7 @@ pub async fn install(
         ));
         if opts.keep_pack_archives {
             opts.dry_run(
-                "Would stream archive ranges during extraction, retain them, fill only missing gaps, verify each complete volume, and keep the package archives.",
+                "Would stream archive ranges during extraction, retain them, fill only missing gaps, verify each full volume, and keep the package archives.",
             );
         } else {
             opts.dry_run("Would stream required package byte ranges, verify extracted files, and remove the range cache after commit.");
@@ -173,8 +173,8 @@ pub async fn install(
         .await
         .context("Failed to plan VFS tasks")?
         {
-            griffr_common::runtime::VfsPlanOutcome::Planned(plan) => plan.tasks,
-            griffr_common::runtime::VfsPlanOutcome::Unsupported => {
+            Some(plan) => plan.tasks,
+            None => {
                 ui::print_info("The selected target does not provide the launcher resource-index API. Skip VFS sync.");
                 Vec::new()
             }
@@ -213,7 +213,7 @@ pub async fn install(
             archive_nodes.push(graph.add_root(Task::InstallArchive {
                 base_name: group.base_name,
                 dest: install_path.clone(),
-                retention: ArchiveRetention::from_keep_complete_volumes(opts.keep_pack_archives),
+                retention: ArchiveRetention::from_keep_full_volumes(opts.keep_pack_archives),
                 password: None,
                 patch_options: griffr_common::runtime::PatchApplyOptions::default(),
                 expected_files: expected_archive_files.clone(),
@@ -334,7 +334,7 @@ pub async fn install(
         ));
         if !ensured.issues.is_empty() {
             anyhow::bail!(
-                "Install file ensure operation finished with {} issue(s)",
+                "Install file ensure work finished with {} issue(s)",
                 ensured.issues.len()
             );
         }
@@ -410,6 +410,6 @@ pub async fn install(
         }
     }
 
-    ui::print_success("Install complete");
+    ui::print_success("Install finished");
     Ok(())
 }

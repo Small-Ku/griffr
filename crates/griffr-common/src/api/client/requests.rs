@@ -14,14 +14,6 @@ use crate::{
     error::{Error, Result},
 };
 
-#[derive(Debug, thiserror::Error)]
-pub enum ApiError {
-    #[error("Resource API is not available: {0}")]
-    ResourceApiUnavailable(String),
-    #[error(transparent)]
-    Other(#[from] crate::error::Error),
-}
-
 /// API client for Hypergryph game services
 #[derive(Debug, Clone)]
 pub struct ApiClient {
@@ -69,27 +61,40 @@ impl ApiClient {
             .client
             .post(url)?
             .header(USER_AGENT_HEADER, &self.user_agent)
-            .map_err(|e| Error::ApiClient(format!("Failed to set User-Agent header: {e}")))?
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to set User-Agent header: {e}"),
+            })?
             .header(CONTENT_TYPE_HEADER, JSON_CONTENT_TYPE)
-            .map_err(|e| Error::ApiClient(format!("Failed to set Content-Type header: {e}")))?
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to set Content-Type header: {e}"),
+            })?
             .json(request)
-            .map_err(|e| Error::ApiClient(format!("Failed to serialize batch request body: {e}")))?
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to serialize batch request body: {e}"),
+            })?
             .send()
             .await
-            .map_err(|e| Error::ApiClient(format!("Failed to send batch request to {url}: {e}")))?;
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to send batch request to {url}: {e}"),
+            })?;
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(Error::ApiClient(format!(
-                "API returned error {status}: {body}"
-            )));
+            return Err(Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("API returned error {status}: {body}"),
+            });
         }
 
-        response
-            .json::<T>()
-            .await
-            .map_err(|e| Error::ApiClient(format!("Failed to parse batch response: {e}")))
+        response.json::<T>().await.map_err(|e| Error::Message {
+            context: "API client wrapper error: ",
+            detail: format!("Failed to parse batch response: {e}"),
+        })
     }
 
     /// Get latest game version info
@@ -110,7 +115,10 @@ impl ApiClient {
                 ProxyResponse::GetLatestGame { rsp } => Some(rsp),
                 _ => None,
             })
-            .ok_or_else(|| Error::ApiClient("Missing get_latest_game response".to_string()))
+            .ok_or_else(|| Error::Message {
+                context: "API client wrapper error: ",
+                detail: "Missing get_latest_game response".to_string(),
+            })
     }
 
     /// Get media resources (banners, announcements, background)
@@ -119,10 +127,13 @@ impl ApiClient {
 
         // Use web batch URL for media APIs
         let url = web_batch_proxy_url(&target.gateway);
-        let response: BatchResponse = self
-            .batch_request_with_url(&url, &request)
-            .await
-            .map_err(|e| Error::ApiClient(format!("Media API request failed: {e}")))?;
+        let response: BatchResponse =
+            self.batch_request_with_url(&url, &request)
+                .await
+                .map_err(|e| Error::Message {
+                    context: "API client wrapper error: ",
+                    detail: format!("Media API request failed: {e}"),
+                })?;
 
         let mut media = MediaResponse::default();
 
@@ -150,7 +161,10 @@ impl ApiClient {
         let url = web_batch_proxy_url(&target.gateway);
         self.batch_request_with_url::<serde_json::Value>(&url, &request)
             .await
-            .map_err(|e| Error::ApiClient(format!("Media API request failed: {e}")))
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Media API request failed: {e}"),
+            })
     }
 
     /// Get latest game resources (VFS files) via the direct API endpoint
@@ -160,7 +174,7 @@ impl ApiClient {
         game_version: &str,
         rand_str: &str,
         platform: &str,
-    ) -> Result<GetLatestResourcesResponse, ApiError> {
+    ) -> Result<Option<GetLatestResourcesResponse>> {
         let url = latest_resources_url(&target.gateway);
 
         // Derive the version minor (major.minor) from the full version
@@ -178,41 +192,40 @@ impl ApiClient {
         let response = self
             .client
             .get(&url)
-            .map_err(|e| {
-                Error::ApiClient(format!("Failed to build get_latest_resources request: {e}"))
-            })
-            .map_err(ApiError::Other)?
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to build get_latest_resources request: {e}"),
+            })?
             .header(USER_AGENT_HEADER, &self.user_agent)
-            .map_err(|e| Error::ApiClient(format!("Failed to set User-Agent header: {e}")))
-            .map_err(ApiError::Other)?
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to set User-Agent header: {e}"),
+            })?
             .send()
             .await
-            .map_err(|e| {
-                Error::ApiClient(format!("Failed to get latest resources from {url}: {e}"))
-            })
-            .map_err(ApiError::Other)?;
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to get latest resources from {url}: {e}"),
+            })?;
 
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             if status.as_u16() == 400 && body.contains("resource not exist") {
-                return Err(ApiError::ResourceApiUnavailable(body));
+                return Ok(None);
             }
-            return Err(ApiError::Other(Error::ApiClient(format!(
-                "get_latest_resources returned error {status}: {body}"
-            ))));
+            return Err(Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("get_latest_resources returned error {status}: {body}"),
+            });
         }
 
-        let resources: GetLatestResourcesResponse = response
-            .json()
-            .await
-            .map_err(|e| {
-                Error::ApiClient(format!(
-                    "Failed to parse get_latest_resources response: {e}"
-                ))
-            })
-            .map_err(ApiError::Other)?;
+        let resources: GetLatestResourcesResponse =
+            response.json().await.map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to parse get_latest_resources response: {e}"),
+            })?;
 
-        Ok(resources)
+        Ok(Some(resources))
     }
 }

@@ -21,8 +21,8 @@ pub struct IntegrityRunSummary {
     pub reused_files: usize,
 }
 
-/// Chooses whether integrity reads the complete manifest or only paths known
-/// to have been committed by the current operation.
+/// Chooses whether integrity reads the full manifest or only paths known
+/// to have been committed by the current work.
 #[derive(Debug, Clone)]
 pub enum IntegritySelection {
     Full,
@@ -42,12 +42,6 @@ fn task_target_path(task: &Task) -> Option<&Path> {
 fn task_expected_artifact(task: &Task) -> Option<(&Path, &str, Option<u64>)> {
     match task {
         Task::Download {
-            dest,
-            expected_md5,
-            expected_size,
-            ..
-        }
-        | Task::TransferDownload {
             dest,
             expected_md5,
             expected_size,
@@ -87,10 +81,13 @@ fn deduplicate_target_tasks(tasks: Vec<Task>) -> Result<Vec<Task>> {
         let expected = (expected_md5.to_ascii_lowercase(), expected_size);
         if let Some(previous) = targets.get(&target) {
             if previous != &expected {
-                return Err(Error::Integrity(format!(
-                    "conflicting integrity tasks target {} with different expected content",
-                    path.display()
-                )));
+                return Err(Error::Message {
+                    context: "Integrity error: ",
+                    detail: format!(
+                        "conflicting integrity tasks target {} with different expected content",
+                        path.display()
+                    ),
+                });
             }
             continue;
         }
@@ -176,10 +173,10 @@ pub async fn run_integrity_pool(
         let version_info = api_client
             .get_latest_game(&install_target.api, version)
             .await?;
-        let pkg = version_info
-            .pkg
-            .as_ref()
-            .ok_or_else(|| Error::ApiClient("No package information available".to_string()))?;
+        let pkg = version_info.pkg.as_ref().ok_or_else(|| Error::Message {
+            context: "API client wrapper error: ",
+            detail: "No package information available".to_string(),
+        })?;
         let mut entries = api_client
             .fetch_game_files(&pkg.file_path, pkg.game_files_md5.as_deref())
             .await?;
@@ -313,11 +310,14 @@ pub async fn run_integrity_pool(
         }
     }
     if !failed_paths.is_empty() {
-        return Err(Error::Integrity(format!(
-            "{} integrity task(s) failed: {}",
-            failed_paths.len(),
-            failed_paths.join("; ")
-        )));
+        return Err(Error::Message {
+            context: "Integrity error: ",
+            detail: format!(
+                "{} integrity task(s) failed: {}",
+                failed_paths.len(),
+                failed_paths.join("; ")
+            ),
+        });
     }
 
     let summary = outcomes.summary();

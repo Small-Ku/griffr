@@ -37,7 +37,10 @@ impl std::str::FromStr for GameId {
     fn from_str(s: &str) -> Result<Self> {
         let value = s.trim().to_lowercase();
         if value.is_empty() {
-            return Err(Error::Game("game id cannot be empty".to_string()));
+            return Err(Error::Message {
+                context: "Game error: ",
+                detail: "game id cannot be empty".to_string(),
+            });
         }
         Ok(Self::new(value))
     }

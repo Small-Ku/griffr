@@ -2,17 +2,17 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
-use super::super::routing::{ExecutionClass, NetworkClass, ResourceRequest};
+use super::super::routing::{NetworkClass, ResourceRequest, RunClass};
 use super::super::TaskPriority;
 use super::resources::{AdmissionSnapshot, ResourceState};
 use crate::runtime::task_pool::{NodeId, Task, TaskPoolConfig};
 
 const CONTINUATION_BURST: usize = 4;
-const EXECUTION_SCHEDULE: [ExecutionClass; 4] = [
-    ExecutionClass::AsyncIo,
-    ExecutionClass::Cpu,
-    ExecutionClass::Blocking,
-    ExecutionClass::AsyncIo,
+const RUN_SCHEDULE: [RunClass; 4] = [
+    RunClass::AsyncIo,
+    RunClass::Cpu,
+    RunClass::Blocking,
+    RunClass::AsyncIo,
 ];
 const NETWORK_SCHEDULE: [NetworkClass; 8] = [
     NetworkClass::General,
@@ -38,17 +38,17 @@ struct QueueState {
     continuation: VecDeque<QueuedTask>,
     bulk: VecDeque<QueuedTask>,
     continuation_streak: [usize; 3],
-    execution_cursor: usize,
+    run_cursor: usize,
     network_cursor: usize,
     resources: ResourceState,
 }
 
 impl QueueState {
-    fn class_index(class: ExecutionClass) -> usize {
+    fn class_index(class: RunClass) -> usize {
         match class {
-            ExecutionClass::AsyncIo => 0,
-            ExecutionClass::Cpu => 1,
-            ExecutionClass::Blocking => 2,
+            RunClass::AsyncIo => 0,
+            RunClass::Cpu => 1,
+            RunClass::Blocking => 2,
         }
     }
 
@@ -58,9 +58,9 @@ impl QueueState {
             if queued.resources.reuse_probe {
                 admission.queued_reuse_commits = admission.queued_reuse_commits.saturating_add(1);
             }
-            if (queued.resources.execution == ExecutionClass::Cpu
+            if (queued.resources.run == RunClass::Cpu
                 && self.resources.cpu_in_use >= config.cpu_slots)
-                || (queued.resources.execution == ExecutionClass::Blocking
+                || (queued.resources.run == RunClass::Blocking
                     && self.resources.blocking_in_use >= config.blocking_slots)
                 || (queued.resources.extract
                     && self.resources.extract_in_use >= config.extract_slots)
@@ -82,28 +82,24 @@ impl QueueState {
         config: &TaskPoolConfig,
         blocking_dispatch_available: bool,
     ) -> Option<QueuedTask> {
-        for offset in 0..EXECUTION_SCHEDULE.len() {
-            let index = (self.execution_cursor + offset) % EXECUTION_SCHEDULE.len();
-            let class = EXECUTION_SCHEDULE[index];
-            if !blocking_dispatch_available && class != ExecutionClass::AsyncIo {
+        for offset in 0..RUN_SCHEDULE.len() {
+            let index = (self.run_cursor + offset) % RUN_SCHEDULE.len();
+            let class = RUN_SCHEDULE[index];
+            if !blocking_dispatch_available && class != RunClass::AsyncIo {
                 continue;
             }
             if let Some(task) = self.pop_runnable(class, config) {
-                self.execution_cursor = (index + 1) % EXECUTION_SCHEDULE.len();
+                self.run_cursor = (index + 1) % RUN_SCHEDULE.len();
                 return Some(task);
             }
         }
         None
     }
 
-    fn pop_runnable(
-        &mut self,
-        class: ExecutionClass,
-        config: &TaskPoolConfig,
-    ) -> Option<QueuedTask> {
+    fn pop_runnable(&mut self, class: RunClass, config: &TaskPoolConfig) -> Option<QueuedTask> {
         let class_index = Self::class_index(class);
         let force_bulk = self.continuation_streak[class_index] >= CONTINUATION_BURST;
-        let preferred_network = if class == ExecutionClass::AsyncIo {
+        let preferred_network = if class == RunClass::AsyncIo {
             let selected = NETWORK_SCHEDULE[self.network_cursor % NETWORK_SCHEDULE.len()];
             self.network_cursor = (self.network_cursor + 1) % NETWORK_SCHEDULE.len();
             Some(selected)
@@ -156,7 +152,7 @@ impl QueueState {
 
 fn remove_runnable(
     queue: &mut VecDeque<QueuedTask>,
-    class: ExecutionClass,
+    class: RunClass,
     preferred_network: Option<NetworkClass>,
     resources: &ResourceState,
     config: &TaskPoolConfig,
@@ -177,7 +173,7 @@ fn remove_runnable(
 
 fn runnable_index(
     queue: &VecDeque<QueuedTask>,
-    class: ExecutionClass,
+    class: RunClass,
     network: Option<NetworkClass>,
     resources: &ResourceState,
     config: &TaskPoolConfig,
@@ -199,7 +195,7 @@ fn runnable_index(
         .iter()
         .enumerate()
         .filter(|(_, queued)| {
-            queued.resources.execution == class
+            queued.resources.run == class
                 && network.is_none_or(|selected| queued.resources.network == Some(selected))
                 && resources.can_acquire(&queued.resources, config, admission)
         })

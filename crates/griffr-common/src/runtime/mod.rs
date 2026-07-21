@@ -8,7 +8,7 @@ pub mod issues;
 pub mod launcher;
 mod launcher_metadata;
 mod local_install;
-mod patch_transaction;
+mod patch_apply;
 mod paths;
 mod progress;
 pub mod task_pool;
@@ -29,8 +29,7 @@ pub use files::reuse::{
 pub use files::vfs::{
     download_vfs_resources, get_vfs_resource_info, plan_persistent_vfs_tasks, plan_vfs_tasks,
     setup_persistent_vfs, PersistentVfsConfig, PersistentVfsFileSet, PersistentVfsPlan,
-    PersistentVfsResult, VfsFilePlanOptions, VfsPlanOutcome, VfsTaskPlan, VfsUpdateOutcome,
-    VfsUpdateResult,
+    PersistentVfsResult, VfsFilePlanOptions, VfsTaskPlan, VfsUpdateResult,
 };
 pub use install_plan::required_install_bytes;
 pub use integrity::{run_integrity_pool, IntegrityRunSummary, IntegritySelection};
@@ -41,15 +40,14 @@ pub use local_install::{
     decrypt_config_ini, detect_local_install, resolve_install_path, resolve_named_path,
     LocalInstall, ParsedConfigIni,
 };
-pub use patch_transaction::{
+pub use patch_apply::{
     available_space, check_patch_archives, get_patch_recovery_state, read_patch_storage_layout,
     read_predownload_stage_metadata, write_predownload_stage_metadata, PatchApplyOptions,
     PatchCheckReport, PatchPlan, PatchRecoveryState, PatchStorageLayout, PlannedPatchEntry,
     PlannedPatchSource, PredownloadStageMetadata, StagedArchivePart, PATCH_DEFERRED_DIR,
-    PATCH_PLAN_NAME, PATCH_STORAGE_METADATA_NAME, PATCH_TRANSACTION_DIR,
-    PREDOWNLOAD_STAGE_METADATA_NAME,
+    PATCH_PLAN_NAME, PATCH_STORAGE_METADATA_NAME, PATCH_WORK_DIR, PREDOWNLOAD_STAGE_METADATA_NAME,
 };
-pub(crate) use patch_transaction::{
+pub(crate) use patch_apply::{
     build_patch_plan_with_probe_cache, entry_dependency_indices, entry_wave_indices,
     plan_patch_probes, PatchArtifactProbe, PatchProbePlan,
 };
@@ -59,7 +57,7 @@ pub use paths::{
     resource_manifest_url, streaming_assets_path, vfs_path, ResourceManifestKind, CDN_FILES_DIR,
     CONFIG_INI_NAME, DELETE_FILES_MANIFEST_NAME, GAME_FILES_NAME, PACKAGE_FILES_NAME,
     PATCH_DIFF_STAGE_DIR, PATCH_FILES_STAGE_DIR, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
-    PERSISTENT_DIR, RESOURCE_GROUP_INITIAL, RESOURCE_GROUP_MAIN, STREAMING_ASSETS_DIR, VFS_DIR,
+    PERSISTENT_DIR, RESOURCE_GROUP_BASE, RESOURCE_GROUP_MAIN, STREAMING_ASSETS_DIR, VFS_DIR,
 };
 pub use progress::{
     PathAttemptKind, PathOutcome, PathOutcomeSummary, PathOutcomeTracker, PathReuseMethod,

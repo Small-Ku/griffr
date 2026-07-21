@@ -27,7 +27,7 @@ pub use space::available_space;
 pub(crate) use storage::write_patch_storage_layout;
 pub use storage::{read_patch_storage_layout, PatchStorageLayout};
 
-pub const PATCH_TRANSACTION_DIR: &str = ".griffr-patch";
+pub const PATCH_WORK_DIR: &str = ".griffr-patch";
 pub const PATCH_DEFERRED_DIR: &str = "deferred";
 pub const PATCH_PLAN_NAME: &str = "plan.json";
 pub const PATCH_STORAGE_METADATA_NAME: &str = ".griffr-storage.json";

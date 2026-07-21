@@ -222,25 +222,27 @@ impl MultiVolumeExtractor {
             let mut file = open_archive_entry(&mut archive, *index, password)?;
             let file_path = target_dir.join(safe_relative_archive_path(file.name())?);
             if file.is_dir() {
-                std::fs::create_dir_all(&file_path).map_err(|source| Error::CreateDirFailed {
+                std::fs::create_dir_all(&file_path).map_err(|source| Error::IoAt {
+                    action: "create directory",
                     path: file_path.clone(),
                     source,
                 })?;
                 continue;
             }
             if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirFailed {
+                std::fs::create_dir_all(parent).map_err(|source| Error::IoAt {
+                    action: "create directory",
                     path: parent.to_path_buf(),
                     source,
                 })?;
             }
             let normalized = normalized_archive_name(file.name())?;
             let expected = expected_files.get(&normalized.to_ascii_lowercase());
-            let mut output =
-                std::fs::File::create(&file_path).map_err(|source| Error::OpenFileFailed {
-                    path: file_path.clone(),
-                    source,
-                })?;
+            let mut output = std::fs::File::create(&file_path).map_err(|source| Error::IoAt {
+                action: "open file",
+                path: file_path.clone(),
+                source,
+            })?;
             preallocate_file(&output, &file_path, file.size())?;
             let mut hasher = expected.map(|_| Md5::new());
             let mut written = 0u64;
@@ -265,11 +267,14 @@ impl MultiVolumeExtractor {
                     crate::to_hex(&hasher.expect("expected file has a hasher").finalize());
                 if written != expected.size || actual_md5 != expected.md5.to_ascii_lowercase() {
                     let _ = std::fs::remove_file(&file_path);
-                    return Err(Error::Extraction(format!(
+                    return Err(Error::Message {
+                        context: "Extraction error: ",
+                        detail: format!(
                         "Archive entry {normalized} failed target verification: expected size {} \
                          md5 {}, got size {written} md5 {actual_md5}",
                         expected.size, expected.md5
-                    )));
+                    ),
+                    });
                 }
             }
         }

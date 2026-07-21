@@ -441,7 +441,7 @@ pub(super) async fn collect_hash_mismatches(
         callback(0, total, "");
     }
     let mut mismatches = Vec::new();
-    let mut completed = 0usize;
+    let mut finished = 0usize;
     for (rel_path, expected_md5) in expected_checksums {
         let file_path = root.join(rel_path.replace('/', "\\"));
         if path_is_file(&file_path).await {
@@ -455,9 +455,9 @@ pub(super) async fn collect_hash_mismatches(
                 }
             }
         }
-        completed = completed.saturating_add(1);
+        finished = finished.saturating_add(1);
         if let Some(callback) = progress_callback {
-            callback(completed, total, rel_path);
+            callback(finished, total, rel_path);
         }
     }
     mismatches

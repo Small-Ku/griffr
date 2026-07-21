@@ -5,9 +5,10 @@ use crate::error::{Error, Result};
 pub(crate) fn parse_safe_relative_path(label: &str, raw: &str) -> Result<PathBuf> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return Err(Error::InvalidPath(format!(
-            "{label} contains an empty path"
-        )));
+        return Err(Error::Message {
+            context: "Invalid path: ",
+            detail: format!("{label} contains an empty path"),
+        });
     }
 
     let mut relative = PathBuf::new();
@@ -18,17 +19,19 @@ pub(crate) fn parse_safe_relative_path(label: &str, raw: &str) -> Result<PathBuf
             std::path::Component::ParentDir
             | std::path::Component::RootDir
             | std::path::Component::Prefix(_) => {
-                return Err(Error::InvalidPath(format!(
-                    "{label} contains unsupported path: {trimmed}"
-                )));
+                return Err(Error::Message {
+                    context: "Invalid path: ",
+                    detail: format!("{label} contains unsupported path: {trimmed}"),
+                });
             }
         }
     }
 
     if relative.as_os_str().is_empty() {
-        return Err(Error::InvalidPath(format!(
-            "{label} contains an empty path"
-        )));
+        return Err(Error::Message {
+            context: "Invalid path: ",
+            detail: format!("{label} contains an empty path"),
+        });
     }
 
     Ok(relative)

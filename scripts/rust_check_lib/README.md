@@ -32,20 +32,27 @@ The default policy favors recall:
 - cfg compatibility, module reachability, imports/re-exports, selected macro
   output, lexical scopes, and direct-call arity are analyzed across files;
 - repository architecture checks enforce frontend-neutral progress channels, canonical
-  progress lanes, durable-only task-pool results, and a Dispatcher-only task execution model
+  progress lanes, durable-only task-pool results, and a Dispatcher-only task runs model
   (no class-specific `std::thread`/`Condvar` worker pools or synchronous dispatch bridge);
 - `DAG001` checks exhaustive `Task` routing matches that deliberately omit a catch-all, while
   `DAG002` keeps struct-like `Task::Variant { ... }` constructors synchronized with the canonical
   enum payload. These are high-confidence structural fallbacks for large DAG refactors, not a
   replacement for rustc type checking;
+- `DST001` through `DST011` enforce the reduced data model: removed wrapper names cannot return,
+  `WorkerEvent` and `TaskOutcome` keep one terminal-result model, `Task::Download` owns both
+  preparation and transfer state, unsupported resource APIs return `Result<Option<_>>`, filesystem
+  and message errors use three canonical payload variants and synchronized constructors, runner
+  structs cannot mirror a `Task` variant at 80% or greater field overlap, duplicated nested
+  conditions are rejected, download stage routing remains tied to `resume`, and reuse results use
+  one canonical `PathReuseMethod`, and identical adjacent bindings are rejected;
 - `AFS001` rejects direct `std::fs` calls and blocking `Path` probes in production async functions
   and async blocks, while recognizing `spawn_blocking`, `dispatch_blocking`, and `run_blocking`
   closures as explicit synchronous boundaries;
-- `AFS002` reports blocking closures that contain only operations with compio async replacements;
+- `AFS002` reports blocking closures that contain only calls with compio async replacements;
 - `AFS003` follows direct calls into local synchronous helpers and rejects filesystem work hidden
   behind those helpers when it is invoked from production async code.
 - `WRD001` rejects abstract project wording listed in `docs/WORDING.md`, and `WRD002` rejects broad file names when a concrete name is available.
-  Test fixture modules are excluded because synchronous fixture construction is not a runtime I/O
+  Test sample modules are excluded because synchronous sample construction is not a runtime I/O
   architecture decision. Directory enumeration, recursive removal, link reads, and canonicalization
   remain valid blocking boundaries with compio 0.19.
 

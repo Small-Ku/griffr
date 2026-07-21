@@ -10,15 +10,14 @@ pub(crate) use extract::{
     CommitFileBatch,
 };
 pub(crate) use patch_manifest::{
-    apply_extracted_vfs_patch_manifest, apply_patch_transaction_deletes,
-    apply_patch_transaction_entry, cleanup_patch_transaction, commit_patch_transaction_deferred,
-    prepare_patch_transaction, release_patch_transaction_base, resume_patch_transaction,
+    apply_extracted_vfs_patch_manifest, apply_patch_deletes, apply_patch_entry, clean_patch_apply,
+    commit_deferred_patch_files, prepare_patch_apply, release_patch_base, resume_patch_apply,
 };
 pub(crate) use reuse::{
     classify_reuse_mode, commit_partial_download, commit_partial_download_async,
     copy_verified_file_async, create_hardlink_async, hash_file_prefix_into_hasher,
     make_partial_download_path, make_temp_write_path, storage_volume_group_key, storage_volume_id,
-    ReuseMethod, ReuseMode,
+    ReuseMode,
 };
 
 #[cfg(test)]

@@ -33,14 +33,18 @@ pub struct MultiVolumeLayout {
 impl MultiVolumeLayout {
     pub(crate) fn from_expected(volumes: Vec<(PathBuf, u64)>) -> Result<Self> {
         if volumes.is_empty() {
-            return Err(Error::Extraction("No volumes provided".to_string()));
+            return Err(Error::Message {
+                context: "Extraction error: ",
+                detail: "No volumes provided".to_string(),
+            });
         }
         let mut start = 0u64;
         let mut layouts = Vec::with_capacity(volumes.len());
         let mut ranges = Vec::with_capacity(volumes.len());
         for (path, size) in volumes {
-            let end = start.checked_add(size).ok_or_else(|| {
-                Error::Extraction("Combined archive size overflowed u64".to_string())
+            let end = start.checked_add(size).ok_or_else(|| Error::Message {
+                context: "Extraction error: ",
+                detail: "Combined archive size overflowed u64".to_string(),
             })?;
             let mut available = Vec::new();
             if std::fs::metadata(&path)
@@ -74,9 +78,13 @@ impl MultiVolumeLayout {
         cache_dir: PathBuf,
     ) -> Result<Self> {
         if volumes.is_empty() {
-            return Err(Error::Extraction("No volumes provided".to_string()));
+            return Err(Error::Message {
+                context: "Extraction error: ",
+                detail: "No volumes provided".to_string(),
+            });
         }
-        std::fs::create_dir_all(&cache_dir).map_err(|source| Error::CreateDirFailed {
+        std::fs::create_dir_all(&cache_dir).map_err(|source| Error::IoAt {
+            action: "create directory",
             path: cache_dir.clone(),
             source,
         })?;
@@ -84,8 +92,9 @@ impl MultiVolumeLayout {
         let mut layouts = Vec::with_capacity(volumes.len());
         let mut ranges = Vec::with_capacity(volumes.len());
         for (path, url, size) in volumes {
-            let end = start.checked_add(size).ok_or_else(|| {
-                Error::Extraction("Combined archive size overflowed u64".to_string())
+            let end = start.checked_add(size).ok_or_else(|| Error::Message {
+                context: "Extraction error: ",
+                detail: "Combined archive size overflowed u64".to_string(),
             })?;
             let mut available = Vec::new();
             if std::fs::metadata(&path)
@@ -161,7 +170,8 @@ impl MultiVolumeLayout {
         let mut expected = Vec::with_capacity(volumes.len());
         for path in volumes {
             let size = std::fs::metadata(&path)
-                .map_err(|source| Error::StatFailed {
+                .map_err(|source| Error::IoAt {
+                    action: "query file metadata/stat for",
                     path: path.clone(),
                     source,
                 })?
@@ -210,7 +220,7 @@ impl MultiVolumeLayout {
         self.total_size.saturating_sub(EOCD_MAX_SEARCH)..self.total_size
     }
 
-    fn refresh_complete_files(&self) {
+    fn refresh_full_files(&self) {
         let mut ranges = self.ranges.lock().unwrap();
         for (index, layout) in self.layouts.iter().enumerate() {
             let size = layout.end - layout.start;
@@ -255,7 +265,7 @@ impl MultiVolumeLayout {
     }
 
     pub(crate) fn range_is_available(&self, range: &Range<u64>) -> bool {
-        self.refresh_complete_files();
+        self.refresh_full_files();
         if range.start > range.end || range.end > self.total_size {
             return false;
         }
@@ -311,15 +321,18 @@ impl MultiVolumeLayout {
         &self,
         ranges: impl IntoIterator<Item = Range<u64>>,
     ) -> Result<Vec<ArchiveRangeRequest>> {
-        self.refresh_complete_files();
+        self.refresh_full_files();
         let cached = self.ranges.lock().unwrap();
         let mut per_volume = vec![Vec::<Range<u64>>::new(); self.layouts.len()];
         for range in ranges {
             if range.start > range.end || range.end > self.total_size {
-                return Err(Error::Extraction(format!(
-                    "Archive byte range {}..{} exceeds stream size {}",
-                    range.start, range.end, self.total_size
-                )));
+                return Err(Error::Message {
+                    context: "Extraction error: ",
+                    detail: format!(
+                        "Archive byte range {}..{} exceeds stream size {}",
+                        range.start, range.end, self.total_size
+                    ),
+                });
             }
             for (index, layout) in self.layouts.iter().enumerate() {
                 let start = range.start.max(layout.start);
@@ -351,20 +364,24 @@ impl MultiVolumeLayout {
             let Some(url) = layout.url.clone() else {
                 for range in merged {
                     if !Self::range_covered(&cached[index], &range) {
-                        return Err(Error::Extraction(format!(
-                            "Local archive volume {} is missing byte range {}..{}",
-                            layout.path.display(),
-                            range.start,
-                            range.end
-                        )));
+                        return Err(Error::Message {
+                            context: "Extraction error: ",
+                            detail: format!(
+                                "Local archive volume {} is missing byte range {}..{}",
+                                layout.path.display(),
+                                range.start,
+                                range.end
+                            ),
+                        });
                     }
                 }
                 continue;
             };
             for range in merged {
                 for missing in Self::subtract_cached(range, &cached[index]) {
-                    let cache_dir = self.cache_dir.as_ref().ok_or_else(|| {
-                        Error::Extraction("Remote archive has no range-cache directory".to_string())
+                    let cache_dir = self.cache_dir.as_ref().ok_or_else(|| Error::Message {
+                        context: "Extraction error: ",
+                        detail: "Remote archive has no range-cache directory".to_string(),
                     })?;
                     let cache_path = cache_dir.join(format!(
                         "v{index:04}-{}-{}.range",
@@ -386,21 +403,28 @@ impl MultiVolumeLayout {
     pub(crate) fn register_range(&self, request: &ArchiveRangeRequest) -> Result<()> {
         let expected = request.local_range.end - request.local_range.start;
         let actual = std::fs::metadata(&request.cache_path)
-            .map_err(|source| Error::StatFailed {
+            .map_err(|source| Error::IoAt {
+                action: "query file metadata/stat for",
                 path: request.cache_path.clone(),
                 source,
             })?
             .len();
         if actual != expected {
-            return Err(Error::Extraction(format!(
-                "Archive range cache {} has {actual} bytes, expected {expected}",
-                request.cache_path.display()
-            )));
+            return Err(Error::Message {
+                context: "Extraction error: ",
+                detail: format!(
+                    "Archive range cache {} has {actual} bytes, expected {expected}",
+                    request.cache_path.display()
+                ),
+            });
         }
         let mut ranges = self.ranges.lock().unwrap();
-        let volume = ranges.get_mut(request.volume_index).ok_or_else(|| {
-            Error::Extraction("Archive range references an unknown volume".to_string())
-        })?;
+        let volume = ranges
+            .get_mut(request.volume_index)
+            .ok_or_else(|| Error::Message {
+                context: "Extraction error: ",
+                detail: "Archive range references an unknown volume".to_string(),
+            })?;
         volume.push(CachedVolumeRange {
             range: request.local_range.clone(),
             path: request.cache_path.clone(),
@@ -458,20 +482,24 @@ impl MultiVolumeLayout {
     }
 
     pub(crate) fn open_stream(&self) -> Result<super::stream::MultiVolumeStream> {
-        self.refresh_complete_files();
+        self.refresh_full_files();
         super::stream::MultiVolumeStream::from_layout(self.clone())
     }
 
     pub(crate) fn read_range(&self, range: Range<u64>) -> Result<Vec<u8>> {
         use std::io::{Read, Seek, SeekFrom};
         if range.start > range.end || range.end > self.total_size {
-            return Err(Error::Extraction(format!(
-                "Archive byte range {}..{} exceeds stream size {}",
-                range.start, range.end, self.total_size
-            )));
+            return Err(Error::Message {
+                context: "Extraction error: ",
+                detail: format!(
+                    "Archive byte range {}..{} exceeds stream size {}",
+                    range.start, range.end, self.total_size
+                ),
+            });
         }
-        let length = usize::try_from(range.end - range.start).map_err(|_| {
-            Error::Extraction("Archive byte range is too large for this platform".to_string())
+        let length = usize::try_from(range.end - range.start).map_err(|_| Error::Message {
+            context: "Extraction error: ",
+            detail: "Archive byte range is too large for this platform".to_string(),
         })?;
         let mut stream = self.open_stream()?;
         stream.seek(SeekFrom::Start(range.start))?;

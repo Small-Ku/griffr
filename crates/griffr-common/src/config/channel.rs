@@ -14,14 +14,20 @@ const GOOGLE_PLAY_ID: &str = "802";
 fn numeric_id(value: &str, field: &str) -> Result<ChannelId> {
     let value = value.trim();
     if value.is_empty() {
-        return Err(Error::Config(format!("{field} cannot be empty")));
+        return Err(Error::Message {
+            context: "Configuration error: ",
+            detail: format!("{field} cannot be empty"),
+        });
     }
     if value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Ok(ChannelId(Cow::Owned(value.to_string())));
     }
-    Err(Error::Config(format!(
-        "invalid {field} {value:?}: expected a numeric API ID or a supported alias"
-    )))
+    Err(Error::Message {
+        context: "Configuration error: ",
+        detail: format!(
+            "invalid {field} {value:?}: expected a numeric API ID or a supported alias"
+        ),
+    })
 }
 
 fn parse_channel(region: RegionId, value: Option<String>) -> Result<ChannelId> {

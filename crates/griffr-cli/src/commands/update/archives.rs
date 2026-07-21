@@ -120,7 +120,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
                     base_name: group.base_name.clone(),
                     volumes: group.parts.iter().map(|part| part.dest.clone()).collect(),
                     dest: install_path.to_path_buf(),
-                    retention: ArchiveRetention::from_keep_complete_volumes(keep_pack_archives),
+                    retention: ArchiveRetention::from_keep_full_volumes(keep_pack_archives),
                     password: archive_password.map(str::to_owned),
                     patch_options: patch_options.clone(),
                     expected_files: expected_files.clone(),
@@ -201,7 +201,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
         archive_nodes.push(graph.add_root(Task::InstallArchive {
             base_name: group.base_name,
             dest: install_path.to_path_buf(),
-            retention: ArchiveRetention::from_keep_complete_volumes(keep_pack_archives),
+            retention: ArchiveRetention::from_keep_full_volumes(keep_pack_archives),
             password: archive_password.map(str::to_owned),
             patch_options: patch_options.clone(),
             expected_files: expected_files.clone(),
@@ -305,8 +305,8 @@ pub(super) async fn download_and_extract_archives(
     .await
 }
 
-pub(super) async fn validate_patch_target(executable: &Path, install_path: &Path) -> Result<()> {
-    let expected_exe = install_path.join(executable);
+pub(super) async fn validate_patch_target(exe_name: &Path, install_path: &Path) -> Result<()> {
+    let expected_exe = install_path.join(exe_name);
     match compio::fs::metadata(&expected_exe).await {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == ErrorKind::NotFound => {

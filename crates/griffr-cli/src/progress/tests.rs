@@ -22,7 +22,7 @@ fn count_and_byte_progress_keep_independent_units() {
     });
     sender.emit(ProgressUpdate::Advanced {
         lane: count_lane,
-        completed: 1,
+        finished: 1,
         total: Some(10),
         item: Some("a.bin".to_string()),
     });
@@ -33,7 +33,7 @@ fn count_and_byte_progress_keep_independent_units() {
     });
     sender.emit(ProgressUpdate::Advanced {
         lane: byte_lane,
-        completed: 64,
+        finished: 64,
         total: Some(128),
         item: Some("b.bin".to_string()),
     });
@@ -68,13 +68,13 @@ fn archive_progress_keeps_download_and_extract_separate() {
 
     sender.emit(ProgressUpdate::Advanced {
         lane: download_lane,
-        completed: 50,
+        finished: 50,
         total: Some(100),
         item: Some("pack.001".to_string()),
     });
     sender.emit(ProgressUpdate::Advanced {
         lane: extract_lane,
-        completed: 20,
+        finished: 20,
         total: Some(200),
         item: Some("pack".to_string()),
     });

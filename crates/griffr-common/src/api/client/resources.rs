@@ -20,32 +20,41 @@ impl ApiClient {
             .client
             .get(&url)?
             .header(USER_AGENT_HEADER, &self.user_agent)
-            .map_err(|e| Error::ApiClient(format!("Failed to set User-Agent header: {e}")))?
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to set User-Agent header: {e}"),
+            })?
             .send()
             .await
-            .map_err(|e| {
-                Error::ApiClient(format!("Failed to download game_files from {url}: {e}"))
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to download game_files from {url}: {e}"),
             })?;
 
         let status = response.status();
         if !status.is_success() {
-            return Err(Error::ApiClient(format!(
-                "Failed to download game_files: HTTP {status}"
-            )));
+            return Err(Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to download game_files: HTTP {status}"),
+            });
         }
 
-        let encrypted_data = response.bytes().await.map_err(|e| {
-            Error::ApiClient(format!("Failed to read game_files response bytes: {e}"))
+        let encrypted_data = response.bytes().await.map_err(|e| Error::Message {
+            context: "API client wrapper error: ",
+            detail: format!("Failed to read game_files response bytes: {e}"),
         })?;
 
         // Verify MD5 if provided
         if let Some(expected) = expected_md5 {
             let actual = crate::to_hex(&Md5::digest(&encrypted_data));
             if actual != expected.to_lowercase() {
-                return Err(Error::ApiClient(format!(
-                    "game_files MD5 mismatch: expected {}, got {}",
-                    expected, actual
-                )));
+                return Err(Error::Message {
+                    context: "API client wrapper error: ",
+                    detail: format!(
+                        "game_files MD5 mismatch: expected {}, got {}",
+                        expected, actual
+                    ),
+                });
             }
         }
 
@@ -59,8 +68,10 @@ impl ApiClient {
             if line.is_empty() {
                 continue;
             }
-            let entry: GameFileEntry = serde_json::from_str(line)
-                .map_err(|e| Error::ApiClient(format!("Failed to parse game_files entry: {e}")))?;
+            let entry: GameFileEntry = serde_json::from_str(line).map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to parse game_files entry: {e}"),
+            })?;
             entries.push(entry);
         }
 
@@ -73,33 +84,37 @@ impl ApiClient {
             .client
             .get(url)?
             .header(USER_AGENT_HEADER, &self.user_agent)
-            .map_err(|e| Error::ApiClient(format!("Failed to set User-Agent header: {e}")))?
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to set User-Agent header: {e}"),
+            })?
             .send()
             .await
-            .map_err(|e| {
-                Error::ApiClient(format!("Failed to download resource index from {url}: {e}"))
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to download resource index from {url}: {e}"),
             })?;
 
         let status = response.status();
         if !status.is_success() {
-            return Err(Error::ApiClient(format!(
-                "Failed to download resource index: HTTP {status}"
-            )));
+            return Err(Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to download resource index: HTTP {status}"),
+            });
         }
 
-        let base64_data = response
-            .text()
-            .await
-            .map_err(|e| Error::ApiClient(format!("Failed to read resource index as text: {e}")))?;
+        let base64_data = response.text().await.map_err(|e| Error::Message {
+            context: "API client wrapper error: ",
+            detail: format!("Failed to read resource index as text: {e}"),
+        })?;
 
         // Decrypt
         let decrypted = crypto::decrypt_res_index(&base64_data, key)?;
 
         // Parse JSON
-        let index: ResIndex = serde_json::from_str(&decrypted).map_err(|e| {
-            Error::ApiClient(format!(
-                "Failed to parse decrypted resource index JSON: {e}"
-            ))
+        let index: ResIndex = serde_json::from_str(&decrypted).map_err(|e| Error::Message {
+            context: "API client wrapper error: ",
+            detail: format!("Failed to parse decrypted resource index JSON: {e}"),
         })?;
 
         Ok(index)
@@ -113,24 +128,29 @@ impl ApiClient {
             .client
             .get(url)?
             .header(USER_AGENT_HEADER, &self.user_agent)
-            .map_err(|e| Error::ApiClient(format!("Failed to set User-Agent header: {e}")))?
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to set User-Agent header: {e}"),
+            })?
             .send()
             .await
-            .map_err(|e| {
-                Error::ApiClient(format!("Failed to download resource patch from {url}: {e}"))
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to download resource patch from {url}: {e}"),
             })?;
 
         let status = response.status();
         if !status.is_success() {
-            return Err(Error::ApiClient(format!(
-                "Failed to download resource patch: HTTP {status}"
-            )));
+            return Err(Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to download resource patch: HTTP {status}"),
+            });
         }
 
-        let patch: ResourcePatch = response
-            .json()
-            .await
-            .map_err(|e| Error::ApiClient(format!("Failed to parse resource patch JSON: {e}")))?;
+        let patch: ResourcePatch = response.json().await.map_err(|e| Error::Message {
+            context: "API client wrapper error: ",
+            detail: format!("Failed to parse resource patch JSON: {e}"),
+        })?;
 
         Ok(patch)
     }
@@ -146,7 +166,10 @@ impl ApiClient {
             .client
             .get(url)?
             .header(USER_AGENT_HEADER, &self.user_agent)
-            .map_err(|e| Error::ApiClient(format!("Failed to set User-Agent header: {e}")))?;
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to set User-Agent header: {e}"),
+            })?;
 
         let existing = if resume {
             match compio::fs::read(output_path).await {
@@ -154,15 +177,17 @@ impl ApiClient {
                     if !bytes.is_empty() {
                         request = request
                             .header(RANGE_HEADER, byte_range_from(bytes.len() as u64))
-                            .map_err(|e| {
-                                Error::ApiClient(format!("Failed to set Range header: {e}"))
+                            .map_err(|e| Error::Message {
+                                context: "API client wrapper error: ",
+                                detail: format!("Failed to set Range header: {e}"),
                             })?;
                     }
                     bytes
                 }
                 Err(err) if err.kind() == ErrorKind::NotFound => Vec::new(),
                 Err(err) => {
-                    return Err(Error::OpenFileFailed {
+                    return Err(Error::IoAt {
+                        action: "open file",
                         path: output_path.to_path_buf(),
                         source: err,
                     });
@@ -172,31 +197,33 @@ impl ApiClient {
             Vec::new()
         };
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| Error::ApiClient(format!("Failed to download from {url}: {e}")))?;
+        let response = request.send().await.map_err(|e| Error::Message {
+            context: "API client wrapper error: ",
+            detail: format!("Failed to download from {url}: {e}"),
+        })?;
 
         let status = response.status();
         if !status.is_success() && status.as_u16() != 206 {
-            return Err(Error::ApiClient(format!(
-                "Download returned error status: {status}"
-            )));
+            return Err(Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Download returned error status: {status}"),
+            });
         }
 
         if let Some(parent) = output_path.parent() {
             compio::fs::create_dir_all(parent)
                 .await
-                .map_err(|e| Error::CreateDirFailed {
+                .map_err(|e| Error::IoAt {
+                    action: "create directory",
                     path: parent.to_path_buf(),
                     source: e,
                 })?;
         }
 
-        let downloaded = response
-            .bytes()
-            .await
-            .map_err(|e| Error::ApiClient(format!("Failed to download bytes: {e}")))?;
+        let downloaded = response.bytes().await.map_err(|e| Error::Message {
+            context: "API client wrapper error: ",
+            detail: format!("Failed to download bytes: {e}"),
+        })?;
         let final_bytes = if !existing.is_empty() && status.as_u16() == 206 {
             let mut merged = existing;
             merged.extend_from_slice(downloaded.as_ref());
@@ -206,7 +233,8 @@ impl ApiClient {
         };
 
         let write_result = compio::fs::write(output_path, final_bytes.clone()).await;
-        write_result.0.map_err(|e| Error::WriteFileFailed {
+        write_result.0.map_err(|e| Error::IoAt {
+            action: "write to file",
             path: output_path.to_path_buf(),
             source: e,
         })?;
@@ -225,9 +253,12 @@ impl ApiClient {
     ) -> Result<()> {
         let actual_md5 = self.download_file(url, output_path, false).await?;
         if actual_md5 != expected_md5.to_lowercase() {
-            return Err(Error::ApiClient(format!(
-                "MD5 mismatch for {url}: expected {expected_md5}, got {actual_md5}"
-            )));
+            return Err(Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!(
+                    "MD5 mismatch for {url}: expected {expected_md5}, got {actual_md5}"
+                ),
+            });
         }
         Ok(())
     }

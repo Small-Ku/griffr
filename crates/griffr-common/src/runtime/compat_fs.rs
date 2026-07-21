@@ -36,7 +36,10 @@ pub(crate) async fn run_blocking<T: Send + 'static>(
 ) -> Result<T> {
     compio::runtime::spawn_blocking(task)
         .await
-        .map_err(|_| Error::TaskPool(format!("{label} task panicked")))?
+        .map_err(|_| Error::Message {
+            context: "Task pool error: ",
+            detail: format!("{label} task panicked"),
+        })?
 }
 
 /// Returns `true` if `path` is a directory, `false` for any other outcome
@@ -58,7 +61,8 @@ pub async fn path_is_dir_or_err(path: &Path) -> Result<bool> {
     match compio::fs::metadata(path).await {
         Ok(m) => Ok(m.is_dir()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(Error::StatFailed {
+        Err(e) => Err(Error::IoAt {
+            action: "query file metadata/stat for",
             path: path.to_path_buf(),
             source: e,
         }),
@@ -68,7 +72,8 @@ pub async fn path_is_dir_or_err(path: &Path) -> Result<bool> {
 pub async fn directory_has_entries(path: impl Into<PathBuf>) -> Result<bool> {
     let path = path.into();
     run_blocking("directory scan", move || {
-        let mut entries = std::fs::read_dir(&path).map_err(|e| Error::ReadDirFailed {
+        let mut entries = std::fs::read_dir(&path).map_err(|e| Error::IoAt {
+            action: "read directory",
             path: path.clone(),
             source: e,
         })?;
@@ -85,11 +90,13 @@ pub async fn list_files_with_extension(
     let extension = extension.into();
     run_blocking("directory listing", move || {
         let mut targets = Vec::new();
-        for entry in std::fs::read_dir(&path).map_err(|e| Error::ReadDirFailed {
+        for entry in std::fs::read_dir(&path).map_err(|e| Error::IoAt {
+            action: "read directory",
             path: path.clone(),
             source: e,
         })? {
-            let entry = entry.map_err(|e| Error::ReadDirFailed {
+            let entry = entry.map_err(|e| Error::IoAt {
+                action: "read directory",
                 path: path.clone(),
                 source: e,
             })?;
@@ -120,8 +127,10 @@ pub async fn remove_dir_all(path: impl Into<PathBuf>) -> Result<()> {
 pub async fn read_link(path: impl Into<PathBuf>) -> Result<PathBuf> {
     let path = path.into();
     run_blocking("read link", move || {
-        std::fs::read_link(&path)
-            .map_err(|e| Error::Other(format!("Failed to read link {}: {}", path.display(), e)))
+        std::fs::read_link(&path).map_err(|e| Error::Message {
+            context: "",
+            detail: format!("Failed to read link {}: {}", path.display(), e),
+        })
     })
     .await
 }
@@ -139,15 +148,16 @@ pub async fn copy_dir_recursive(
     let target = target.into();
 
     if !path_is_dir_or_err(&source).await? {
-        return Err(Error::InvalidPath(format!(
-            "Source directory not found: {}",
-            source.display()
-        )));
+        return Err(Error::Message {
+            context: "Invalid path: ",
+            detail: format!("Source directory not found: {}", source.display()),
+        });
     }
 
     compio::fs::create_dir_all(&target)
         .await
-        .map_err(|source_error| Error::CreateDirFailed {
+        .map_err(|source_error| Error::IoAt {
+            action: "create directory",
             path: target.clone(),
             source: source_error,
         })?;
@@ -165,7 +175,8 @@ pub async fn copy_dir_recursive(
     for directory in &plan.directories {
         compio::fs::create_dir_all(directory)
             .await
-            .map_err(|source_error| Error::CreateDirFailed {
+            .map_err(|source_error| Error::IoAt {
+                action: "create directory",
                 path: directory.clone(),
                 source: source_error,
             })?;
@@ -200,7 +211,8 @@ async fn copy_file_async(source: &Path, target: &Path, expected_bytes: u64) -> R
     if let Some(parent) = target.parent() {
         compio::fs::create_dir_all(parent)
             .await
-            .map_err(|source_error| Error::CreateDirFailed {
+            .map_err(|source_error| Error::IoAt {
+                action: "create directory",
                 path: parent.to_path_buf(),
                 source: source_error,
             })?;
@@ -211,7 +223,8 @@ async fn copy_file_async(source: &Path, target: &Path, expected_bytes: u64) -> R
         Ok(()) => {}
         Err(source_error) if source_error.kind() == std::io::ErrorKind::NotFound => {}
         Err(source_error) => {
-            return Err(Error::RemoveFailed {
+            return Err(Error::IoAt {
+                action: "remove file or directory",
                 path: temp,
                 source: source_error,
             })
@@ -221,13 +234,15 @@ async fn copy_file_async(source: &Path, target: &Path, expected_bytes: u64) -> R
     let source_metadata =
         compio::fs::metadata(source)
             .await
-            .map_err(|source_error| Error::StatFailed {
+            .map_err(|source_error| Error::IoAt {
+                action: "query file metadata/stat for",
                 path: source.to_path_buf(),
                 source: source_error,
             })?;
     let input = compio::fs::File::open(source)
         .await
-        .map_err(|source_error| Error::OpenFileFailed {
+        .map_err(|source_error| Error::IoAt {
+            action: "open file",
             path: source.to_path_buf(),
             source: source_error,
         })?;
@@ -236,7 +251,8 @@ async fn copy_file_async(source: &Path, target: &Path, expected_bytes: u64) -> R
         .write(true)
         .open(&temp)
         .await
-        .map_err(|source_error| Error::CopyFailed {
+        .map_err(|source_error| Error::IoBetween {
+            action: "copy file",
             src: source.to_path_buf(),
             dest: target.to_path_buf(),
             source: source_error,
@@ -248,7 +264,8 @@ async fn copy_file_async(source: &Path, target: &Path, expected_bytes: u64) -> R
         let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
         loop {
             let BufResult(read_result, mut returned_buffer) = input.read_at(buffer, copied).await;
-            let read = read_result.map_err(|source_error| Error::CopyFailed {
+            let read = read_result.map_err(|source_error| Error::IoBetween {
+                action: "copy file",
                 src: source.to_path_buf(),
                 dest: target.to_path_buf(),
                 source: source_error,
@@ -259,7 +276,8 @@ async fn copy_file_async(source: &Path, target: &Path, expected_bytes: u64) -> R
             returned_buffer.truncate(read);
             let BufResult(write_result, mut returned_buffer) =
                 output.write_all_at(returned_buffer, copied).await;
-            write_result.map_err(|source_error| Error::CopyFailed {
+            write_result.map_err(|source_error| Error::IoBetween {
+                action: "copy file",
                 src: source.to_path_buf(),
                 dest: target.to_path_buf(),
                 source: source_error,
@@ -270,24 +288,29 @@ async fn copy_file_async(source: &Path, target: &Path, expected_bytes: u64) -> R
         }
 
         if copied != expected_bytes {
-            return Err(Error::Integrity(format!(
-                "Copy size mismatch for {} -> {}: expected {} bytes, copied {}",
-                source.display(),
-                target.display(),
-                expected_bytes,
-                copied
-            )));
+            return Err(Error::Message {
+                context: "Integrity error: ",
+                detail: format!(
+                    "Copy size mismatch for {} -> {}: expected {} bytes, copied {}",
+                    source.display(),
+                    target.display(),
+                    expected_bytes,
+                    copied
+                ),
+            });
         }
         output
             .sync_all()
             .await
-            .map_err(|source_error| Error::WriteFileFailed {
+            .map_err(|source_error| Error::IoAt {
+                action: "write to file",
                 path: temp.clone(),
                 source: source_error,
             })?;
         compio::fs::set_permissions(&temp, source_metadata.permissions())
             .await
-            .map_err(|source_error| Error::CopyFailed {
+            .map_err(|source_error| Error::IoBetween {
+                action: "copy file",
                 src: source.to_path_buf(),
                 dest: target.to_path_buf(),
                 source: source_error,
@@ -296,13 +319,11 @@ async fn copy_file_async(source: &Path, target: &Path, expected_bytes: u64) -> R
     }
     .await;
 
-    let close_result = output
-        .close()
-        .await
-        .map_err(|source_error| Error::WriteFileFailed {
-            path: temp.clone(),
-            source: source_error,
-        });
+    let close_result = output.close().await.map_err(|source_error| Error::IoAt {
+        action: "write to file",
+        path: temp.clone(),
+        source: source_error,
+    });
     if let Err(error) = copy_result {
         let _ = close_result;
         let _ = compio::fs::remove_file(&temp).await;
@@ -314,7 +335,8 @@ async fn copy_file_async(source: &Path, target: &Path, expected_bytes: u64) -> R
     }
     if let Err(source_error) = compio::fs::rename(&temp, target).await {
         let _ = compio::fs::remove_file(&temp).await;
-        return Err(Error::RenameFailed {
+        return Err(Error::IoBetween {
+            action: "rename file",
             src: temp,
             dest: target.to_path_buf(),
             source: source_error,
@@ -344,24 +366,25 @@ fn collect_copy_plan_sync(source: &Path, target: &Path) -> Result<CopyPlan> {
 }
 
 fn collect_copy_plan_inner_sync(source: &Path, target: &Path, plan: &mut CopyPlan) -> Result<()> {
-    let entries = std::fs::read_dir(source).map_err(|source_error| Error::ReadDirFailed {
+    let entries = std::fs::read_dir(source).map_err(|source_error| Error::IoAt {
+        action: "read directory",
         path: source.to_path_buf(),
         source: source_error,
     })?;
     for entry in entries {
-        let entry = entry.map_err(|source_error| Error::ReadDirFailed {
+        let entry = entry.map_err(|source_error| Error::IoAt {
+            action: "read directory",
             path: source.to_path_buf(),
             source: source_error,
         })?;
         let source_path = entry.path();
         let target_path = target.join(entry.file_name());
 
-        let file_type = entry
-            .file_type()
-            .map_err(|source_error| Error::StatFailed {
-                path: source_path.clone(),
-                source: source_error,
-            })?;
+        let file_type = entry.file_type().map_err(|source_error| Error::IoAt {
+            action: "query file metadata/stat for",
+            path: source_path.clone(),
+            source: source_error,
+        })?;
 
         if file_type.is_dir() {
             plan.directories.push(target_path.clone());
@@ -369,7 +392,8 @@ fn collect_copy_plan_inner_sync(source: &Path, target: &Path, plan: &mut CopyPla
         } else if file_type.is_file() {
             let bytes = entry
                 .metadata()
-                .map_err(|source_error| Error::StatFailed {
+                .map_err(|source_error| Error::IoAt {
+                    action: "query file metadata/stat for",
                     path: source_path.clone(),
                     source: source_error,
                 })?
@@ -388,11 +412,13 @@ fn collect_files_recursive_sync(root: &Path) -> Result<Vec<PathBuf>> {
     let mut stack = vec![root.to_path_buf()];
     let mut files = Vec::new();
     while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).map_err(|e| Error::ReadDirFailed {
+        for entry in std::fs::read_dir(&dir).map_err(|e| Error::IoAt {
+            action: "read directory",
             path: dir.clone(),
             source: e,
         })? {
-            let entry = entry.map_err(|e| Error::ReadDirFailed {
+            let entry = entry.map_err(|e| Error::IoAt {
+                action: "read directory",
                 path: dir.clone(),
                 source: e,
             })?;
@@ -415,11 +441,13 @@ fn remove_empty_dirs_recursive_sync(root: &Path) -> Result<()> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         dirs.push(dir.clone());
-        for entry in std::fs::read_dir(&dir).map_err(|e| Error::ReadDirFailed {
+        for entry in std::fs::read_dir(&dir).map_err(|e| Error::IoAt {
+            action: "read directory",
             path: dir.clone(),
             source: e,
         })? {
-            let entry = entry.map_err(|e| Error::ReadDirFailed {
+            let entry = entry.map_err(|e| Error::IoAt {
+                action: "read directory",
                 path: dir.clone(),
                 source: e,
             })?;
@@ -435,7 +463,8 @@ fn remove_empty_dirs_recursive_sync(root: &Path) -> Result<()> {
             continue;
         }
         if std::fs::read_dir(&dir)
-            .map_err(|e| Error::ReadDirFailed {
+            .map_err(|e| Error::IoAt {
+                action: "read directory",
                 path: dir.clone(),
                 source: e,
             })?

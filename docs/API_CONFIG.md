@@ -180,7 +180,7 @@ The `seq` field is a **per-session event sequence counter** used for telemetry a
 | Type | Integer (number) |
 | Scope | Per-session |
 | Behavior | Monotonically incrementing |
-| Initial value | Varies (observed starting at 3, 7, 10) |
+| Start value | Varies (observed starting at 3, 7, 10) |
 | Increment | +1 per event |
 
 ### Usage

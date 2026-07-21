@@ -103,6 +103,7 @@ fn build_predownload_tasks(stage_dir: &Path, patches: &[PackFile]) -> Result<Vec
                 expected_size: Some(patch.size()),
                 retry_count: 0,
                 transfer_class: griffr_common::runtime::task_pool::TransferClass::General,
+                resume: None,
             })),
         });
     }
@@ -283,15 +284,15 @@ pub async fn apply(
 pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
     let local = detect_local_install(&path).await?;
     let install_root = local.install_path;
-    let initial_task = match get_patch_recovery_state(&install_root, None)? {
+    let root_task = match get_patch_recovery_state(&install_root, None)? {
         PatchRecoveryState::ExtractedReady => Task::ApplyExtractedVfsPatchManifest {
             install_root: install_root.clone(),
         },
         PatchRecoveryState::DeletePending => Task::ApplyDeleteManifest {
             install_root: install_root.clone(),
         },
-        PatchRecoveryState::ExtractedIncomplete { missing } => anyhow::bail!(
-            "Extracted patch state is incomplete under {}. Missing recoverable payload/base for: {}",
+        PatchRecoveryState::ExtractedMissing { missing } => anyhow::bail!(
+            "Extracted patch state is missing required data under {}. Missing recoverable payload/base for: {}",
             install_root.display(),
             missing.join(", ")
         ),
@@ -304,7 +305,7 @@ pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
             "Archive-only state at {} must be applied with `predownload apply --output-dir`, not resume.",
             stage_dir.display()
         ),
-        PatchRecoveryState::Complete => anyhow::bail!(
+        PatchRecoveryState::Idle => anyhow::bail!(
             "No extracted local patch state found under {} (expected {}, {}, or {}).",
             install_root.display(),
             PATCH_MANIFEST_NAME,
@@ -339,7 +340,7 @@ pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
         .with_commit(commit_lane)
         .with_patch(patch_lane)
         .with_delete(delete_lane);
-    let result = task_pool_runner.run_batch(vec![initial_task], task_progress)?;
+    let result = task_pool_runner.run_batch(vec![root_task], task_progress)?;
     progress_session.finish();
     progress.finish();
 

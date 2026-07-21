@@ -14,18 +14,19 @@ pub async fn sync_launcher_metadata(
     let version_info = api_client
         .get_latest_game(&install_target.api, version)
         .await?;
-    let pkg = version_info
-        .pkg
-        .as_ref()
-        .ok_or_else(|| Error::ApiClient("No package information available".to_string()))?;
+    let pkg = version_info.pkg.as_ref().ok_or_else(|| Error::Message {
+        context: "API client wrapper error: ",
+        detail: "No package information available".to_string(),
+    })?;
 
     let config_ini_url = launcher_metadata_url(&pkg.file_path, CONFIG_INI_NAME)?;
     let config_ini_path = install_path.join(CONFIG_INI_NAME);
     api_client
         .download_file(&config_ini_url, &config_ini_path, false)
         .await
-        .map_err(|e| {
-            Error::Download(format!("Failed to sync launcher config.ini metadata: {e}"))
+        .map_err(|e| Error::Message {
+            context: "Download error: ",
+            detail: format!("Failed to sync launcher config.ini metadata: {e}"),
         })?;
 
     let game_files_url = launcher_metadata_url(&pkg.file_path, GAME_FILES_NAME)?;
@@ -34,15 +35,17 @@ pub async fn sync_launcher_metadata(
         api_client
             .download_file_with_verify(&game_files_url, &game_files_path, expected_md5)
             .await
-            .map_err(|e| {
-                Error::Download(format!("Failed to sync launcher game_files metadata: {e}"))
+            .map_err(|e| Error::Message {
+                context: "Download error: ",
+                detail: format!("Failed to sync launcher game_files metadata: {e}"),
             })?;
     } else {
         api_client
             .download_file(&game_files_url, &game_files_path, false)
             .await
-            .map_err(|e| {
-                Error::Download(format!("Failed to sync launcher game_files metadata: {e}"))
+            .map_err(|e| Error::Message {
+                context: "Download error: ",
+                detail: format!("Failed to sync launcher game_files metadata: {e}"),
             })?;
     }
 

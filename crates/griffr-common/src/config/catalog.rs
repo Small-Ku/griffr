@@ -4,7 +4,7 @@ use super::{ChannelId, GameId, RegionId};
 #[derive(Debug, Clone)]
 pub struct GameDefinition {
     pub id: GameId,
-    pub executable: &'static str,
+    pub exe_name: &'static str,
     pub data_root: &'static str,
     pub local_low_dir: &'static str,
     pub cn_appcode: &'static str,
@@ -35,7 +35,7 @@ pub const GRYPHLINE_LOCAL_LOW_VENDOR: &str = "Gryphline";
 pub static GAME_DEFINITIONS: &[GameDefinition] = &[
     GameDefinition {
         id: GameId::ARKNIGHTS,
-        executable: "Arknights.exe",
+        exe_name: "Arknights.exe",
         data_root: "Arknights_Data",
         local_low_dir: "Arknights",
         cn_appcode: "GzD1CpaWgmSq1wew",
@@ -44,7 +44,7 @@ pub static GAME_DEFINITIONS: &[GameDefinition] = &[
     },
     GameDefinition {
         id: GameId::ENDFIELD,
-        executable: "Endfield.exe",
+        exe_name: "Endfield.exe",
         data_root: "Endfield_Data",
         local_low_dir: "Endfield",
         cn_appcode: "6LL0KJuqHBVz33WK",
@@ -65,10 +65,10 @@ pub fn game_by_appcode(appcode: &str) -> Option<GameId> {
         .map(GameDefinition::game_id)
 }
 
-pub fn game_by_executable(executable: &str) -> Option<GameId> {
+pub fn game_by_exe_name(name: &str) -> Option<GameId> {
     GAME_DEFINITIONS
         .iter()
-        .find(|entry| entry.executable.eq_ignore_ascii_case(executable))
+        .find(|entry| entry.exe_name.eq_ignore_ascii_case(name))
         .map(GameDefinition::game_id)
 }
 

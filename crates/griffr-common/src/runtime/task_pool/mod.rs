@@ -1,8 +1,8 @@
 mod archive_plan;
 pub mod download;
-mod executor;
 pub(crate) mod fs_ops;
 pub mod graph;
+mod runner;
 pub mod scheduler;
 pub mod types;
 pub(crate) mod verify;

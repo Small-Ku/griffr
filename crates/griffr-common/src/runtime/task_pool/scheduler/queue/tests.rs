@@ -1,5 +1,5 @@
 use super::{AdmissionSnapshot, ResourceState, SchedulerQueue};
-use crate::runtime::task_pool::scheduler::routing::{ExecutionClass, ResourceRequest};
+use crate::runtime::task_pool::scheduler::routing::{ResourceRequest, RunClass};
 use crate::runtime::task_pool::scheduler::TaskPriority;
 use crate::runtime::task_pool::{
     NodeId, Task, TaskPoolConfig, VolumeIoPolicy, VolumeStreamingMode,
@@ -15,7 +15,7 @@ fn hardlink(name: &str) -> Task {
 
 fn resources(volume: &str) -> ResourceRequest {
     ResourceRequest {
-        execution: ExecutionClass::Blocking,
+        run: RunClass::Blocking,
         write_volumes: vec![volume.to_string()],
         ..ResourceRequest::default()
     }
@@ -23,7 +23,7 @@ fn resources(volume: &str) -> ResourceRequest {
 
 fn read(volume: &str) -> ResourceRequest {
     ResourceRequest {
-        execution: ExecutionClass::AsyncIo,
+        run: RunClass::AsyncIo,
         read_volumes: vec![volume.to_string()],
         ..ResourceRequest::default()
     }
@@ -31,7 +31,7 @@ fn read(volume: &str) -> ResourceRequest {
 
 fn write(volume: &str) -> ResourceRequest {
     ResourceRequest {
-        execution: ExecutionClass::Blocking,
+        run: RunClass::Blocking,
         write_volumes: vec![volume.to_string()],
         ..ResourceRequest::default()
     }
@@ -39,7 +39,7 @@ fn write(volume: &str) -> ResourceRequest {
 
 fn metadata(volume: &str) -> ResourceRequest {
     ResourceRequest {
-        execution: ExecutionClass::Blocking,
+        run: RunClass::Blocking,
         metadata_volumes: vec![volume.to_string()],
         ..ResourceRequest::default()
     }
@@ -53,7 +53,7 @@ fn unavailable_blocking_pool_does_not_stall_async_admission() {
         NodeId::from_index(0),
         hardlink("blocking"),
         ResourceRequest {
-            execution: ExecutionClass::Blocking,
+            run: RunClass::Blocking,
             ..ResourceRequest::default()
         },
         TaskPriority::Bulk,
@@ -62,7 +62,7 @@ fn unavailable_blocking_pool_does_not_stall_async_admission() {
         NodeId::from_index(1),
         hardlink("async"),
         ResourceRequest {
-            execution: ExecutionClass::AsyncIo,
+            run: RunClass::AsyncIo,
             ..ResourceRequest::default()
         },
         TaskPriority::Bulk,
@@ -255,10 +255,10 @@ fn runnable_tasks_prefer_smaller_work_on_the_same_backlogged_volume() {
     let mut queue = SchedulerQueue::default();
     let config = TaskPoolConfig::default();
     let mut large = resources("volume-a");
-    large.execution = ExecutionClass::Blocking;
+    large.run = RunClass::Blocking;
     large.estimated_bytes = 1024;
     let mut small = resources("volume-a");
-    small.execution = ExecutionClass::Blocking;
+    small.run = RunClass::Blocking;
     small.estimated_bytes = 1;
     queue.push(
         NodeId::from_index(0),

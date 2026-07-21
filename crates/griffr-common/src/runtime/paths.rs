@@ -15,7 +15,7 @@ pub const DELETE_FILES_MANIFEST_NAME: &str = "delete_files.txt";
 pub const STREAMING_ASSETS_DIR: &str = "StreamingAssets";
 pub const PERSISTENT_DIR: &str = "Persistent";
 pub const VFS_DIR: &str = "VFS";
-pub const RESOURCE_GROUP_INITIAL: &str = "initial";
+pub const RESOURCE_GROUP_BASE: &str = "initial";
 pub const RESOURCE_GROUP_MAIN: &str = "main";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,9 +74,9 @@ pub fn files_base_url(file_path: &str) -> Result<&str> {
 }
 
 fn invalid_files_path(file_path: &str) -> Error {
-    Error::Config(format!(
+    Error::Message { context: "Configuration error: ", detail: format!(
         "Expected file_path to end with '/{GAME_FILES_NAME}' or '/{CDN_FILES_DIR}', got: {file_path}"
-    ))
+    ) }
 }
 
 pub fn launcher_metadata_url(file_path: &str, filename: &str) -> Result<String> {

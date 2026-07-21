@@ -7,23 +7,19 @@ use compio::buf::BufResult;
 use compio::io::{AsyncReadAt, AsyncWriteAtExt};
 
 use crate::error::{Error, Result};
-use crate::runtime::preallocate_file;
+use crate::runtime::{preallocate_file, PathReuseMethod};
 use md5::Md5;
 
 pub(crate) fn make_partial_download_path(path: &Path) -> Result<PathBuf> {
-    let parent = path.parent().ok_or_else(|| {
-        Error::InvalidPath(format!(
-            "Destination path has no parent: {}",
-            path.display()
-        ))
+    let parent = path.parent().ok_or_else(|| Error::Message {
+        context: "Invalid path: ",
+        detail: format!("Destination path has no parent: {}", path.display()),
     })?;
     let file_name = path
         .file_name()
-        .ok_or_else(|| {
-            Error::InvalidPath(format!(
-                "Destination path has no file name: {}",
-                path.display()
-            ))
+        .ok_or_else(|| Error::Message {
+            context: "Invalid path: ",
+            detail: format!("Destination path has no file name: {}", path.display()),
         })?
         .to_string_lossy();
     Ok(parent.join(format!(".{}.griffr.part", file_name)))
@@ -37,7 +33,8 @@ pub(crate) fn hash_file_prefix_into_hasher(
     if prefix_len == 0 {
         return Ok(());
     }
-    let mut file = File::open(path).map_err(|e| Error::OpenFileFailed {
+    let mut file = File::open(path).map_err(|e| Error::IoAt {
+        action: "open file",
         path: path.to_path_buf(),
         source: e,
     })?;
@@ -47,12 +44,15 @@ pub(crate) fn hash_file_prefix_into_hasher(
         let to_read = remaining.min(buf.len() as u64) as usize;
         let n = file.read(&mut buf[..to_read])?;
         if n == 0 {
-            return Err(Error::Extraction(format!(
-                "Partial file shorter than expected prefix: {} < {} for {}",
-                prefix_len - remaining,
-                prefix_len,
-                path.display()
-            )));
+            return Err(Error::Message {
+                context: "Extraction error: ",
+                detail: format!(
+                    "Partial file shorter than expected prefix: {} < {} for {}",
+                    prefix_len - remaining,
+                    prefix_len,
+                    path.display()
+                ),
+            });
         }
         md5::Digest::update(hasher, &buf[..n]);
         remaining -= n as u64;
@@ -64,26 +64,31 @@ pub(crate) fn commit_partial_download(part_path: &Path, dest_path: &Path) -> Res
     match std::fs::metadata(part_path) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => {
-            return Err(Error::Download(format!(
-                "Partial download path is not a file: {}",
-                part_path.display()
-            )))
+            return Err(Error::Message {
+                context: "Download error: ",
+                detail: format!(
+                    "Partial download path is not a file: {}",
+                    part_path.display()
+                ),
+            })
         }
         Err(source) if source.kind() == ErrorKind::NotFound => {
-            return Err(Error::Download(format!(
-                "Missing partial download file {}",
-                part_path.display()
-            )))
+            return Err(Error::Message {
+                context: "Download error: ",
+                detail: format!("Missing partial download file {}", part_path.display()),
+            })
         }
         Err(source) => {
-            return Err(Error::StatFailed {
+            return Err(Error::IoAt {
+                action: "query file metadata/stat for",
                 path: part_path.to_path_buf(),
                 source,
             })
         }
     }
     if let Some(parent) = dest_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirFailed {
+        std::fs::create_dir_all(parent).map_err(|source| Error::IoAt {
+            action: "create directory",
             path: parent.to_path_buf(),
             source,
         })?;
@@ -98,19 +103,23 @@ pub(crate) async fn commit_partial_download_async(
     match compio::fs::metadata(part_path).await {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => {
-            return Err(Error::Download(format!(
-                "Partial download path is not a file: {}",
-                part_path.display()
-            )))
+            return Err(Error::Message {
+                context: "Download error: ",
+                detail: format!(
+                    "Partial download path is not a file: {}",
+                    part_path.display()
+                ),
+            })
         }
         Err(source) if source.kind() == ErrorKind::NotFound => {
-            return Err(Error::Download(format!(
-                "Missing partial download file {}",
-                part_path.display()
-            )))
+            return Err(Error::Message {
+                context: "Download error: ",
+                detail: format!("Missing partial download file {}", part_path.display()),
+            })
         }
         Err(source) => {
-            return Err(Error::StatFailed {
+            return Err(Error::IoAt {
+                action: "query file metadata/stat for",
                 path: part_path.to_path_buf(),
                 source,
             })
@@ -119,14 +128,16 @@ pub(crate) async fn commit_partial_download_async(
     if let Some(parent) = dest_path.parent() {
         compio::fs::create_dir_all(parent)
             .await
-            .map_err(|source| Error::CreateDirFailed {
+            .map_err(|source| Error::IoAt {
+                action: "create directory",
                 path: parent.to_path_buf(),
                 source,
             })?;
     }
     compio::fs::rename(part_path, dest_path)
         .await
-        .map_err(|source| Error::RenameFailed {
+        .map_err(|source| Error::IoBetween {
+            action: "rename file",
             src: part_path.to_path_buf(),
             dest: dest_path.to_path_buf(),
             source,
@@ -137,7 +148,8 @@ pub(crate) async fn create_hardlink_async(src: &Path, dest: &Path) -> Result<()>
     if let Some(parent) = dest.parent() {
         compio::fs::create_dir_all(parent)
             .await
-            .map_err(|source| Error::CreateDirFailed {
+            .map_err(|source| Error::IoAt {
+                action: "create directory",
                 path: parent.to_path_buf(),
                 source,
             })?;
@@ -147,7 +159,8 @@ pub(crate) async fn create_hardlink_async(src: &Path, dest: &Path) -> Result<()>
         Ok(()) => {}
         Err(source) if source.kind() == ErrorKind::NotFound => {}
         Err(source) => {
-            return Err(Error::RemoveFailed {
+            return Err(Error::IoAt {
+                action: "remove file or directory",
                 path: temp_path,
                 source,
             })
@@ -155,16 +168,20 @@ pub(crate) async fn create_hardlink_async(src: &Path, dest: &Path) -> Result<()>
     }
     if let Err(source) = compio::fs::hard_link(src, &temp_path).await {
         let _ = compio::fs::remove_file(&temp_path).await;
-        return Err(Error::Other(format!(
-            "Failed to hardlink {} -> {}: {}",
-            src.display(),
-            temp_path.display(),
-            source
-        )));
+        return Err(Error::Message {
+            context: "",
+            detail: format!(
+                "Failed to hardlink {} -> {}: {}",
+                src.display(),
+                temp_path.display(),
+                source
+            ),
+        });
     }
     if let Err(source) = compio::fs::rename(&temp_path, dest).await {
         let _ = compio::fs::remove_file(&temp_path).await;
-        return Err(Error::RenameFailed {
+        return Err(Error::IoBetween {
+            action: "rename file",
             src: temp_path,
             dest: dest.to_path_buf(),
             source,
@@ -277,24 +294,19 @@ pub(crate) fn classify_reuse_mode(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReuseMethod {
-    Hardlink,
-    Copy,
-}
-
 pub(crate) async fn copy_verified_file_async(
     src: &Path,
     dest: &Path,
     expected_md5: &str,
     expected_size: u64,
-) -> Result<ReuseMethod> {
+) -> Result<PathReuseMethod> {
     const COPY_BUFFER_BYTES: usize = 1024 * 1024;
 
     if let Some(parent) = dest.parent() {
         compio::fs::create_dir_all(parent)
             .await
-            .map_err(|source| Error::CreateDirFailed {
+            .map_err(|source| Error::IoAt {
+                action: "create directory",
                 path: parent.to_path_buf(),
                 source,
             })?;
@@ -304,7 +316,13 @@ pub(crate) async fn copy_verified_file_async(
     match compio::fs::remove_file(&temp).await {
         Ok(()) => {}
         Err(source) if source.kind() == ErrorKind::NotFound => {}
-        Err(source) => return Err(Error::RemoveFailed { path: temp, source }),
+        Err(source) => {
+            return Err(Error::IoAt {
+                action: "remove file or directory",
+                path: temp,
+                source,
+            })
+        }
     }
 
     let source_permissions = compio::fs::metadata(src)
@@ -313,7 +331,8 @@ pub(crate) async fn copy_verified_file_async(
         .map(|metadata| metadata.permissions());
     let input = compio::fs::File::open(src)
         .await
-        .map_err(|source| Error::OpenFileFailed {
+        .map_err(|source| Error::IoAt {
+            action: "open file",
             path: src.to_path_buf(),
             source,
         })?;
@@ -322,7 +341,8 @@ pub(crate) async fn copy_verified_file_async(
         .write(true)
         .open(&temp)
         .await
-        .map_err(|source| Error::WriteFileFailed {
+        .map_err(|source| Error::IoAt {
+            action: "write to file",
             path: temp.clone(),
             source,
         })?;
@@ -334,7 +354,8 @@ pub(crate) async fn copy_verified_file_async(
         let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
         loop {
             let BufResult(read_result, mut returned_buffer) = input.read_at(buffer, copied).await;
-            let read = read_result.map_err(|source| Error::CopyFailed {
+            let read = read_result.map_err(|source| Error::IoBetween {
+                action: "copy file",
                 src: src.to_path_buf(),
                 dest: dest.to_path_buf(),
                 source,
@@ -346,7 +367,8 @@ pub(crate) async fn copy_verified_file_async(
             md5::Digest::update(&mut hasher, &returned_buffer);
             let BufResult(write_result, mut returned_buffer) =
                 output.write_all_at(returned_buffer, copied).await;
-            write_result.map_err(|source| Error::CopyFailed {
+            write_result.map_err(|source| Error::IoBetween {
+                action: "copy file",
                 src: src.to_path_buf(),
                 dest: dest.to_path_buf(),
                 source,
@@ -356,24 +378,25 @@ pub(crate) async fn copy_verified_file_async(
             buffer = returned_buffer;
         }
 
-        output
-            .sync_all()
-            .await
-            .map_err(|source| Error::WriteFileFailed {
-                path: temp.clone(),
-                source,
-            })?;
+        output.sync_all().await.map_err(|source| Error::IoAt {
+            action: "write to file",
+            path: temp.clone(),
+            source,
+        })?;
         let actual_md5 = crate::to_hex(&md5::Digest::finalize(hasher));
         if copied != expected_size || actual_md5 != expected_md5.to_lowercase() {
-            return Err(Error::Integrity(format!(
-                "Copy verification failed for {} -> {}: expected size/md5 {}/{}, got {}/{}",
-                src.display(),
-                dest.display(),
-                expected_size,
-                expected_md5,
-                copied,
-                actual_md5
-            )));
+            return Err(Error::Message {
+                context: "Integrity error: ",
+                detail: format!(
+                    "Copy verification failed for {} -> {}: expected size/md5 {}/{}, got {}/{}",
+                    src.display(),
+                    dest.display(),
+                    expected_size,
+                    expected_md5,
+                    copied,
+                    actual_md5
+                ),
+            });
         }
         if let Some(permissions) = source_permissions {
             // Preserve the previous reuse behavior: permissions are best-effort
@@ -387,13 +410,11 @@ pub(crate) async fn copy_verified_file_async(
     // Explicitly close on both success and failure. Dropping a compio file may
     // defer the actual OS close, which can otherwise keep the temporary path
     // busy while cleanup runs on Windows.
-    let close_result = output
-        .close()
-        .await
-        .map_err(|source| Error::WriteFileFailed {
-            path: temp.clone(),
-            source,
-        });
+    let close_result = output.close().await.map_err(|source| Error::IoAt {
+        action: "write to file",
+        path: temp.clone(),
+        source,
+    });
     if let Err(error) = copy_result {
         let _ = close_result;
         let _ = compio::fs::remove_file(&temp).await;
@@ -405,30 +426,27 @@ pub(crate) async fn copy_verified_file_async(
     }
     if let Err(source) = compio::fs::rename(&temp, dest).await {
         let _ = compio::fs::remove_file(&temp).await;
-        return Err(Error::RenameFailed {
+        return Err(Error::IoBetween {
+            action: "rename file",
             src: temp,
             dest: dest.to_path_buf(),
             source,
         });
     }
-    Ok(ReuseMethod::Copy)
+    Ok(PathReuseMethod::Copy)
 }
 
 pub(crate) fn make_temp_write_path(path: &Path) -> Result<PathBuf> {
     static TEMP_WRITE_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let parent = path.parent().ok_or_else(|| {
-        Error::InvalidPath(format!(
-            "Destination path has no parent: {}",
-            path.display()
-        ))
+    let parent = path.parent().ok_or_else(|| Error::Message {
+        context: "Invalid path: ",
+        detail: format!("Destination path has no parent: {}", path.display()),
     })?;
     let file_name = path
         .file_name()
-        .ok_or_else(|| {
-            Error::InvalidPath(format!(
-                "Destination path has no file name: {}",
-                path.display()
-            ))
+        .ok_or_else(|| Error::Message {
+            context: "Invalid path: ",
+            detail: format!("Destination path has no file name: {}", path.display()),
         })?
         .to_string_lossy();
     let counter = TEMP_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -438,14 +456,16 @@ pub(crate) fn make_temp_write_path(path: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 pub(crate) fn write_file(path: &Path, bytes: Vec<u8>) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirFailed {
+        std::fs::create_dir_all(parent).map_err(|source| Error::IoAt {
+            action: "create directory",
             path: parent.to_path_buf(),
             source,
         })?;
     }
     let temp_path = make_temp_write_path(path)?;
     let result = (|| -> Result<()> {
-        std::fs::write(&temp_path, bytes).map_err(|source| Error::WriteFileFailed {
+        std::fs::write(&temp_path, bytes).map_err(|source| Error::IoAt {
+            action: "write to file",
             path: temp_path.clone(),
             source,
         })?;

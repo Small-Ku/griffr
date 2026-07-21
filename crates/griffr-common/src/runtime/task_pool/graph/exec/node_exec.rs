@@ -4,7 +4,7 @@ use super::super::super::types::Task;
 use super::super::builder::{
     NodeId, NodeState, TaskDependencyToken, TaskGraphBuilder, TaskGraphSummary,
 };
-use super::expansion::{GraphExpansion, TaskExecution};
+use super::expansion::{GraphExpansion, TaskRun};
 use crate::error::{Error, Result};
 
 #[derive(Debug)]
@@ -107,49 +107,52 @@ impl TaskGraph {
     }
 
     pub(crate) fn mark_running(&mut self, id: NodeId) -> Result<()> {
-        let node = self.nodes.get_mut(id.index()).ok_or_else(|| {
-            Error::TaskPool(format!(
-                "scheduler started unknown graph node {}",
-                id.index()
-            ))
-        })?;
+        let node = self
+            .nodes
+            .get_mut(id.index())
+            .ok_or_else(|| Error::Message {
+                context: "Task pool error: ",
+                detail: format!("scheduler started unknown graph node {}", id.index()),
+            })?;
         if node.state != NodeState::Ready {
-            return Err(Error::TaskPool(format!(
-                "scheduler started graph node {} from invalid state {:?}",
-                id.index(),
-                node.state,
-            )));
+            return Err(Error::Message {
+                context: "Task pool error: ",
+                detail: format!(
+                    "scheduler started graph node {} from invalid state {:?}",
+                    id.index(),
+                    node.state,
+                ),
+            });
         }
         node.state = NodeState::Running;
         Ok(())
     }
 
-    pub(crate) fn complete(
-        &mut self,
-        id: NodeId,
-        execution: TaskExecution,
-    ) -> Result<Vec<ReadyTask>> {
+    pub(crate) fn finish(&mut self, id: NodeId, run: TaskRun) -> Result<Vec<ReadyTask>> {
         let state = self.nodes.get(id.index()).map(|node| node.state);
         if state != Some(NodeState::Running) {
-            return Err(Error::TaskPool(format!(
-                "completion received for graph node {} outside Running state",
-                id.index(),
-            )));
+            return Err(Error::Message {
+                context: "Task pool error: ",
+                detail: format!(
+                    "finish received for graph node {} outside Running state",
+                    id.index(),
+                ),
+            });
         }
 
         let mut ready = Vec::new();
-        match execution {
-            TaskExecution::Succeeded => self.finish_succeeded(id, &mut ready),
-            TaskExecution::Failed { .. } => self.finish_failed(id, &mut ready),
-            TaskExecution::Cancelled => self.finish_cancelled(id, &mut ready),
-            TaskExecution::Expand(expansion) => {
+        match run {
+            TaskRun::Succeeded => self.finish_succeeded(id, &mut ready),
+            TaskRun::Failed { .. } => self.finish_failed(id, &mut ready),
+            TaskRun::Cancelled => self.finish_cancelled(id, &mut ready),
+            TaskRun::Expand(expansion) => {
                 self.install_expansion(id, expansion, &mut ready)?;
             }
         }
         Ok(ready)
     }
 
-    fn completion_dependents_of(&self, root: NodeId) -> BTreeSet<NodeId> {
+    fn finish_dependents_of(&self, root: NodeId) -> BTreeSet<NodeId> {
         let mut reachable = BTreeSet::new();
         let mut pending = vec![root];
         while let Some(id) = pending.pop() {
@@ -186,15 +189,18 @@ impl TaskGraph {
                 if self.bindings.contains_key(&binding)
                     || local_bindings.insert(binding, local_index).is_some()
                 {
-                    return Err(Error::TaskPool(format!(
-                        "dynamic graph dependency token {:?} is bound more than once",
-                        binding,
-                    )));
+                    return Err(Error::Message {
+                        context: "Task pool error: ",
+                        detail: format!(
+                            "dynamic graph dependency token {:?} is bound more than once",
+                            binding,
+                        ),
+                    });
                 }
             }
         }
 
-        let completion_dependents = self.completion_dependents_of(parent);
+        let finish_dependents = self.finish_dependents_of(parent);
         let mut resolved_dependencies = Vec::with_capacity(nodes.len());
         let mut blocked = vec![false; nodes.len()];
         let mut out_degree = vec![0usize; nodes.len()];
@@ -202,34 +208,46 @@ impl TaskGraph {
             let mut dependencies = BTreeSet::new();
             for dependency in &node.dependencies {
                 if dependency.0 >= local_index {
-                    return Err(Error::TaskPool(format!(
-                        "dynamic graph node {local_index} has a forward dependency on {}",
-                        dependency.0,
-                    )));
+                    return Err(Error::Message {
+                        context: "Task pool error: ",
+                        detail: format!(
+                            "dynamic graph node {local_index} has a forward dependency on {}",
+                            dependency.0,
+                        ),
+                    });
                 }
                 dependencies.insert(global_ids[dependency.0]);
             }
             for token in &node.token_dependencies {
                 let dependency = if let Some(existing) = self.bindings.get(token).copied() {
-                    if completion_dependents.contains(&existing) {
-                        return Err(Error::TaskPool(format!(
+                    if finish_dependents.contains(&existing) {
+                        return Err(Error::Message {
+                            context: "Task pool error: ",
+                            detail: format!(
                             "dynamic graph node {local_index} creates a cycle through token {:?}",
                             token,
-                        )));
+                        ),
+                        });
                     }
                     existing
                 } else if let Some(bound_local) = local_bindings.get(token).copied() {
                     if bound_local >= local_index {
-                        return Err(Error::TaskPool(format!(
-                            "dynamic graph node {local_index} has a forward token dependency"
-                        )));
+                        return Err(Error::Message {
+                            context: "Task pool error: ",
+                            detail: format!(
+                                "dynamic graph node {local_index} has a forward token dependency"
+                            ),
+                        });
                     }
                     global_ids[bound_local]
                 } else {
-                    return Err(Error::TaskPool(format!(
-                        "dynamic graph node {local_index} depends on unbound token {:?}",
-                        token,
-                    )));
+                    return Err(Error::Message {
+                        context: "Task pool error: ",
+                        detail: format!(
+                            "dynamic graph node {local_index} depends on unbound token {:?}",
+                            token,
+                        ),
+                    });
                 };
                 dependencies.insert(dependency);
             }
@@ -294,9 +312,10 @@ impl TaskGraph {
             .filter_map(|(index, degree)| (degree == 0).then_some(global_ids[index]))
             .collect::<Vec<_>>();
         if terminals.is_empty() {
-            return Err(Error::TaskPool(
-                "dynamic task expansion has no terminal nodes".to_string(),
-            ));
+            return Err(Error::Message {
+                context: "Task pool error: ",
+                detail: "dynamic task expansion has no terminal nodes".to_string(),
+            });
         }
 
         let parent_node = &mut self.nodes[parent.index()];

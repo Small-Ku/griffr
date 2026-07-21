@@ -71,29 +71,29 @@ impl StepProgress {
         }
     }
 
-    pub fn update_count(&self, completed: usize, total: usize, file: &str) {
+    pub fn update_count(&self, finished: usize, total: usize, file: &str) {
         if total == 0 {
             return;
         }
-        let completed = completed.min(total);
+        let finished = finished.min(total);
         self.ensure_started(total as u64);
 
         let should_refresh = self.verbose
             || total <= 20
-            || completed <= 3
-            || completed == total
-            || completed.is_multiple_of(10);
+            || finished <= 3
+            || finished == total
+            || finished.is_multiple_of(10);
         if !should_refresh {
             return;
         }
 
         if self.plain {
-            let completed = completed as u64;
+            let finished = finished as u64;
             let total = total as u64;
             let marker = if self.verbose {
-                completed
+                finished
             } else {
-                completed
+                finished
                     .saturating_mul(100)
                     .checked_div(total)
                     .map(|pct| (pct / 5) * 5)
@@ -101,12 +101,12 @@ impl StepProgress {
             };
             if self.last_plain.swap(marker, Ordering::AcqRel) != marker {
                 if self.verbose && !file.is_empty() {
-                    eprintln!("{}: {}/{} {}", self.label, completed, total, file);
+                    eprintln!("{}: {}/{} {}", self.label, finished, total, file);
                 } else {
-                    eprintln!("{}: {}/{}", self.label, completed, total);
+                    eprintln!("{}: {}/{}", self.label, finished, total);
                 }
             }
-            self.bar.set_position(completed);
+            self.bar.set_position(finished);
             return;
         }
         if self.verbose && !file.is_empty() {
@@ -115,14 +115,14 @@ impl StepProgress {
         } else {
             self.bar.set_message(self.label.clone());
         }
-        self.bar.set_position(completed as u64);
+        self.bar.set_position(finished as u64);
     }
 
-    pub fn update_bytes(&self, completed: u64, total: u64, file: &str) {
+    pub fn update_bytes(&self, finished: u64, total: u64, file: &str) {
         let total = total.max(1);
         self.ensure_started(total);
 
-        let clamped = completed.min(total);
+        let clamped = finished.min(total);
         if self.plain {
             let bucket = ((clamped.saturating_mul(100) / total) / 5) * 5;
             if self.last_plain.swap(bucket, Ordering::AcqRel) != bucket {
@@ -278,7 +278,7 @@ fn apply_update(route: &ProgressRoute, update: ProgressUpdate) {
             }
         }
         ProgressUpdate::Advanced {
-            completed,
+            finished,
             total,
             item,
             ..
@@ -289,12 +289,12 @@ fn apply_update(route: &ProgressRoute, update: ProgressUpdate) {
                     if let Some(total) = total {
                         route
                             .bar
-                            .update_count(completed as usize, total as usize, item);
+                            .update_count(finished as usize, total as usize, item);
                     }
                 }
                 ProgressUnit::Bytes => {
                     if let Some(total) = total {
-                        route.bar.update_bytes(completed, total, item);
+                        route.bar.update_bytes(finished, total, item);
                     }
                 }
             }

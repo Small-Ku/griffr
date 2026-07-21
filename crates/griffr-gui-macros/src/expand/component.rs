@@ -44,7 +44,7 @@ fn render_definitions(tokens: &ComponentTokens<'_>) -> TokenStream {
                 #(#z_order_front_to_back),*
             ];
             pub const CANVAS_COUNT: usize = #canvas_count;
-            pub fn initial_widget_nodes() -> Vec<::griffr_gui::ui::WidgetNode> {
+            pub fn root_widget_nodes() -> Vec<::griffr_gui::ui::WidgetNode> {
                 vec![#(#static_widgets),*]
             }
         }
@@ -88,7 +88,7 @@ fn render_definitions(tokens: &ComponentTokens<'_>) -> TokenStream {
             type Init<'a> = &'a ::winio::prelude::Child<::winio::widgets::Window>;
             type Message = #msg_ident;
             async fn init(init: Self::Init<'_>, _sender: &::winio::prelude::ComponentSender<Self>) -> ::winio::prelude::Result<Self> {
-                let mut widget_nodes = #ident::initial_widget_nodes();
+                let mut widget_nodes = #ident::root_widget_nodes();
                 ::winio::prelude::init! { root: ::winio::widgets::View = (init), #(#canvas_inits)* }
                 let size = init.client_size()?;
                 root.set_loc(::winio::prelude::Point::new(0.0, 0.0))?;

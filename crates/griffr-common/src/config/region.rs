@@ -38,9 +38,9 @@ impl std::str::FromStr for RegionId {
         match value.trim().to_ascii_lowercase().as_str() {
             "cn" | "china" | "mainland" => Ok(Self::Cn),
             "sg" | "global" | "os" | "overseas" => Ok(Self::Sg),
-            value => Err(Error::Config(format!(
+            value => Err(Error::Message { context: "Configuration error: ", detail: format!(
                 "invalid region {value:?}: expected cn or sg (aliases: china/mainland, global/os/overseas)"
-            ))),
+            ) }),
         }
     }
 }
