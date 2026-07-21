@@ -192,10 +192,6 @@ impl MultiVolumeLayout {
             .map(|layout| layout.start..layout.end)
     }
 
-    pub(crate) fn complete_range(&self) -> Range<u64> {
-        0..self.total_size
-    }
-
     #[cfg(test)]
     pub(crate) fn volume_tail_range(&self, index: usize) -> Option<Range<u64>> {
         self.volume_range(index)

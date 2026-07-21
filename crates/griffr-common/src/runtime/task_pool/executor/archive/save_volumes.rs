@@ -8,24 +8,31 @@ use crate::error::{Error, Result};
 use crate::runtime::preallocate_file;
 use crate::runtime::task_pool::fs_ops::commit_partial_download;
 use crate::runtime::task_pool::graph::{GraphExpansion, TaskExecution};
-use crate::runtime::task_pool::types::{ArchivePart, ArchiveWork, Task, WorkerEvent};
+use crate::runtime::task_pool::types::{
+    ArchivePart, ArchiveRangePriority, ArchiveWork, Task, WorkerEvent,
+};
 use crate::runtime::task_pool::verify;
 
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
 
-pub(crate) fn execute_fetch_missing_archive_ranges(work: Arc<ArchiveWork>) -> TaskExecution {
+pub(crate) fn execute_fill_archive_volume_gaps(
+    work: Arc<ArchiveWork>,
+    volume_index: usize,
+) -> TaskExecution {
     if !work.should_complete_volumes() {
         return TaskExecution::succeeded();
     }
-    let requests = match work
-        .layout
-        .missing_range_requests([work.layout.complete_range()])
-    {
+    let Some(volume_range) = work.layout.volume_range(volume_index) else {
+        return TaskExecution::failed(format!(
+            "archive volume index {volume_index} is out of range"
+        ));
+    };
+    let requests = match work.layout.missing_range_requests([volume_range]) {
         Ok(requests) => requests,
         Err(error) => return TaskExecution::failed(error.to_string()),
     };
     if requests.is_empty() {
-        return TaskExecution::then(Task::SaveArchiveVolumes { work });
+        return TaskExecution::then(Task::FinalizeArchiveVolume { work, volume_index });
     }
 
     let mut expansion = GraphExpansion::new();
@@ -36,20 +43,22 @@ pub(crate) fn execute_fetch_missing_archive_ranges(work: Arc<ArchiveWork>) -> Ta
                 work: work.clone(),
                 request,
                 retry_count: 0,
+                priority: ArchiveRangePriority::RetentionBackground,
             })
         })
         .collect::<Vec<_>>();
-    match expansion.add_task(Task::SaveArchiveVolumes { work }, fetches) {
+    match expansion.add_task(Task::FinalizeArchiveVolume { work, volume_index }, fetches) {
         Ok(_) => TaskExecution::expand(expansion),
         Err(error) => TaskExecution::failed(error.to_string()),
     }
 }
 
-pub(crate) fn execute_save_archive_volumes(
+pub(crate) fn execute_finalize_archive_volume(
     work: Arc<ArchiveWork>,
+    volume_index: usize,
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskExecution {
-    let result = save_archive_volumes(&work, event_tx);
+    let result = finalize_archive_volume(&work, volume_index, event_tx);
     match result {
         Ok(()) => TaskExecution::succeeded(),
         Err(error) => {
@@ -64,39 +73,54 @@ pub(crate) fn execute_save_archive_volumes(
     }
 }
 
-fn save_archive_volumes(work: &ArchiveWork, event_tx: &flume::Sender<WorkerEvent>) -> Result<()> {
+pub(crate) fn execute_archive_volumes_complete(work: Arc<ArchiveWork>) -> TaskExecution {
+    if work.should_complete_volumes() {
+        TaskExecution::succeeded()
+    } else {
+        TaskExecution::failed("archive volume completion barrier used for an ephemeral archive")
+    }
+}
+
+fn finalize_archive_volume(
+    work: &ArchiveWork,
+    volume_index: usize,
+    event_tx: &flume::Sender<WorkerEvent>,
+) -> Result<()> {
     if !work.should_complete_volumes() {
         return Ok(());
     }
-    for (index, part) in work.parts.iter().enumerate() {
-        if verify::build_issue(
-            &part.dest,
-            &part.logical_path,
-            &part.expected_md5,
-            Some(part.expected_size),
-        )
-        .is_none()
-        {
-            report_verified(part, event_tx);
-            release_saved_volume_ranges(work, index);
-            continue;
-        }
-        if let Err(error) = write_archive_volume(work, index, part) {
-            let _ = event_tx.send(WorkerEvent::Verified {
-                path: part.logical_path.clone(),
-                ok: false,
-                issue: verify::build_issue(
-                    &part.dest,
-                    &part.logical_path,
-                    &part.expected_md5,
-                    Some(part.expected_size),
-                ),
-            });
-            return Err(error);
-        }
+    let part = work.parts.get(volume_index).ok_or_else(|| {
+        Error::Extraction(format!(
+            "archive volume index {volume_index} is out of range"
+        ))
+    })?;
+    if verify::build_issue(
+        &part.dest,
+        &part.logical_path,
+        &part.expected_md5,
+        Some(part.expected_size),
+    )
+    .is_none()
+    {
         report_verified(part, event_tx);
-        release_saved_volume_ranges(work, index);
+        work.mark_volume_finalized(volume_index);
+        return Ok(());
     }
+    if let Err(error) = write_archive_volume(work, volume_index, part) {
+        let _ = event_tx.send(WorkerEvent::Verified {
+            path: part.logical_path.clone(),
+            ok: false,
+            issue: verify::build_issue(
+                &part.dest,
+                &part.logical_path,
+                &part.expected_md5,
+                Some(part.expected_size),
+            ),
+        });
+        return Err(error);
+    }
+    report_verified(part, event_tx);
+    work.mark_volume_finalized(volume_index);
     Ok(())
 }
 
@@ -212,16 +236,6 @@ fn write_archive_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) ->
     Ok(())
 }
 
-fn release_saved_volume_ranges(work: &ArchiveWork, finalized_index: usize) {
-    let still_needed = ((finalized_index + 1)..work.layout.volume_count())
-        .filter_map(|index| work.layout.volume_range(index))
-        .collect::<Vec<_>>();
-    if let Some(range) = work.layout.volume_range(finalized_index) {
-        let _ = work.layout.range_is_available(&range);
-    }
-    work.layout.prune_range_cache(&still_needed);
-}
-
 pub(super) fn volume_temp_path(path: &Path) -> Result<PathBuf> {
     let file_name = path.file_name().ok_or_else(|| {
         Error::InvalidPath(format!(
@@ -251,7 +265,7 @@ mod tests {
     use crate::runtime::PatchApplyOptions;
 
     #[test]
-    fn cached_ranges_are_saved_as_verified_archive_volumes() {
+    fn cached_ranges_are_saved_as_independent_verified_archive_volumes() {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
         let first_bytes = b"first-volume";
@@ -323,18 +337,20 @@ mod tests {
             None,
             PatchApplyOptions::default(),
             Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(std::collections::BTreeSet::new()),
         )
         .unwrap();
         let (event_tx, _event_rx) = flume::unbounded();
 
-        save_archive_volumes(&work, &event_tx).unwrap();
+        finalize_archive_volume(&work, 1, &event_tx).unwrap();
+        assert_eq!(std::fs::read(&second_dest).unwrap(), second_bytes);
+        assert!(work
+            .layout
+            .volume_range(0)
+            .is_some_and(|range| work.layout.range_is_available(&range)));
 
+        finalize_archive_volume(&work, 0, &event_tx).unwrap();
         assert_eq!(std::fs::read(first_dest).unwrap(), first_bytes);
-        assert_eq!(std::fs::read(second_dest).unwrap(), second_bytes);
-        assert!(
-            cache.exists(),
-            "cleanup removes the cache directory; saving volumes does not remove it"
-        );
         assert!(
             std::fs::read_dir(cache).unwrap().all(|entry| entry
                 .unwrap()
@@ -342,7 +358,7 @@ mod tests {
                 .extension()
                 .and_then(|value| value.to_str())
                 != Some("range")),
-            "saved volume ranges should be released as complete files are promoted"
+            "all saved volume ranges should be released after the final volume is promoted"
         );
     }
 }

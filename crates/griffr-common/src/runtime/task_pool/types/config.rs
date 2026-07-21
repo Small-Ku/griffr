@@ -21,6 +21,7 @@ const MIN_EXTRACT_SLOTS: usize = 1;
 const MAX_EXTRACT_SLOTS: usize = 2;
 const MIN_EXTRACT_SHARDS: usize = 1;
 const MAX_EXTRACT_SHARDS: usize = 4;
+const READY_SHARDS_PER_SLOT: usize = 2;
 const DEFAULT_VOLUME_WRITE_RESERVATION_DELAY: Duration = Duration::from_millis(15);
 
 pub const DEFAULT_PROGRESS_BUFFER_BYTES: usize = 256 * 1024;
@@ -111,6 +112,7 @@ pub struct TaskPoolConfig {
     /// Once a streaming writer has waited this long, mixed-mode admission keeps
     /// one pressure unit available for it instead of stopping all new readers.
     pub volume_write_reservation_delay: Duration,
+    /// Target number of ready extraction shards; hard source and entry limits may add more.
     pub extract_shards: usize,
     pub max_retries: u32,
     pub user_agent: String,
@@ -138,8 +140,12 @@ impl TaskPoolConfig {
     }
 
     pub fn with_extract_slots(extract_slots: usize) -> Self {
+        let extract_slots = extract_slots.clamp(MIN_EXTRACT_SLOTS, MAX_EXTRACT_SLOTS);
         Self {
-            extract_slots: extract_slots.clamp(MIN_EXTRACT_SLOTS, MAX_EXTRACT_SLOTS),
+            extract_slots,
+            extract_shards: extract_slots
+                .saturating_mul(READY_SHARDS_PER_SLOT)
+                .clamp(MIN_EXTRACT_SHARDS, MAX_EXTRACT_SHARDS),
             ..Self::default()
         }
     }
@@ -182,18 +188,21 @@ impl Default for TaskPoolConfig {
             .saturating_add(blocking_slots)
             .saturating_add(BLOCKING_POOL_INTERNAL_RESERVE)
             .clamp(MIN_BLOCKING_POOL_LIMIT, MAX_BLOCKING_POOL_LIMIT);
+        let extract_slots = (cpus / 4).clamp(MIN_EXTRACT_SLOTS, MAX_EXTRACT_SLOTS);
         Self {
             dispatcher_threads: cpus.clamp(MIN_DISPATCHER_THREADS, MAX_DISPATCHER_THREADS),
             network_slots: (cpus * 2).clamp(MIN_NETWORK_SLOTS, MAX_NETWORK_SLOTS),
             cpu_slots,
             blocking_slots,
             blocking_pool_limit,
-            extract_slots: (cpus / 4).clamp(MIN_EXTRACT_SLOTS, MAX_EXTRACT_SLOTS),
+            extract_slots,
             default_volume_policy: VolumeIoPolicy::default(),
             volume_policies: BTreeMap::new(),
             reuse_queue_limit: DEFAULT_REUSE_QUEUE_LIMIT,
             volume_write_reservation_delay: DEFAULT_VOLUME_WRITE_RESERVATION_DELAY,
-            extract_shards: (cpus / 2).clamp(MIN_EXTRACT_SHARDS, MAX_EXTRACT_SHARDS),
+            extract_shards: extract_slots
+                .saturating_mul(READY_SHARDS_PER_SLOT)
+                .clamp(MIN_EXTRACT_SHARDS, MAX_EXTRACT_SHARDS),
             max_retries: DEFAULT_MAX_RETRIES,
             user_agent: MIN_USER_AGENT.to_owned(),
             extraction_progress_buffer_bytes: DEFAULT_PROGRESS_BUFFER_BYTES,

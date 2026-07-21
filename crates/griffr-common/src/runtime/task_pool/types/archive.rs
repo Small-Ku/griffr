@@ -1,16 +1,215 @@
 use crate::api::types::GameFileEntry;
 use crate::download::extractor::{ArchiveIndex, MultiVolumeLayout};
 use crate::error::{Error, Result};
-use crate::runtime::{PatchApplyOptions, PatchCheckReport, PatchPlan};
+use crate::runtime::{
+    PatchApplyOptions, PatchArtifactProbe, PatchCheckReport, PatchPlan, PatchProbePlan,
+    PlannedPatchEntry,
+};
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::runtime::task_pool::fs_ops::CommitFileBatch;
 use crate::runtime::task_pool::graph::TaskDependencyToken;
+use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 
 use super::tasks::{ArchivePart, ArchiveRetention};
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct PatchTransactionWork {
+    plan: Arc<PatchPlan>,
+    completed_entries: AtomicUsize,
+    verification_cache: VerifiedArtifactCache,
+}
+
+impl PatchTransactionWork {
+    pub(crate) fn new(plan: PatchPlan) -> Arc<Self> {
+        Arc::new(Self {
+            plan: Arc::new(plan),
+            completed_entries: AtomicUsize::new(0),
+            verification_cache: VerifiedArtifactCache::default(),
+        })
+    }
+
+    pub(crate) fn plan(&self) -> &PatchPlan {
+        &self.plan
+    }
+
+    pub(crate) fn entry(&self, index: usize) -> Option<&PlannedPatchEntry> {
+        self.plan.entries.get(index)
+    }
+
+    pub(crate) fn entry_count(&self) -> usize {
+        self.plan.entries.len()
+    }
+
+    pub(crate) fn finish_entry(&self) -> usize {
+        self.completed_entries.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub(crate) fn verification_cache(&self) -> &VerifiedArtifactCache {
+        &self.verification_cache
+    }
+}
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct PatchCheckWork {
+    probes: Vec<PatchArtifactProbe>,
+    relocation_root: Option<PathBuf>,
+    relocation_bytes: Mutex<Option<std::result::Result<u64, String>>>,
+    verification_cache: VerifiedArtifactCache,
+}
+
+impl PatchCheckWork {
+    pub(crate) fn new(plan: PatchProbePlan) -> Arc<Self> {
+        Arc::new(Self {
+            probes: plan.artifacts,
+            relocation_root: plan.relocation_root,
+            relocation_bytes: Mutex::new(None),
+            verification_cache: VerifiedArtifactCache::default(),
+        })
+    }
+
+    pub(crate) fn probe_count(&self) -> usize {
+        self.probes.len()
+    }
+
+    pub(crate) fn probe_path(&self, index: usize) -> Option<&Path> {
+        self.probes.get(index).map(|probe| probe.path.as_path())
+    }
+
+    pub(crate) fn probe_size(&self, index: usize) -> Option<u64> {
+        self.probes.get(index).map(|probe| probe.expected_size)
+    }
+
+    pub(crate) fn relocation_root(&self) -> Option<&Path> {
+        self.relocation_root.as_deref()
+    }
+
+    pub(crate) fn run_probe(&self, index: usize) -> Result<()> {
+        let probe = self
+            .probes
+            .get(index)
+            .ok_or_else(|| Error::TaskPool(format!("patch probe index {index} is out of range")))?;
+        let _ = self.verification_cache.build_issue(
+            &probe.path,
+            &probe.logical_path,
+            &probe.expected_md5,
+            Some(probe.expected_size),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn measure_relocation(&self) -> Result<()> {
+        let result = self
+            .relocation_root
+            .as_deref()
+            .map(directory_size_sync)
+            .transpose()
+            .map(|size| size.unwrap_or(0))
+            .map_err(|error| error.to_string());
+        *self.relocation_bytes.lock().unwrap() = Some(result.clone());
+        result.map(|_| ()).map_err(Error::TaskPool)
+    }
+
+    pub(crate) fn measured_relocation_bytes(&self) -> Result<Option<u64>> {
+        if self.relocation_root.is_none() {
+            return Ok(None);
+        }
+        match self.relocation_bytes.lock().unwrap().as_ref() {
+            Some(Ok(bytes)) => Ok(Some(*bytes)),
+            Some(Err(error)) => Err(Error::TaskPool(error.clone())),
+            None => Err(Error::TaskPool(
+                "patch relocation scan did not finish before the plan was saved".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) fn verification_cache(&self) -> &VerifiedArtifactCache {
+        &self.verification_cache
+    }
+}
+
+fn directory_size_sync(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let mut total = 0u64;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).map_err(|source| Error::ReadDirFailed {
+            path: directory.clone(),
+            source,
+        })? {
+            let entry = entry.map_err(|source| Error::ReadDirFailed {
+                path: directory.clone(),
+                source,
+            })?;
+            let entry_path = entry.path();
+            let metadata =
+                std::fs::symlink_metadata(&entry_path).map_err(|source| Error::StatFailed {
+                    path: entry_path.clone(),
+                    source,
+                })?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(entry_path);
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok(total)
+}
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ArchiveCommitWork {
+    pub(crate) archive: Arc<ArchiveWork>,
+    pub(crate) staging_dir: PathBuf,
+    pub(crate) batches: Vec<CommitFileBatch>,
+    completed_files: AtomicUsize,
+    total_files: usize,
+}
+
+impl ArchiveCommitWork {
+    pub(crate) fn new(
+        archive: Arc<ArchiveWork>,
+        staging_dir: PathBuf,
+        batches: Vec<CommitFileBatch>,
+    ) -> Arc<Self> {
+        let total_files = batches.iter().map(|batch| batch.jobs.len()).sum();
+        Arc::new(Self {
+            archive,
+            staging_dir,
+            batches,
+            completed_files: AtomicUsize::new(0),
+            total_files,
+        })
+    }
+
+    pub(crate) fn batch(&self, index: usize) -> Option<&CommitFileBatch> {
+        self.batches.get(index)
+    }
+
+    pub(crate) fn batch_count(&self) -> usize {
+        self.batches.len()
+    }
+
+    pub(crate) fn finish_file(&self) -> usize {
+        self.completed_files.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub(crate) fn total_files(&self) -> usize {
+        self.total_files
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedArchive {
@@ -30,8 +229,10 @@ pub struct ArchiveWork {
     pub(crate) password: Option<String>,
     pub(crate) patch_options: PatchApplyOptions,
     pub(crate) expected_files: Arc<BTreeMap<String, GameFileEntry>>,
+    pub(crate) excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
     pub(crate) prepared: Mutex<Option<PreparedArchive>>,
     pub(crate) extracted_bytes: AtomicU64,
+    finalized_volumes: Mutex<Vec<bool>>,
     cache_invalid: AtomicBool,
 }
 
@@ -47,6 +248,7 @@ impl ArchiveWork {
         password: Option<String>,
         patch_options: PatchApplyOptions,
         expected_files: Arc<BTreeMap<String, GameFileEntry>>,
+        excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
     ) -> Result<Arc<Self>> {
         if volume_tokens.len() != layout.volume_count() {
             return Err(Error::TaskPool(format!(
@@ -78,6 +280,7 @@ impl ArchiveWork {
                 }
             }
         }
+        let volume_count = layout.volume_count();
         Ok(Arc::new(Self {
             base_name,
             layout,
@@ -88,8 +291,10 @@ impl ArchiveWork {
             password,
             patch_options,
             expected_files,
+            excluded_commit_paths,
             prepared: Mutex::new(None),
             extracted_bytes: AtomicU64::new(0),
+            finalized_volumes: Mutex::new(vec![false; volume_count]),
             cache_invalid: AtomicBool::new(false),
         }))
     }
@@ -126,6 +331,26 @@ impl ArchiveWork {
 
     pub(crate) fn should_complete_volumes(&self) -> bool {
         self.retention.keeps_complete_volumes() && self.layout.is_remote()
+    }
+
+    pub(crate) fn mark_volume_finalized(&self, index: usize) {
+        let still_needed = {
+            let mut finalized = self.finalized_volumes.lock().unwrap();
+            let Some(slot) = finalized.get_mut(index) else {
+                return;
+            };
+            *slot = true;
+            finalized
+                .iter()
+                .enumerate()
+                .filter_map(|(volume_index, done)| {
+                    (!*done)
+                        .then(|| self.layout.volume_range(volume_index))
+                        .flatten()
+                })
+                .collect::<Vec<_>>()
+        };
+        self.layout.prune_range_cache(&still_needed);
     }
 
     pub(crate) fn invalidate_range_cache(&self) {
@@ -262,7 +487,7 @@ pub struct ArchiveShardTask {
     pub(crate) staging_dir: PathBuf,
     pub(crate) entries: Vec<usize>,
     pub(crate) volume_indices: Vec<usize>,
-    pub(crate) uncompressed_bytes: u64,
+    pub(crate) estimated_cost: u64,
     pub(crate) execution_state: Arc<ArchiveShardExecutionState>,
     pub(crate) range_release: Option<(Arc<ArchiveRangeReleaseState>, usize)>,
 }
