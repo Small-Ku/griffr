@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use super::super::fs_ops::{
-    classify_reuse_mode, create_hardlink_async, reuse_verified_file, storage_volume_group_key,
+    classify_reuse_mode, copy_verified_file_async, create_hardlink_async, storage_volume_group_key,
     storage_volume_id, ReuseMethod, ReuseMode,
 };
 use super::super::graph::{GraphExpansion, TaskExecution};
@@ -302,22 +302,18 @@ pub(super) async fn execute_hardlink_reuse_file(
     finish_reuse_file(input, result, event_tx)
 }
 
-pub(super) fn execute_copy_reuse_file(
+pub(super) async fn execute_copy_reuse_file(
     input: ReuseFileInput,
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskExecution {
-    assert!(
-        input.copy_only,
-        "hardlink reuse routed to blocking executor"
-    );
-    let result = reuse_verified_file(
+    assert!(input.copy_only, "hardlink reuse routed to copy executor");
+    let result = copy_verified_file_async(
         &input.source,
         &input.dest,
         &input.expected_md5,
         input.expected_size,
-        ReuseMode::CopyOnly,
-        true,
-    );
+    )
+    .await;
     finish_reuse_file(input, result, event_tx)
 }
 

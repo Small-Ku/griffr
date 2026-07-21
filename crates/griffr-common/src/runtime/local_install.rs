@@ -93,16 +93,18 @@ impl LocalInstall {
     }
 }
 
-pub fn resolve_install_path(path: &Path) -> PathBuf {
-    if path.is_dir() {
+use super::path_is_dir;
+
+pub async fn resolve_install_path(path: &Path) -> PathBuf {
+    if path_is_dir(path).await {
         path.to_path_buf()
     } else {
         path.parent().unwrap_or(path).to_path_buf()
     }
 }
 
-pub fn resolve_named_path(path: &Path, filename: &str) -> PathBuf {
-    if path.is_dir() {
+pub async fn resolve_named_path(path: &Path, filename: &str) -> PathBuf {
+    if path_is_dir(path).await {
         path.join(filename)
     } else {
         path.to_path_buf()
@@ -110,7 +112,7 @@ pub fn resolve_named_path(path: &Path, filename: &str) -> PathBuf {
 }
 
 pub async fn decrypt_config_ini(path: &Path) -> Result<ParsedConfigIni> {
-    let config_path = resolve_named_path(path, CONFIG_INI_NAME);
+    let config_path = resolve_named_path(path, CONFIG_INI_NAME).await;
     let encrypted =
         compio::fs::read(&config_path)
             .await
@@ -141,7 +143,7 @@ pub async fn decrypt_config_ini(path: &Path) -> Result<ParsedConfigIni> {
 }
 
 pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
-    let install_path = resolve_install_path(path);
+    let install_path = resolve_install_path(path).await;
     let config_ini = decrypt_config_ini(&install_path).await?;
 
     let mut games_with_existing_executable = Vec::new();

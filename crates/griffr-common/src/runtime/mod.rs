@@ -17,7 +17,8 @@ mod update_plan;
 pub use admin::{ensure_admin, is_running_as_admin, restart_as_admin};
 pub use compat_fs::{
     collect_files_recursive, copy_dir_recursive, dir_size, directory_has_entries,
-    list_files_with_extension, read_link, remove_dir_all, remove_empty_dirs_recursive, CopyStats,
+    list_files_with_extension, path_is_dir, path_is_dir_or_err, path_is_file, read_link,
+    remove_dir_all, remove_empty_dirs_recursive, CopyStats,
 };
 pub(crate) use file_allocation::preallocate_file;
 

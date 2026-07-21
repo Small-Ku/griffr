@@ -1,5 +1,5 @@
 use super::fs_ops::{
-    apply_delete_files_manifest, apply_extracted_vfs_patch_manifest, create_hardlink_async,
+    apply_delete_files_manifest_async, apply_extracted_vfs_patch_manifest, create_hardlink_async,
     resume_patch_transaction,
 };
 use super::graph::TaskExecution;
@@ -19,21 +19,20 @@ pub(crate) fn execute_blocking_task(
         Task::InstallArchive {
             base_name,
             dest,
-            cleanup,
+            retention,
             password,
             patch_options,
+            expected_files,
             parts,
         } => archive::execute_install_archive(
             base_name,
             dest,
-            cleanup,
+            retention,
             password,
             patch_options,
+            expected_files,
             parts,
         ),
-        Task::InstallArchivePart { part, retry_count } => {
-            archive::execute_install_archive_part(part, retry_count, max_retries, event_tx)
-        }
         Task::Verify {
             path,
             logical_path,
@@ -107,50 +106,22 @@ pub(crate) fn execute_blocking_task(
             expected_size,
             group,
         ),
-        Task::ReuseFile {
-            source,
-            copy_only,
-            remaining_source_candidates,
-            dest,
-            logical_path,
-            expected_md5,
-            expected_size,
-            download_url,
-            allow_copy_fallback,
-            verify_destination_fallback,
-            retry_count,
-            transfer_class,
-        } => transfer::execute_copy_reuse_file(
-            transfer::ReuseFileInput {
-                source,
-                copy_only,
-                remaining_source_candidates,
-                dest,
-                logical_path,
-                expected_md5,
-                expected_size,
-                download_url,
-                allow_copy_fallback,
-                verify_destination_fallback,
-                retry_count,
-                transfer_class,
-            },
-            event_tx,
-        ),
         Task::Extract {
             base_name,
             volumes,
             dest,
-            cleanup,
+            retention,
             password,
             patch_options,
+            expected_files,
         } => archive::execute_schedule_extract(
             base_name,
             volumes,
             dest,
-            cleanup,
+            retention,
             password,
             patch_options,
+            expected_files,
         ),
         Task::DiscoverArchiveDirectory {
             work,
@@ -170,16 +141,19 @@ pub(crate) fn execute_blocking_task(
             extraction_progress_buffer_bytes,
             event_tx,
         ),
+        Task::FillArchiveVolumeGaps { work } => archive::execute_fill_archive_volume_gaps(work),
+        Task::FinalizeArchiveVolumes { work } => {
+            archive::execute_finalize_archive_volumes(work, event_tx)
+        }
         Task::CommitArchive { work } => archive::execute_commit_archive(work, event_tx),
         Task::CleanupArchive { work } => archive::execute_cleanup_archive(work, event_tx),
         Task::ApplyExtractedVfsPatchManifest { install_root } => {
             execute_apply_patch_manifest(install_root, event_tx)
         }
-        Task::ApplyDeleteManifest { install_root } => {
-            execute_apply_delete_manifest(install_root, event_tx)
-        }
         Task::TransferDownload { .. }
-        | Task::TransferArchivePart { .. }
+        | Task::FetchArchiveRange { .. }
+        | Task::ReuseFile { .. }
+        | Task::ApplyDeleteManifest { .. }
         | Task::Hardlink { .. } => unreachable!("async I/O task routed to blocking executor"),
     }
 }
@@ -192,15 +166,15 @@ pub(crate) async fn execute_async_task(
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskExecution {
     match task {
-        Task::TransferArchivePart {
-            part,
+        Task::FetchArchiveRange {
+            work,
+            request,
             retry_count,
-            resume,
         } => {
-            archive::execute_transfer_archive_part(
-                part,
+            archive::execute_fetch_archive_range(
+                work,
+                request,
                 retry_count,
-                resume,
                 max_retries,
                 download_progress_buffer_bytes,
                 user_agent,
@@ -250,24 +224,28 @@ pub(crate) async fn execute_async_task(
             retry_count,
             transfer_class,
         } => {
-            transfer::execute_hardlink_reuse_file(
-                transfer::ReuseFileInput {
-                    source,
-                    copy_only,
-                    remaining_source_candidates,
-                    dest,
-                    logical_path,
-                    expected_md5,
-                    expected_size,
-                    download_url,
-                    allow_copy_fallback,
-                    verify_destination_fallback,
-                    retry_count,
-                    transfer_class,
-                },
-                event_tx,
-            )
-            .await
+            let input = transfer::ReuseFileInput {
+                source,
+                copy_only,
+                remaining_source_candidates,
+                dest,
+                logical_path,
+                expected_md5,
+                expected_size,
+                download_url,
+                allow_copy_fallback,
+                verify_destination_fallback,
+                retry_count,
+                transfer_class,
+            };
+            if copy_only {
+                transfer::execute_copy_reuse_file(input, event_tx).await
+            } else {
+                transfer::execute_hardlink_reuse_file(input, event_tx).await
+            }
+        }
+        Task::ApplyDeleteManifest { install_root } => {
+            execute_apply_delete_manifest(install_root, event_tx).await
         }
         Task::Hardlink { src, dest } => match create_hardlink_async(&src, &dest).await {
             Ok(()) => {
@@ -358,12 +336,13 @@ fn execute_apply_patch_manifest(
     }
 }
 
-fn execute_apply_delete_manifest(
+async fn execute_apply_delete_manifest(
     install_root: std::path::PathBuf,
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskExecution {
-    let result = {
-        let mut on_progress = |path: &std::path::Path, completed: usize, total: usize| {
+    let result = apply_delete_files_manifest_async(
+        &install_root,
+        Some(|path: &std::path::Path, completed: usize, total: usize| {
             let normalized = path.to_string_lossy().replace('\\', "/");
             if completed > 0 {
                 let _ = event_tx.send(WorkerEvent::Changed {
@@ -375,9 +354,9 @@ fn execute_apply_delete_manifest(
                 completed,
                 total,
             });
-        };
-        apply_delete_files_manifest(&install_root, Some(&mut on_progress))
-    };
+        }),
+    )
+    .await;
     match result {
         Ok(()) => TaskExecution::succeeded(),
         Err(error) => TaskExecution::failed(error.to_string()),

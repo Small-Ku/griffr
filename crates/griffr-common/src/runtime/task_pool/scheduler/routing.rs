@@ -66,10 +66,10 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.write_volumes.push(volume_key(dest));
             request.mutation_root = Some(path_key(dest));
         }
-        Task::TransferArchivePart { part, .. } => {
+        Task::FetchArchiveRange { request: range, .. } => {
             request.network = Some(NetworkClass::Archive);
-            request.write_volumes.push(volume_key(&part.dest));
-            request.mutation_root = Some(path_key(&part.dest));
+            request.write_volumes.push(volume_key(&range.cache_path));
+            request.mutation_root = Some(path_key(&range.cache_path));
         }
         Task::Verify { path, .. } => request.read_volumes.push(volume_key(path)),
         Task::Download { dest, .. } => {
@@ -77,12 +77,6 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.read_volumes.push(volume.clone());
             request.metadata_volumes.push(volume);
             request.mutation_root = Some(path_key(dest));
-        }
-        Task::InstallArchivePart { part, .. } => {
-            let volume = volume_key(&part.dest);
-            request.read_volumes.push(volume.clone());
-            request.metadata_volumes.push(volume);
-            request.mutation_root = Some(path_key(&part.dest));
         }
         Task::VerifyReuseVolume { candidates, .. } => {
             if let Some(path) = candidates.first() {
@@ -172,6 +166,19 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.write_volumes.push(volume_key(&shard.staging_dir));
             request.extract = true;
         }
+        Task::FillArchiveVolumeGaps { work } => {
+            request
+                .metadata_volumes
+                .extend(work.layout.paths().iter().map(|path| volume_key(path)));
+        }
+        Task::FinalizeArchiveVolumes { work } => {
+            request
+                .read_volumes
+                .extend(work.layout.paths().iter().map(|path| volume_key(path)));
+            request
+                .write_volumes
+                .extend(work.parts.iter().map(|part| volume_key(&part.dest)));
+        }
         Task::CommitArchive { work } => {
             request.write_volumes.push(volume_key(&work.dest));
             let prepared = work.prepared.lock().unwrap();
@@ -216,8 +223,8 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
 
 fn task_estimated_bytes(task: &Task) -> u64 {
     match task {
-        Task::InstallArchivePart { part, .. } | Task::TransferArchivePart { part, .. } => {
-            part.expected_size
+        Task::FetchArchiveRange { request, .. } => {
+            request.local_range.end - request.local_range.start
         }
         Task::Download { expected_size, .. }
         | Task::TransferDownload { expected_size, .. }
@@ -226,12 +233,16 @@ fn task_estimated_bytes(task: &Task) -> u64 {
         | Task::VerifyReuseVolume { expected_size, .. }
         | Task::ReuseFile { expected_size, .. } => *expected_size,
         Task::ExtractArchiveShard { shard } => shard.uncompressed_bytes,
+        Task::FinalizeArchiveVolumes { work } => {
+            work.parts.iter().map(|part| part.expected_size).sum()
+        }
         Task::InstallArchive { .. }
         | Task::Extract { .. }
         | Task::DiscoverArchiveDirectory { .. }
         | Task::InspectArchiveIndex { .. }
         | Task::ReadArchiveControls { .. }
         | Task::PlanArchiveExtraction { .. }
+        | Task::FillArchiveVolumeGaps { .. }
         | Task::CommitArchive { .. }
         | Task::CleanupArchive { .. }
         | Task::ApplyExtractedVfsPatchManifest { .. }
@@ -243,30 +254,26 @@ fn task_estimated_bytes(task: &Task) -> u64 {
 fn execution_class(task: &Task) -> ExecutionClass {
     match task {
         Task::TransferDownload { .. }
-        | Task::TransferArchivePart { .. }
+        | Task::FetchArchiveRange { .. }
         | Task::Hardlink { .. }
-        | Task::ReuseFile {
-            copy_only: false, ..
-        } => ExecutionClass::AsyncIo,
-        Task::InstallArchivePart { .. }
-        | Task::Download { .. }
+        | Task::ReuseFile { .. }
+        | Task::ApplyDeleteManifest { .. } => ExecutionClass::AsyncIo,
+        Task::Download { .. }
         | Task::Verify { .. }
         | Task::RepairFile { .. }
         | Task::VerifyReuseVolume { .. } => ExecutionClass::Cpu,
         Task::InstallArchive { .. }
-        | Task::ReuseFile {
-            copy_only: true, ..
-        }
         | Task::Extract { .. }
         | Task::DiscoverArchiveDirectory { .. }
         | Task::InspectArchiveIndex { .. }
         | Task::ReadArchiveControls { .. }
         | Task::PlanArchiveExtraction { .. }
         | Task::ExtractArchiveShard { .. }
+        | Task::FillArchiveVolumeGaps { .. }
+        | Task::FinalizeArchiveVolumes { .. }
         | Task::CommitArchive { .. }
         | Task::CleanupArchive { .. }
-        | Task::ApplyExtractedVfsPatchManifest { .. }
-        | Task::ApplyDeleteManifest { .. } => ExecutionClass::Blocking,
+        | Task::ApplyExtractedVfsPatchManifest { .. } => ExecutionClass::Blocking,
     }
 }
 
@@ -304,12 +311,18 @@ pub(super) fn task_path(task: &Task) -> String {
         | Task::InspectArchiveIndex { work, .. }
         | Task::ReadArchiveControls { work, .. }
         | Task::PlanArchiveExtraction { work, .. }
+        | Task::FillArchiveVolumeGaps { work }
+        | Task::FinalizeArchiveVolumes { work }
         | Task::CommitArchive { work }
         | Task::CleanupArchive { work } => work.base_name.clone(),
         Task::ExtractArchiveShard { shard } => shard.work.base_name.clone(),
-        Task::InstallArchivePart { part, .. } | Task::TransferArchivePart { part, .. } => {
-            part.logical_path.clone()
-        }
+        Task::FetchArchiveRange { work, request, .. } => format!(
+            "{}#volume-{:03}:{}-{}",
+            work.base_name,
+            request.volume_index + 1,
+            request.local_range.start,
+            request.local_range.end
+        ),
         Task::Download { logical_path, .. }
         | Task::TransferDownload { logical_path, .. }
         | Task::Verify { logical_path, .. }
@@ -363,7 +376,15 @@ mod tests {
         assert_eq!(resources.read_volumes, resources.write_volumes);
         assert!(resources.metadata_volumes.is_empty());
         assert!(!resources.reuse_commit);
-        assert_eq!(resources.execution, ExecutionClass::Blocking);
+        assert_eq!(resources.execution, ExecutionClass::AsyncIo);
+    }
+
+    #[test]
+    fn delete_manifest_uses_async_dispatcher_runtime() {
+        let resources = task_resources(&Task::ApplyDeleteManifest {
+            install_root: PathBuf::from("game"),
+        });
+        assert_eq!(resources.execution, ExecutionClass::AsyncIo);
     }
 
     #[test]

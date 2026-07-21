@@ -1,5 +1,6 @@
 use super::{
-    ArchiveWork, FileEnsureTask, PreparedArchive, Task, TaskOutcome, TransferClass, WorkerEvent,
+    ArchiveRetention, ArchiveWork, FileEnsureTask, PreparedArchive, Task, TaskOutcome,
+    TransferClass, WorkerEvent,
 };
 use crate::download::extractor::MultiVolumeLayout;
 use std::path::PathBuf;
@@ -190,9 +191,11 @@ fn archive_work_drop_removes_abandoned_staging() {
         layout,
         vec![None],
         temp.path().join("install"),
-        false,
+        ArchiveRetention::KeepCompleteVolumes,
+        Vec::new(),
         None,
         crate::runtime::PatchApplyOptions::default(),
+        std::sync::Arc::new(std::collections::BTreeMap::new()),
     )
     .unwrap();
     *work.prepared.lock().unwrap() = Some(PreparedArchive {
@@ -202,4 +205,33 @@ fn archive_work_drop_removes_abandoned_staging() {
 
     drop(work);
     assert!(!staging.exists());
+}
+
+#[test]
+fn retained_remote_archive_requires_one_descriptor_per_volume() {
+    let temp = tempfile::tempdir().unwrap();
+    let layout = MultiVolumeLayout::from_remote(
+        vec![(
+            temp.path().join("archive.zip.001"),
+            "https://example.invalid/archive.zip.001".to_string(),
+            6,
+        )],
+        temp.path().join("cache"),
+    )
+    .unwrap();
+
+    let error = ArchiveWork::new(
+        "archive".to_string(),
+        layout,
+        vec![None],
+        temp.path().join("install"),
+        ArchiveRetention::KeepCompleteVolumes,
+        Vec::new(),
+        None,
+        crate::runtime::PatchApplyOptions::default(),
+        std::sync::Arc::new(std::collections::BTreeMap::new()),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("part descriptors for 1 volumes"));
 }

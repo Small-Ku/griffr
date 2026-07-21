@@ -34,59 +34,77 @@ pub(crate) fn parse_delete_files_manifest(manifest: &str) -> Result<Vec<PathBuf>
         .collect()
 }
 
-pub(crate) fn apply_delete_files_manifest(
+pub(crate) async fn apply_delete_files_manifest_async<F>(
     dest_root: &Path,
-    mut progress_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
-) -> Result<()> {
+    mut progress_callback: Option<F>,
+) -> Result<()>
+where
+    F: FnMut(&Path, usize, usize) + Send,
+{
     let manifest_path = dest_root.join(DELETE_FILES_MANIFEST_NAME);
-    if !manifest_path.is_file() {
-        return Ok(());
+    match compio::fs::metadata(&manifest_path).await {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(()),
+        Err(source) if source.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(Error::StatFailed {
+                path: manifest_path,
+                source,
+            })
+        }
     }
 
-    let manifest = std::fs::read_to_string(&manifest_path).map_err(|e| Error::OpenFileFailed {
+    let bytes = compio::fs::read(&manifest_path)
+        .await
+        .map_err(|source| Error::OpenFileFailed {
+            path: manifest_path.clone(),
+            source,
+        })?;
+    let manifest = String::from_utf8(bytes).map_err(|source| Error::OpenFileFailed {
         path: manifest_path.clone(),
-        source: e,
+        source: std::io::Error::new(ErrorKind::InvalidData, source),
     })?;
     let entries = parse_delete_files_manifest(&manifest)?;
     let total_entries = entries.len();
     if total_entries > 0 {
-        if let Some(cb) = progress_callback.as_deref_mut() {
-            cb(Path::new("."), 0, total_entries);
-        }
-    }
-    for (index, relative) in entries.iter().enumerate() {
-        let target_path = dest_root.join(relative);
-        match std::fs::symlink_metadata(&target_path) {
-            Ok(meta) => {
-                if meta.is_dir() {
-                    std::fs::remove_dir_all(&target_path).map_err(|e| Error::RemoveFailed {
-                        path: target_path.clone(),
-                        source: e,
-                    })?;
-                } else {
-                    std::fs::remove_file(&target_path).map_err(|e| Error::RemoveFailed {
-                        path: target_path.clone(),
-                        source: e,
-                    })?;
-                }
-            }
-            Err(err) if err.kind() == ErrorKind::NotFound => {}
-            Err(err) => {
-                return Err(Error::StatFailed {
-                    path: target_path.clone(),
-                    source: err,
-                });
-            }
-        }
-        if let Some(cb) = progress_callback.as_deref_mut() {
-            cb(relative, index + 1, total_entries);
+        if let Some(callback) = progress_callback.as_mut() {
+            callback(Path::new("."), 0, total_entries);
         }
     }
 
-    std::fs::remove_file(&manifest_path).map_err(|e| Error::RemoveFailed {
-        path: manifest_path.clone(),
-        source: e,
-    })?;
+    for (index, relative) in entries.iter().enumerate() {
+        let target_path = dest_root.join(relative);
+        match compio::fs::symlink_metadata(&target_path).await {
+            Ok(metadata) if metadata.is_dir() => {
+                crate::runtime::remove_dir_all(target_path.clone()).await?;
+            }
+            Ok(_) => {
+                compio::fs::remove_file(&target_path)
+                    .await
+                    .map_err(|source| Error::RemoveFailed {
+                        path: target_path.clone(),
+                        source,
+                    })?;
+            }
+            Err(source) if source.kind() == ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(Error::StatFailed {
+                    path: target_path,
+                    source,
+                })
+            }
+        }
+        if let Some(callback) = progress_callback.as_mut() {
+            callback(relative, index + 1, total_entries);
+        }
+    }
+
+    compio::fs::remove_file(&manifest_path)
+        .await
+        .map_err(|source| Error::RemoveFailed {
+            path: manifest_path,
+            source,
+        })?;
     Ok(())
 }
 
@@ -95,7 +113,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        apply_delete_files_manifest, parse_delete_files_entry, DELETE_FILES_MANIFEST_NAME,
+        apply_delete_files_manifest_async, parse_delete_files_entry, DELETE_FILES_MANIFEST_NAME,
     };
 
     #[test]
@@ -116,24 +134,35 @@ mod tests {
         assert!(err.to_string().contains("unsupported path"));
     }
 
-    #[test]
-    fn apply_delete_files_manifest_removes_listed_files_and_manifest() {
+    #[compio::test]
+    async fn apply_delete_files_manifest_removes_listed_files_and_manifest() {
         let temp = tempfile::tempdir().unwrap();
         let dest_root = temp.path().join("install");
         let obsolete_path = dest_root.join("Endfield_Data/Plugins/x86_64/libHAPI.dll");
-        std::fs::create_dir_all(obsolete_path.parent().unwrap()).unwrap();
-        std::fs::write(&obsolete_path, b"obsolete").unwrap();
-        std::fs::write(
+        compio::fs::create_dir_all(obsolete_path.parent().unwrap())
+            .await
+            .unwrap();
+        compio::fs::write(&obsolete_path, b"obsolete".to_vec())
+            .await
+            .0
+            .unwrap();
+        compio::fs::write(
             dest_root.join(DELETE_FILES_MANIFEST_NAME),
-            "Endfield_Data/Plugins/x86_64/libHAPI.dll\n",
+            b"Endfield_Data/Plugins/x86_64/libHAPI.dll\n".to_vec(),
         )
+        .await
+        .0
         .unwrap();
 
         let mut progress = Vec::new();
-        let mut on_progress = |path: &Path, completed: usize, total: usize| {
-            progress.push((path.to_path_buf(), completed, total));
-        };
-        apply_delete_files_manifest(&dest_root, Some(&mut on_progress)).unwrap();
+        apply_delete_files_manifest_async(
+            &dest_root,
+            Some(|path: &Path, completed: usize, total: usize| {
+                progress.push((path.to_path_buf(), completed, total));
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             progress,
             vec![
@@ -145,7 +174,13 @@ mod tests {
                 ),
             ]
         );
-        assert!(!obsolete_path.exists());
-        assert!(!dest_root.join(DELETE_FILES_MANIFEST_NAME).exists());
+        assert!(matches!(
+            compio::fs::metadata(&obsolete_path).await,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(matches!(
+            compio::fs::metadata(dest_root.join(DELETE_FILES_MANIFEST_NAME)).await,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound
+        ));
     }
 }

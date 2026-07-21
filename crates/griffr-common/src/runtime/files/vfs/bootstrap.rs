@@ -10,10 +10,10 @@ use crate::runtime::task_pool::{
     FileEnsureTask, Task, TaskOutcome, TaskPoolRunner, TaskProgress, TransferClass,
 };
 use crate::runtime::{
-    collect_files_recursive, logical_path_from_root, normalize_logical_path,
-    remove_empty_dirs_recursive, resource_manifest_filename, resource_manifest_url, vfs_path,
-    PathOutcomeTracker, PathReuseMethod, ProgressLane, ProgressSender, ResourceManifestKind,
-    RESOURCE_GROUP_INITIAL, RESOURCE_GROUP_MAIN,
+    collect_files_recursive, logical_path_from_root, normalize_logical_path, path_is_dir,
+    path_is_file, remove_empty_dirs_recursive, resource_manifest_filename, resource_manifest_url,
+    vfs_path, PathOutcomeTracker, PathReuseMethod, ProgressLane, ProgressSender,
+    ResourceManifestKind, RESOURCE_GROUP_INITIAL, RESOURCE_GROUP_MAIN,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -163,7 +163,7 @@ pub(super) fn should_include_bootstrap_group(
 }
 
 async fn read_local_res_index(path: &Path) -> Result<Option<crate::api::types::ResIndex>> {
-    if !path.is_file() {
+    if !path_is_file(path).await {
         return Ok(None);
     }
     let encrypted_b64 =
@@ -424,7 +424,7 @@ pub async fn bootstrap_persistent_vfs_with_runner(
 
     if cfg.prune_extra_files {
         let vfs_root = vfs_path(persistent_root);
-        if vfs_root.is_dir() {
+        if path_is_dir(&vfs_root).await {
             let files = collect_files_recursive(vfs_root.clone()).await?;
             for file in files {
                 let rel = match file.strip_prefix(persistent_root) {

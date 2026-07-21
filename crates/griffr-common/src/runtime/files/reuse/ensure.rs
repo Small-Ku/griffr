@@ -10,7 +10,7 @@ use crate::api::ApiClient;
 use crate::runtime::task_pool::{FileEnsureTask, Task, TransferClass};
 use crate::runtime::{
     build_cdn_file_url, files_base_url, is_launcher_metadata_path, logical_path_from_root,
-    PathOutcomeTracker, PathReuseMethod, ProgressLane, ProgressSender,
+    path_is_file, PathOutcomeTracker, PathReuseMethod, ProgressLane, ProgressSender,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -94,33 +94,40 @@ pub async fn ensure_game_files_with_pool(
 
     let mut dry_run_reused = 0usize;
     let mut dry_run_downloaded = 0usize;
-    let tasks = manifest
+    let mut tasks = Vec::with_capacity(manifest.len());
+    for entry in manifest
         .iter()
         .filter(|entry| !is_launcher_metadata_path(&entry.path))
-        .map(|entry| {
-            let candidates = source_candidates.remove(&entry.path).unwrap_or_default();
-            if config.dry_run {
-                if candidates.iter().any(|path| path.exists()) {
-                    dry_run_reused = dry_run_reused.saturating_add(1);
-                } else {
-                    dry_run_downloaded = dry_run_downloaded.saturating_add(1);
+    {
+        let candidates = source_candidates.remove(&entry.path).unwrap_or_default();
+        if config.dry_run {
+            let mut reusable_candidate_exists = false;
+            for path in &candidates {
+                if path_is_file(path).await {
+                    reusable_candidate_exists = true;
+                    break;
                 }
             }
+            if reusable_candidate_exists {
+                dry_run_reused = dry_run_reused.saturating_add(1);
+            } else {
+                dry_run_downloaded = dry_run_downloaded.saturating_add(1);
+            }
+        }
 
-            Task::ensure_file(FileEnsureTask {
-                dest: install_path.join(&entry.path),
-                logical_path: entry.path.clone(),
-                expected_md5: entry.md5.clone(),
-                expected_size: entry.size,
-                source_candidates: candidates,
-                download_url: Some(build_cdn_file_url(files_url_base, &entry.path)),
-                allow_copy_fallback: config.allow_copy_fallback,
-                prefer_reuse: false,
-                retry_count: 0,
-                transfer_class: TransferClass::General,
-            })
-        })
-        .collect::<Vec<_>>();
+        tasks.push(Task::ensure_file(FileEnsureTask {
+            dest: install_path.join(&entry.path),
+            logical_path: entry.path.clone(),
+            expected_md5: entry.md5.clone(),
+            expected_size: entry.size,
+            source_candidates: candidates,
+            download_url: Some(build_cdn_file_url(files_url_base, &entry.path)),
+            allow_copy_fallback: config.allow_copy_fallback,
+            prefer_reuse: false,
+            retry_count: 0,
+            transfer_class: TransferClass::General,
+        }));
+    }
 
     if config.dry_run {
         info!(
