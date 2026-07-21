@@ -56,17 +56,19 @@ Use a concrete noun for types and files:
 
 Avoid broad file names such as `models.rs`, `operations.rs`, and `workflow.rs` when a specific name is available.
 
-## 4. Comments and Messages
+## 4. Short, Simple, and Direct Paragraphs
 
-State what the code does. Do not repeat the function name without more useful information.
+Keep documentation, comments, and messages short, simple, and concise. Break long explanations into short bullet points. Use direct active voice (state the subject and the direct action verb).
 
-Prefer:
+### Phrasing Examples
 
-> Save each verified range as an archive volume.
-
-Avoid:
-
-> Perform finalization of the materialized archive ranges.
+| Avoid (Passive / Wordy) | Prefer (Short / Direct Active Voice) |
+|---|---|
+| `CollectCommitJobs` is performed by the `CommitArchive` task. | The `CommitArchive` task collects commit jobs. |
+| Successful checks are carried into the integrity pass. | The integrity pass receives successful checks. |
+| This implementation is split into six code stages. | Six code stages make up this design. |
+| Task runs are wrapped with `catch_unwind` in order to handle panics. | The runner wraps task runs with `catch_unwind` to handle panics. |
+| Perform finalization of the materialized archive ranges. | Save each verified range as an archive volume. |
 
 For errors, state the failed action and the affected object:
 

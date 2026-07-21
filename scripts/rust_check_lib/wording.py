@@ -87,6 +87,13 @@ _TERM_RULES = (
         re.compile(r"\b" + "terminat" + r"(?:e|es|ed|ing|ion|ions)\b", re.I),
         "Use stop, end, or cancel.",
     ),
+    (
+        re.compile(
+            r"\b" + "is" + r"\s+(?:performed|carried\s+out|executed|split\s+into|carried\s+into)\b",
+            re.I,
+        ),
+        "Use direct active voice (e.g. 'collects', 'runs', 'uses') instead of passive phrasing.",
+    ),
 )
 
 _VAGUE_FILE_NAMES = {
