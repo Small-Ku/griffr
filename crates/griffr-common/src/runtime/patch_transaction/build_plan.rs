@@ -17,6 +17,20 @@ use super::{
     PatchCheckReport, PatchPlan, PlannedPatchEntry, PlannedPatchSource,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PatchArtifactProbe {
+    pub(crate) path: PathBuf,
+    pub(crate) logical_path: String,
+    pub(crate) expected_md5: String,
+    pub(crate) expected_size: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PatchProbePlan {
+    pub(crate) artifacts: Vec<PatchArtifactProbe>,
+    pub(crate) relocation_root: Option<PathBuf>,
+}
+
 fn normalized_archive_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -190,12 +204,98 @@ pub(crate) fn build_patch_plan(
     )
 }
 
+pub(crate) fn plan_patch_probes(
+    install_root: &Path,
+    archive_index: &ArchiveIndex,
+    options: &PatchApplyOptions,
+) -> Result<PatchProbePlan> {
+    let mut options = options.resolved_for_install(install_root)?;
+    if let Some(storage_layout) = read_patch_storage_layout(install_root)? {
+        match options.external_vfs_root.as_ref() {
+            Some(requested) if requested != &storage_layout.external_vfs_root => {
+                return Err(Error::Config(format!(
+                    "Install already manages VFS storage at {}; requested external root {} does not match",
+                    storage_layout.external_vfs_root.display(),
+                    requested.display()
+                )));
+            }
+            Some(_) => {}
+            None => options.external_vfs_root = Some(storage_layout.external_vfs_root),
+        }
+    }
+    let manifest = archive_index
+        .patch_manifest
+        .as_ref()
+        .ok_or_else(|| Error::Vfs(format!("Patch archive is missing {PATCH_MANIFEST_NAME}")))?;
+    let vfs_base_path =
+        parse_safe_relative_path("patch.json vfs_base_path", manifest.vfs_base_path.trim())?;
+    let logical_vfs_destination = install_root.join(&vfs_base_path);
+    let vfs_destination = options
+        .external_vfs_root
+        .clone()
+        .unwrap_or_else(|| logical_vfs_destination.clone());
+
+    let mut artifacts = BTreeSet::new();
+    for entry in &manifest.files {
+        let relative = parse_safe_relative_path("patch.json file name", &entry.name)?;
+        let existing_path = if options.external_vfs_root.is_some() {
+            logical_vfs_destination.join(&relative)
+        } else {
+            vfs_destination.join(&relative)
+        };
+        artifacts.insert(PatchArtifactProbe {
+            path: existing_path,
+            logical_path: relative.to_string_lossy().replace('\\', "/"),
+            expected_md5: entry.md5.clone(),
+            expected_size: entry.size,
+        });
+        if entry.effective_local_path().is_none() {
+            for diff in &entry.patch {
+                let base_relative =
+                    parse_safe_relative_path("patch.json base_file", diff.effective_base_file())?;
+                artifacts.insert(PatchArtifactProbe {
+                    path: logical_vfs_destination.join(&base_relative),
+                    logical_path: base_relative.to_string_lossy().replace('\\', "/"),
+                    expected_md5: diff.base_md5.clone(),
+                    expected_size: diff.base_size,
+                });
+            }
+        }
+    }
+
+    let relocation_root = (options.external_vfs_root.is_some()
+        && !same_link_target(&logical_vfs_destination, &vfs_destination))
+    .then_some(logical_vfs_destination);
+    Ok(PatchProbePlan {
+        artifacts: artifacts.into_iter().collect(),
+        relocation_root,
+    })
+}
+
 pub(crate) fn build_patch_plan_with_cache(
     install_root: &Path,
     stage_root: &Path,
     archive_index: &ArchiveIndex,
     options: &PatchApplyOptions,
     verification_cache: &VerifiedArtifactCache,
+) -> Result<(PatchPlan, PatchCheckReport)> {
+    build_patch_plan_with_probe_cache(
+        install_root,
+        stage_root,
+        archive_index,
+        options,
+        verification_cache,
+        None,
+    )
+}
+
+pub(crate) fn build_patch_plan_with_probe_cache(
+    install_root: &Path,
+    stage_root: &Path,
+    archive_index: &ArchiveIndex,
+    options: &PatchApplyOptions,
+    verification_cache: &VerifiedArtifactCache,
+    measured_relocation_bytes: Option<u64>,
 ) -> Result<(PatchPlan, PatchCheckReport)> {
     let mut options = options.resolved_for_install(install_root)?;
     if let Some(storage_layout) = read_patch_storage_layout(install_root)? {
@@ -381,7 +481,9 @@ pub(crate) fn build_patch_plan_with_cache(
     let relocating_vfs_bytes = if options.external_vfs_root.is_some()
         && !same_link_target(&logical_vfs_destination, &vfs_destination)
     {
-        directory_size(&logical_vfs_destination)?
+        measured_relocation_bytes
+            .map(Ok)
+            .unwrap_or_else(|| directory_size(&logical_vfs_destination))?
     } else {
         0
     };

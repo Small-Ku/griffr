@@ -8,10 +8,12 @@ mod space;
 mod space_use;
 mod storage;
 
-pub(crate) use dependency::entry_wave_indices;
+pub(crate) use dependency::{entry_dependency_indices, entry_wave_indices};
 
-pub(crate) use build_plan::build_patch_plan_with_cache;
 pub use build_plan::check_patch_archives;
+pub(crate) use build_plan::{
+    build_patch_plan_with_probe_cache, plan_patch_probes, PatchArtifactProbe, PatchProbePlan,
+};
 pub use metadata::{
     read_predownload_stage_metadata, write_predownload_stage_metadata, PredownloadStageMetadata,
     StagedArchivePart, PREDOWNLOAD_STAGE_METADATA_NAME,
