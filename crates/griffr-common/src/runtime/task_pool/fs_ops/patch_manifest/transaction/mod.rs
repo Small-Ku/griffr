@@ -19,6 +19,61 @@ use steps::{
     release_base_if_unused,
 };
 
+pub(crate) fn prepare_patch_transaction(
+    plan: &PatchPlan,
+    commit_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
+) -> Result<()> {
+    plan.validate()?;
+    write_patch_plan(plan)?;
+    prepare_external_vfs_root(plan)?;
+    commit_top_level_files(plan, commit_callback)?;
+    delete_unreferenced_paths_before_patch(plan)
+}
+
+pub(crate) fn apply_patch_transaction_entry(
+    plan: &PatchPlan,
+    entry_index: usize,
+    verification_cache: &VerifiedArtifactCache,
+) -> Result<()> {
+    let entry = plan.entries.get(entry_index).ok_or_else(|| {
+        Error::TaskPool(format!("patch entry index {entry_index} is out of range"))
+    })?;
+    apply_planned_entry(plan, entry, verification_cache).map_err(|error| {
+        Error::Other(format!(
+            "Failed to apply patch entry {}: {}",
+            entry.name, error
+        ))
+    })
+}
+
+pub(crate) fn release_patch_transaction_base(plan: &PatchPlan, base: &Path) -> Result<()> {
+    let delete_set = plan.delete_paths.iter().cloned().collect::<BTreeSet<_>>();
+    let outputs = final_output_paths(plan);
+    let Some(relative) = steps::relative_install_path(plan, base) else {
+        return Ok(());
+    };
+    if delete_set.contains(&relative) && !outputs.contains(&relative) {
+        filesystem::remove_path_if_exists(base)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_patch_transaction_deletes(
+    plan: &PatchPlan,
+    callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
+) -> Result<()> {
+    apply_remaining_deletes(plan, callback)
+}
+
+pub(crate) fn commit_patch_transaction_deferred(plan: &PatchPlan) -> Result<()> {
+    commit_deferred_files(plan)
+}
+
+pub(crate) fn cleanup_patch_transaction(plan: &PatchPlan) -> Result<()> {
+    cleanup_staging(plan)?;
+    cleanup_transaction(plan)
+}
+
 pub(crate) fn run_patch_transaction(
     plan: &PatchPlan,
     _report: Option<&PatchCheckReport>,
@@ -27,11 +82,7 @@ pub(crate) fn run_patch_transaction(
     delete_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
     verification_cache: &VerifiedArtifactCache,
 ) -> Result<()> {
-    plan.validate()?;
-    write_patch_plan(plan)?;
-    prepare_external_vfs_root(plan)?;
-    commit_top_level_files(plan, commit_callback)?;
-    delete_unreferenced_paths_before_patch(plan)?;
+    prepare_patch_transaction(plan, commit_callback)?;
 
     let delete_set = plan.delete_paths.iter().cloned().collect::<BTreeSet<_>>();
     let outputs = final_output_paths(plan);

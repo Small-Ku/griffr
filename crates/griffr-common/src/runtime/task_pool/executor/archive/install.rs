@@ -20,6 +20,7 @@ pub(crate) fn execute_install_archive(
     password: Option<String>,
     patch_options: PatchApplyOptions,
     expected_files: Arc<std::collections::BTreeMap<String, GameFileEntry>>,
+    excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
     mut parts: Vec<ArchivePart>,
 ) -> TaskExecution {
     let result = (|| -> Result<_> {
@@ -74,6 +75,7 @@ pub(crate) fn execute_install_archive(
             password,
             patch_options,
             expected_files,
+            excluded_commit_paths,
         )
     })();
 

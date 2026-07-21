@@ -212,7 +212,7 @@ pub(super) fn commit_top_level_files(
             (!is_patch_control_path(&relative)).then_some((source, relative))
         })
         .collect::<Vec<_>>();
-    let jobs = commit_files
+    let jobs: Vec<CommitFileJob> = commit_files
         .into_iter()
         .map(|(source, relative)| {
             let destination = if deferred.contains(&relative) {
@@ -230,5 +230,5 @@ pub(super) fn commit_top_level_files(
             }
         })
         .collect();
-    commit_file_jobs(jobs, callback)
+    commit_file_jobs(&jobs, callback)
 }
