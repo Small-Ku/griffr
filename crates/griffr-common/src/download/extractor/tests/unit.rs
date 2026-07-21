@@ -507,3 +507,59 @@ fn range_cache_prunes_only_segments_without_pending_readers() -> Result<()> {
     assert!(!layout.range_is_available(&(200..300)));
     Ok(())
 }
+
+#[test]
+fn remote_range_requests_do_not_overfetch_gaps() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let layout = MultiVolumeLayout::from_remote(
+        vec![(
+            temp_dir.path().join("payload.zip.001"),
+            "https://example.invalid/payload.zip.001".to_string(),
+            1_000,
+        )],
+        temp_dir.path().join("ranges"),
+    )?;
+
+    let requests = layout.missing_range_requests([100..200, 201..300])?;
+
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].global_range, 100..200);
+    assert_eq!(requests[1].global_range, 201..300);
+    Ok(())
+}
+
+#[test]
+fn remote_range_requests_union_only_overlapping_or_adjacent_ranges() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let layout = MultiVolumeLayout::from_remote(
+        vec![(
+            temp_dir.path().join("payload.zip.001"),
+            "https://example.invalid/payload.zip.001".to_string(),
+            1_000,
+        )],
+        temp_dir.path().join("ranges"),
+    )?;
+
+    let requests = layout.missing_range_requests([100..220, 180..260, 260..300])?;
+
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].global_range, 100..300);
+    Ok(())
+}
+
+#[test]
+fn archive_entry_lookup_is_case_insensitive_for_windows_repair_paths() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let zip_path = temp_dir.path().join("case.zip");
+    let file = std::fs::File::create(&zip_path)?;
+    let mut zip = zip::ZipWriter::new(file);
+    zip.start_file("Data/Payload.BIN", zip::write::FileOptions::<()>::default())?;
+    zip.write_all(b"payload")?;
+    zip.finish()?;
+
+    let extractor = MultiVolumeExtractor::new(vec![zip_path])?;
+    let index = extractor.read_patch_payload(None)?;
+
+    assert!(index.entry_indices.contains_key("data/payload.bin"));
+    Ok(())
+}

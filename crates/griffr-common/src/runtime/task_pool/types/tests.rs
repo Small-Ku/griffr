@@ -1,9 +1,11 @@
 use super::{
-    ArchiveRetention, ArchiveWork, FileEnsureTask, PreparedArchive, Task, TaskOutcome,
-    TaskPoolConfig, TransferClass, WorkerEvent,
+    destination_or_repair_tasks, ArchiveRepairSession, ArchiveRetention, ArchiveWork,
+    FileEnsureTask, PreparedArchive, Task, TaskOutcome, TaskPoolConfig, TransferClass, WorkerEvent,
 };
 use crate::download::extractor::MultiVolumeLayout;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[test]
 fn transient_worker_progress_is_not_a_durable_outcome() {
@@ -42,6 +44,7 @@ fn normal_file_ensure_starts_with_cpu_verification() {
         prefer_reuse: false,
         retry_count: 0,
         transfer_class: TransferClass::General,
+        archive_repair: None,
     });
 
     assert!(matches!(
@@ -66,6 +69,7 @@ fn explicit_relink_skips_target_verification() {
         prefer_reuse: true,
         retry_count: 0,
         transfer_class: TransferClass::Vfs,
+        archive_repair: None,
     });
 
     assert!(matches!(
@@ -74,6 +78,75 @@ fn explicit_relink_skips_target_verification() {
             transfer_class: TransferClass::Vfs,
             ..
         }
+    ));
+}
+
+#[test]
+fn archive_repair_metadata_preparation_has_one_dynamic_owner() {
+    let session =
+        ArchiveRepairSession::new(Vec::new(), PathBuf::from("game"), Arc::new(BTreeMap::new()));
+
+    assert!(session.try_start_prepare());
+    assert!(!session.try_start_prepare());
+}
+
+#[test]
+fn archive_repair_reuses_download_preparation_before_network_admission() {
+    let session =
+        ArchiveRepairSession::new(Vec::new(), PathBuf::from("game"), Arc::new(BTreeMap::new()));
+    let tasks = destination_or_repair_tasks(
+        PathBuf::from("game/file.bin"),
+        "file.bin".to_string(),
+        "00".repeat(16),
+        4,
+        Some("https://example.invalid/file.bin".to_string()),
+        false,
+        0,
+        TransferClass::General,
+        Some(session),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        tasks.as_slice(),
+        [Task::Download {
+            archive_repair: Some(_),
+            resume: None,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn relink_verifies_destination_before_repair_preparation() {
+    let session =
+        ArchiveRepairSession::new(Vec::new(), PathBuf::from("game"), Arc::new(BTreeMap::new()));
+    let tasks = destination_or_repair_tasks(
+        PathBuf::from("game/file.bin"),
+        "file.bin".to_string(),
+        "00".repeat(16),
+        4,
+        Some("https://example.invalid/file.bin".to_string()),
+        true,
+        0,
+        TransferClass::General,
+        Some(session),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        tasks.as_slice(),
+        [Task::Verify {
+            on_fail: Some(route),
+            ..
+        }] if matches!(
+            route.as_ref(),
+            Task::Download {
+                archive_repair: Some(_),
+                resume: None,
+                ..
+            }
+        )
     ));
 }
 
@@ -111,6 +184,7 @@ fn reuse_group_claims_first_verified_source_immediately() {
         false,
         0,
         TransferClass::General,
+        None,
     );
     let tasks = group.finish_volume(false, Some(source.clone())).unwrap();
     assert!(matches!(
@@ -138,6 +212,7 @@ fn reuse_group_defers_cross_volume_copy_until_hardlink_probes_fail() {
         false,
         0,
         TransferClass::General,
+        None,
     );
     let first = group.finish_volume(false, None).unwrap();
     assert!(first.is_empty());

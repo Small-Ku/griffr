@@ -1017,6 +1017,13 @@ class RustCheckTests(unittest.TestCase):
         self.assertEqual(1, len(diagnostics))
         self.assertIn("DownloadExecInput", diagnostics[0].message)
 
+    def test_removed_repair_task_variant_is_reported(self) -> None:
+        root = self.make_workspace(
+            "enum Task { PrepareFileRepair, TransferFileRepair, ReadArchiveRepairIndex }\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DST001")
+        self.assertEqual(3, len(diagnostics))
+
     def test_canonical_data_structure_names_are_allowed(self) -> None:
         root = self.make_workspace(
             "struct DownloadResumeState;\n"
@@ -1070,7 +1077,7 @@ class RustCheckTests(unittest.TestCase):
             "enum Task { Download {\n"
             "    url: String, dest: String, logical_path: String, expected_md5: String,\n"
             "    expected_size: Option<u64>, retry_count: u32, transfer_class: TransferClass,\n"
-            "    resume: Option<DownloadResumeState>,\n"
+            "    archive_repair: Option<String>, resume: Option<DownloadResumeState>,\n"
             "} }\n"
         )
         self.assertNotIn("DST003", self.codes(self.run_checker(root)))

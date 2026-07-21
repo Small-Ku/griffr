@@ -180,6 +180,30 @@ RepairFile
 
 Reuse candidates are grouped by physical volume. Probes run as parallel DAG roots; the winning probe expands the selected commit node. Both hardlink and copy commits use the async runner; copy commits stream with positional `compio::fs::File` I/O while verifying MD5 inline. The enclosing repair node waits for all probe terminals and the selected commit chain. Failed candidates do not release an unrelated download branch prematurely.
 
+Integrity repair can also use the current full-package archive without adding a global verify barrier or a second download state machine:
+
+```text
+Verify file
+|- valid -> success
+`- invalid -> RepairFile
+             |- first failure expands the existing archive metadata DAG
+             |    DiscoverArchiveDirectory
+             |      -> FetchArchiveRange as required
+             |      -> InspectArchiveIndex
+             |- reuse probe may still win
+             `- Download { resume: None, archive_repair: Some(session) }
+                  -> Download { resume: Some(state), archive_repair: Some(session) }
+                     |- index not ready -> start individual transfer now
+                     |- exact missing archive bytes >= remaining direct bytes -> individual transfer
+                     `- smaller exact archive bytes -> FetchArchiveRepairFile
+                                                    -> ExtractArchiveRepairFile
+                                                    -> final MD5 verify + commit
+```
+
+The first failed `RepairFile` claims metadata preparation once and expands the normal `DiscoverArchiveDirectory -> FetchArchiveRange -> InspectArchiveIndex` chain for each package group. A clean verification run therefore creates no archive task and makes no archive HTTP request. The canonical `Download` variant still owns both CPU-only resume preparation and the admitted async transfer; its optional repair session is only routing context. Source choice occurs after the prepared `Download` receives a direct network slot. If the index is not ready, the individual transfer starts inside that same task and is never cancelled or reassigned. Only downloads still waiting for admission can use metadata that became ready later. Explicit relink mode delays metadata discovery until destination verification also fails.
+
+Archive repair is deliberately simple in this phase: it uses the archive only when the currently missing exact entry bytes are strictly smaller than the prepared individual download remainder. It unions only overlapping or exactly adjacent ranges and never downloads a gap merely to reduce the request count. Repair ranges use an isolated ephemeral cache below the package identity, so cleanup cannot remove install or update resume data. Archive metadata failure, range failure, extraction failure, or final verification failure continues the same graph node through the individual-file fallback. Range download and per-entry extraction are separate continuation tasks, so one ready entry can decompress while other archive ranges are still downloading.
+
 ---
 
 ## 7. Lazy Range Archive DAG
@@ -233,7 +257,7 @@ Range downloads are exact and resumable:
 - Partial ranges are cached as `*.range.part`;
 - Retries resume from the existing partial length and request only the missing suffix;
 - Finished segments are renamed atomically to `*.range`;
-- Nearby requests on the same volume are coalesced to avoid small HTTP requests;
+- Only overlapping or exactly adjacent requests are unioned; entry gaps are never downloaded as overfetch;
 - Cache directory keys include package sizes and MD5s to prevent stale range reuse.
 
 The directory planner first reads only the final EOCD search window. ZIP64 locator or end-record dependencies dynamically add preceding ranges. Central-directory parsing then derives a conservative source range for each entry—from its local header to the next local header or central directory—so encryption headers, data descriptors, and alignment padding remain available without exposing ZIP codec details to the scheduler.

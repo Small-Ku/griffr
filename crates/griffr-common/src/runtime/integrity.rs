@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 use crate::api::ApiClient;
 use crate::config::InstallTarget;
 use crate::error::{Error, Result};
+use crate::runtime::task_pool::types::{ArchiveRepairGroupSpec, ArchiveRepairSession};
 use crate::runtime::task_pool::{
-    run_tasks_with_progress, FileEnsureTask, Task, TaskOutcome, TaskPoolConfig, TaskPoolRunner,
-    TaskProgress, TransferClass,
+    archive_expected_files, plan_archive_groups, run_tasks_with_progress, FileEnsureTask, Task,
+    TaskOutcome, TaskPoolConfig, TaskPoolRunner, TaskProgress, TransferClass,
 };
 use crate::runtime::{
     build_cdn_file_url, files_base_url, normalize_logical_path, FileIssue, PathOutcomeTracker,
@@ -164,11 +165,11 @@ pub async fn run_integrity_pool(
         .filter(|path| !path.is_empty() && path != ".")
         .collect::<HashSet<_>>();
 
-    let (entries, files_url_base) = if selected_paths
+    let (entries, files_url_base, archive_groups) = if selected_paths
         .as_ref()
         .is_some_and(|paths| paths.is_empty())
     {
-        (Vec::new(), None)
+        (Vec::new(), None, None)
     } else {
         let version_info = api_client
             .get_latest_game(&install_target.api, version)
@@ -185,13 +186,32 @@ pub async fn run_integrity_pool(
         }
         remove_already_verified_entries(&mut entries, &already_verified_paths);
         remove_entries_owned_by_extra_tasks(&mut entries, install_path, &extra_target_paths);
+        let archive_groups = (repair && !pkg.packs.is_empty())
+            .then(|| plan_archive_groups(&pkg.packs, &install_path.join("downloads")))
+            .transpose()?
+            .filter(|groups| !groups.is_empty());
         (
             entries,
             repair
                 .then(|| files_base_url(&pkg.file_path).map(str::to_owned))
                 .transpose()?,
+            archive_groups,
         )
     };
+
+    let archive_repair = archive_groups.map(|groups| {
+        ArchiveRepairSession::new(
+            groups
+                .into_iter()
+                .map(|group| ArchiveRepairGroupSpec {
+                    base_name: group.base_name,
+                    parts: group.parts,
+                })
+                .collect(),
+            install_path.to_path_buf(),
+            archive_expected_files(entries.clone()),
+        )
+    });
 
     let tracked_paths = entries
         .iter()
@@ -238,6 +258,7 @@ pub async fn run_integrity_pool(
                     prefer_reuse,
                     retry_count: 0,
                     transfer_class: TransferClass::General,
+                    archive_repair: archive_repair.clone(),
                 })
             } else {
                 Task::Verify {
@@ -259,7 +280,15 @@ pub async fn run_integrity_pool(
     let task_progress = TaskProgress::new(progress)
         .with_verify(ProgressLane::INTEGRITY_VERIFY, total)
         .with_download(ProgressLane::INTEGRITY_DOWNLOAD);
-    let result = if let Some(runner) = task_pool_runner {
+    let result = if let Some(session) = archive_repair.as_ref() {
+        let run_result = if let Some(runner) = task_pool_runner {
+            runner.run_batch(tasks, task_progress)
+        } else {
+            run_tasks_with_progress(tasks, TaskPoolConfig::default(), task_progress)
+        };
+        session.cleanup();
+        run_result?
+    } else if let Some(runner) = task_pool_runner {
         runner.run_batch(tasks, task_progress)?
     } else {
         run_tasks_with_progress(tasks, TaskPoolConfig::default(), task_progress)?

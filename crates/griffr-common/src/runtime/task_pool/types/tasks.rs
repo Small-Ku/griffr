@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::archive::{
-    ArchiveCommitWork, ArchiveShardTask, ArchiveWork, PatchApplyWork, PatchCheckWork,
+    ArchiveCommitWork, ArchiveFileRepairTask, ArchiveRepairSession, ArchiveShardTask, ArchiveWork,
+    PatchApplyWork, PatchCheckWork,
 };
 
 /// Selects the download throttle. Local verification and reuse never use the
@@ -44,6 +45,10 @@ impl DownloadResumeState {
         }
     }
 
+    pub(crate) fn remaining_bytes(&self, expected_size: u64) -> u64 {
+        expected_size.saturating_sub(self.offset)
+    }
+
     pub(crate) fn take_hasher(self) -> Md5 {
         let mut hasher = self.hasher.lock().unwrap();
         hasher
@@ -73,6 +78,8 @@ pub struct FileEnsureTask {
     pub prefer_reuse: bool,
     pub retry_count: u32,
     pub transfer_class: TransferClass,
+    #[doc(hidden)]
+    pub archive_repair: Option<Arc<ArchiveRepairSession>>,
 }
 
 #[derive(Debug)]
@@ -90,6 +97,7 @@ pub struct ReuseCandidateGroup {
     verify_destination_fallback: bool,
     retry_count: u32,
     transfer_class: TransferClass,
+    archive_repair: Option<Arc<ArchiveRepairSession>>,
 }
 
 impl ReuseCandidateGroup {
@@ -107,6 +115,7 @@ impl ReuseCandidateGroup {
         verify_destination_fallback: bool,
         retry_count: u32,
         transfer_class: TransferClass,
+        archive_repair: Option<Arc<ArchiveRepairSession>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             remaining: AtomicUsize::new(group_count),
@@ -124,6 +133,7 @@ impl ReuseCandidateGroup {
             verify_destination_fallback,
             retry_count,
             transfer_class,
+            archive_repair,
         })
     }
 
@@ -163,6 +173,7 @@ impl ReuseCandidateGroup {
                 verify_destination_fallback: self.verify_destination_fallback,
                 retry_count: self.retry_count,
                 transfer_class: self.transfer_class,
+                archive_repair: self.archive_repair.clone(),
             }]);
         }
 
@@ -189,6 +200,7 @@ impl ReuseCandidateGroup {
                 self.verify_destination_fallback,
                 self.retry_count,
                 self.transfer_class,
+                self.archive_repair.clone(),
             );
             return Ok(copy_groups
                 .into_iter()
@@ -203,7 +215,7 @@ impl ReuseCandidateGroup {
                 .collect());
         }
 
-        destination_or_download_tasks(
+        destination_or_repair_tasks(
             self.dest.clone(),
             self.logical_path.clone(),
             self.expected_md5.clone(),
@@ -212,12 +224,13 @@ impl ReuseCandidateGroup {
             self.verify_destination_fallback,
             self.retry_count,
             self.transfer_class,
+            self.archive_repair.clone(),
         )
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn destination_or_download_tasks(
+pub(crate) fn destination_or_repair_tasks(
     dest: PathBuf,
     logical_path: String,
     expected_md5: String,
@@ -226,8 +239,9 @@ pub(crate) fn destination_or_download_tasks(
     verify_destination_fallback: bool,
     retry_count: u32,
     transfer_class: TransferClass,
+    archive_repair: Option<Arc<ArchiveRepairSession>>,
 ) -> Result<Vec<Task>> {
-    let download = download_url.map(|url| Task::Download {
+    let repair = download_url.map(|url| Task::Download {
         url,
         dest: dest.clone(),
         logical_path: logical_path.clone(),
@@ -235,6 +249,7 @@ pub(crate) fn destination_or_download_tasks(
         expected_size: Some(expected_size),
         retry_count,
         transfer_class,
+        archive_repair,
         resume: None,
     });
     if verify_destination_fallback {
@@ -243,11 +258,11 @@ pub(crate) fn destination_or_download_tasks(
             logical_path,
             expected_md5,
             expected_size: Some(expected_size),
-            on_fail: download.map(Box::new),
+            on_fail: repair.map(Box::new),
         }]);
     }
-    if let Some(download) = download {
-        return Ok(vec![download]);
+    if let Some(repair) = repair {
+        return Ok(vec![repair]);
     }
     Err(Error::Message {
         context: "Task pool error: ",
@@ -316,6 +331,8 @@ pub enum Task {
         retry_count: u32,
         transfer_class: TransferClass,
         #[doc(hidden)]
+        archive_repair: Option<Arc<ArchiveRepairSession>>,
+        #[doc(hidden)]
         resume: Option<DownloadResumeState>,
     },
     Verify {
@@ -336,6 +353,7 @@ pub enum Task {
         verify_destination_fallback: bool,
         retry_count: u32,
         transfer_class: TransferClass,
+        archive_repair: Option<Arc<ArchiveRepairSession>>,
     },
     VerifyReuseVolume {
         copy_only: bool,
@@ -358,6 +376,15 @@ pub enum Task {
         verify_destination_fallback: bool,
         retry_count: u32,
         transfer_class: TransferClass,
+        archive_repair: Option<Arc<ArchiveRepairSession>>,
+    },
+    #[doc(hidden)]
+    FetchArchiveRepairFile {
+        repair: ArchiveFileRepairTask,
+    },
+    #[doc(hidden)]
+    ExtractArchiveRepairFile {
+        repair: ArchiveFileRepairTask,
     },
     #[doc(hidden)]
     FetchArchiveRange {
@@ -501,6 +528,7 @@ impl Task {
             verify_destination_fallback: spec.prefer_reuse,
             retry_count: spec.retry_count,
             transfer_class: spec.transfer_class,
+            archive_repair: spec.archive_repair,
         };
         if spec.prefer_reuse {
             repair

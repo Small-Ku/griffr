@@ -8,26 +8,27 @@ use crate::download::extractor::{
 use crate::runtime::task_pool::graph::{GraphExpansion, TaskRun};
 use crate::runtime::task_pool::types::{ArchiveRangePriority, ArchiveWork, Task, WorkerEvent};
 
-pub(crate) async fn run_fetch_archive_range(
-    work: Arc<ArchiveWork>,
-    request: ArchiveRangeRequest,
-    retry_count: u32,
-    priority: ArchiveRangePriority,
-    max_retries: u32,
-    progress_buffer_bytes: usize,
-    user_agent: &str,
-    event_tx: &flume::Sender<WorkerEvent>,
-) -> TaskRun {
-    if work.layout.range_is_available(&request.global_range) {
-        return TaskRun::succeeded();
-    }
-    let logical_path = format!(
+fn archive_range_logical_path(work: &ArchiveWork, request: &ArchiveRangeRequest) -> String {
+    format!(
         "{}#volume-{:03}:{}-{}",
         work.base_name,
         request.volume_index + 1,
         request.local_range.start,
         request.local_range.end
-    );
+    )
+}
+
+pub(super) async fn fetch_archive_range_once(
+    work: &Arc<ArchiveWork>,
+    request: &ArchiveRangeRequest,
+    progress_buffer_bytes: usize,
+    user_agent: &str,
+    event_tx: &flume::Sender<WorkerEvent>,
+) -> crate::error::Result<u64> {
+    if work.layout.range_is_available(&request.global_range) {
+        return Ok(0);
+    }
+    let logical_path = archive_range_logical_path(work, request);
     let expected = request.local_range.end - request.local_range.start;
     let _ = event_tx.send(WorkerEvent::progress(
         crate::runtime::ProgressPhase::Download,
@@ -36,9 +37,8 @@ pub(crate) async fn run_fetch_archive_range(
         expected,
         false,
     ));
-
-    let result = crate::download::extractor::fetch_archive_range_to_cache(
-        &request,
+    let written = crate::download::extractor::fetch_archive_range_to_cache(
+        request,
         user_agent,
         progress_buffer_bytes,
         |written| {
@@ -51,21 +51,36 @@ pub(crate) async fn run_fetch_archive_range(
             ));
         },
     )
-    .await
-    .and_then(|written| {
-        work.layout.register_range(&request)?;
-        Ok(written)
-    });
+    .await?;
+    work.layout.register_range(request)?;
+    let _ = event_tx.send(WorkerEvent::progress(
+        crate::runtime::ProgressPhase::Download,
+        logical_path.clone(),
+        written,
+        expected,
+        false,
+    ));
+    Ok(written)
+}
 
-    match result {
+pub(crate) async fn run_fetch_archive_range(
+    work: Arc<ArchiveWork>,
+    request: ArchiveRangeRequest,
+    retry_count: u32,
+    priority: ArchiveRangePriority,
+    max_retries: u32,
+    progress_buffer_bytes: usize,
+    user_agent: &str,
+    event_tx: &flume::Sender<WorkerEvent>,
+) -> TaskRun {
+    if work.repair_index_stopped() {
+        return TaskRun::succeeded();
+    }
+    let logical_path = archive_range_logical_path(&work, &request);
+    match fetch_archive_range_once(&work, &request, progress_buffer_bytes, user_agent, event_tx)
+        .await
+    {
         Ok(bytes) => {
-            let _ = event_tx.send(WorkerEvent::progress(
-                crate::runtime::ProgressPhase::Download,
-                logical_path.clone(),
-                bytes,
-                expected,
-                false,
-            ));
             let _ = event_tx.send(WorkerEvent::downloaded(logical_path, bytes));
             TaskRun::succeeded()
         }
@@ -81,9 +96,24 @@ pub(crate) async fn run_fetch_archive_range(
                 priority,
             })
         }
-        Err(error) => TaskRun::failed(format!(
-            "archive range download failed after retries: {error}"
-        )),
+        Err(error) => {
+            let detail = format!("archive range download failed after retries: {error}");
+            if work.fail_repair_index(&detail) {
+                TaskRun::succeeded()
+            } else {
+                TaskRun::failed(detail)
+            }
+        }
+    }
+}
+
+fn fail_archive_work(work: &Arc<ArchiveWork>, error: impl std::fmt::Display) -> TaskRun {
+    let detail = error.to_string();
+    if work.fail_repair_index(&detail) {
+        TaskRun::succeeded()
+    } else {
+        work.invalidate_range_cache();
+        TaskRun::failed(detail)
     }
 }
 
@@ -103,15 +133,15 @@ fn fetch_ranges_then(
                 .into_iter()
                 .collect::<Vec<_>>();
             if tokens.is_empty() {
-                return TaskRun::failed(error.to_string());
+                return fail_archive_work(&work, error);
             }
             let mut expansion = GraphExpansion::new();
             return match expansion.add_root_with_tokens(next, tokens) {
                 Ok(_) => TaskRun::expand(expansion),
-                Err(error) => TaskRun::failed(error.to_string()),
+                Err(error) => fail_archive_work(&work, error),
             };
         }
-        Err(error) => return TaskRun::failed(error.to_string()),
+        Err(error) => return fail_archive_work(&work, error),
     };
     if requests.is_empty() {
         return TaskRun::then(next);
@@ -132,6 +162,9 @@ pub(crate) fn run_discover_archive_directory(
     work: Arc<ArchiveWork>,
     required_range: Option<std::ops::Range<u64>>,
 ) -> TaskRun {
+    if work.repair_index_stopped() {
+        return TaskRun::succeeded();
+    }
     if let Some(range) = required_range.as_ref() {
         if !work.layout.range_is_available(range) {
             return fetch_ranges_then(
@@ -162,10 +195,7 @@ pub(crate) fn run_discover_archive_directory(
                 required_range: Some(range),
             },
         ),
-        Err(error) => {
-            work.invalidate_range_cache();
-            TaskRun::failed(error.to_string())
-        }
+        Err(error) => fail_archive_work(&work, error),
     }
 }
 
@@ -173,10 +203,20 @@ pub(crate) fn run_read_archive_index(
     work: Arc<ArchiveWork>,
     directory: ArchiveDirectory,
 ) -> TaskRun {
+    if work.repair_index_stopped() {
+        return TaskRun::succeeded();
+    }
     let extractor = MultiVolumeExtractor::from_layout(work.layout.clone());
     match extractor.read_archive_index(&directory) {
         Ok(archive_index) => {
             let archive_index = Arc::new(archive_index);
+            if work.repair_target().is_some() {
+                return match super::repair::finish_archive_repair_index(work.clone(), archive_index)
+                {
+                    Ok(()) => TaskRun::succeeded(),
+                    Err(error) => fail_archive_work(&work, error),
+                };
+            }
             let ranges = MultiVolumeExtractor::control_source_ranges(&archive_index);
             fetch_ranges_then(
                 work.clone(),
@@ -187,10 +227,7 @@ pub(crate) fn run_read_archive_index(
                 },
             )
         }
-        Err(error) => {
-            work.invalidate_range_cache();
-            TaskRun::failed(error.to_string())
-        }
+        Err(error) => fail_archive_work(&work, error),
     }
 }
 
@@ -208,9 +245,6 @@ pub(crate) fn run_read_archive_controls(
             extract_shards,
             event_tx,
         ),
-        Err(error) => {
-            work.invalidate_range_cache();
-            TaskRun::failed(error.to_string())
-        }
+        Err(error) => fail_archive_work(&work, error),
     }
 }

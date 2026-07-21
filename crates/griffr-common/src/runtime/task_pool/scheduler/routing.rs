@@ -71,6 +71,32 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.write_volumes.push(volume_key(&range.cache_path));
             request.mutation_paths.push(path_key(&range.cache_path));
         }
+        Task::FetchArchiveRepairFile { repair } => {
+            request.network = Some(NetworkClass::Archive);
+            if let Ok(ranges) = repair
+                .work
+                .layout
+                .missing_range_requests([repair.source_range.clone()])
+            {
+                for range in ranges {
+                    request.write_volumes.push(volume_key(&range.cache_path));
+                    request.mutation_paths.push(path_key(&range.cache_path));
+                }
+            }
+        }
+        Task::ExtractArchiveRepairFile { repair } => {
+            request.read_volumes.extend(
+                repair
+                    .work
+                    .paths_for_indices(&repair.volume_indices)
+                    .iter()
+                    .map(|path| volume_key(path)),
+            );
+            request.write_volumes.push(volume_key(&repair.staging_dir));
+            request.write_volumes.push(volume_key(&repair.dest));
+            request.mutation_paths.push(path_key(&repair.dest));
+            request.extract = true;
+        }
         Task::Verify { path, .. } => request.read_volumes.push(volume_key(path)),
         Task::Download {
             dest,
@@ -378,6 +404,8 @@ fn task_estimated_bytes(task: &Task) -> u64 {
         Task::FetchArchiveRange { request, .. } => {
             request.local_range.end - request.local_range.start
         }
+        Task::FetchArchiveRepairFile { repair } => repair.source_bytes,
+        Task::ExtractArchiveRepairFile { repair } => repair.expected_size,
         Task::Download { expected_size, .. } | Task::Verify { expected_size, .. } => {
             expected_size.unwrap_or(0)
         }
@@ -447,7 +475,8 @@ fn run_class(task: &Task) -> RunClass {
                 RunClass::Cpu
             }
         }
-        Task::FetchArchiveRange { .. }
+        Task::FetchArchiveRepairFile { .. }
+        | Task::FetchArchiveRange { .. }
         | Task::Hardlink { .. }
         | Task::ReuseFile { .. }
         | Task::ApplyDeleteManifest { .. } => RunClass::AsyncIo,
@@ -463,7 +492,8 @@ fn run_class(task: &Task) -> RunClass {
                 | crate::runtime::PlannedPatchSource::Hdiff { .. } => RunClass::Cpu,
             })
             .unwrap_or(RunClass::Blocking),
-        Task::OpenArchive { .. }
+        Task::ExtractArchiveRepairFile { .. }
+        | Task::OpenArchive { .. }
         | Task::DiscoverArchiveDirectory { .. }
         | Task::InspectArchiveIndex { .. }
         | Task::ReadArchiveControls { .. }
@@ -533,6 +563,9 @@ fn path_key(path: &Path) -> String {
 
 pub(super) fn task_path(task: &Task) -> String {
     match task {
+        Task::FetchArchiveRepairFile { repair } | Task::ExtractArchiveRepairFile { repair } => {
+            repair.logical_path.clone()
+        }
         Task::OpenArchive { base_name, .. } => base_name.clone(),
         Task::ProbePatchArtifact {
             patch_check,
@@ -587,9 +620,13 @@ pub(super) fn task_path(task: &Task) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{task_resources, RunClass};
+    use super::{task_resources, NetworkClass, RunClass};
+    use crate::runtime::task_pool::types::{ArchiveRepairSession, DownloadResumeState};
     use crate::runtime::task_pool::{Task, TransferClass};
+    use md5::{Digest, Md5};
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn reuse_task(copy_only: bool) -> Task {
         Task::ReuseFile {
@@ -605,6 +642,7 @@ mod tests {
             verify_destination_fallback: false,
             retry_count: 0,
             transfer_class: TransferClass::General,
+            archive_repair: None,
         }
     }
 
@@ -647,5 +685,28 @@ mod tests {
             dest: PathBuf::from("dest.bin"),
         });
         assert_eq!(hardlink.run, RunClass::AsyncIo);
+    }
+
+    #[test]
+    fn repair_route_waits_for_its_network_lane_before_source_selection() {
+        let resources = task_resources(&Task::Download {
+            url: "https://example.invalid/file.bin".to_string(),
+            dest: PathBuf::from("game/file.bin"),
+            logical_path: "file.bin".to_string(),
+            expected_md5: "00".repeat(16),
+            expected_size: Some(4),
+            retry_count: 0,
+            transfer_class: TransferClass::General,
+            archive_repair: Some(ArchiveRepairSession::new(
+                Vec::new(),
+                PathBuf::from("game"),
+                Arc::new(BTreeMap::new()),
+            )),
+            resume: Some(DownloadResumeState::new(0, Md5::new())),
+        });
+
+        assert_eq!(resources.run, RunClass::AsyncIo);
+        assert_eq!(resources.network, Some(NetworkClass::General));
+        assert_eq!(resources.estimated_bytes, 4);
     }
 }

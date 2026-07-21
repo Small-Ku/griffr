@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::runtime::task_pool::fs_ops::CommitFileBatch;
 use crate::runtime::task_pool::graph::TaskDependencyToken;
@@ -229,6 +229,240 @@ pub(crate) struct PreparedArchive {
 }
 
 #[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct ArchiveRepairGroupSpec {
+    pub(crate) base_name: String,
+    pub(crate) parts: Vec<ArchivePart>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedArchiveRepairGroup {
+    pub(crate) work: Arc<ArchiveWork>,
+    pub(crate) archive_index: Arc<ArchiveIndex>,
+    pub(crate) staging_dir: PathBuf,
+}
+
+#[derive(Debug)]
+enum ArchiveRepairGroupState {
+    Pending,
+    Ready(PreparedArchiveRepairGroup),
+    Failed,
+}
+
+#[derive(Debug)]
+struct ArchiveRepairState {
+    started: bool,
+    groups: Vec<ArchiveRepairGroupState>,
+}
+
+/// Command-scoped archive metadata and range cache used by integrity repair.
+/// The first failed verification dynamically starts the existing archive
+/// directory/index DAG for every package group. Source selection still occurs
+/// only when a prepared direct `Download` receives network admission.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ArchiveRepairSession {
+    groups: Vec<ArchiveRepairGroupSpec>,
+    install_root: PathBuf,
+    expected_files: Arc<BTreeMap<String, GameFileEntry>>,
+    state: Mutex<ArchiveRepairState>,
+}
+
+impl ArchiveRepairSession {
+    pub(crate) fn new(
+        groups: Vec<ArchiveRepairGroupSpec>,
+        install_root: PathBuf,
+        expected_files: Arc<BTreeMap<String, GameFileEntry>>,
+    ) -> Arc<Self> {
+        let group_count = groups.len();
+        Arc::new(Self {
+            groups,
+            install_root,
+            expected_files,
+            state: Mutex::new(ArchiveRepairState {
+                started: false,
+                groups: (0..group_count)
+                    .map(|_| ArchiveRepairGroupState::Pending)
+                    .collect(),
+            }),
+        })
+    }
+
+    pub(crate) fn group_specs(&self) -> &[ArchiveRepairGroupSpec] {
+        &self.groups
+    }
+
+    pub(crate) fn install_root(&self) -> &Path {
+        &self.install_root
+    }
+
+    pub(crate) fn expected_files(&self) -> &Arc<BTreeMap<String, GameFileEntry>> {
+        &self.expected_files
+    }
+
+    /// Claims metadata preparation for this command. The caller expands the
+    /// returned group work through the normal archive directory/index tasks.
+    pub(crate) fn try_start_prepare(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.started {
+            return false;
+        }
+        state.started = true;
+        true
+    }
+
+    pub(crate) fn set_group_ready(
+        &self,
+        group_index: usize,
+        group: PreparedArchiveRepairGroup,
+    ) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let Some(slot) = state.groups.get_mut(group_index) else {
+            return false;
+        };
+        if !matches!(slot, ArchiveRepairGroupState::Pending) {
+            return false;
+        }
+        *slot = ArchiveRepairGroupState::Ready(group);
+        true
+    }
+
+    pub(crate) fn set_group_failed(&self, group_index: usize) {
+        let mut state = self.state.lock().unwrap();
+        let Some(slot) = state.groups.get_mut(group_index) else {
+            return;
+        };
+        if matches!(slot, ArchiveRepairGroupState::Pending) {
+            *slot = ArchiveRepairGroupState::Failed;
+        }
+    }
+
+    pub(crate) fn group_failed(&self, group_index: usize) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .groups
+            .get(group_index)
+            .is_none_or(|slot| matches!(slot, ArchiveRepairGroupState::Failed))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn select_file(
+        &self,
+        dest: PathBuf,
+        logical_path: String,
+        expected_md5: String,
+        expected_size: u64,
+        direct_bytes: u64,
+        download_url: Option<String>,
+        retry_count: u32,
+        transfer_class: super::tasks::TransferClass,
+    ) -> Option<ArchiveFileRepairTask> {
+        let normalized = logical_path.replace('\\', "/").to_ascii_lowercase();
+        let state = self.state.lock().unwrap();
+        state.groups.iter().find_map(|group_state| {
+            let ArchiveRepairGroupState::Ready(group) = group_state else {
+                return None;
+            };
+            let entry_index = *group.archive_index.entry_indices.get(&normalized)?;
+            let source = group.archive_index.entry_sources.get(entry_index)?;
+            let source_bytes = group
+                .work
+                .layout
+                .missing_range_requests([source.range.clone()])
+                .ok()?
+                .iter()
+                .fold(0u64, |total, request| {
+                    total.saturating_add(
+                        request
+                            .local_range
+                            .end
+                            .saturating_sub(request.local_range.start),
+                    )
+                });
+            (source_bytes < direct_bytes).then(|| ArchiveFileRepairTask {
+                work: group.work.clone(),
+                archive_index: group.archive_index.clone(),
+                staging_dir: group.staging_dir.clone(),
+                entry_index,
+                source_range: source.range.clone(),
+                volume_indices: source.volume_indices.clone(),
+                source_bytes,
+                dest: dest.clone(),
+                logical_path: logical_path.clone(),
+                expected_md5: expected_md5.clone(),
+                expected_size,
+                download_url: download_url.clone(),
+                retry_count,
+                transfer_class,
+            })
+        })
+    }
+
+    pub(crate) fn cleanup(&self) {
+        let groups = {
+            let mut state = self.state.lock().unwrap();
+            state
+                .groups
+                .iter_mut()
+                .filter_map(
+                    |slot| match std::mem::replace(slot, ArchiveRepairGroupState::Failed) {
+                        ArchiveRepairGroupState::Ready(group) => Some(group),
+                        ArchiveRepairGroupState::Pending | ArchiveRepairGroupState::Failed => None,
+                    },
+                )
+                .collect::<Vec<_>>()
+        };
+        for group in groups {
+            let PreparedArchiveRepairGroup {
+                work,
+                archive_index,
+                staging_dir,
+            } = group;
+            drop(archive_index);
+            if let Err(error) = std::fs::remove_dir_all(&staging_dir) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        path = %staging_dir.display(),
+                        %error,
+                        "failed to remove archive repair staging directory"
+                    );
+                }
+            }
+            work.layout.cleanup_cache();
+        }
+    }
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct ArchiveFileRepairTask {
+    pub(crate) work: Arc<ArchiveWork>,
+    pub(crate) archive_index: Arc<ArchiveIndex>,
+    pub(crate) staging_dir: PathBuf,
+    pub(crate) entry_index: usize,
+    pub(crate) source_range: Range<u64>,
+    pub(crate) volume_indices: Vec<usize>,
+    pub(crate) source_bytes: u64,
+    pub(crate) dest: PathBuf,
+    pub(crate) logical_path: String,
+    pub(crate) expected_md5: String,
+    pub(crate) expected_size: u64,
+    pub(crate) download_url: Option<String>,
+    pub(crate) retry_count: u32,
+    pub(crate) transfer_class: super::tasks::TransferClass,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ArchiveWorkPurpose {
+    Install,
+    Repair {
+        session: Weak<ArchiveRepairSession>,
+        group_index: usize,
+    },
+}
+
+#[doc(hidden)]
 #[derive(Debug)]
 pub struct ArchiveWork {
     pub(crate) base_name: String,
@@ -241,6 +475,7 @@ pub struct ArchiveWork {
     pub(crate) patch_options: PatchApplyOptions,
     pub(crate) expected_files: Arc<BTreeMap<String, GameFileEntry>>,
     pub(crate) excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
+    purpose: ArchiveWorkPurpose,
     pub(crate) prepared: Mutex<Option<PreparedArchive>>,
     pub(crate) extracted_bytes: AtomicU64,
     saved_volumes: Mutex<Vec<bool>>,
@@ -261,6 +496,67 @@ impl ArchiveWork {
         expected_files: Arc<BTreeMap<String, GameFileEntry>>,
         excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
     ) -> Result<Arc<Self>> {
+        Self::new_with_purpose(
+            base_name,
+            layout,
+            volume_tokens,
+            dest,
+            retention,
+            parts,
+            password,
+            patch_options,
+            expected_files,
+            excluded_commit_paths,
+            ArchiveWorkPurpose::Install,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_repair(
+        base_name: String,
+        layout: MultiVolumeLayout,
+        volume_tokens: Vec<Option<TaskDependencyToken>>,
+        dest: PathBuf,
+        parts: Vec<ArchivePart>,
+        password: Option<String>,
+        patch_options: PatchApplyOptions,
+        expected_files: Arc<BTreeMap<String, GameFileEntry>>,
+        excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
+        session: Weak<ArchiveRepairSession>,
+        group_index: usize,
+    ) -> Result<Arc<Self>> {
+        Self::new_with_purpose(
+            base_name,
+            layout,
+            volume_tokens,
+            dest,
+            ArchiveRetention::Ephemeral,
+            parts,
+            password,
+            patch_options,
+            expected_files,
+            excluded_commit_paths,
+            ArchiveWorkPurpose::Repair {
+                session,
+                group_index,
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_purpose(
+        base_name: String,
+        layout: MultiVolumeLayout,
+        volume_tokens: Vec<Option<TaskDependencyToken>>,
+        dest: PathBuf,
+        retention: ArchiveRetention,
+        parts: Vec<ArchivePart>,
+        password: Option<String>,
+        patch_options: PatchApplyOptions,
+        expected_files: Arc<BTreeMap<String, GameFileEntry>>,
+        excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
+        purpose: ArchiveWorkPurpose,
+    ) -> Result<Arc<Self>> {
         if volume_tokens.len() != layout.volume_count() {
             return Err(Error::Message {
                 context: "Task pool error: ",
@@ -277,11 +573,11 @@ impl ArchiveWork {
                 return Err(Error::Message {
                     context: "Task pool error: ",
                     detail: format!(
-                    "archive {} retains full volumes but has {} part descriptors for {} volumes",
-                    base_name,
-                    parts.len(),
-                    layout.volume_count()
-                ),
+                        "archive {} retains full volumes but has {} part descriptors for {} volumes",
+                        base_name,
+                        parts.len(),
+                        layout.volume_count()
+                    ),
                 });
             }
             for (index, part) in parts.iter().enumerate() {
@@ -312,11 +608,47 @@ impl ArchiveWork {
             patch_options,
             expected_files,
             excluded_commit_paths,
+            purpose,
             prepared: Mutex::new(None),
             extracted_bytes: AtomicU64::new(0),
             saved_volumes: Mutex::new(vec![false; volume_count]),
             cache_invalid: AtomicBool::new(false),
         }))
+    }
+
+    pub(crate) fn repair_target(&self) -> Option<(Weak<ArchiveRepairSession>, usize)> {
+        match &self.purpose {
+            ArchiveWorkPurpose::Install => None,
+            ArchiveWorkPurpose::Repair {
+                session,
+                group_index,
+            } => Some((session.clone(), *group_index)),
+        }
+    }
+
+    pub(crate) fn repair_index_stopped(&self) -> bool {
+        let Some((session, group_index)) = self.repair_target() else {
+            return false;
+        };
+        session
+            .upgrade()
+            .is_none_or(|session| session.group_failed(group_index))
+    }
+
+    pub(crate) fn fail_repair_index(&self, detail: &str) -> bool {
+        let Some((session, group_index)) = self.repair_target() else {
+            return false;
+        };
+        if let Some(session) = session.upgrade() {
+            session.set_group_failed(group_index);
+        }
+        self.invalidate_range_cache();
+        tracing::warn!(
+            archive = %self.base_name,
+            %detail,
+            "archive repair index is unavailable; direct repair remains active"
+        );
+        true
     }
 
     pub(crate) fn tokens_for_range(&self, range: std::ops::Range<u64>) -> Vec<TaskDependencyToken> {

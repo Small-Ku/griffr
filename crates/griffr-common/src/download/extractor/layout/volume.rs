@@ -353,7 +353,7 @@ impl MultiVolumeLayout {
             let mut merged = Vec::<Range<u64>>::new();
             for range in requested {
                 if let Some(last) = merged.last_mut() {
-                    if range.start <= last.end.saturating_add(64 * 1024) {
+                    if range.start <= last.end {
                         last.end = last.end.max(range.end);
                         continue;
                     }

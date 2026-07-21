@@ -210,6 +210,7 @@ impl MultiVolumeExtractor {
         let archive_offset = directory.archive_offset;
         let mut cursor = 0usize;
         let mut entries = BTreeMap::new();
+        let mut entry_indices = BTreeMap::new();
         let mut entry_sizes = Vec::with_capacity(directory.entry_count);
         let mut entry_compression_methods = Vec::with_capacity(directory.entry_count);
         let mut compressed_sizes = Vec::with_capacity(directory.entry_count);
@@ -359,6 +360,15 @@ impl MultiVolumeExtractor {
                         detail: format!("Archive contains duplicate entry {normalized}"),
                     });
                 }
+                let lookup_name = normalized.to_ascii_lowercase();
+                if entry_indices.insert(lookup_name, index).is_some() {
+                    return Err(Error::Message {
+                        context: "Extraction error: ",
+                        detail: format!(
+                            "Archive contains Windows-path duplicate entry {normalized}"
+                        ),
+                    });
+                }
                 if normalized == PATCH_MANIFEST_NAME || normalized == DELETE_FILES_MANIFEST_NAME {
                     control_indices.push(index);
                 }
@@ -415,6 +425,7 @@ impl MultiVolumeExtractor {
 
         Ok(ArchiveIndex {
             entries,
+            entry_indices,
             archive,
             total_uncompressed_bytes,
             entry_sizes,

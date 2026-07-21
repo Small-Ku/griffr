@@ -37,6 +37,7 @@ fn plan_vfs_file_task(
             prefer_reuse: options.prefer_reuse,
             retry_count: 0,
             transfer_class: TransferClass::Vfs,
+            archive_repair: None,
         })
     } else {
         Task::Verify {

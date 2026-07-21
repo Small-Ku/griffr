@@ -222,6 +222,7 @@ fn res_index_to_ensure_tasks(
             prefer_reuse: cfg.prefer_reuse,
             retry_count: 0,
             transfer_class: TransferClass::Vfs,
+            archive_repair: None,
         }));
     }
 

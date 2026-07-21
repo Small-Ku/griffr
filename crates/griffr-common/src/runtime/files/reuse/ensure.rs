@@ -125,6 +125,7 @@ pub async fn ensure_game_files_with_pool(
             prefer_reuse: false,
             retry_count: 0,
             transfer_class: TransferClass::General,
+            archive_repair: None,
         }));
     }
 

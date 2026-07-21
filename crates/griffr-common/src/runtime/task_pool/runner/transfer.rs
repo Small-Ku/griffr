@@ -6,7 +6,7 @@ use super::super::fs_ops::{
     storage_volume_id, ReuseMode,
 };
 use super::super::graph::{GraphExpansion, TaskRun};
-use super::super::types::{destination_or_download_tasks, ReuseCandidateGroup, Task, WorkerEvent};
+use super::super::types::{destination_or_repair_tasks, ReuseCandidateGroup, Task, WorkerEvent};
 use crate::runtime::PathReuseMethod;
 
 pub(super) fn run_prepare_download(
@@ -22,6 +22,7 @@ pub(super) fn run_prepare_download(
         expected_size,
         retry_count,
         transfer_class,
+        archive_repair,
         resume: None,
     } = task
     else {
@@ -35,7 +36,7 @@ pub(super) fn run_prepare_download(
             TaskRun::succeeded()
         }
         Ok(super::super::download::DownloadPreparation::Resume(resume)) => {
-            TaskRun::then(Task::Download {
+            let transfer = Task::Download {
                 url,
                 dest,
                 logical_path,
@@ -43,8 +44,18 @@ pub(super) fn run_prepare_download(
                 expected_size,
                 retry_count,
                 transfer_class,
+                archive_repair: archive_repair.clone(),
                 resume: Some(resume),
-            })
+            };
+            let mut tasks = archive_repair
+                .map(super::archive::start_archive_repair_index)
+                .unwrap_or_default();
+            if tasks.is_empty() {
+                TaskRun::then(transfer)
+            } else {
+                tasks.push(transfer);
+                TaskRun::expand(GraphExpansion::parallel(tasks))
+            }
         }
         Err(error) => retry_or_fail_download(
             url,
@@ -54,6 +65,7 @@ pub(super) fn run_prepare_download(
             expected_size,
             retry_count,
             transfer_class,
+            archive_repair,
             max_retries,
             error,
             event_tx,
@@ -77,11 +89,28 @@ pub(super) async fn run_transfer_download(
         expected_size,
         retry_count,
         transfer_class,
+        archive_repair,
         resume: Some(resume),
     } = task
     else {
         unreachable!("download transfer requires a prepared download task");
     };
+
+    if let (Some(session), Some(expected_size)) = (archive_repair.as_ref(), expected_size) {
+        let direct_bytes = resume.remaining_bytes(expected_size);
+        if let Some(repair) = session.select_file(
+            dest.clone(),
+            logical_path.clone(),
+            expected_md5.clone(),
+            expected_size,
+            direct_bytes,
+            Some(url.clone()),
+            retry_count,
+            transfer_class,
+        ) {
+            return TaskRun::then(Task::FetchArchiveRepairFile { repair });
+        }
+    }
 
     let event_tx_clone = event_tx.clone();
     let logical_path_clone = logical_path.clone();
@@ -136,6 +165,7 @@ pub(super) async fn run_transfer_download(
             expected_size,
             retry_count,
             transfer_class,
+            None,
             max_retries,
             error,
             event_tx,
@@ -152,6 +182,7 @@ fn retry_or_fail_download(
     expected_size: Option<u64>,
     retry_count: u32,
     transfer_class: super::super::types::TransferClass,
+    archive_repair: Option<std::sync::Arc<super::super::types::ArchiveRepairSession>>,
     max_retries: u32,
     error: crate::error::Error,
     event_tx: &flume::Sender<WorkerEvent>,
@@ -169,6 +200,7 @@ fn retry_or_fail_download(
             expected_size,
             retry_count: retry_count + 1,
             transfer_class,
+            archive_repair,
             resume: None,
         })
     } else {
@@ -188,9 +220,23 @@ pub(super) fn run_repair_file(task: Task) -> TaskRun {
         verify_destination_fallback,
         retry_count,
         transfer_class,
+        archive_repair,
     } = task
     else {
         unreachable!("repair runner requires a repair task");
+    };
+
+    // Normal verify has already proved the destination is bad, so metadata
+    // discovery can overlap reuse and direct preparation. Explicit relink mode
+    // starts the same discovery from the fallback Download only after its
+    // delayed destination verification fails.
+    let archive_prepare = if verify_destination_fallback {
+        Vec::new()
+    } else {
+        archive_repair
+            .clone()
+            .map(super::archive::start_archive_repair_index)
+            .unwrap_or_default()
     };
 
     let destination_volume = storage_volume_id(&dest);
@@ -228,7 +274,7 @@ pub(super) fn run_repair_file(task: Task) -> TaskRun {
     }
 
     if hardlink_groups.is_empty() && copy_groups.is_empty() {
-        return task_list_run(destination_or_download_tasks(
+        let tasks = destination_or_repair_tasks(
             dest,
             logical_path,
             expected_md5,
@@ -237,7 +283,13 @@ pub(super) fn run_repair_file(task: Task) -> TaskRun {
             verify_destination_fallback,
             retry_count,
             transfer_class,
-        ));
+            archive_repair,
+        )
+        .map(|mut tasks| {
+            tasks.extend(archive_prepare);
+            tasks
+        });
+        return task_list_run(tasks);
     }
 
     let (first_groups, first_copy_only, deferred_copy_groups) = if hardlink_groups.is_empty() {
@@ -258,17 +310,21 @@ pub(super) fn run_repair_file(task: Task) -> TaskRun {
         verify_destination_fallback,
         retry_count,
         transfer_class,
+        archive_repair,
     );
-    TaskRun::expand(GraphExpansion::parallel(first_groups.into_iter().map(
-        |candidates| Task::VerifyReuseVolume {
+    let mut tasks = first_groups
+        .into_iter()
+        .map(|candidates| Task::VerifyReuseVolume {
             copy_only: first_copy_only,
             candidates,
             logical_path: logical_path.clone(),
             expected_md5: expected_md5.clone(),
             expected_size,
             group: group.clone(),
-        },
-    )))
+        })
+        .collect::<Vec<_>>();
+    tasks.extend(archive_prepare);
+    TaskRun::expand(GraphExpansion::parallel(tasks))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -358,6 +414,7 @@ fn finish_reuse_file(
         verify_destination_fallback,
         retry_count,
         transfer_class,
+        archive_repair,
     } = task
     else {
         unreachable!("reuse finish requires a reuse task");
@@ -393,6 +450,7 @@ fn finish_reuse_file(
                 verify_destination_fallback,
                 retry_count,
                 transfer_class,
+                archive_repair,
             })
         }
         Err(error) => {
@@ -412,9 +470,10 @@ fn finish_reuse_file(
                     verify_destination_fallback,
                     retry_count,
                     transfer_class,
+                    archive_repair,
                 })
             } else {
-                task_list_run(destination_or_download_tasks(
+                task_list_run(destination_or_repair_tasks(
                     dest,
                     logical_path,
                     expected_md5,
@@ -423,6 +482,7 @@ fn finish_reuse_file(
                     verify_destination_fallback,
                     retry_count,
                     transfer_class,
+                    archive_repair,
                 ))
             }
         }

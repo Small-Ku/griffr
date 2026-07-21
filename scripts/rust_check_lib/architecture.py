@@ -70,11 +70,14 @@ _REMOVED_DATA_STRUCTURE_NAMES = {
     "FillArchiveVolumeGaps",
     "InstallArchive",
     "PlanArchiveExtraction",
+    "PrepareFileRepair",
+    "ReadArchiveRepairIndex",
     "RepairFileInput",
     "ReuseFileInput",
     "ReuseMethod",
     "SaveArchiveVolume",
     "TransferDownload",
+    "TransferFileRepair",
     "VerifyCommittedBatch",
     "VfsPlanOutcome",
     "VfsUpdateOutcome",
@@ -238,6 +241,7 @@ def _check_canonical_worker_events(host: ArchitectureHost) -> None:
 
 def _check_canonical_download_task(host: ArchitectureHost) -> None:
     expected = {
+        "archive_repair",
         "dest",
         "expected_md5",
         "expected_size",

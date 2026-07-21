@@ -41,7 +41,8 @@ The default policy favors recall:
   fallbacks for large DAG refactors, not a replacement for rustc type checking;
 - `DST001` through `DST011` enforce the reduced data model: removed wrapper names cannot return,
   `WorkerEvent` and `TaskOutcome` keep one terminal-result model, `Task::Download` owns both
-  preparation and transfer state, unsupported resource APIs return `Result<Option<_>>`, filesystem
+  preparation and transfer state (including optional archive-routing context rather than separate
+  prepare/transfer task variants), unsupported resource APIs return `Result<Option<_>>`, filesystem
   and message errors use three canonical payload variants and synchronized constructors, runner
   structs cannot mirror a `Task` variant at 80% or greater field overlap, duplicated nested
   conditions are rejected, download stage routing remains tied to `resume`, and reuse results use

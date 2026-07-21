@@ -53,6 +53,11 @@ pub(crate) fn run_blocking_task(
             transfer::run_prepare_download(task, max_retries, event_tx)
         }
         task @ Task::RepairFile { .. } => transfer::run_repair_file(task),
+        Task::ExtractArchiveRepairFile { repair } => archive::run_extract_archive_repair_file(
+            repair,
+            extraction_progress_buffer_bytes,
+            event_tx,
+        ),
         Task::VerifyReuseVolume {
             copy_only,
             candidates,
@@ -121,6 +126,7 @@ pub(crate) fn run_blocking_task(
         Task::Download {
             resume: Some(_), ..
         }
+        | Task::FetchArchiveRepairFile { .. }
         | Task::FetchArchiveRange { .. }
         | Task::ReuseFile { .. }
         | Task::ApplyDeleteManifest { .. }
@@ -136,6 +142,16 @@ pub(crate) async fn run_async_task(
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskRun {
     match task {
+        Task::FetchArchiveRepairFile { repair } => {
+            archive::run_fetch_archive_repair_file(
+                repair,
+                max_retries,
+                download_progress_buffer_bytes,
+                user_agent,
+                event_tx,
+            )
+            .await
+        }
         Task::FetchArchiveRange {
             work,
             request,

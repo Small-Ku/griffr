@@ -49,6 +49,7 @@ fn ensure_file_can_relink_verified_target_when_prefer_reuse_enabled() {
         prefer_reuse: true,
         retry_count: 0,
         transfer_class: TransferClass::General,
+        archive_repair: None,
     })];
 
     let result = run_tasks(tasks, TaskPoolConfig::default()).unwrap();
@@ -90,6 +91,7 @@ fn relink_mode_keeps_valid_destination_when_no_source_can_be_reused() {
         prefer_reuse: true,
         retry_count: 0,
         transfer_class: TransferClass::General,
+        archive_repair: None,
     })];
 
     let result = run_tasks(tasks, TaskPoolConfig::default()).unwrap();

@@ -154,6 +154,7 @@ mod tests {
             expected_size: None,
             retry_count: 0,
             transfer_class: TransferClass::General,
+            archive_repair: None,
             resume: None,
         });
         let counts = add_file_tasks(
