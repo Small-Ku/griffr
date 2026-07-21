@@ -23,6 +23,7 @@ pub(crate) fn execute_blocking_task(
             password,
             patch_options,
             expected_files,
+            excluded_commit_paths,
             parts,
         } => archive::execute_install_archive(
             base_name,
@@ -31,6 +32,7 @@ pub(crate) fn execute_blocking_task(
             password,
             patch_options,
             expected_files,
+            excluded_commit_paths,
             parts,
         ),
         Task::Verify {
@@ -114,6 +116,7 @@ pub(crate) fn execute_blocking_task(
             password,
             patch_options,
             expected_files,
+            excluded_commit_paths,
         } => archive::execute_schedule_extract(
             base_name,
             volumes,
@@ -122,6 +125,7 @@ pub(crate) fn execute_blocking_task(
             password,
             patch_options,
             expected_files,
+            excluded_commit_paths,
         ),
         Task::DiscoverArchiveDirectory {
             work,
@@ -140,16 +144,60 @@ pub(crate) fn execute_blocking_task(
         } => {
             archive::execute_plan_archive_extraction(work, archive_index, extract_shards, event_tx)
         }
+        Task::ProbePatchArtifact {
+            patch_check,
+            probe_index,
+        } => archive::execute_probe_patch_artifact(patch_check, probe_index),
+        Task::MeasurePatchRelocation { patch_check } => {
+            archive::execute_measure_patch_relocation(patch_check)
+        }
+        Task::FinalizePatchPlan {
+            work,
+            archive_index,
+            patch_check,
+        } => archive::execute_finalize_patch_plan(work, archive_index, patch_check, event_tx),
         Task::ExtractArchiveShard { shard } => archive::execute_extract_archive_shard(
             shard,
             extraction_progress_buffer_bytes,
             event_tx,
         ),
-        Task::FetchMissingArchiveRanges { work } => {
-            archive::execute_fetch_missing_archive_ranges(work)
+        Task::FillArchiveVolumeGaps { work, volume_index } => {
+            archive::execute_fill_archive_volume_gaps(work, volume_index)
         }
-        Task::SaveArchiveVolumes { work } => archive::execute_save_archive_volumes(work, event_tx),
+        Task::FinalizeArchiveVolume { work, volume_index } => {
+            archive::execute_finalize_archive_volume(work, volume_index, event_tx)
+        }
+        Task::ArchiveVolumesComplete { work } => archive::execute_archive_volumes_complete(work),
         Task::CommitArchive { work } => archive::execute_commit_archive(work, event_tx),
+        Task::CommitArchiveBatch {
+            commit,
+            batch_index,
+        } => archive::execute_commit_archive_batch(commit, batch_index, event_tx),
+        Task::VerifyCommittedBatch {
+            commit,
+            batch_index,
+        } => archive::execute_verify_committed_batch(commit, batch_index, event_tx),
+        Task::FinishArchiveCommit { commit } => archive::execute_finish_archive_commit(commit),
+        Task::PreparePatchTransaction { transaction } => {
+            archive::execute_prepare_patch_transaction(transaction, event_tx)
+        }
+        Task::ApplyPatchEntry {
+            transaction,
+            entry_index,
+        } => archive::execute_apply_patch_entry(transaction, entry_index, event_tx),
+        Task::ReleasePatchBase { transaction, base } => {
+            archive::execute_release_patch_base(transaction, base)
+        }
+        Task::ApplyPatchDeletes { transaction } => {
+            archive::execute_apply_patch_deletes(transaction, event_tx)
+        }
+        Task::CommitPatchDeferred { transaction } => {
+            archive::execute_commit_patch_deferred(transaction)
+        }
+        Task::CleanupPatchTransaction {
+            transaction,
+            archive: archive_work,
+        } => archive::execute_cleanup_patch_transaction(transaction, archive_work),
         Task::CleanupArchive { work } => archive::execute_cleanup_archive(work, event_tx),
         Task::ApplyExtractedVfsPatchManifest { install_root } => {
             execute_apply_patch_manifest(install_root, event_tx)
@@ -174,11 +222,13 @@ pub(crate) async fn execute_async_task(
             work,
             request,
             retry_count,
+            priority,
         } => {
             archive::execute_fetch_archive_range(
                 work,
                 request,
                 retry_count,
+                priority,
                 max_retries,
                 download_progress_buffer_bytes,
                 user_agent,

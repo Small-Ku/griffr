@@ -3,12 +3,14 @@ use crate::download::extractor::{ArchiveDirectory, ArchiveIndex, ArchiveRangeReq
 use crate::error::{Error, Result};
 use crate::runtime::PatchApplyOptions;
 use md5::Md5;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::archive::{ArchiveShardTask, ArchiveWork};
+use super::archive::{
+    ArchiveCommitWork, ArchiveShardTask, ArchiveWork, PatchCheckWork, PatchTransactionWork,
+};
 
 /// Selects the download throttle. Local verification and reuse never use the
 /// VFS CDN queue, even when a later fallback download is VFS-classified.
@@ -16,6 +18,13 @@ use super::archive::{ArchiveShardTask, ArchiveWork};
 pub enum TransferClass {
     General,
     Vfs,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveRangePriority {
+    ExtractionCritical,
+    RetentionBackground,
 }
 
 /// Prepared incremental-MD5 state passed from a CPU preparation task to the
@@ -283,6 +292,7 @@ pub enum Task {
         password: Option<String>,
         patch_options: PatchApplyOptions,
         expected_files: Arc<BTreeMap<String, GameFileEntry>>,
+        excluded_commit_paths: Arc<BTreeSet<String>>,
         parts: Vec<ArchivePart>,
     },
     /// CPU-side partial-file archive_index and prefix hashing. This task creates
@@ -356,12 +366,14 @@ pub enum Task {
         password: Option<String>,
         patch_options: PatchApplyOptions,
         expected_files: Arc<BTreeMap<String, GameFileEntry>>,
+        excluded_commit_paths: Arc<BTreeSet<String>>,
     },
     #[doc(hidden)]
     FetchArchiveRange {
         work: Arc<ArchiveWork>,
         request: ArchiveRangeRequest,
         retry_count: u32,
+        priority: ArchiveRangePriority,
     },
     #[doc(hidden)]
     DiscoverArchiveDirectory {
@@ -384,20 +396,82 @@ pub enum Task {
         archive_index: Arc<ArchiveIndex>,
     },
     #[doc(hidden)]
+    ProbePatchArtifact {
+        patch_check: Arc<PatchCheckWork>,
+        probe_index: usize,
+    },
+    #[doc(hidden)]
+    MeasurePatchRelocation {
+        patch_check: Arc<PatchCheckWork>,
+    },
+    #[doc(hidden)]
+    FinalizePatchPlan {
+        work: Arc<ArchiveWork>,
+        archive_index: Arc<ArchiveIndex>,
+        patch_check: Arc<PatchCheckWork>,
+    },
+    #[doc(hidden)]
     ExtractArchiveShard {
         shard: ArchiveShardTask,
     },
     #[doc(hidden)]
-    FetchMissingArchiveRanges {
+    FillArchiveVolumeGaps {
         work: Arc<ArchiveWork>,
+        volume_index: usize,
     },
     #[doc(hidden)]
-    SaveArchiveVolumes {
+    FinalizeArchiveVolume {
+        work: Arc<ArchiveWork>,
+        volume_index: usize,
+    },
+    #[doc(hidden)]
+    ArchiveVolumesComplete {
         work: Arc<ArchiveWork>,
     },
     #[doc(hidden)]
     CommitArchive {
         work: Arc<ArchiveWork>,
+    },
+    #[doc(hidden)]
+    CommitArchiveBatch {
+        commit: Arc<ArchiveCommitWork>,
+        batch_index: usize,
+    },
+    #[doc(hidden)]
+    VerifyCommittedBatch {
+        commit: Arc<ArchiveCommitWork>,
+        batch_index: usize,
+    },
+    #[doc(hidden)]
+    FinishArchiveCommit {
+        commit: Arc<ArchiveCommitWork>,
+    },
+    #[doc(hidden)]
+    PreparePatchTransaction {
+        transaction: Arc<PatchTransactionWork>,
+    },
+    #[doc(hidden)]
+    ApplyPatchEntry {
+        transaction: Arc<PatchTransactionWork>,
+        entry_index: usize,
+    },
+    #[doc(hidden)]
+    ReleasePatchBase {
+        transaction: Arc<PatchTransactionWork>,
+        base: PathBuf,
+    },
+    #[doc(hidden)]
+    ApplyPatchDeletes {
+        transaction: Arc<PatchTransactionWork>,
+    },
+    #[doc(hidden)]
+    CommitPatchDeferred {
+        transaction: Arc<PatchTransactionWork>,
+    },
+    #[doc(hidden)]
+    CleanupPatchTransaction {
+        transaction: Arc<PatchTransactionWork>,
+        archive: Arc<ArchiveWork>,
     },
     #[doc(hidden)]
     CleanupArchive {
@@ -416,6 +490,33 @@ pub enum Task {
 }
 
 impl Task {
+    /// Returns the concrete destination inspected or changed by a file task.
+    /// Composite archive tasks intentionally return `None`; callers must use
+    /// their archive manifest when assigning path ownership.
+    pub fn target_path(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Download { dest, .. }
+            | Self::TransferDownload { dest, .. }
+            | Self::RepairFile { dest, .. }
+            | Self::ReuseFile { dest, .. } => Some(dest.as_path()),
+            Self::Verify { path, .. } => Some(path.as_path()),
+            _ => None,
+        }
+    }
+
+    /// Returns the user-facing logical path for a file task.
+    pub fn logical_path(&self) -> Option<&str> {
+        match self {
+            Self::Download { logical_path, .. }
+            | Self::TransferDownload { logical_path, .. }
+            | Self::Verify { logical_path, .. }
+            | Self::RepairFile { logical_path, .. }
+            | Self::VerifyReuseVolume { logical_path, .. }
+            | Self::ReuseFile { logical_path, .. } => Some(logical_path.as_str()),
+            _ => None,
+        }
+    }
+
     /// Builds a CPU-first verify/repair graph. Explicit relink mode probes reuse
     /// first, then verifies the destination before allowing a network fallback.
     pub fn ensure_file(spec: FileEnsureTask) -> Self {

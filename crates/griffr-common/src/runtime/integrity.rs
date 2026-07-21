@@ -36,14 +36,7 @@ fn normalize_target_path(path: &Path) -> String {
 }
 
 fn task_target_path(task: &Task) -> Option<&Path> {
-    match task {
-        Task::Download { dest, .. }
-        | Task::TransferDownload { dest, .. }
-        | Task::RepairFile { dest, .. }
-        | Task::ReuseFile { dest, .. } => Some(dest.as_path()),
-        Task::Verify { path, .. } => Some(path.as_path()),
-        _ => None,
-    }
+    task.target_path()
 }
 
 fn task_expected_artifact(task: &Task) -> Option<(&Path, &str, Option<u64>)> {
@@ -107,6 +100,16 @@ fn deduplicate_target_tasks(tasks: Vec<Task>) -> Result<Vec<Task>> {
     Ok(unique)
 }
 
+fn remove_already_verified_entries(
+    entries: &mut Vec<crate::api::types::GameFileEntry>,
+    already_verified_paths: &HashSet<String>,
+) {
+    if already_verified_paths.is_empty() {
+        return;
+    }
+    entries.retain(|entry| !already_verified_paths.contains(&normalize_logical_path(&entry.path)));
+}
+
 fn remove_entries_owned_by_extra_tasks(
     entries: &mut Vec<crate::api::types::GameFileEntry>,
     install_path: &Path,
@@ -122,15 +125,7 @@ fn remove_entries_owned_by_extra_tasks(
 }
 
 fn task_progress_path(task: &Task) -> Option<&str> {
-    match task {
-        Task::Download { logical_path, .. }
-        | Task::TransferDownload { logical_path, .. }
-        | Task::Verify { logical_path, .. }
-        | Task::RepairFile { logical_path, .. }
-        | Task::VerifyReuseVolume { logical_path, .. }
-        | Task::ReuseFile { logical_path, .. } => Some(logical_path.as_str()),
-        _ => None,
-    }
+    task.logical_path()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -140,6 +135,7 @@ pub async fn run_integrity_pool(
     install_target: &InstallTarget,
     version: Option<&str>,
     selection: IntegritySelection,
+    already_verified_paths: &[String],
     repair: bool,
     source_roots: &[PathBuf],
     allow_copy_fallback: bool,
@@ -165,6 +161,12 @@ pub async fn run_integrity_pool(
         ),
     };
 
+    let already_verified_paths = already_verified_paths
+        .iter()
+        .map(|path| normalize_logical_path(path))
+        .filter(|path| !path.is_empty() && path != ".")
+        .collect::<HashSet<_>>();
+
     let (entries, files_url_base) = if selected_paths
         .as_ref()
         .is_some_and(|paths| paths.is_empty())
@@ -184,6 +186,7 @@ pub async fn run_integrity_pool(
         if let Some(paths) = selected_paths.as_ref() {
             entries.retain(|entry| paths.contains(&normalize_logical_path(&entry.path)));
         }
+        remove_already_verified_entries(&mut entries, &already_verified_paths);
         remove_entries_owned_by_extra_tasks(&mut entries, install_path, &extra_target_paths);
         (
             entries,
@@ -370,6 +373,28 @@ mod tests {
                 .contains("conflicting integrity tasks target"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn already_verified_manifest_entry_is_removed() {
+        let mut entries = vec![
+            GameFileEntry {
+                path: "Data/game.bin".to_string(),
+                md5: "game".to_string(),
+                size: 8,
+            },
+            GameFileEntry {
+                path: "Data/other.bin".to_string(),
+                md5: "other".to_string(),
+                size: 4,
+            },
+        ];
+        let verified = HashSet::from_iter(["data/game.bin".to_string()]);
+
+        remove_already_verified_entries(&mut entries, &verified);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "Data/other.bin");
     }
 
     #[test]

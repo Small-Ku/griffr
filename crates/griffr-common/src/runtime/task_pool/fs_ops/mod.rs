@@ -5,9 +5,14 @@ pub(crate) mod path_safety;
 mod reuse;
 
 pub(crate) use delete_manifest::{apply_delete_files_manifest_async, parse_delete_files_manifest};
-pub(crate) use extract::{commit_staged_extract, make_extract_staging_dir};
+pub(crate) use extract::{
+    build_commit_batches, collect_commit_jobs_excluding, commit_file_job, make_extract_staging_dir,
+    CommitFileBatch,
+};
 pub(crate) use patch_manifest::{
-    apply_extracted_vfs_patch_manifest, resume_patch_transaction, run_patch_transaction,
+    apply_extracted_vfs_patch_manifest, apply_patch_transaction_deletes,
+    apply_patch_transaction_entry, cleanup_patch_transaction, commit_patch_transaction_deferred,
+    prepare_patch_transaction, release_patch_transaction_base, resume_patch_transaction,
 };
 pub(crate) use reuse::{
     classify_reuse_mode, commit_partial_download, commit_partial_download_async,

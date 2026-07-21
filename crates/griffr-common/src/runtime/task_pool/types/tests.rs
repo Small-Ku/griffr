@@ -1,6 +1,6 @@
 use super::{
     ArchiveRetention, ArchiveWork, FileEnsureTask, PreparedArchive, Task, TaskOutcome,
-    TransferClass, WorkerEvent,
+    TaskPoolConfig, TransferClass, WorkerEvent,
 };
 use crate::download::extractor::MultiVolumeLayout;
 use std::path::PathBuf;
@@ -196,6 +196,7 @@ fn archive_work_drop_removes_abandoned_staging() {
         None,
         crate::runtime::PatchApplyOptions::default(),
         std::sync::Arc::new(std::collections::BTreeMap::new()),
+        std::sync::Arc::new(std::collections::BTreeSet::new()),
     )
     .unwrap();
     *work.prepared.lock().unwrap() = Some(PreparedArchive {
@@ -230,8 +231,20 @@ fn retained_remote_archive_requires_one_descriptor_per_volume() {
         None,
         crate::runtime::PatchApplyOptions::default(),
         std::sync::Arc::new(std::collections::BTreeMap::new()),
+        std::sync::Arc::new(std::collections::BTreeSet::new()),
     )
     .unwrap_err();
 
     assert!(error.to_string().contains("part descriptors for 1 volumes"));
+}
+
+#[test]
+fn extract_slot_override_keeps_two_ready_shards_per_slot() {
+    let one_slot = TaskPoolConfig::with_extract_slots(1);
+    assert_eq!(one_slot.extract_slots, 1);
+    assert_eq!(one_slot.extract_shards, 2);
+
+    let two_slots = TaskPoolConfig::with_extract_slots(2);
+    assert_eq!(two_slots.extract_slots, 2);
+    assert_eq!(two_slots.extract_shards, 4);
 }

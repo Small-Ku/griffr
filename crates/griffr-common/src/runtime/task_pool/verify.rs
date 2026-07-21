@@ -65,6 +65,12 @@ struct ArtifactStamp {
     modified_nanos: Option<u128>,
 }
 
+#[derive(Debug, Clone)]
+struct CachedArtifactCheck {
+    stamp: ArtifactStamp,
+    issue: Option<FileIssue>,
+}
+
 impl ArtifactStamp {
     fn from_metadata(metadata: &std::fs::Metadata) -> Self {
         let modified_nanos = metadata
@@ -83,7 +89,7 @@ impl ArtifactStamp {
 /// was last validated. The cache never survives the command invocation.
 #[derive(Debug, Default)]
 pub(crate) struct VerifiedArtifactCache {
-    entries: Mutex<HashMap<ArtifactKey, ArtifactStamp>>,
+    entries: Mutex<HashMap<ArtifactKey, CachedArtifactCheck>>,
 }
 
 impl VerifiedArtifactCache {
@@ -128,19 +134,6 @@ fn build_issue_impl(
         }
     };
 
-    if let Some(expected_size) = expected_size {
-        if metadata.len() != expected_size {
-            return Some(FileIssue {
-                path: logical_path.to_string(),
-                expected_md5: expected_md5.to_string(),
-                expected_size,
-                actual_size: Some(metadata.len()),
-                actual_md5: None,
-                kind: FileIssueKind::SizeMismatch,
-            });
-        }
-    }
-
     let normalized_md5 = expected_md5.to_ascii_lowercase();
     let key = ArtifactKey {
         path: path.to_path_buf(),
@@ -149,49 +142,63 @@ fn build_issue_impl(
     };
     let stamp = ArtifactStamp::from_metadata(&metadata);
     let cacheable = stamp.modified_nanos.is_some();
-    if cacheable
-        && cache.is_some_and(|cache| {
+    if cacheable {
+        if let Some(cached) = cache.and_then(|cache| {
             cache
                 .entries
                 .lock()
                 .unwrap()
                 .get(&key)
-                .is_some_and(|cached| cached == &stamp)
-        })
-    {
-        return None;
+                .filter(|cached| cached.stamp == stamp)
+                .cloned()
+        }) {
+            return cached.issue;
+        }
     }
 
-    let actual_md5 = match file_md5(path) {
-        Ok(md5) => md5,
-        Err(_) => {
-            return Some(FileIssue {
+    let issue = if expected_size.is_some_and(|expected| metadata.len() != expected) {
+        Some(FileIssue {
+            path: logical_path.to_string(),
+            expected_md5: expected_md5.to_string(),
+            expected_size: expected_size.unwrap_or(metadata.len()),
+            actual_size: Some(metadata.len()),
+            actual_md5: None,
+            kind: FileIssueKind::SizeMismatch,
+        })
+    } else {
+        match file_md5(path) {
+            Ok(actual_md5) if actual_md5 == normalized_md5 => None,
+            Ok(actual_md5) => Some(FileIssue {
+                path: logical_path.to_string(),
+                expected_md5: expected_md5.to_string(),
+                expected_size: expected_size.unwrap_or(metadata.len()),
+                actual_size: Some(metadata.len()),
+                actual_md5: Some(actual_md5),
+                kind: FileIssueKind::Md5Mismatch,
+            }),
+            Err(_) => Some(FileIssue {
                 path: logical_path.to_string(),
                 expected_md5: expected_md5.to_string(),
                 expected_size: expected_size.unwrap_or(metadata.len()),
                 actual_size: Some(metadata.len()),
                 actual_md5: None,
                 kind: FileIssueKind::Md5Mismatch,
-            });
+            }),
         }
     };
-    if actual_md5 != normalized_md5 {
-        return Some(FileIssue {
-            path: logical_path.to_string(),
-            expected_md5: expected_md5.to_string(),
-            expected_size: expected_size.unwrap_or(metadata.len()),
-            actual_size: Some(metadata.len()),
-            actual_md5: Some(actual_md5),
-            kind: FileIssueKind::Md5Mismatch,
-        });
-    }
 
     if cacheable {
         if let Some(cache) = cache {
-            cache.entries.lock().unwrap().insert(key, stamp);
+            cache.entries.lock().unwrap().insert(
+                key,
+                CachedArtifactCheck {
+                    stamp,
+                    issue: issue.clone(),
+                },
+            );
         }
     }
-    None
+    issue
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,4 +271,28 @@ fn open_sequential_read(path: &Path) -> std::io::Result<File> {
     #[cfg(windows)]
     options.custom_flags(FILE_FLAG_SEQUENTIAL_SCAN);
     options.open(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VerifiedArtifactCache;
+    use md5::{Digest, Md5};
+    use std::fs;
+
+    #[test]
+    fn cached_mismatch_is_invalidated_when_file_metadata_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("artifact.bin");
+        fs::write(&path, b"x").unwrap();
+        let cache = VerifiedArtifactCache::default();
+        assert!(cache
+            .build_issue(&path, "artifact.bin", "invalid", Some(2))
+            .is_some());
+
+        fs::write(&path, b"ok").unwrap();
+        let expected = crate::to_hex(&Md5::digest(b"ok"));
+        assert!(cache
+            .build_issue(&path, "artifact.bin", &expected, Some(2))
+            .is_none());
+    }
 }

@@ -10,12 +10,15 @@ use crate::download::extractor::{
 use crate::runtime::PatchApplyOptions;
 
 use crate::runtime::task_pool::graph::{GraphExpansion, TaskExecution};
-use crate::runtime::task_pool::types::{ArchiveRetention, ArchiveWork, Task, WorkerEvent};
+use crate::runtime::task_pool::types::{
+    ArchiveRangePriority, ArchiveRetention, ArchiveWork, Task, WorkerEvent,
+};
 
 pub(crate) async fn execute_fetch_archive_range(
     work: Arc<ArchiveWork>,
     request: ArchiveRangeRequest,
     retry_count: u32,
+    priority: ArchiveRangePriority,
     max_retries: u32,
     progress_buffer_bytes: usize,
     user_agent: &str,
@@ -77,6 +80,7 @@ pub(crate) async fn execute_fetch_archive_range(
                 work,
                 request,
                 retry_count: retry_count + 1,
+                priority,
             })
         }
         Err(error) => TaskExecution::failed(format!(
@@ -93,6 +97,7 @@ pub(crate) fn execute_schedule_extract(
     password: Option<String>,
     patch_options: PatchApplyOptions,
     expected_files: Arc<std::collections::BTreeMap<String, GameFileEntry>>,
+    excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
 ) -> TaskExecution {
     let layout = match MultiVolumeLayout::from_files(volumes) {
         Ok(layout) => layout,
@@ -108,6 +113,7 @@ pub(crate) fn execute_schedule_extract(
         password,
         patch_options,
         expected_files,
+        excluded_commit_paths,
     ) {
         Ok(work) => work,
         Err(error) => return TaskExecution::failed(error.to_string()),
@@ -154,6 +160,7 @@ fn fetch_ranges_then(
             work: work.clone(),
             request,
             retry_count: 0,
+            priority: ArchiveRangePriority::ExtractionCritical,
         }));
     }
     match expansion.add_task(next, fetches) {

@@ -14,7 +14,7 @@ const EXECUTION_SCHEDULE: [ExecutionClass; 4] = [
     ExecutionClass::Blocking,
     ExecutionClass::AsyncIo,
 ];
-const NETWORK_SCHEDULE: [NetworkClass; 7] = [
+const NETWORK_SCHEDULE: [NetworkClass; 8] = [
     NetworkClass::General,
     NetworkClass::General,
     NetworkClass::General,
@@ -22,6 +22,7 @@ const NETWORK_SCHEDULE: [NetworkClass; 7] = [
     NetworkClass::Archive,
     NetworkClass::Archive,
     NetworkClass::Vfs,
+    NetworkClass::ArchiveBackground,
 ];
 
 #[derive(Debug)]
@@ -63,11 +64,9 @@ impl QueueState {
                     && self.resources.blocking_in_use >= config.blocking_slots)
                 || (queued.resources.extract
                     && self.resources.extract_in_use >= config.extract_slots)
-                || queued
+                || self
                     .resources
-                    .mutation_root
-                    .as_ref()
-                    .is_some_and(|root| self.resources.mutation_roots.contains(root))
+                    .has_mutation_conflict(&queued.resources.mutation_paths)
             {
                 continue;
             }

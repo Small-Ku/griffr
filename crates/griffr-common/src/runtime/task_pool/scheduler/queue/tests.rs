@@ -280,3 +280,53 @@ fn runnable_tasks_prefer_smaller_work_on_the_same_backlogged_volume() {
     ));
     queue.release(&selected.resources);
 }
+
+#[test]
+fn mutation_paths_block_ancestors_and_descendants_only() {
+    let config = TaskPoolConfig::default();
+    let admission = AdmissionSnapshot::default();
+    let parent = ResourceRequest {
+        mutation_paths: vec!["c:/game/data".to_string()],
+        ..ResourceRequest::default()
+    };
+    let child = ResourceRequest {
+        mutation_paths: vec!["c:/game/data/file.bin".to_string()],
+        ..ResourceRequest::default()
+    };
+    let sibling = ResourceRequest {
+        mutation_paths: vec!["c:/game/other/file.bin".to_string()],
+        ..ResourceRequest::default()
+    };
+    let mut state = ResourceState::default();
+
+    state.acquire(&parent);
+    assert!(!state.can_acquire(&child, &config, &admission));
+    assert!(state.can_acquire(&sibling, &config, &admission));
+    state.release(&parent);
+    assert!(state.can_acquire(&child, &config, &admission));
+}
+
+#[test]
+fn archive_commit_limits_same_volume_metadata_and_cross_volume_copies() {
+    let config = TaskPoolConfig::default();
+    let admission = AdmissionSnapshot::default();
+    let metadata_commit = ResourceRequest {
+        archive_commit_volumes: vec![("volume-a".to_string(), false)],
+        ..ResourceRequest::default()
+    };
+    let copy_commit = ResourceRequest {
+        archive_commit_volumes: vec![("volume-b".to_string(), true)],
+        ..ResourceRequest::default()
+    };
+    let mut state = ResourceState::default();
+
+    state.acquire(&metadata_commit);
+    assert!(!state.can_acquire(&metadata_commit, &config, &admission));
+    state.release(&metadata_commit);
+
+    for _ in 0..3 {
+        assert!(state.can_acquire(&copy_commit, &config, &admission));
+        state.acquire(&copy_commit);
+    }
+    assert!(!state.can_acquire(&copy_commit, &config, &admission));
+}

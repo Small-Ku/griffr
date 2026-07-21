@@ -18,7 +18,9 @@ pub(crate) struct ResourceState {
     pub(crate) volume_reads: HashMap<String, usize>,
     pub(crate) volume_writes: HashMap<String, usize>,
     pub(crate) volume_metadata: HashMap<String, usize>,
-    pub(crate) mutation_roots: HashSet<String>,
+    pub(crate) archive_finalizers: HashMap<String, usize>,
+    pub(crate) archive_commits: HashMap<String, usize>,
+    pub(crate) mutation_paths: HashSet<String>,
     pub(crate) reuse_commits_in_use: usize,
 }
 
@@ -52,10 +54,23 @@ impl ResourceState {
             return false;
         }
         if request
-            .mutation_root
-            .as_ref()
-            .is_some_and(|root| self.mutation_roots.contains(root))
+            .archive_finalize_volumes
+            .iter()
+            .any(|volume| self.archive_finalizers.get(volume).copied().unwrap_or(0) > 0)
         {
+            return false;
+        }
+        if request
+            .archive_commit_volumes
+            .iter()
+            .any(|(volume, cross_volume)| {
+                let limit = if *cross_volume { 3 } else { 1 };
+                self.archive_commits.get(volume).copied().unwrap_or(0) >= limit
+            })
+        {
+            return false;
+        }
+        if self.has_mutation_conflict(&request.mutation_paths) {
             return false;
         }
 
@@ -124,6 +139,14 @@ impl ResourceState {
         true
     }
 
+    pub(crate) fn has_mutation_conflict(&self, requested: &[String]) -> bool {
+        requested.iter().any(|requested| {
+            self.mutation_paths
+                .iter()
+                .any(|active| mutation_paths_conflict(requested, active))
+        })
+    }
+
     pub(crate) fn acquire(&mut self, request: &ResourceRequest) {
         match request.execution {
             ExecutionClass::AsyncIo => {}
@@ -147,9 +170,14 @@ impl ResourceState {
         for volume in &request.metadata_volumes {
             *self.volume_metadata.entry(volume.clone()).or_default() += 1;
         }
-        if let Some(root) = &request.mutation_root {
-            self.mutation_roots.insert(root.clone());
+        for volume in &request.archive_finalize_volumes {
+            *self.archive_finalizers.entry(volume.clone()).or_default() += 1;
         }
+        for (volume, _) in &request.archive_commit_volumes {
+            *self.archive_commits.entry(volume.clone()).or_default() += 1;
+        }
+        self.mutation_paths
+            .extend(request.mutation_paths.iter().cloned());
         if request.reuse_commit {
             self.reuse_commits_in_use = self.reuse_commits_in_use.saturating_add(1);
         }
@@ -178,13 +206,29 @@ impl ResourceState {
         for volume in &request.metadata_volumes {
             decrement(&mut self.volume_metadata, volume);
         }
-        if let Some(root) = &request.mutation_root {
-            self.mutation_roots.remove(root);
+        for volume in &request.archive_finalize_volumes {
+            decrement(&mut self.archive_finalizers, volume);
+        }
+        for (volume, _) in &request.archive_commit_volumes {
+            decrement(&mut self.archive_commits, volume);
+        }
+        for path in &request.mutation_paths {
+            self.mutation_paths.remove(path);
         }
         if request.reuse_commit {
             self.reuse_commits_in_use = self.reuse_commits_in_use.saturating_sub(1);
         }
     }
+}
+
+fn mutation_paths_conflict(left: &str, right: &str) -> bool {
+    left == right || mutation_path_contains(left, right) || mutation_path_contains(right, left)
+}
+
+fn mutation_path_contains(parent: &str, child: &str) -> bool {
+    child.strip_prefix(parent).is_some_and(|suffix| {
+        suffix.starts_with('/') || (parent.ends_with('/') && !suffix.is_empty())
+    })
 }
 
 fn request_volume_set(request: &ResourceRequest) -> BTreeSet<&str> {
@@ -206,5 +250,29 @@ fn decrement(counts: &mut HashMap<String, usize>, key: &str) {
     };
     if should_remove {
         counts.remove(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mutation_paths_conflict;
+
+    #[test]
+    fn mutation_paths_reject_ancestor_conflicts() {
+        assert!(mutation_paths_conflict(
+            "c:/games",
+            "c:/games/endfield/file.bin"
+        ));
+        assert!(mutation_paths_conflict("/", "/tmp/file.bin"));
+        assert!(mutation_paths_conflict("c:/", "c:/games/file.bin"));
+    }
+
+    #[test]
+    fn mutation_paths_allow_sibling_files() {
+        assert!(!mutation_paths_conflict(
+            "c:/games/endfield/a.bin",
+            "c:/games/endfield/b.bin"
+        ));
+        assert!(!mutation_paths_conflict("c:/games", "c:/games-old"));
     }
 }

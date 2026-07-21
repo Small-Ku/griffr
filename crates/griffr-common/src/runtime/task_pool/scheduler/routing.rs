@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::runtime::task_pool::{Task, TransferClass};
+use crate::runtime::task_pool::{ArchiveRangePriority, Task, TransferClass};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ExecutionClass {
@@ -15,6 +15,7 @@ pub(super) enum NetworkClass {
     General,
     Vfs,
     Archive,
+    ArchiveBackground,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,8 +25,10 @@ pub(super) struct ResourceRequest {
     pub(super) read_volumes: Vec<String>,
     pub(super) write_volumes: Vec<String>,
     pub(super) metadata_volumes: Vec<String>,
+    pub(super) archive_finalize_volumes: Vec<String>,
+    pub(super) archive_commit_volumes: Vec<(String, bool)>,
     pub(super) extract: bool,
-    pub(super) mutation_root: Option<String>,
+    pub(super) mutation_paths: Vec<String>,
     pub(super) estimated_bytes: u64,
     pub(super) reuse_probe: bool,
     pub(super) reuse_commit: bool,
@@ -39,8 +42,10 @@ impl Default for ResourceRequest {
             read_volumes: Vec::new(),
             write_volumes: Vec::new(),
             metadata_volumes: Vec::new(),
+            archive_finalize_volumes: Vec::new(),
+            archive_commit_volumes: Vec::new(),
             extract: false,
-            mutation_root: None,
+            mutation_paths: Vec::new(),
             estimated_bytes: 0,
             reuse_probe: false,
             reuse_commit: false,
@@ -64,19 +69,26 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                 TransferClass::Vfs => NetworkClass::Vfs,
             });
             request.write_volumes.push(volume_key(dest));
-            request.mutation_root = Some(path_key(dest));
+            request.mutation_paths.push(path_key(dest));
         }
-        Task::FetchArchiveRange { request: range, .. } => {
-            request.network = Some(NetworkClass::Archive);
+        Task::FetchArchiveRange {
+            request: range,
+            priority,
+            ..
+        } => {
+            request.network = Some(match priority {
+                ArchiveRangePriority::ExtractionCritical => NetworkClass::Archive,
+                ArchiveRangePriority::RetentionBackground => NetworkClass::ArchiveBackground,
+            });
             request.write_volumes.push(volume_key(&range.cache_path));
-            request.mutation_root = Some(path_key(&range.cache_path));
+            request.mutation_paths.push(path_key(&range.cache_path));
         }
         Task::Verify { path, .. } => request.read_volumes.push(volume_key(path)),
         Task::Download { dest, .. } => {
             let volume = volume_key(dest);
             request.read_volumes.push(volume.clone());
             request.metadata_volumes.push(volume);
-            request.mutation_root = Some(path_key(dest));
+            request.mutation_paths.push(path_key(dest));
         }
         Task::VerifyReuseVolume { candidates, .. } => {
             if let Some(path) = candidates.first() {
@@ -93,10 +105,10 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             if *copy_only {
                 request.read_volumes.push(volume_key(source));
                 request.write_volumes.push(volume_key(dest));
-                request.mutation_root = Some(path_key(dest));
+                request.mutation_paths.push(path_key(dest));
             } else {
                 request.metadata_volumes.push(volume_key(dest));
-                request.mutation_root = Some(path_key(dest));
+                request.mutation_paths.push(path_key(dest));
                 request.reuse_commit = true;
             }
         }
@@ -158,6 +170,29 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                 .unwrap_or(work.dest.as_path());
             request.metadata_volumes.push(volume_key(staging_parent));
         }
+        Task::ProbePatchArtifact {
+            patch_check,
+            probe_index,
+        } => {
+            if let Some(path) = patch_check.probe_path(*probe_index) {
+                request.read_volumes.push(volume_key(path));
+            }
+        }
+        Task::MeasurePatchRelocation { patch_check } => {
+            if let Some(path) = patch_check.relocation_root() {
+                request.read_volumes.push(volume_key(path));
+            }
+        }
+        Task::FinalizePatchPlan { work, .. } => {
+            request.read_volumes.push(volume_key(&work.dest));
+            let staging_parent = work
+                .patch_options
+                .work_dir
+                .as_deref()
+                .or_else(|| work.dest.parent())
+                .unwrap_or(work.dest.as_path());
+            request.metadata_volumes.push(volume_key(staging_parent));
+        }
         Task::ExtractArchiveShard { shard } => {
             request.read_volumes.extend(
                 shard
@@ -169,34 +204,145 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.write_volumes.push(volume_key(&shard.staging_dir));
             request.extract = true;
         }
-        Task::FetchMissingArchiveRanges { work } => {
-            request
-                .metadata_volumes
-                .extend(work.layout.paths().iter().map(|path| volume_key(path)));
+        Task::FillArchiveVolumeGaps { work, volume_index } => {
+            if let Some(path) = work.layout.path(*volume_index) {
+                request.metadata_volumes.push(volume_key(path));
+            }
         }
-        Task::SaveArchiveVolumes { work } => {
-            request
-                .read_volumes
-                .extend(work.layout.paths().iter().map(|path| volume_key(path)));
-            request
-                .write_volumes
-                .extend(work.parts.iter().map(|part| volume_key(&part.dest)));
+        Task::FinalizeArchiveVolume { work, volume_index } => {
+            if let Some(path) = work.layout.path(*volume_index) {
+                request.read_volumes.push(volume_key(path));
+            }
+            if let Some(part) = work.parts.get(*volume_index) {
+                let volume = volume_key(&part.dest);
+                request.write_volumes.push(volume.clone());
+                request.archive_finalize_volumes.push(volume);
+                request.mutation_paths.push(path_key(&part.dest));
+            }
         }
+        Task::ArchiveVolumesComplete { .. } => {}
         Task::CommitArchive { work } => {
-            request.write_volumes.push(volume_key(&work.dest));
-            let prepared = work.prepared.lock().unwrap();
-            if let Some(prepared) = prepared.as_ref() {
-                request.read_volumes.push(volume_key(&prepared.staging_dir));
-                if let Some((plan, _)) = prepared.patch_plan.as_ref() {
-                    request
-                        .write_volumes
-                        .push(volume_key(&plan.vfs_destination));
-                    if let Some(work_dir) = plan.work_dir.as_deref() {
-                        request.write_volumes.push(volume_key(work_dir));
+            if let Some(prepared) = work.prepared.lock().unwrap().as_ref() {
+                request
+                    .metadata_volumes
+                    .push(volume_key(&prepared.staging_dir));
+            }
+        }
+        Task::CommitArchiveBatch {
+            commit,
+            batch_index,
+        } => {
+            if let Some(batch) = commit.batch(*batch_index) {
+                for job in &batch.jobs {
+                    let destination_volume = volume_key(&job.destination);
+                    if batch.cross_volume {
+                        request.read_volumes.push(volume_key(&job.source));
+                        request.write_volumes.push(destination_volume.clone());
+                    } else {
+                        request.metadata_volumes.push(destination_volume.clone());
                     }
+                    request
+                        .archive_commit_volumes
+                        .push((destination_volume, batch.cross_volume));
+                    request.mutation_paths.push(path_key(&job.destination));
                 }
             }
-            request.mutation_root = Some(path_key(&work.dest));
+        }
+        Task::VerifyCommittedBatch {
+            commit,
+            batch_index,
+        } => {
+            if let Some(batch) = commit.batch(*batch_index) {
+                request
+                    .read_volumes
+                    .extend(batch.jobs.iter().map(|job| volume_key(&job.destination)));
+            }
+        }
+        Task::FinishArchiveCommit { commit } => {
+            request
+                .metadata_volumes
+                .push(volume_key(&commit.staging_dir));
+            request.mutation_paths.push(path_key(&commit.staging_dir));
+        }
+        Task::PreparePatchTransaction { transaction } => {
+            let plan = transaction.plan();
+            request.read_volumes.push(volume_key(&plan.stage_root));
+            request.write_volumes.push(volume_key(&plan.install_root));
+            request
+                .write_volumes
+                .push(volume_key(&plan.vfs_destination));
+            if let Some(work_dir) = plan.work_dir.as_deref() {
+                request.write_volumes.push(volume_key(work_dir));
+            }
+            request.mutation_paths.push(path_key(&plan.install_root));
+        }
+        Task::ApplyPatchEntry {
+            transaction,
+            entry_index,
+        } => {
+            if let Some(entry) = transaction.entry(*entry_index) {
+                match &entry.source {
+                    crate::runtime::PlannedPatchSource::AlreadyPresent => {
+                        request.read_volumes.push(volume_key(&entry.destination));
+                    }
+                    crate::runtime::PlannedPatchSource::Local { payload } => {
+                        request
+                            .read_volumes
+                            .push(volume_key(&transaction.plan().stage_root.join(payload)));
+                        request.write_volumes.push(volume_key(&entry.destination));
+                    }
+                    crate::runtime::PlannedPatchSource::Hdiff { base, payload, .. } => {
+                        request.read_volumes.push(volume_key(base));
+                        request
+                            .read_volumes
+                            .push(volume_key(&transaction.plan().stage_root.join(payload)));
+                        request.write_volumes.push(volume_key(&entry.destination));
+                        if let Some(work_dir) = transaction.plan().work_dir.as_deref() {
+                            request.write_volumes.push(volume_key(work_dir));
+                        }
+                    }
+                }
+                request.mutation_paths.push(path_key(&entry.destination));
+            }
+        }
+        Task::ReleasePatchBase { base, .. } => {
+            request.metadata_volumes.push(volume_key(base));
+            request.mutation_paths.push(path_key(base));
+        }
+        Task::ApplyPatchDeletes { transaction } => {
+            for relative in &transaction.plan().delete_paths {
+                let path = physical_patch_path(transaction.plan(), relative);
+                request.metadata_volumes.push(volume_key(&path));
+                request.mutation_paths.push(path_key(&path));
+            }
+        }
+        Task::CommitPatchDeferred { transaction } => {
+            let plan = transaction.plan();
+            let deferred_root = plan
+                .install_root
+                .join(crate::runtime::PATCH_TRANSACTION_DIR)
+                .join(crate::runtime::PATCH_DEFERRED_DIR);
+            for relative in &plan.deferred_paths {
+                request
+                    .read_volumes
+                    .push(volume_key(&deferred_root.join(relative)));
+                let target = plan.install_root.join(relative);
+                request.write_volumes.push(volume_key(&target));
+                request.mutation_paths.push(path_key(&target));
+            }
+        }
+        Task::CleanupPatchTransaction {
+            transaction,
+            archive: _,
+        } => {
+            let plan = transaction.plan();
+            let transaction_root = plan
+                .install_root
+                .join(crate::runtime::PATCH_TRANSACTION_DIR);
+            request.metadata_volumes.push(volume_key(&plan.stage_root));
+            request.metadata_volumes.push(volume_key(&transaction_root));
+            request.mutation_paths.push(path_key(&plan.stage_root));
+            request.mutation_paths.push(path_key(&transaction_root));
         }
         Task::CleanupArchive { work } => {
             request
@@ -207,15 +353,15 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             let volume = volume_key(install_root);
             request.read_volumes.push(volume.clone());
             request.write_volumes.push(volume);
-            request.mutation_root = Some(path_key(install_root));
+            request.mutation_paths.push(path_key(install_root));
         }
         Task::ApplyDeleteManifest { install_root } => {
             request.metadata_volumes.push(volume_key(install_root));
-            request.mutation_root = Some(path_key(install_root));
+            request.mutation_paths.push(path_key(install_root));
         }
         Task::Hardlink { dest, .. } => {
             request.metadata_volumes.push(volume_key(dest));
-            request.mutation_root = Some(path_key(dest));
+            request.mutation_paths.push(path_key(dest));
         }
         Task::InstallArchive { .. } | Task::RepairFile { .. } => {}
     }
@@ -235,16 +381,51 @@ fn task_estimated_bytes(task: &Task) -> u64 {
         Task::RepairFile { expected_size, .. }
         | Task::VerifyReuseVolume { expected_size, .. }
         | Task::ReuseFile { expected_size, .. } => *expected_size,
-        Task::ExtractArchiveShard { shard } => shard.uncompressed_bytes,
-        Task::SaveArchiveVolumes { work } => work.parts.iter().map(|part| part.expected_size).sum(),
+        Task::ProbePatchArtifact {
+            patch_check,
+            probe_index,
+        } => patch_check.probe_size(*probe_index).unwrap_or(0),
+        Task::ExtractArchiveShard { shard } => shard.estimated_cost,
+        Task::CommitArchiveBatch {
+            commit,
+            batch_index,
+        }
+        | Task::VerifyCommittedBatch {
+            commit,
+            batch_index,
+        } => commit
+            .batch(*batch_index)
+            .map(|batch| batch.estimated_bytes)
+            .unwrap_or(0),
+        Task::ApplyPatchEntry {
+            transaction,
+            entry_index,
+        } => transaction
+            .entry(*entry_index)
+            .map(|entry| entry.expected_size)
+            .unwrap_or(0),
+        Task::FinalizeArchiveVolume { work, volume_index } => work
+            .parts
+            .get(*volume_index)
+            .map(|part| part.expected_size)
+            .unwrap_or(0),
         Task::InstallArchive { .. }
         | Task::Extract { .. }
         | Task::DiscoverArchiveDirectory { .. }
         | Task::InspectArchiveIndex { .. }
         | Task::ReadArchiveControls { .. }
         | Task::PlanArchiveExtraction { .. }
-        | Task::FetchMissingArchiveRanges { .. }
+        | Task::MeasurePatchRelocation { .. }
+        | Task::FinalizePatchPlan { .. }
+        | Task::FillArchiveVolumeGaps { .. }
+        | Task::ArchiveVolumesComplete { .. }
         | Task::CommitArchive { .. }
+        | Task::FinishArchiveCommit { .. }
+        | Task::PreparePatchTransaction { .. }
+        | Task::ReleasePatchBase { .. }
+        | Task::ApplyPatchDeletes { .. }
+        | Task::CommitPatchDeferred { .. }
+        | Task::CleanupPatchTransaction { .. }
         | Task::CleanupArchive { .. }
         | Task::ApplyExtractedVfsPatchManifest { .. }
         | Task::ApplyDeleteManifest { .. }
@@ -262,17 +443,40 @@ fn execution_class(task: &Task) -> ExecutionClass {
         Task::Download { .. }
         | Task::Verify { .. }
         | Task::RepairFile { .. }
-        | Task::VerifyReuseVolume { .. } => ExecutionClass::Cpu,
+        | Task::VerifyReuseVolume { .. }
+        | Task::ProbePatchArtifact { .. }
+        | Task::VerifyCommittedBatch { .. } => ExecutionClass::Cpu,
+        Task::ApplyPatchEntry {
+            transaction,
+            entry_index,
+        } => transaction
+            .entry(*entry_index)
+            .map(|entry| match &entry.source {
+                crate::runtime::PlannedPatchSource::Local { .. } => ExecutionClass::Blocking,
+                crate::runtime::PlannedPatchSource::AlreadyPresent
+                | crate::runtime::PlannedPatchSource::Hdiff { .. } => ExecutionClass::Cpu,
+            })
+            .unwrap_or(ExecutionClass::Blocking),
         Task::InstallArchive { .. }
         | Task::Extract { .. }
         | Task::DiscoverArchiveDirectory { .. }
         | Task::InspectArchiveIndex { .. }
         | Task::ReadArchiveControls { .. }
         | Task::PlanArchiveExtraction { .. }
+        | Task::MeasurePatchRelocation { .. }
+        | Task::FinalizePatchPlan { .. }
         | Task::ExtractArchiveShard { .. }
-        | Task::FetchMissingArchiveRanges { .. }
-        | Task::SaveArchiveVolumes { .. }
+        | Task::FillArchiveVolumeGaps { .. }
+        | Task::FinalizeArchiveVolume { .. }
+        | Task::ArchiveVolumesComplete { .. }
         | Task::CommitArchive { .. }
+        | Task::CommitArchiveBatch { .. }
+        | Task::FinishArchiveCommit { .. }
+        | Task::PreparePatchTransaction { .. }
+        | Task::ReleasePatchBase { .. }
+        | Task::ApplyPatchDeletes { .. }
+        | Task::CommitPatchDeferred { .. }
+        | Task::CleanupPatchTransaction { .. }
         | Task::CleanupArchive { .. }
         | Task::ApplyExtractedVfsPatchManifest { .. } => ExecutionClass::Blocking,
     }
@@ -286,9 +490,31 @@ fn normalize_volumes(request: &mut ResourceRequest) {
         .filter(|volume| !writes.contains(volume))
         .collect::<BTreeSet<_>>();
     let reads = request.read_volumes.drain(..).collect::<BTreeSet<_>>();
+    let finalizers = request
+        .archive_finalize_volumes
+        .drain(..)
+        .collect::<BTreeSet<_>>();
+    let commits = request
+        .archive_commit_volumes
+        .drain(..)
+        .collect::<BTreeSet<_>>();
+    let mutations = request.mutation_paths.drain(..).collect::<BTreeSet<_>>();
     request.write_volumes.extend(writes);
     request.metadata_volumes.extend(metadata);
     request.read_volumes.extend(reads);
+    request.archive_finalize_volumes.extend(finalizers);
+    request.archive_commit_volumes.extend(commits);
+    request.mutation_paths.extend(mutations);
+}
+
+fn physical_patch_path(plan: &crate::runtime::PatchPlan, relative: &Path) -> std::path::PathBuf {
+    let logical_vfs_root = plan.install_root.join(&plan.vfs_base_path);
+    if plan.vfs_destination != logical_vfs_root {
+        if let Ok(vfs_relative) = relative.strip_prefix(&plan.vfs_base_path) {
+            return plan.vfs_destination.join(vfs_relative);
+        }
+    }
+    plan.install_root.join(relative)
 }
 
 fn volume_key(path: &Path) -> String {
@@ -308,12 +534,25 @@ pub(super) fn task_path(task: &Task) -> String {
         Task::InstallArchive { base_name, .. } | Task::Extract { base_name, .. } => {
             base_name.clone()
         }
+        Task::ProbePatchArtifact {
+            patch_check,
+            probe_index,
+        } => patch_check
+            .probe_path(*probe_index)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| format!("patch-probe-{probe_index}")),
+        Task::MeasurePatchRelocation { patch_check } => patch_check
+            .relocation_root()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "patch-relocation".to_string()),
         Task::DiscoverArchiveDirectory { work, .. }
         | Task::InspectArchiveIndex { work, .. }
         | Task::ReadArchiveControls { work, .. }
         | Task::PlanArchiveExtraction { work, .. }
-        | Task::FetchMissingArchiveRanges { work }
-        | Task::SaveArchiveVolumes { work }
+        | Task::FinalizePatchPlan { work, .. }
+        | Task::FillArchiveVolumeGaps { work, .. }
+        | Task::FinalizeArchiveVolume { work, .. }
+        | Task::ArchiveVolumesComplete { work }
         | Task::CommitArchive { work }
         | Task::CleanupArchive { work } => work.base_name.clone(),
         Task::ExtractArchiveShard { shard } => shard.work.base_name.clone(),
@@ -330,6 +569,31 @@ pub(super) fn task_path(task: &Task) -> String {
         | Task::RepairFile { logical_path, .. }
         | Task::VerifyReuseVolume { logical_path, .. }
         | Task::ReuseFile { logical_path, .. } => logical_path.clone(),
+        Task::CommitArchiveBatch {
+            commit,
+            batch_index,
+        }
+        | Task::VerifyCommittedBatch {
+            commit,
+            batch_index,
+        } => format!("{}#commit-batch-{batch_index}", commit.archive.base_name),
+        Task::FinishArchiveCommit { commit } => commit.archive.base_name.clone(),
+        Task::PreparePatchTransaction { transaction }
+        | Task::ApplyPatchDeletes { transaction }
+        | Task::CommitPatchDeferred { transaction } => {
+            transaction.plan().install_root.display().to_string()
+        }
+        Task::ApplyPatchEntry {
+            transaction,
+            entry_index,
+        } => transaction
+            .entry(*entry_index)
+            .map(|entry| entry.destination.display().to_string())
+            .unwrap_or_else(|| format!("patch-entry-{entry_index}")),
+        Task::ReleasePatchBase { base, .. } => base.display().to_string(),
+        Task::CleanupPatchTransaction { transaction, .. } => {
+            transaction.plan().stage_root.display().to_string()
+        }
         Task::ApplyExtractedVfsPatchManifest { install_root }
         | Task::ApplyDeleteManifest { install_root } => install_root.display().to_string(),
         Task::Hardlink { dest, .. } => dest.display().to_string(),

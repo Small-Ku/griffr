@@ -58,6 +58,7 @@ fn extract_task_spawns_vfs_patch_and_delete_manifest_follow_up_tasks() {
         password: None,
         patch_options: crate::runtime::PatchApplyOptions::default(),
         expected_files: crate::runtime::task_pool::archive_expected_files(Vec::new()),
+        excluded_commit_paths: std::sync::Arc::new(std::collections::BTreeSet::new()),
     }];
 
     let (progress_sender, progress_receiver) = crate::runtime::ProgressSender::channel();

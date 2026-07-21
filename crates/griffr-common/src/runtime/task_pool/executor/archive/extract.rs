@@ -2,17 +2,14 @@ use std::sync::Arc;
 
 use crate::download::extractor::{ArchiveIndex, MultiVolumeExtractor};
 use crate::error::{Error, Result};
-use crate::runtime::build_patch_plan_with_cache;
+use crate::runtime::{build_patch_plan_with_probe_cache, plan_patch_probes};
 
-use crate::runtime::task_pool::fs_ops::{
-    commit_staged_extract, make_extract_staging_dir, run_patch_transaction,
-};
+use crate::runtime::task_pool::fs_ops::make_extract_staging_dir;
 use crate::runtime::task_pool::graph::{GraphExpansion, TaskExecution};
 use crate::runtime::task_pool::types::{
-    ArchiveRangeReleaseState, ArchiveShardExecutionState, ArchiveShardTask, ArchiveWork,
-    PreparedArchive, Task, WorkerEvent,
+    ArchiveRangePriority, ArchiveRangeReleaseState, ArchiveShardExecutionState, ArchiveShardTask,
+    ArchiveWork, PatchCheckWork, PatchTransactionWork, PreparedArchive, Task, WorkerEvent,
 };
-use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 
 pub(crate) fn execute_plan_archive_extraction(
     work: Arc<ArchiveWork>,
@@ -36,30 +33,6 @@ pub(crate) fn execute_plan_archive_extraction(
             patch_plan: None,
         });
 
-        let verification_cache = VerifiedArtifactCache::default();
-        let patch_plan = if archive_index.patch_manifest.is_some() {
-            Some(build_patch_plan_with_cache(
-                &work.dest,
-                &staging_dir,
-                &archive_index,
-                &patch_options,
-                &verification_cache,
-            )?)
-        } else {
-            None
-        };
-        if let Some((_, report)) = patch_plan.as_ref() {
-            let _ = event_tx.send(WorkerEvent::ArchiveCheck {
-                path: work.base_name.clone(),
-                report: report.clone(),
-            });
-        }
-        work.prepared
-            .lock()
-            .unwrap()
-            .as_mut()
-            .expect("archive staging state disappeared during the archive check")
-            .patch_plan = patch_plan;
         let plans = MultiVolumeExtractor::extraction_shards(&archive_index, extract_shards);
         let _ = event_tx.send(WorkerEvent::ExtractedBytes {
             path: work.base_name.clone(),
@@ -68,21 +41,72 @@ pub(crate) fn execute_plan_archive_extraction(
         });
 
         let mut expansion = GraphExpansion::new();
+        let patch_check_node = if archive_index.patch_manifest.is_some() {
+            let probe_plan = plan_patch_probes(&work.dest, &archive_index, &patch_options)?;
+            let patch_check = PatchCheckWork::new(probe_plan);
+            let mut dependencies = (0..patch_check.probe_count())
+                .map(|probe_index| {
+                    expansion.add_root(Task::ProbePatchArtifact {
+                        patch_check: patch_check.clone(),
+                        probe_index,
+                    })
+                })
+                .collect::<Vec<_>>();
+            if patch_check.relocation_root().is_some() {
+                dependencies.push(expansion.add_root(Task::MeasurePatchRelocation {
+                    patch_check: patch_check.clone(),
+                }));
+            }
+            Some(expansion.add_task(
+                Task::FinalizePatchPlan {
+                    work: work.clone(),
+                    archive_index: archive_index.clone(),
+                    patch_check,
+                },
+                dependencies,
+            )?)
+        } else {
+            None
+        };
         let commit_tokens = work.all_tokens();
         if plans.is_empty() {
             if work.should_complete_volumes() {
-                let fill_gaps =
-                    expansion.add_root(Task::FetchMissingArchiveRanges { work: work.clone() });
+                let mut volume_nodes = Vec::with_capacity(work.layout.volume_count());
+                for volume_index in 0..work.layout.volume_count() {
+                    let node = expansion.add_task_with_tokens(
+                        Task::FillArchiveVolumeGaps {
+                            work: work.clone(),
+                            volume_index,
+                        },
+                        std::iter::empty(),
+                        work.tokens_for_indices(&[volume_index]),
+                    )?;
+                    volume_nodes.push(node);
+                }
+                let volumes_complete = expansion.add_task(
+                    Task::ArchiveVolumesComplete { work: work.clone() },
+                    volume_nodes,
+                )?;
+                let mut commit_dependencies = vec![volumes_complete];
+                commit_dependencies.extend(patch_check_node);
                 expansion.add_task_with_tokens(
                     Task::CommitArchive { work: work.clone() },
-                    [fill_gaps],
+                    commit_dependencies,
                     commit_tokens,
                 )?;
             } else {
-                expansion.add_root_with_tokens(
-                    Task::CommitArchive { work: work.clone() },
-                    commit_tokens,
-                )?;
+                if let Some(patch_check_node) = patch_check_node {
+                    expansion.add_task_with_tokens(
+                        Task::CommitArchive { work: work.clone() },
+                        [patch_check_node],
+                        commit_tokens,
+                    )?;
+                } else {
+                    expansion.add_root_with_tokens(
+                        Task::CommitArchive { work: work.clone() },
+                        commit_tokens,
+                    )?;
+                }
             }
             return Ok(expansion);
         }
@@ -97,8 +121,9 @@ pub(crate) fn execute_plan_archive_extraction(
         let range_release = (work.layout.is_remote() && !work.retention.keeps_complete_volumes())
             .then(|| ArchiveRangeReleaseState::new(work.layout.clone(), plan_ranges.clone()));
         let mut shard_nodes = Vec::with_capacity(plans.len());
+        let mut volume_shards = vec![Vec::new(); work.layout.volume_count()];
         for (shard_index, (plan, ranges)) in plans.into_iter().zip(plan_ranges).enumerate() {
-            let local_dependencies = if work.layout.is_remote() {
+            let mut local_dependencies = if work.layout.is_remote() {
                 work.layout
                     .missing_range_requests(ranges.clone())?
                     .into_iter()
@@ -107,13 +132,16 @@ pub(crate) fn execute_plan_archive_extraction(
                             work: work.clone(),
                             request,
                             retry_count: 0,
+                            priority: ArchiveRangePriority::ExtractionCritical,
                         })
                     })
                     .collect::<Vec<_>>()
             } else {
                 Vec::new()
             };
+            local_dependencies.extend(patch_check_node);
             let external_dependencies = work.tokens_for_indices(&plan.volume_indices);
+            let shard_volume_indices = plan.volume_indices.clone();
             let node = expansion.add_task_with_tokens(
                 Task::ExtractArchiveShard {
                     shard: ArchiveShardTask {
@@ -122,7 +150,7 @@ pub(crate) fn execute_plan_archive_extraction(
                         staging_dir: staging_dir.clone(),
                         entries: plan.entries,
                         volume_indices: plan.volume_indices,
-                        uncompressed_bytes: plan.uncompressed_bytes,
+                        estimated_cost: plan.estimated_cost,
                         execution_state: execution_state.clone(),
                         range_release: range_release
                             .as_ref()
@@ -132,12 +160,29 @@ pub(crate) fn execute_plan_archive_extraction(
                 local_dependencies,
                 external_dependencies,
             )?;
+            for volume_index in shard_volume_indices {
+                if let Some(readers) = volume_shards.get_mut(volume_index) {
+                    readers.push(node);
+                }
+            }
             shard_nodes.push(node);
         }
         let commit_dependencies = if work.should_complete_volumes() {
+            let mut volume_nodes = Vec::with_capacity(work.layout.volume_count());
+            for (volume_index, readers) in volume_shards.into_iter().enumerate() {
+                let node = expansion.add_task_with_tokens(
+                    Task::FillArchiveVolumeGaps {
+                        work: work.clone(),
+                        volume_index,
+                    },
+                    readers,
+                    work.tokens_for_indices(&[volume_index]),
+                )?;
+                volume_nodes.push(node);
+            }
             vec![expansion.add_task(
-                Task::FetchMissingArchiveRanges { work: work.clone() },
-                shard_nodes,
+                Task::ArchiveVolumesComplete { work: work.clone() },
+                volume_nodes,
             )?]
         } else {
             shard_nodes
@@ -156,6 +201,69 @@ pub(crate) fn execute_plan_archive_extraction(
             work.cleanup_prepared();
             TaskExecution::failed(error.to_string())
         }
+    }
+}
+
+pub(crate) fn execute_probe_patch_artifact(
+    patch_check: Arc<PatchCheckWork>,
+    probe_index: usize,
+) -> TaskExecution {
+    match patch_check.run_probe(probe_index) {
+        Ok(()) => TaskExecution::succeeded(),
+        Err(error) => TaskExecution::failed(error.to_string()),
+    }
+}
+
+pub(crate) fn execute_measure_patch_relocation(patch_check: Arc<PatchCheckWork>) -> TaskExecution {
+    match patch_check.measure_relocation() {
+        Ok(()) => TaskExecution::succeeded(),
+        Err(error) => TaskExecution::failed(error.to_string()),
+    }
+}
+
+pub(crate) fn execute_finalize_patch_plan(
+    work: Arc<ArchiveWork>,
+    archive_index: Arc<ArchiveIndex>,
+    patch_check: Arc<PatchCheckWork>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) -> TaskExecution {
+    let staging_dir = match work.prepared.lock().unwrap().as_ref() {
+        Some(prepared) => prepared.staging_dir.clone(),
+        None => {
+            return TaskExecution::failed(
+                "patch plan finish started without archive staging state",
+            );
+        }
+    };
+    let measured_relocation_bytes = match patch_check.measured_relocation_bytes() {
+        Ok(bytes) => bytes,
+        Err(error) => return TaskExecution::failed(error.to_string()),
+    };
+    let result = build_patch_plan_with_probe_cache(
+        &work.dest,
+        &staging_dir,
+        &archive_index,
+        &work.patch_options,
+        patch_check.verification_cache(),
+        measured_relocation_bytes,
+    );
+    match result {
+        Ok(patch_plan) => {
+            let report = patch_plan.1.clone();
+            let mut prepared_state = work.prepared.lock().unwrap();
+            let Some(prepared) = prepared_state.as_mut() else {
+                return TaskExecution::failed(
+                    "archive staging state disappeared while finishing the patch plan",
+                );
+            };
+            prepared.patch_plan = Some(patch_plan);
+            let _ = event_tx.send(WorkerEvent::ArchiveCheck {
+                path: work.base_name.clone(),
+                report,
+            });
+            TaskExecution::succeeded()
+        }
+        Err(error) => TaskExecution::failed(error.to_string()),
     }
 }
 
@@ -239,97 +347,10 @@ pub(crate) fn execute_commit_archive(
             return TaskExecution::failed("archive commit started without prepared state");
         }
     };
-    let result: Result<bool, Error> = (|| {
-        let mut on_commit = |path: &std::path::Path, completed: usize, total: usize| {
-            let normalized = path.to_string_lossy().replace('\\', "/");
-            if completed > 0 {
-                let _ = event_tx.send(WorkerEvent::Changed {
-                    path: normalized.clone(),
-                });
-            }
-            let _ = event_tx.send(WorkerEvent::ArchiveCommitProgress {
-                path: normalized,
-                completed,
-                total,
-            });
-        };
-        let mut on_patch = |path: &str, completed: usize, total: usize| {
-            if completed > 0 {
-                let _ = event_tx.send(WorkerEvent::Changed {
-                    path: path.replace('\\', "/"),
-                });
-            }
-            let _ = event_tx.send(WorkerEvent::PatchProgress {
-                path: path.to_string(),
-                completed,
-                total,
-            });
-        };
-        let mut on_delete = |path: &std::path::Path, completed: usize, total: usize| {
-            let normalized = path.to_string_lossy().replace('\\', "/");
-            if completed > 0 {
-                let _ = event_tx.send(WorkerEvent::Changed {
-                    path: normalized.clone(),
-                });
-            }
-            let _ = event_tx.send(WorkerEvent::DeleteProgress {
-                path: normalized,
-                completed,
-                total,
-            });
-        };
-        let verification_cache = VerifiedArtifactCache::default();
-        if let Some((plan, report)) = prepared.patch_plan.clone() {
-            run_patch_transaction(
-                &plan,
-                Some(&report),
-                Some(&mut on_commit),
-                Some(&mut on_patch),
-                Some(&mut on_delete),
-                &verification_cache,
-            )?;
-            if prepared.staging_dir.exists() {
-                std::fs::remove_dir_all(&prepared.staging_dir).map_err(|source| {
-                    Error::RemoveFailed {
-                        path: prepared.staging_dir.clone(),
-                        source,
-                    }
-                })?;
-            }
-            Ok(false)
-        } else {
-            commit_staged_extract(&prepared.staging_dir, &work.dest, Some(&mut on_commit))?;
-            Ok(true)
-        }
-    })();
-
-    match result {
-        Ok(needs_manifest_follow_up) => {
-            work.prepared.lock().unwrap().take();
-            let mut expansion = GraphExpansion::new();
-            let cleanup_dependencies = work.all_tokens();
-            let result = if needs_manifest_follow_up {
-                let apply = expansion.add_root(Task::ApplyExtractedVfsPatchManifest {
-                    install_root: work.dest.clone(),
-                });
-                expansion.add_task_with_tokens(
-                    Task::CleanupArchive { work },
-                    [apply],
-                    cleanup_dependencies,
-                )
-            } else {
-                expansion.add_root_with_tokens(Task::CleanupArchive { work }, cleanup_dependencies)
-            };
-            match result {
-                Ok(_) => TaskExecution::expand(expansion),
-                Err(error) => TaskExecution::failed(error.to_string()),
-            }
-        }
-        Err(error) => {
-            work.cleanup_prepared();
-            TaskExecution::failed(error.to_string())
-        }
+    if let Some((plan, _report)) = prepared.patch_plan {
+        return super::patch::schedule_patch_transaction(work, PatchTransactionWork::new(plan));
     }
+    super::commit::schedule_archive_commit(work, prepared.staging_dir, event_tx)
 }
 
 pub(crate) fn execute_cleanup_archive(

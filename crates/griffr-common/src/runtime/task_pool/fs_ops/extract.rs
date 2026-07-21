@@ -32,6 +32,16 @@ pub(crate) struct CommitFileJob {
     pub logical_path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CommitFileBatch {
+    pub jobs: Vec<CommitFileJob>,
+    pub estimated_bytes: u64,
+    pub cross_volume: bool,
+}
+
+const CROSS_VOLUME_COMMIT_BATCH_BYTES: u64 = 384 * 1024 * 1024;
+const MAX_COMMIT_BATCH_FILES: usize = 1024;
+
 pub(crate) fn collect_staged_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -60,7 +70,7 @@ pub(crate) fn collect_staged_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn commit_file_job(job: &CommitFileJob) -> Result<()> {
+pub(crate) fn commit_file_job(job: &CommitFileJob) -> Result<()> {
     if let Some(parent) = job.destination.parent() {
         std::fs::create_dir_all(parent).map_err(|source| Error::CreateDirFailed {
             path: parent.to_path_buf(),
@@ -83,7 +93,7 @@ fn commit_file_job(job: &CommitFileJob) -> Result<()> {
 }
 
 pub(crate) fn commit_file_jobs(
-    jobs: Vec<CommitFileJob>,
+    jobs: &[CommitFileJob],
     mut progress_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
 ) -> Result<()> {
     let total = jobs.len();
@@ -101,23 +111,106 @@ pub(crate) fn commit_file_jobs(
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn collect_commit_jobs(
+    staging_root: &Path,
+    dest_root: &Path,
+) -> Result<Vec<CommitFileJob>> {
+    collect_commit_jobs_excluding(staging_root, dest_root, &std::collections::BTreeSet::new())
+}
+
+pub(crate) fn collect_commit_jobs_excluding(
+    staging_root: &Path,
+    dest_root: &Path,
+    excluded_paths: &std::collections::BTreeSet<String>,
+) -> Result<Vec<CommitFileJob>> {
+    collect_staged_files(staging_root)?
+        .into_iter()
+        .filter_map(|source| {
+            let logical_path = match source.strip_prefix(staging_root) {
+                Ok(path) => path.to_path_buf(),
+                Err(error) => return Some(Err(error.into())),
+            };
+            let normalized = logical_path
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase();
+            if excluded_paths.contains(&normalized) {
+                return None;
+            }
+            Some(Ok(CommitFileJob {
+                destination: dest_root.join(&logical_path),
+                source,
+                logical_path,
+            }))
+        })
+        .collect()
+}
+
+pub(crate) fn build_commit_batches(jobs: Vec<CommitFileJob>) -> Result<Vec<CommitFileBatch>> {
+    use std::collections::BTreeMap;
+
+    let mut groups = BTreeMap::<(String, String, PathBuf), Vec<(CommitFileJob, u64)>>::new();
+    for job in jobs {
+        let bytes = std::fs::metadata(&job.source)
+            .map_err(|source| Error::StatFailed {
+                path: job.source.clone(),
+                source,
+            })?
+            .len();
+        let source_volume = super::reuse::storage_volume_group_key(&job.source);
+        let destination_volume = super::reuse::storage_volume_group_key(&job.destination);
+        let parent = job
+            .destination
+            .parent()
+            .unwrap_or(job.destination.as_path())
+            .to_path_buf();
+        groups
+            .entry((source_volume, destination_volume, parent))
+            .or_default()
+            .push((job, bytes));
+    }
+
+    let mut batches = Vec::new();
+    for ((source_volume, destination_volume, _), group) in groups {
+        let cross_volume = source_volume != destination_volume;
+        let mut current = Vec::new();
+        let mut current_bytes = 0u64;
+        for (job, bytes) in group {
+            let exceeds_bytes = cross_volume
+                && !current.is_empty()
+                && current_bytes.saturating_add(bytes) > CROSS_VOLUME_COMMIT_BATCH_BYTES;
+            let exceeds_files = current.len() >= MAX_COMMIT_BATCH_FILES;
+            if exceeds_bytes || exceeds_files {
+                batches.push(CommitFileBatch {
+                    jobs: std::mem::take(&mut current),
+                    estimated_bytes: current_bytes,
+                    cross_volume,
+                });
+                current_bytes = 0;
+            }
+            current_bytes = current_bytes.saturating_add(bytes);
+            current.push(job);
+        }
+        if !current.is_empty() {
+            batches.push(CommitFileBatch {
+                jobs: current,
+                estimated_bytes: current_bytes,
+                cross_volume,
+            });
+        }
+    }
+    Ok(batches)
+}
+
+#[cfg(test)]
 pub(crate) fn commit_staged_extract(
     staging_root: &Path,
     dest_root: &Path,
     progress_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
 ) -> Result<()> {
-    let jobs = collect_staged_files(staging_root)?
-        .into_iter()
-        .map(|source| {
-            let logical_path = source.strip_prefix(staging_root)?.to_path_buf();
-            Ok(CommitFileJob {
-                destination: dest_root.join(&logical_path),
-                source,
-                logical_path,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    commit_file_jobs(jobs, progress_callback)?;
+    let jobs = collect_commit_jobs(staging_root, dest_root)?;
+    commit_file_jobs(&jobs, progress_callback)?;
     std::fs::remove_dir_all(staging_root).map_err(|source| Error::RemoveFailed {
         path: staging_root.to_path_buf(),
         source,
@@ -280,8 +373,27 @@ pub(crate) fn move_path_replace_cross_volume(src: &Path, dest: &Path) -> Result<
 mod tests {
     use std::path::Path;
 
-    use super::commit_staged_extract;
+    use super::{
+        build_commit_batches, collect_commit_jobs, collect_commit_jobs_excluding,
+        commit_staged_extract,
+    };
     use crate::runtime::DELETE_FILES_MANIFEST_NAME;
+
+    #[test]
+    fn commit_job_collection_omits_paths_owned_by_other_branches() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging_root = temp.path().join("staging");
+        let dest_root = temp.path().join("install");
+        std::fs::create_dir_all(staging_root.join("Data/VFS")).unwrap();
+        std::fs::write(staging_root.join("Data/VFS/a.bin"), b"vfs").unwrap();
+        std::fs::write(staging_root.join("game.bin"), b"game").unwrap();
+        let excluded = std::collections::BTreeSet::from(["data/vfs/a.bin".to_string()]);
+
+        let jobs = collect_commit_jobs_excluding(&staging_root, &dest_root, &excluded).unwrap();
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].logical_path, Path::new("game.bin"));
+    }
 
     #[test]
     fn commit_staged_extract_keeps_delete_manifest_for_follow_up_task() {
@@ -309,5 +421,22 @@ mod tests {
             "updated payload"
         );
         assert!(dest_root.join(DELETE_FILES_MANIFEST_NAME).exists());
+    }
+    #[test]
+    fn commit_batches_keep_parent_directory_locality() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging_root = temp.path().join("staging");
+        let dest_root = temp.path().join("install");
+        let first = staging_root.join("a").join("one.bin");
+        let second = staging_root.join("b").join("two.bin");
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        std::fs::write(&first, b"one").unwrap();
+        std::fs::write(&second, b"two").unwrap();
+
+        let jobs = collect_commit_jobs(&staging_root, &dest_root).unwrap();
+        let batches = build_commit_batches(jobs).unwrap();
+        assert_eq!(batches.len(), 2);
+        assert!(batches.iter().all(|batch| batch.jobs.len() == 1));
     }
 }
