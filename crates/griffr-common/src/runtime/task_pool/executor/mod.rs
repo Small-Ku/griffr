@@ -128,23 +128,27 @@ pub(crate) fn execute_blocking_task(
             required_range,
         } => archive::execute_discover_archive_directory(work, required_range),
         Task::InspectArchiveIndex { work, directory } => {
-            archive::execute_inspect_archive_index(work, directory)
+            archive::execute_read_archive_index(work, directory)
         }
-        Task::ReadArchiveControls { work, inspection } => {
-            archive::execute_read_archive_controls(work, inspection)
-        }
-        Task::PlanArchiveExtraction { work, inspection } => {
-            archive::execute_plan_archive_extraction(work, inspection, extract_shards, event_tx)
+        Task::ReadArchiveControls {
+            work,
+            archive_index,
+        } => archive::execute_read_archive_controls(work, archive_index),
+        Task::PlanArchiveExtraction {
+            work,
+            archive_index,
+        } => {
+            archive::execute_plan_archive_extraction(work, archive_index, extract_shards, event_tx)
         }
         Task::ExtractArchiveShard { shard } => archive::execute_extract_archive_shard(
             shard,
             extraction_progress_buffer_bytes,
             event_tx,
         ),
-        Task::FillArchiveVolumeGaps { work } => archive::execute_fill_archive_volume_gaps(work),
-        Task::FinalizeArchiveVolumes { work } => {
-            archive::execute_finalize_archive_volumes(work, event_tx)
+        Task::FetchMissingArchiveRanges { work } => {
+            archive::execute_fetch_missing_archive_ranges(work)
         }
+        Task::SaveArchiveVolumes { work } => archive::execute_save_archive_volumes(work, event_tx),
         Task::CommitArchive { work } => archive::execute_commit_archive(work, event_tx),
         Task::CleanupArchive { work } => archive::execute_cleanup_archive(work, event_tx),
         Task::ApplyExtractedVfsPatchManifest { install_root } => {

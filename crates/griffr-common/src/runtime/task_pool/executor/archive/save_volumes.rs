@@ -13,7 +13,7 @@ use crate::runtime::task_pool::verify;
 
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
 
-pub(crate) fn execute_fill_archive_volume_gaps(work: Arc<ArchiveWork>) -> TaskExecution {
+pub(crate) fn execute_fetch_missing_archive_ranges(work: Arc<ArchiveWork>) -> TaskExecution {
     if !work.should_complete_volumes() {
         return TaskExecution::succeeded();
     }
@@ -25,7 +25,7 @@ pub(crate) fn execute_fill_archive_volume_gaps(work: Arc<ArchiveWork>) -> TaskEx
         Err(error) => return TaskExecution::failed(error.to_string()),
     };
     if requests.is_empty() {
-        return TaskExecution::then(Task::FinalizeArchiveVolumes { work });
+        return TaskExecution::then(Task::SaveArchiveVolumes { work });
     }
 
     let mut expansion = GraphExpansion::new();
@@ -39,17 +39,17 @@ pub(crate) fn execute_fill_archive_volume_gaps(work: Arc<ArchiveWork>) -> TaskEx
             })
         })
         .collect::<Vec<_>>();
-    match expansion.add_task(Task::FinalizeArchiveVolumes { work }, fetches) {
+    match expansion.add_task(Task::SaveArchiveVolumes { work }, fetches) {
         Ok(_) => TaskExecution::expand(expansion),
         Err(error) => TaskExecution::failed(error.to_string()),
     }
 }
 
-pub(crate) fn execute_finalize_archive_volumes(
+pub(crate) fn execute_save_archive_volumes(
     work: Arc<ArchiveWork>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskExecution {
-    let result = finalize_archive_volumes(&work, event_tx);
+    let result = save_archive_volumes(&work, event_tx);
     match result {
         Ok(()) => TaskExecution::succeeded(),
         Err(error) => {
@@ -64,10 +64,7 @@ pub(crate) fn execute_finalize_archive_volumes(
     }
 }
 
-fn finalize_archive_volumes(
-    work: &ArchiveWork,
-    event_tx: &flume::Sender<WorkerEvent>,
-) -> Result<()> {
+fn save_archive_volumes(work: &ArchiveWork, event_tx: &flume::Sender<WorkerEvent>) -> Result<()> {
     if !work.should_complete_volumes() {
         return Ok(());
     }
@@ -81,10 +78,10 @@ fn finalize_archive_volumes(
         .is_none()
         {
             report_verified(part, event_tx);
-            release_finalized_volume_ranges(work, index);
+            release_saved_volume_ranges(work, index);
             continue;
         }
-        if let Err(error) = materialize_volume(work, index, part) {
+        if let Err(error) = write_archive_volume(work, index, part) {
             let _ = event_tx.send(WorkerEvent::Verified {
                 path: part.logical_path.clone(),
                 ok: false,
@@ -98,12 +95,12 @@ fn finalize_archive_volumes(
             return Err(error);
         }
         report_verified(part, event_tx);
-        release_finalized_volume_ranges(work, index);
+        release_saved_volume_ranges(work, index);
     }
     Ok(())
 }
 
-fn materialize_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) -> Result<()> {
+fn write_archive_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) -> Result<()> {
     let volume_range = work.layout.volume_range(index).ok_or_else(|| {
         Error::Extraction(format!("archive volume index {index} is out of range"))
     })?;
@@ -116,7 +113,7 @@ fn materialize_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) -> R
     }
     if !work.layout.range_is_available(&volume_range) {
         return Err(Error::Extraction(format!(
-            "archive volume {} is not fully cached before finalization",
+            "archive volume {} is not fully cached before it is saved",
             part.logical_path
         )));
     }
@@ -171,7 +168,7 @@ fn materialize_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) -> R
             let read = input.read(&mut buffer[..limit])?;
             if read == 0 {
                 return Err(Error::Extraction(format!(
-                    "archive stream ended while finalizing {}",
+                    "archive stream ended while saving {}",
                     part.logical_path
                 )));
             }
@@ -215,7 +212,7 @@ fn materialize_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) -> R
     Ok(())
 }
 
-fn release_finalized_volume_ranges(work: &ArchiveWork, finalized_index: usize) {
+fn release_saved_volume_ranges(work: &ArchiveWork, finalized_index: usize) {
     let still_needed = ((finalized_index + 1)..work.layout.volume_count())
         .filter_map(|index| work.layout.volume_range(index))
         .collect::<Vec<_>>();
@@ -254,7 +251,7 @@ mod tests {
     use crate::runtime::PatchApplyOptions;
 
     #[test]
-    fn retained_ranges_are_materialized_as_verified_complete_volumes() {
+    fn cached_ranges_are_saved_as_verified_archive_volumes() {
         let temp = tempfile::tempdir().unwrap();
         let cache = temp.path().join("cache");
         let first_bytes = b"first-volume";
@@ -330,13 +327,13 @@ mod tests {
         .unwrap();
         let (event_tx, _event_rx) = flume::unbounded();
 
-        finalize_archive_volumes(&work, &event_tx).unwrap();
+        save_archive_volumes(&work, &event_tx).unwrap();
 
         assert_eq!(std::fs::read(first_dest).unwrap(), first_bytes);
         assert_eq!(std::fs::read(second_dest).unwrap(), second_bytes);
         assert!(
             cache.exists(),
-            "cache directory is removed by cleanup, not finalization"
+            "cleanup removes the cache directory; saving volumes does not remove it"
         );
         assert!(
             std::fs::read_dir(cache).unwrap().all(|entry| entry
@@ -345,7 +342,7 @@ mod tests {
                 .extension()
                 .and_then(|value| value.to_str())
                 != Some("range")),
-            "finalized volume ranges should be released as complete files are promoted"
+            "saved volume ranges should be released as complete files are promoted"
         );
     }
 }

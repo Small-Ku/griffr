@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::download::extractor::ArchiveInspection;
+use crate::download::extractor::ArchiveIndex;
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::fs_ops::{
     parse_delete_files_manifest, path_safety::parse_safe_relative_path, storage_volume_group_key,
@@ -13,9 +13,8 @@ use crate::runtime::{
 };
 
 use super::{
-    available_space, read_patch_storage_topology, space_model::simulate_space_peaks,
-    PatchApplyOptions, PatchExecutionPlan, PatchPreflightReport, PlannedPatchEntry,
-    PlannedPatchSource,
+    available_space, read_patch_storage_layout, space_use::simulate_space_peaks, PatchApplyOptions,
+    PatchCheckReport, PatchPlan, PlannedPatchEntry, PlannedPatchSource,
 };
 
 fn normalized_archive_path(path: &Path) -> String {
@@ -147,7 +146,7 @@ fn verify_space_requirements(
     for (path, required, available, labels) in groups {
         if available.is_some_and(|available| available < required) {
             return Err(Error::Vfs(format!(
-                "Patch preflight requires approximately {} bytes of peak free space for {} data on the volume containing {}, but only {} bytes are available",
+                "The patch check needs about {} bytes of peak free space for {} data on the volume that contains {}, but only {} bytes are free",
                 required,
                 labels.join(" + "),
                 path.display(),
@@ -158,61 +157,61 @@ fn verify_space_requirements(
     Ok(())
 }
 
-pub fn preflight_patch_archives(
+pub fn check_patch_archives(
     volumes: Vec<PathBuf>,
     install_root: &Path,
     password: Option<&str>,
     options: &PatchApplyOptions,
-) -> Result<PatchPreflightReport> {
+) -> Result<PatchCheckReport> {
     let options = options.resolved_for_install(install_root)?;
     let extractor = crate::download::extractor::MultiVolumeExtractor::new(volumes)?;
-    let inspection = extractor.inspect_patch_payload(password)?;
+    let archive_index = extractor.read_patch_payload(password)?;
     let stage_root = options
         .work_dir
         .as_deref()
         .unwrap_or_else(|| install_root.parent().unwrap_or(install_root))
-        .join(".griffr-preflight");
-    let (_, report) = build_patch_execution_plan(install_root, &stage_root, &inspection, &options)?;
+        .join(".griffr-check");
+    let (_, report) = build_patch_plan(install_root, &stage_root, &archive_index, &options)?;
     Ok(report)
 }
 
-pub(crate) fn build_patch_execution_plan(
+pub(crate) fn build_patch_plan(
     install_root: &Path,
     stage_root: &Path,
-    inspection: &ArchiveInspection,
+    archive_index: &ArchiveIndex,
     options: &PatchApplyOptions,
-) -> Result<(PatchExecutionPlan, PatchPreflightReport)> {
-    build_patch_execution_plan_with_cache(
+) -> Result<(PatchPlan, PatchCheckReport)> {
+    build_patch_plan_with_cache(
         install_root,
         stage_root,
-        inspection,
+        archive_index,
         options,
         &VerifiedArtifactCache::default(),
     )
 }
 
-pub(crate) fn build_patch_execution_plan_with_cache(
+pub(crate) fn build_patch_plan_with_cache(
     install_root: &Path,
     stage_root: &Path,
-    inspection: &ArchiveInspection,
+    archive_index: &ArchiveIndex,
     options: &PatchApplyOptions,
     verification_cache: &VerifiedArtifactCache,
-) -> Result<(PatchExecutionPlan, PatchPreflightReport)> {
+) -> Result<(PatchPlan, PatchCheckReport)> {
     let mut options = options.resolved_for_install(install_root)?;
-    if let Some(topology) = read_patch_storage_topology(install_root)? {
+    if let Some(storage_layout) = read_patch_storage_layout(install_root)? {
         match options.external_vfs_root.as_ref() {
-            Some(requested) if requested != &topology.external_vfs_root => {
+            Some(requested) if requested != &storage_layout.external_vfs_root => {
                 return Err(Error::Config(format!(
                     "Install already manages VFS storage at {}; requested external root {} does not match",
-                    topology.external_vfs_root.display(),
+                    storage_layout.external_vfs_root.display(),
                     requested.display()
                 )));
             }
             Some(_) => {}
-            None => options.external_vfs_root = Some(topology.external_vfs_root),
+            None => options.external_vfs_root = Some(storage_layout.external_vfs_root),
         }
     }
-    let manifest = inspection
+    let manifest = archive_index
         .patch_manifest
         .as_ref()
         .ok_or_else(|| Error::Vfs(format!("Patch archive is missing {PATCH_MANIFEST_NAME}")))?;
@@ -242,9 +241,9 @@ pub(crate) fn build_patch_execution_plan_with_cache(
         }
     }
     let delete_paths =
-        parse_delete_files_manifest(inspection.delete_manifest.as_deref().unwrap_or_default())?;
+        parse_delete_files_manifest(archive_index.delete_manifest.as_deref().unwrap_or_default())?;
     let delete_set = delete_paths.iter().cloned().collect::<BTreeSet<_>>();
-    let archive_entries = &inspection.entries;
+    let archive_entries = &archive_index.entries;
     let top_level_growth = archive_entries
         .iter()
         .filter_map(|(name, size)| {
@@ -353,7 +352,7 @@ pub(crate) fn build_patch_execution_plan_with_cache(
 
     if !missing.is_empty() {
         return Err(Error::Vfs(format!(
-            "Patch preflight found unrecoverable entries: {}",
+            "The patch check found entries that cannot be repaired: {}",
             missing.join(", ")
         )));
     }
@@ -398,8 +397,8 @@ pub(crate) fn build_patch_execution_plan_with_cache(
         .into_iter()
         .filter(|path| archive_entries.contains_key(&normalized_archive_path(path)))
         .collect::<Vec<_>>();
-    let plan = PatchExecutionPlan {
-        schema_version: PatchExecutionPlan::SCHEMA_VERSION,
+    let plan = PatchPlan {
+        schema_version: PatchPlan::SCHEMA_VERSION,
         install_root: install_root.to_path_buf(),
         stage_root: stage_root.to_path_buf(),
         vfs_base_path,
@@ -413,7 +412,7 @@ pub(crate) fn build_patch_execution_plan_with_cache(
     let peaks = simulate_space_peaks(
         &plan,
         archive_entries,
-        inspection.total_uncompressed_bytes,
+        archive_index.total_uncompressed_bytes,
         relocating_vfs_bytes,
     )?;
     let install_peak = peaks.install;
@@ -450,8 +449,8 @@ pub(crate) fn build_patch_execution_plan_with_cache(
             .map(|path| (path, work_bytes, available_work_bytes)),
     )?;
 
-    let report = PatchPreflightReport {
-        archive_uncompressed_bytes: inspection.total_uncompressed_bytes,
+    let report = PatchCheckReport {
+        archive_uncompressed_bytes: archive_index.total_uncompressed_bytes,
         estimated_final_growth_bytes: final_growth,
         estimated_install_peak_bytes: install_peak,
         estimated_vfs_peak_bytes: vfs_peak,

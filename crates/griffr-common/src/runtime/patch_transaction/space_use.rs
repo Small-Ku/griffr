@@ -5,7 +5,7 @@ use crate::error::Result;
 use crate::runtime::task_pool::fs_ops::storage_volume_group_key;
 use crate::runtime::{DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR};
 
-use super::{entry_wave_indices, PatchExecutionPlan, PlannedPatchSource};
+use super::{entry_wave_indices, PatchPlan, PlannedPatchSource};
 
 fn normalized_archive_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
@@ -70,11 +70,11 @@ fn payload_size(archive_entries: &BTreeMap<String, u64>, payload: &Path) -> u64 
         .unwrap_or(0)
 }
 
-fn logical_vfs_root(plan: &PatchExecutionPlan) -> PathBuf {
+fn logical_vfs_root(plan: &PatchPlan) -> PathBuf {
     plan.install_root.join(&plan.vfs_base_path)
 }
 
-fn physical_delete_path(plan: &PatchExecutionPlan, relative: &Path) -> PathBuf {
+fn physical_delete_path(plan: &PatchPlan, relative: &Path) -> PathBuf {
     if plan.vfs_destination != logical_vfs_root(plan) {
         if let Ok(vfs_relative) = relative.strip_prefix(&plan.vfs_base_path) {
             return plan.vfs_destination.join(vfs_relative);
@@ -83,7 +83,7 @@ fn physical_delete_path(plan: &PatchExecutionPlan, relative: &Path) -> PathBuf {
     plan.install_root.join(relative)
 }
 
-fn logical_path_for_physical(plan: &PatchExecutionPlan, path: &Path) -> PathBuf {
+fn logical_path_for_physical(plan: &PatchPlan, path: &Path) -> PathBuf {
     if let Ok(vfs_relative) = path.strip_prefix(&plan.vfs_destination) {
         return logical_vfs_root(plan).join(vfs_relative);
     }
@@ -91,7 +91,7 @@ fn logical_path_for_physical(plan: &PatchExecutionPlan, path: &Path) -> PathBuf 
 }
 
 pub(super) fn simulate_space_peaks(
-    plan: &PatchExecutionPlan,
+    plan: &PatchPlan,
     archive_entries: &BTreeMap<String, u64>,
     archive_uncompressed_bytes: u64,
     relocating_vfs_bytes: u64,
@@ -102,11 +102,11 @@ pub(super) fn simulate_space_peaks(
     let work_key = plan.work_dir.as_deref().map(storage_volume_group_key);
     let mut ledger = VolumeSpaceLedger::default();
 
-    // Extraction materializes the complete archive before commit starts.
+    // Extraction writes the complete archive before commit starts.
     ledger.add(&stage_key, archive_uncompressed_bytes);
 
     // First-time external VFS setup copies each file before deleting its source.
-    // A same-volume relocation is rename-only and needs no additional blocks.
+    // A move on the same volume only renames the file and needs no more blocks.
     if relocating_vfs_bytes > 0 && install_key != vfs_key {
         ledger.add(&vfs_key, relocating_vfs_bytes);
         ledger.remove(&install_key, relocating_vfs_bytes);
@@ -219,7 +219,7 @@ pub(super) fn simulate_space_peaks(
 }
 
 fn reserve_wave_outputs(
-    plan: &PatchExecutionPlan,
+    plan: &PatchPlan,
     archive_entries: &BTreeMap<String, u64>,
     wave: &[usize],
     stage_key: &str,
@@ -267,7 +267,7 @@ fn reserve_wave_outputs(
 
 #[allow(clippy::too_many_arguments)]
 fn commit_wave_outputs(
-    plan: &PatchExecutionPlan,
+    plan: &PatchPlan,
     archive_entries: &BTreeMap<String, u64>,
     wave: Vec<usize>,
     stage_key: &str,
@@ -315,7 +315,7 @@ fn commit_wave_outputs(
 }
 
 fn release_last_deleted_base(
-    plan: &PatchExecutionPlan,
+    plan: &PatchPlan,
     base: &Path,
     outputs: &BTreeSet<PathBuf>,
     delete_set: &BTreeSet<PathBuf>,
@@ -374,9 +374,9 @@ mod tests {
         }
     }
 
-    fn plan(root: &Path, entries: Vec<PlannedPatchEntry>) -> PatchExecutionPlan {
-        PatchExecutionPlan {
-            schema_version: PatchExecutionPlan::SCHEMA_VERSION,
+    fn plan(root: &Path, entries: Vec<PlannedPatchEntry>) -> PatchPlan {
+        PatchPlan {
+            schema_version: PatchPlan::SCHEMA_VERSION,
             install_root: root.to_path_buf(),
             stage_root: root.join("stage"),
             vfs_base_path: PathBuf::from("VFS"),

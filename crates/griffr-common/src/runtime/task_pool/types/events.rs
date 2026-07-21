@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::super::graph::TaskGraphSummary;
 use crate::runtime::issues::FileIssue;
-use crate::runtime::PatchPreflightReport;
+use crate::runtime::PatchCheckReport;
 
 #[derive(Debug, Clone)]
 pub(crate) enum WorkerEvent {
@@ -50,9 +50,9 @@ pub(crate) enum WorkerEvent {
         completed: usize,
         total: usize,
     },
-    ArchivePreflight {
+    ArchiveCheck {
         path: String,
-        report: PatchPreflightReport,
+        report: PatchCheckReport,
     },
     PatchProgress {
         path: String,
@@ -78,9 +78,9 @@ pub(crate) enum WorkerEvent {
 
 #[derive(Debug, Clone)]
 pub enum TaskOutcome {
-    ArchivePreflight {
+    ArchiveCheck {
         path: String,
-        report: PatchPreflightReport,
+        report: PatchCheckReport,
     },
     Downloaded {
         path: String,
@@ -112,9 +112,7 @@ pub enum TaskOutcome {
 impl WorkerEvent {
     pub(crate) fn into_outcome(self) -> Option<TaskOutcome> {
         match self {
-            Self::ArchivePreflight { path, report } => {
-                Some(TaskOutcome::ArchivePreflight { path, report })
-            }
+            Self::ArchiveCheck { path, report } => Some(TaskOutcome::ArchiveCheck { path, report }),
             Self::Downloaded { path, bytes } => Some(TaskOutcome::Downloaded { path, bytes }),
             Self::Verified { path, ok, issue } => Some(TaskOutcome::Verified { path, ok, issue }),
             Self::Extracted { path } => Some(TaskOutcome::Extracted { path }),

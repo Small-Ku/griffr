@@ -1,4 +1,4 @@
-# Patch Pipeline
+# Patch Steps
 
 This document describes the forward-only patch transaction implemented in `griffr-common`.
 
@@ -21,7 +21,7 @@ A patch archive can contain standard replacements and a VFS payload (`patch.json
 
 ---
 
-## 3. Preflight & Execution Plan
+## 3. Archive Check and Patch Plan
 
 Before mutating the installation:
 1.  Validates entry paths and checks for duplicates.
@@ -36,7 +36,7 @@ Apply and resume phases consume `plan.json` directly to avoid re-calculating sou
 
 ## 4. Forward-Only Transaction Flow
 
-Rollbacks are not supported. The transaction executes forward:
+Rollbacks are not supported. The transaction runs forward:
 
 1.  Write `.griffr-patch/plan.json`.
 2.  Prepare VFS folder/links.
@@ -60,7 +60,7 @@ wave 1: entry C               (Overwrites A's base file)
 ```
 
 *   Consumers run in earlier waves before writers.
-*   If a dependency cycle is detected, the transaction fails before execution begins.
+*   If a dependency cycle is detected, the transaction fails before step work begins.
 *   A command-local `VerifiedArtifactCache` prevents redundant base checks between waves.
 
 ---
@@ -75,8 +75,8 @@ wave 1: entry C               (Overwrites A's base file)
 
 ## 7. Crash Recovery
 
-`classify_patch_recovery` determines the recovery path on startup:
-*   If a plan exists, the update skips successfully matched files, re-verifies bases, and resumes execution.
+`get_patch_recovery_state` selects the recovery path at startup:
+*   If a plan exists, the update skips successfully matched files, re-verifies bases, and resumes work.
 *   The transaction is marked complete only after staging cleanup and deferred version-marker commits succeed.
 
 ---

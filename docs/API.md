@@ -1,6 +1,6 @@
 # Hypergryph Official API Reference
 
-Documented API structure for Arknights (明日方舟) and Arknights: Endfield (终末地) official PC launchers. The two launchers share some infrastructure (batch gateway, channels, package delivery), but resource pipelines are not fully interchangeable.
+Documented API structure for Arknights (明日方舟) and Arknights: Endfield (终末地) official PC launchers. The two launchers share some infrastructure (batch gateway, channels, package delivery), but resource flows are not fully interchangeable.
 
 ---
 
@@ -44,7 +44,7 @@ Documented API structure for Arknights (明日方舟) and Arknights: Endfield (�
 | CN | `POST https://launcher.hypergryph.com/api/proxy/web/batch_proxy` |
 | SG | `POST https://launcher.gryphline.com/api/proxy/web/batch_proxy` |
 
-### Additional discovered API bases
+### Other API bases
 
 | Key | Decoded | SG/CN | Purpose |
 |-----|---------|-------|---------|

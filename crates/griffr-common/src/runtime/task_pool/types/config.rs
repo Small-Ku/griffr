@@ -24,7 +24,7 @@ const MAX_EXTRACT_SHARDS: usize = 4;
 const DEFAULT_VOLUME_WRITE_RESERVATION_DELAY: Duration = Duration::from_millis(15);
 
 pub const DEFAULT_PROGRESS_BUFFER_BYTES: usize = 256 * 1024;
-pub const DEFAULT_REUSE_PIPELINE_WINDOW: usize = 64;
+pub const DEFAULT_REUSE_QUEUE_LIMIT: usize = 64;
 pub const DEFAULT_VOLUME_READ_LIMIT: usize = 16;
 pub const DEFAULT_VOLUME_WRITE_LIMIT: usize = 16;
 pub const DEFAULT_VOLUME_METADATA_LIMIT: usize = 128;
@@ -107,7 +107,7 @@ pub struct TaskPoolConfig {
     pub volume_policies: BTreeMap<String, VolumeIoPolicy>,
     /// Maximum number of source files that may be verified while their reuse
     /// metadata commit is still queued or running.
-    pub reuse_pipeline_window: usize,
+    pub reuse_queue_limit: usize,
     /// Once a streaming writer has waited this long, mixed-mode admission keeps
     /// one pressure unit available for it instead of stopping all new readers.
     pub volume_write_reservation_delay: Duration,
@@ -191,7 +191,7 @@ impl Default for TaskPoolConfig {
             extract_slots: (cpus / 4).clamp(MIN_EXTRACT_SLOTS, MAX_EXTRACT_SLOTS),
             default_volume_policy: VolumeIoPolicy::default(),
             volume_policies: BTreeMap::new(),
-            reuse_pipeline_window: DEFAULT_REUSE_PIPELINE_WINDOW,
+            reuse_queue_limit: DEFAULT_REUSE_QUEUE_LIMIT,
             volume_write_reservation_delay: DEFAULT_VOLUME_WRITE_RESERVATION_DELAY,
             extract_shards: (cpus / 2).clamp(MIN_EXTRACT_SHARDS, MAX_EXTRACT_SHARDS),
             max_retries: DEFAULT_MAX_RETRIES,

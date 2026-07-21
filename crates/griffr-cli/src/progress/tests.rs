@@ -47,8 +47,8 @@ fn count_and_byte_progress_keep_independent_units() {
 }
 
 #[test]
-fn archive_pipeline_keeps_download_and_extract_separate() {
-    let progress = ArchivePipelineProgress::new("install", false);
+fn archive_progress_keeps_download_and_extract_separate() {
+    let progress = ArchiveProgress::new("install", false);
     hide_group(&progress.part_count);
     let verify_lane = ProgressLane::ARCHIVE_VERIFY;
     let download_lane = ProgressLane::ARCHIVE_DOWNLOAD;

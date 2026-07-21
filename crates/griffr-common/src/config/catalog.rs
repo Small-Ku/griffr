@@ -39,7 +39,7 @@ pub static GAME_DEFINITIONS: &[GameDefinition] = &[
         data_root: "Arknights_Data",
         local_low_dir: "Arknights",
         cn_appcode: "GzD1CpaWgmSq1wew",
-        // No official SG PC target is currently exposed by the launcher API.
+        // The launcher API does not provide an official SG PC target.
         sg_appcode: None,
     },
     GameDefinition {

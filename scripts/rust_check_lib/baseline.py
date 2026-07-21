@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-from .models import DiffEntry
+from .records import DiffEntry
 from .parsing import leaf_tokens
 
 
@@ -23,7 +23,7 @@ class BaselineHost(Protocol):
 def compare(host: BaselineHost) -> None:
     if not host.baseline:
         return
-    with MaterializedBaseline(host.baseline) as baseline_root:
+    with BaselineTree(host.baseline) as baseline_root:
         baseline_files = _file_map(baseline_root, host.excludes)
         current_files = _file_map(host.root, host.excludes)
         for rel in sorted(baseline_files.keys() | current_files.keys()):
@@ -66,7 +66,7 @@ def compare(host: BaselineHost) -> None:
             host.diff_entries.append(DiffEntry(rel, "changed", detail, equivalent))
 
 
-class MaterializedBaseline:
+class BaselineTree:
     def __init__(self, path: Path):
         self.path = path.resolve()
         self.temp: tempfile.TemporaryDirectory[str] | None = None

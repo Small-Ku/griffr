@@ -34,7 +34,7 @@ pub(crate) struct ArchiveEntrySource {
 }
 
 #[derive(Debug, Clone)]
-pub struct ArchiveInspection {
+pub struct ArchiveIndex {
     pub entries: BTreeMap<String, u64>,
     pub(crate) archive: zip::ZipArchive<MultiVolumeStream>,
     pub total_uncompressed_bytes: u64,

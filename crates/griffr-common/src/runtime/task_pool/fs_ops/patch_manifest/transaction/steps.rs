@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::runtime::patch_transaction::{
-    entry_wave_indices, PatchExecutionPlan, PlannedPatchEntry, PlannedPatchSource,
-    PATCH_DEFERRED_DIR, PATCH_TRANSACTION_DIR,
+    entry_wave_indices, PatchPlan, PlannedPatchEntry, PlannedPatchSource, PATCH_DEFERRED_DIR,
+    PATCH_TRANSACTION_DIR,
 };
 use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 
@@ -13,7 +13,7 @@ use super::super::apply::{apply_hdiff_patch, verify_patch_output};
 use super::filesystem::remove_path_if_exists;
 
 pub(super) fn apply_planned_entry(
-    plan: &PatchExecutionPlan,
+    plan: &PatchPlan,
     entry: &PlannedPatchEntry,
     verification_cache: &VerifiedArtifactCache,
 ) -> Result<()> {
@@ -98,11 +98,11 @@ pub(super) fn apply_planned_entry(
     }
 }
 
-pub(super) fn logical_vfs_root(plan: &PatchExecutionPlan) -> PathBuf {
+pub(super) fn logical_vfs_root(plan: &PatchPlan) -> PathBuf {
     plan.install_root.join(&plan.vfs_base_path)
 }
 
-pub(super) fn physical_delete_path(plan: &PatchExecutionPlan, relative: &Path) -> PathBuf {
+pub(super) fn physical_delete_path(plan: &PatchPlan, relative: &Path) -> PathBuf {
     if plan.vfs_destination != logical_vfs_root(plan) {
         if let Ok(vfs_relative) = relative.strip_prefix(&plan.vfs_base_path) {
             return plan.vfs_destination.join(vfs_relative);
@@ -111,7 +111,7 @@ pub(super) fn physical_delete_path(plan: &PatchExecutionPlan, relative: &Path) -
     plan.install_root.join(relative)
 }
 
-pub(super) fn relative_install_path(plan: &PatchExecutionPlan, path: &Path) -> Option<PathBuf> {
+pub(super) fn relative_install_path(plan: &PatchPlan, path: &Path) -> Option<PathBuf> {
     if let Ok(vfs_relative) = path.strip_prefix(&plan.vfs_destination) {
         return Some(plan.vfs_base_path.join(vfs_relative));
     }
@@ -120,14 +120,14 @@ pub(super) fn relative_install_path(plan: &PatchExecutionPlan, path: &Path) -> O
         .map(Path::to_path_buf)
 }
 
-pub(super) fn final_output_paths(plan: &PatchExecutionPlan) -> BTreeSet<PathBuf> {
+pub(super) fn final_output_paths(plan: &PatchPlan) -> BTreeSet<PathBuf> {
     plan.entries
         .iter()
         .map(|entry| plan.vfs_base_path.join(&entry.name))
         .collect()
 }
 
-pub(super) fn entry_waves(plan: &PatchExecutionPlan) -> Result<Vec<Vec<&PlannedPatchEntry>>> {
+pub(super) fn entry_waves(plan: &PatchPlan) -> Result<Vec<Vec<&PlannedPatchEntry>>> {
     entry_wave_indices(plan).map(|waves| {
         waves
             .into_iter()
@@ -137,11 +137,11 @@ pub(super) fn entry_waves(plan: &PatchExecutionPlan) -> Result<Vec<Vec<&PlannedP
 }
 
 #[cfg(test)]
-pub(super) fn ordered_entries(plan: &PatchExecutionPlan) -> Result<Vec<&PlannedPatchEntry>> {
+pub(super) fn ordered_entries(plan: &PatchPlan) -> Result<Vec<&PlannedPatchEntry>> {
     Ok(entry_waves(plan)?.into_iter().flatten().collect())
 }
 
-pub(super) fn delete_unreferenced_paths_before_patch(plan: &PatchExecutionPlan) -> Result<()> {
+pub(super) fn delete_unreferenced_paths_before_patch(plan: &PatchPlan) -> Result<()> {
     let bases = plan
         .entries
         .iter()
@@ -165,7 +165,7 @@ pub(super) fn delete_unreferenced_paths_before_patch(plan: &PatchExecutionPlan) 
 }
 
 pub(super) fn release_base_if_unused(
-    plan: &PatchExecutionPlan,
+    plan: &PatchPlan,
     base: &Path,
     remaining: &mut BTreeMap<PathBuf, usize>,
     delete_set: &BTreeSet<PathBuf>,
@@ -188,7 +188,7 @@ pub(super) fn release_base_if_unused(
 }
 
 pub(super) fn apply_remaining_deletes(
-    plan: &PatchExecutionPlan,
+    plan: &PatchPlan,
     mut callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
 ) -> Result<()> {
     let total = plan.delete_paths.len();
@@ -209,7 +209,7 @@ pub(super) fn apply_remaining_deletes(
     Ok(())
 }
 
-pub(super) fn commit_deferred_files(plan: &PatchExecutionPlan) -> Result<()> {
+pub(super) fn commit_deferred_files(plan: &PatchPlan) -> Result<()> {
     let deferred_root = plan
         .install_root
         .join(PATCH_TRANSACTION_DIR)
@@ -231,7 +231,7 @@ pub(super) fn commit_deferred_files(plan: &PatchExecutionPlan) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn cleanup_staging(plan: &PatchExecutionPlan) -> Result<()> {
+pub(super) fn cleanup_staging(plan: &PatchPlan) -> Result<()> {
     if plan.stage_root.exists() {
         std::fs::remove_dir_all(&plan.stage_root).map_err(|source| Error::RemoveFailed {
             path: plan.stage_root.clone(),
@@ -241,7 +241,7 @@ pub(super) fn cleanup_staging(plan: &PatchExecutionPlan) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn cleanup_transaction(plan: &PatchExecutionPlan) -> Result<()> {
+pub(super) fn cleanup_transaction(plan: &PatchPlan) -> Result<()> {
     let transaction_root = plan.install_root.join(PATCH_TRANSACTION_DIR);
     if transaction_root.exists() {
         std::fs::remove_dir_all(&transaction_root).map_err(|source| Error::RemoveFailed {

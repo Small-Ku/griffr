@@ -120,7 +120,7 @@ pub struct PlannedPatchEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PatchExecutionPlan {
+pub struct PatchPlan {
     pub schema_version: u32,
     pub install_root: PathBuf,
     pub stage_root: PathBuf,
@@ -132,7 +132,7 @@ pub struct PatchExecutionPlan {
     pub deferred_paths: Vec<PathBuf>,
 }
 
-impl PatchExecutionPlan {
+impl PatchPlan {
     pub const SCHEMA_VERSION: u32 = 2;
 
     pub fn plan_path(&self) -> PathBuf {
@@ -261,7 +261,7 @@ impl PatchExecutionPlan {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PatchPreflightReport {
+pub struct PatchCheckReport {
     pub archive_uncompressed_bytes: u64,
     pub estimated_final_growth_bytes: u64,
     pub estimated_install_peak_bytes: u64,

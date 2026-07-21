@@ -1,6 +1,6 @@
 use quote::ToTokens;
 
-use crate::model::{FlatNode, NodeInput, Sizing};
+use crate::tree::{FlatNode, NodeInput, Sizing};
 
 pub(crate) fn flatten_tree(root: &NodeInput) -> Vec<FlatNode> {
     let mut flat = Vec::new();

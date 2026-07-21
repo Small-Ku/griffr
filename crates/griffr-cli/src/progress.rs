@@ -346,7 +346,7 @@ impl CountAndByteProgress {
 }
 
 /// Keeps archive verification, network transfer, extraction, and follow-up work on stable rows.
-pub struct ArchivePipelineProgress {
+pub struct ArchiveProgress {
     part_count: StepProgress,
     download: StepProgress,
     extract: StepProgress,
@@ -355,7 +355,7 @@ pub struct ArchivePipelineProgress {
     delete: StepProgress,
 }
 
-impl ArchivePipelineProgress {
+impl ArchiveProgress {
     pub fn new(label: &str, verbose: bool) -> Self {
         let multi = grouped_progress();
         Self {

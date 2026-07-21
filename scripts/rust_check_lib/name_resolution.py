@@ -10,7 +10,7 @@ from typing import Any, Protocol
 from tree_sitter import Node
 
 from .cfg import CfgExpr, TRUE, all_of, compatibility, conditions_from_attributes
-from .models import (
+from .records import (
     CRATE_VISIBLE,
     PRIVATE,
     PUBLIC,

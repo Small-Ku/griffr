@@ -1,6 +1,6 @@
-mod models;
+mod media;
 mod requests;
 mod resources;
 
-pub use models::MediaResponse;
+pub use media::MediaResponse;
 pub use requests::{ApiClient, ApiError};

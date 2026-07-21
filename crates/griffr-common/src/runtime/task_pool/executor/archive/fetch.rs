@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::api::types::GameFileEntry;
 use crate::download::extractor::{
-    ArchiveDirectory, ArchiveDirectoryDiscovery, ArchiveInspection, ArchiveRangeRequest,
+    ArchiveDirectory, ArchiveDirectoryDiscovery, ArchiveIndex, ArchiveRangeRequest,
     MultiVolumeExtractor, MultiVolumeLayout,
 };
 use crate::runtime::PatchApplyOptions;
@@ -203,19 +203,22 @@ pub(crate) fn execute_discover_archive_directory(
     }
 }
 
-pub(crate) fn execute_inspect_archive_index(
+pub(crate) fn execute_read_archive_index(
     work: Arc<ArchiveWork>,
     directory: ArchiveDirectory,
 ) -> TaskExecution {
     let extractor = MultiVolumeExtractor::from_layout(work.layout.clone());
-    match extractor.inspect_archive_index(&directory) {
-        Ok(inspection) => {
-            let inspection = Arc::new(inspection);
-            let ranges = MultiVolumeExtractor::control_source_ranges(&inspection);
+    match extractor.read_archive_index(&directory) {
+        Ok(archive_index) => {
+            let archive_index = Arc::new(archive_index);
+            let ranges = MultiVolumeExtractor::control_source_ranges(&archive_index);
             fetch_ranges_then(
                 work.clone(),
                 ranges,
-                Task::ReadArchiveControls { work, inspection },
+                Task::ReadArchiveControls {
+                    work,
+                    archive_index,
+                },
             )
         }
         Err(error) => {
@@ -227,13 +230,13 @@ pub(crate) fn execute_inspect_archive_index(
 
 pub(crate) fn execute_read_archive_controls(
     work: Arc<ArchiveWork>,
-    inspection: Arc<ArchiveInspection>,
+    archive_index: Arc<ArchiveIndex>,
 ) -> TaskExecution {
     let extractor = MultiVolumeExtractor::from_layout(work.layout.clone());
-    match extractor.read_control_payloads(&inspection, work.password.as_deref()) {
-        Ok(inspection) => TaskExecution::then(Task::PlanArchiveExtraction {
+    match extractor.read_control_payloads(&archive_index, work.password.as_deref()) {
+        Ok(archive_index) => TaskExecution::then(Task::PlanArchiveExtraction {
             work,
-            inspection: Arc::new(inspection),
+            archive_index: Arc::new(archive_index),
         }),
         Err(error) => {
             work.invalidate_range_cache();

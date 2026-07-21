@@ -62,7 +62,7 @@ pub(crate) async fn fetch_archive_range_to_cache(
         resume_offset = 0;
     }
     if resume_offset == expected {
-        finalize_archive_range_cache(&part_path, &request.cache_path).await?;
+        save_archive_range_file(&part_path, &request.cache_path).await?;
         on_progress(expected);
         return Ok(expected);
     }
@@ -173,11 +173,11 @@ pub(crate) async fn fetch_archive_range_to_cache(
             source,
         })?;
 
-    finalize_archive_range_cache(&part_path, &request.cache_path).await?;
+    save_archive_range_file(&part_path, &request.cache_path).await?;
     Ok(expected)
 }
 
-async fn finalize_archive_range_cache(part_path: &Path, cache_path: &Path) -> Result<()> {
+async fn save_archive_range_file(part_path: &Path, cache_path: &Path) -> Result<()> {
     match compio::fs::metadata(cache_path).await {
         Ok(_) => {
             let _ = compio::fs::remove_file(part_path).await;

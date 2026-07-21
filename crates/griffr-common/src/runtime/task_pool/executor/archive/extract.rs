@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use crate::download::extractor::{ArchiveInspection, MultiVolumeExtractor};
+use crate::download::extractor::{ArchiveIndex, MultiVolumeExtractor};
 use crate::error::{Error, Result};
-use crate::runtime::build_patch_execution_plan_with_cache;
+use crate::runtime::build_patch_plan_with_cache;
 
 use crate::runtime::task_pool::fs_ops::{
-    commit_staged_extract, execute_patch_transaction, make_extract_staging_dir,
+    commit_staged_extract, make_extract_staging_dir, run_patch_transaction,
 };
 use crate::runtime::task_pool::graph::{GraphExpansion, TaskExecution};
 use crate::runtime::task_pool::types::{
@@ -16,7 +16,7 @@ use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 
 pub(crate) fn execute_plan_archive_extraction(
     work: Arc<ArchiveWork>,
-    inspection: Arc<ArchiveInspection>,
+    archive_index: Arc<ArchiveIndex>,
     extract_shards: usize,
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskExecution {
@@ -37,11 +37,11 @@ pub(crate) fn execute_plan_archive_extraction(
         });
 
         let verification_cache = VerifiedArtifactCache::default();
-        let patch_plan = if inspection.patch_manifest.is_some() {
-            Some(build_patch_execution_plan_with_cache(
+        let patch_plan = if archive_index.patch_manifest.is_some() {
+            Some(build_patch_plan_with_cache(
                 &work.dest,
                 &staging_dir,
-                &inspection,
+                &archive_index,
                 &patch_options,
                 &verification_cache,
             )?)
@@ -49,7 +49,7 @@ pub(crate) fn execute_plan_archive_extraction(
             None
         };
         if let Some((_, report)) = patch_plan.as_ref() {
-            let _ = event_tx.send(WorkerEvent::ArchivePreflight {
+            let _ = event_tx.send(WorkerEvent::ArchiveCheck {
                 path: work.base_name.clone(),
                 report: report.clone(),
             });
@@ -58,13 +58,13 @@ pub(crate) fn execute_plan_archive_extraction(
             .lock()
             .unwrap()
             .as_mut()
-            .expect("archive staging state disappeared during preflight")
+            .expect("archive staging state disappeared during the archive check")
             .patch_plan = patch_plan;
-        let plans = MultiVolumeExtractor::extraction_shards(&inspection, extract_shards);
+        let plans = MultiVolumeExtractor::extraction_shards(&archive_index, extract_shards);
         let _ = event_tx.send(WorkerEvent::ExtractedBytes {
             path: work.base_name.clone(),
             bytes: 0,
-            total_bytes: inspection.total_uncompressed_bytes,
+            total_bytes: archive_index.total_uncompressed_bytes,
         });
 
         let mut expansion = GraphExpansion::new();
@@ -72,7 +72,7 @@ pub(crate) fn execute_plan_archive_extraction(
         if plans.is_empty() {
             if work.should_complete_volumes() {
                 let fill_gaps =
-                    expansion.add_root(Task::FillArchiveVolumeGaps { work: work.clone() });
+                    expansion.add_root(Task::FetchMissingArchiveRanges { work: work.clone() });
                 expansion.add_task_with_tokens(
                     Task::CommitArchive { work: work.clone() },
                     [fill_gaps],
@@ -89,7 +89,9 @@ pub(crate) fn execute_plan_archive_extraction(
 
         let plan_ranges = plans
             .iter()
-            .map(|plan| MultiVolumeExtractor::source_ranges_for_indices(&inspection, &plan.entries))
+            .map(|plan| {
+                MultiVolumeExtractor::source_ranges_for_indices(&archive_index, &plan.entries)
+            })
             .collect::<Vec<_>>();
         let execution_state = ArchiveShardExecutionState::new();
         let range_release = (work.layout.is_remote() && !work.retention.keeps_complete_volumes())
@@ -116,7 +118,7 @@ pub(crate) fn execute_plan_archive_extraction(
                 Task::ExtractArchiveShard {
                     shard: ArchiveShardTask {
                         work: work.clone(),
-                        inspection: inspection.clone(),
+                        archive_index: archive_index.clone(),
                         staging_dir: staging_dir.clone(),
                         entries: plan.entries,
                         volume_indices: plan.volume_indices,
@@ -134,7 +136,7 @@ pub(crate) fn execute_plan_archive_extraction(
         }
         let commit_dependencies = if work.should_complete_volumes() {
             vec![expansion.add_task(
-                Task::FillArchiveVolumeGaps { work: work.clone() },
+                Task::FetchMissingArchiveRanges { work: work.clone() },
                 shard_nodes,
             )?]
         } else {
@@ -163,7 +165,7 @@ pub(crate) fn execute_extract_archive_shard(
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskExecution {
     let work = shard.work.clone();
-    let inspection = shard.inspection.clone();
+    let archive_index = shard.archive_index.clone();
     let staging_dir = shard.staging_dir.clone();
     let entries = shard.entries.clone();
     let execution_state = shard.execution_state.clone();
@@ -181,7 +183,7 @@ pub(crate) fn execute_extract_archive_shard(
     let result = extractor.extract_entries_with_progress(
         &staging_dir,
         work.password.as_deref(),
-        &inspection,
+        &archive_index,
         &entries,
         &work.expected_files,
         extraction_progress_buffer_bytes,
@@ -192,8 +194,8 @@ pub(crate) fn execute_extract_archive_shard(
                 .saturating_add(bytes);
             let _ = event_tx.send(WorkerEvent::ExtractedBytes {
                 path: work.base_name.clone(),
-                bytes: extracted.min(inspection.total_uncompressed_bytes),
-                total_bytes: inspection.total_uncompressed_bytes,
+                bytes: extracted.min(archive_index.total_uncompressed_bytes),
+                total_bytes: archive_index.total_uncompressed_bytes,
             });
         },
     );
@@ -211,11 +213,11 @@ pub(crate) fn execute_extract_archive_shard(
         let extracted = work
             .extracted_bytes
             .load(std::sync::atomic::Ordering::Acquire);
-        if extracted >= inspection.total_uncompressed_bytes {
+        if extracted >= archive_index.total_uncompressed_bytes {
             let _ = event_tx.send(WorkerEvent::ExtractedBytes {
                 path: work.base_name.clone(),
-                bytes: inspection.total_uncompressed_bytes,
-                total_bytes: inspection.total_uncompressed_bytes,
+                bytes: archive_index.total_uncompressed_bytes,
+                total_bytes: archive_index.total_uncompressed_bytes,
             });
         }
     }
@@ -278,7 +280,7 @@ pub(crate) fn execute_commit_archive(
         };
         let verification_cache = VerifiedArtifactCache::default();
         if let Some((plan, report)) = prepared.patch_plan.clone() {
-            execute_patch_transaction(
+            run_patch_transaction(
                 &plan,
                 Some(&report),
                 Some(&mut on_commit),

@@ -2,7 +2,7 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use griffr_common::runtime::{read_patch_storage_topology, remove_dir_all};
+use griffr_common::runtime::{read_patch_storage_layout, remove_dir_all};
 
 use crate::progress::ActivityProgress;
 use crate::ui;
@@ -38,7 +38,7 @@ pub async fn uninstall(
     }
 
     let external_vfs_root =
-        read_patch_storage_topology(&target)?.map(|topology| topology.external_vfs_root);
+        read_patch_storage_layout(&target)?.map(|storage_layout| storage_layout.external_vfs_root);
 
     if opts.is_dry_run() {
         opts.dry_run(format!("Would delete {}", target.display()));

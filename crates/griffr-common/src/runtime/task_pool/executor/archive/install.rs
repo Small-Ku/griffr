@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use md5::{Digest, Md5};
 
-use super::complete::volume_temp_path;
+use super::save_volumes::volume_temp_path;
 use crate::api::types::GameFileEntry;
 use crate::download::extractor::MultiVolumeLayout;
 use crate::error::{Error, Result};

@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 from .checker import Checker
-from .models import Diagnostic
+from .records import Diagnostic
 
 
 def render_text(checker: Checker, *, verbose_tools: bool = False) -> str:

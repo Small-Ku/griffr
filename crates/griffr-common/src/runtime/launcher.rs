@@ -1,8 +1,8 @@
-//! Game launcher with process management and admin elevation
+//! Start and stop game processes, and request administrator rights
 //!
 //! Handles:
 //! - Process detection (Arknights.exe, Endfield.exe, PlatformProcess.exe, NeoViewer.exe)
-//! - Graceful kill sequence per TODO requirements
+//! - Ordered process stop sequence
 //! - Game launch
 
 use std::io::ErrorKind;
@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::{GameId, InstallTarget};
 
-/// Information about a running game process
+/// Data for a running game process
 #[derive(Debug, Clone)]
 pub struct GameProcess {
     /// Process ID
@@ -26,13 +26,13 @@ pub struct GameProcess {
     pub name: String,
     /// Full path to executable
     pub exe_path: PathBuf,
-    /// Whether this is the main game process
+    /// True for the main game process
     pub is_main: bool,
-    /// Whether this is a child process (PlatformProcess, NeoViewer)
+    /// True for a child process (PlatformProcess or NeoViewer)
     pub is_child: bool,
 }
 
-/// Game launcher with process management capabilities
+/// Start and stop game processes
 #[derive(Debug)]
 pub struct Launcher {
     game_id: GameId,
@@ -41,7 +41,7 @@ pub struct Launcher {
 }
 
 impl Launcher {
-    /// Create a new launcher for the given game, resolved install target, and path
+    /// Create a launcher for a game, target, and install path
     pub fn new(game_id: GameId, target: InstallTarget, install_path: impl Into<PathBuf>) -> Self {
         Self {
             game_id,
@@ -50,22 +50,22 @@ impl Launcher {
         }
     }
 
-    /// Get the main game executable name for this game
+    /// Get the main game executable name
     fn main_exe_name(&self) -> &Path {
         &self.target.executable
     }
 
-    /// Get the full path to the main game executable
+    /// Get the full path of the main game executable
     pub fn game_exe_path(&self) -> Result<PathBuf> {
         Ok(self.install_path.join(self.main_exe_name()))
     }
 
-    /// Check if the game is currently running
+    /// Check if the game is running
     pub fn is_game_running(&self) -> bool {
         !self.find_game_processes().is_empty()
     }
 
-    /// Find all game-related processes
+    /// Find all processes for this game
     pub fn find_game_processes(&self) -> Vec<GameProcess> {
         #[cfg(windows)]
         {
@@ -110,7 +110,7 @@ impl Launcher {
                         .and_then(|s| s.to_str())
                         .unwrap_or("");
 
-                    // Check if this is a process we care about
+                    // Check for a game process.
                     let is_main = name_stem.eq_ignore_ascii_case(main_exe_stem);
                     let is_child = name_stem.eq_ignore_ascii_case("PlatformProcess")
                         || name_stem.eq_ignore_ascii_case("NeoViewer");
@@ -118,7 +118,7 @@ impl Launcher {
                     if is_main || is_child {
                         let pid = entry.th32ProcessID;
 
-                        // Try to get the full executable path
+                        // Get the full executable path.
                         let exe_path = if let Ok(path) =
                             get_process_exe_path(pid, &self.install_path, &process_name)
                         {
@@ -151,101 +151,95 @@ impl Launcher {
         processes
     }
 
-    /// Gracefully kill the game process following the TODO sequence:
-    /// 1. Kill child processes (PlatformProcess, NeoViewer) first
-    /// 2. Kill main game exe
-    /// 3. Wait 1.5s for handle release
-    /// 4. Force kill if still running
-    pub async fn kill_game(&self) -> Result<()> {
+    /// Stop the game processes in this order:
+    /// 1. Ask child processes to stop.
+    /// 2. Ask the main process to stop.
+    /// 3. Wait 1.5 seconds for handles to close.
+    /// 4. Force-stop processes that are still running.
+    pub async fn stop_game(&self) -> Result<()> {
         let processes = self.find_game_processes();
 
         if processes.is_empty() {
-            info!("No game processes found to kill");
+            info!("No game processes are running");
             return Ok(());
         }
 
-        info!("Found {} game process(es) to terminate", processes.len());
+        info!("Found {} game process(es) to stop", processes.len());
 
-        // First pass: Graceful termination
-        // 1. Kill child processes first
+        // First pass: ask each process to stop.
+        // Ask child processes to stop first.
         for proc in &processes {
             if proc.is_child {
                 debug!(
-                    "Requesting graceful termination of child process: {} (PID: {})",
+                    "Requesting stop of child process: {} (PID: {})",
                     proc.name, proc.pid
                 );
-                if let Err(e) = self.request_graceful_termination(proc.pid) {
-                    warn!(
-                        "Failed to gracefully terminate {} (PID: {}): {}",
-                        proc.name, proc.pid, e
-                    );
+                if let Err(e) = self.request_process_stop(proc.pid) {
+                    warn!("Failed to stop {} (PID: {}): {}", proc.name, proc.pid, e);
                 }
             }
         }
 
-        // 2. Kill main game exe
+        // Ask the main game process to stop.
         for proc in &processes {
             if proc.is_main {
                 debug!(
-                    "Requesting graceful termination of main process: {} (PID: {})",
+                    "Requesting stop of main process: {} (PID: {})",
                     proc.name, proc.pid
                 );
-                if let Err(e) = self.request_graceful_termination(proc.pid) {
-                    warn!(
-                        "Failed to gracefully terminate {} (PID: {}): {}",
-                        proc.name, proc.pid, e
-                    );
+                if let Err(e) = self.request_process_stop(proc.pid) {
+                    warn!("Failed to stop {} (PID: {}): {}", proc.name, proc.pid, e);
                 }
             }
         }
 
-        // 3. Wait 1.5 seconds for handles to release
-        debug!("Waiting 1.5s for processes to terminate gracefully...");
+        // Wait 1.5 seconds for handles to close.
+        debug!("Waiting 1.5 seconds for processes to stop...");
         compio::time::sleep(Duration::from_millis(1500)).await;
 
-        // 4. Second pass: Force kill any remaining processes
+        // Second pass: force-stop remaining processes.
         let remaining = self.find_game_processes();
         if !remaining.is_empty() {
             info!(
-                "{} process(es) still running, force killing...",
+                "{} process(es) are still running; force-stop them...",
                 remaining.len()
             );
 
             for proc in &remaining {
-                warn!("Force killing {} (PID: {})", proc.name, proc.pid);
-                if let Err(e) = self.force_kill_process(proc.pid) {
+                warn!("Force-stopping {} (PID: {})", proc.name, proc.pid);
+                if let Err(e) = self.force_stop_process(proc.pid) {
                     warn!(
-                        "Failed to force kill {} (PID: {}): {}",
+                        "Failed to force-stop {} (PID: {}): {}",
                         proc.name, proc.pid, e
                     );
                 }
             }
 
-            // Wait a bit more and verify
+            // Wait and check again.
             compio::time::sleep(Duration::from_millis(500)).await;
             let final_check = self.find_game_processes();
             if !final_check.is_empty() {
                 return Err(Error::Launcher(format!(
-                    "Failed to kill {} process(es): {:?}",
+                    "Failed to stop {} process(es): {:?}",
                     final_check.len(),
                     final_check.iter().map(|p| &p.name).collect::<Vec<_>>()
                 )));
             }
         }
 
-        info!("Game terminated successfully");
+        info!("Game stopped");
         Ok(())
     }
 
-    /// Request graceful termination of a process (WM_CLOSE on Windows)
+    /// Ask a process to stop with WM_CLOSE on Windows
     #[cfg(windows)]
-    fn request_graceful_termination(&self, pid: u32) -> Result<()> {
+    fn request_process_stop(&self, pid: u32) -> Result<()> {
         use windows_sys::Win32::Foundation::{LPARAM, TRUE, WPARAM};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
         };
 
-        // First try to send WM_CLOSE to any windows owned by this process
+        // Send WM_CLOSE to each window that belongs to this process.
         unsafe {
             struct EnumData {
                 pid: u32,
@@ -264,12 +258,12 @@ impl Launcher {
                 GetWindowThreadProcessId(hwnd, &mut window_pid);
 
                 if window_pid == data.pid {
-                    // Send WM_CLOSE to this window
+                    // Send WM_CLOSE to this window.
                     PostMessageW(hwnd, WM_CLOSE, 0 as WPARAM, 0 as LPARAM);
                     data.sent = true;
                 }
 
-                TRUE // Continue enumeration
+                TRUE // Continue the search.
             }
 
             EnumWindows(Some(enum_callback), &mut data as *mut _ as LPARAM);
@@ -279,18 +273,18 @@ impl Launcher {
             }
         }
 
-        // If no windows found or WM_CLOSE failed, fall back to terminating the process
-        self.force_kill_process(pid)
+        // Force-stop the process if it has no window or WM_CLOSE fails.
+        self.force_stop_process(pid)
     }
 
     #[cfg(not(windows))]
-    fn request_graceful_termination(&self, _pid: u32) -> Result<()> {
+    fn request_process_stop(&self, _pid: u32) -> Result<()> {
         Ok(())
     }
 
-    /// Force kill a process
+    /// Force-stop a process
     #[cfg(windows)]
-    fn force_kill_process(&self, pid: u32) -> Result<()> {
+    fn force_stop_process(&self, pid: u32) -> Result<()> {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
             OpenProcess, TerminateProcess, PROCESS_TERMINATE,
@@ -300,7 +294,7 @@ impl Launcher {
             let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
             if handle.is_null() {
                 return Err(Error::Launcher(format!(
-                    "Failed to open process {} for termination",
+                    "Failed to open process {} to stop it",
                     pid
                 )));
             }
@@ -320,11 +314,11 @@ impl Launcher {
     }
 
     #[cfg(not(windows))]
-    fn force_kill_process(&self, _pid: u32) -> Result<()> {
+    fn force_stop_process(&self, _pid: u32) -> Result<()> {
         Ok(())
     }
 
-    /// Launch the game
+    /// Start the game
     pub async fn launch(&self) -> Result<Child> {
         let exe_path = self.game_exe_path()?;
 
@@ -392,7 +386,7 @@ fn is_process_in_game_directory(exe_path: &Path, game_dir: &Path) -> bool {
     exe_path.ancestors().any(|ancestor| ancestor == game_dir)
 }
 
-/// Try to get the full executable path for a process
+/// Get the full executable path. for a process
 #[cfg(windows)]
 fn get_process_exe_path(pid: u32, _game_dir: &Path, _fallback_name: &str) -> Result<PathBuf> {
     use windows_sys::Win32::Foundation::CloseHandle;

@@ -68,7 +68,7 @@ The EXE is a standalone self-updating launcher binary. Unlike the ZIP, it does n
 }
 ```
 
-Returns the current launcher protocol version. Used to display ToS/privacy policy update prompts to the user. Not critical for download/update functionality.
+Returns the current launcher protocol version. Used to display ToS/privacy policy update prompts to the user. Not required for game downloads or updates.
 
 ---
 

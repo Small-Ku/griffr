@@ -8,15 +8,15 @@
 
 Windows asynchronous I/O is completion based. `compio` maps this model directly and lets Griffr submit futures to a threaded `Dispatcher` processing completions concurrently.
 
-Instead of custom worker pools, the Dispatcher acts as the single execution gateway:
-*   `dispatch()`: asynchronous HTTP, compio file I/O, metadata operations, hardlinks, verified reuse copies, and delete-manifest work.
-*   `dispatch_blocking()`: synchronous hashing, ZIP extraction, HDiff patching, and filesystem operations for which compio has no async API (notably directory enumeration and recursive directory removal).
+Instead of custom worker pools, the Dispatcher acts as the single task gateway:
+*   `dispatch()`: asynchronous HTTP, compio file I/O, metadata calls, hardlinks, verified reuse copies, and delete-manifest work.
+*   `dispatch_blocking()`: synchronous hashing, ZIP extraction, HDiff patching, and filesystem tasks for which compio has no async API (notably directory enumeration and recursive directory removal).
 
 ---
 
 ## 2. Owned Buffer Model
 
-Completion I/O requires a buffer to remain valid until the kernel completes the operation. compio's `IoBuf` model transfers buffer ownership into an operation and returns it with the completion result.
+Completion I/O requires a buffer to remain valid until the kernel completes the action. compio's `IoBuf` model transfers buffer ownership into an I/O call and returns it with the completion result.
 
 The download path receives `cyper` body chunks as `Bytes`, updates MD5 from the same chunk, then transfers the chunk directly to positional compio writes. There is no intermediate staging `Vec` on the download/write hot path.
 
@@ -24,7 +24,7 @@ The download path receives `cyper` body chunks as `Bytes`, updates MD5 from the 
 
 ## 3. Dispatcher Threads vs. Admission Limits
 
-The `Dispatcher` execution threads do not dictate admission concurrency:
+The `Dispatcher` worker threads do not dictate admission concurrency:
 *   `dispatcher_threads` controls the underlying compio runtimes processing completions.
 *   `network_slots`, `cpu_slots`, `blocking_slots`, and volume policies control coordinator-level admission.
 
@@ -53,7 +53,7 @@ Protocol and transport negotiation are controlled by the client, while network a
 
 A Tokio implementation would still need the resource-aware coordinator. Griffr's bottleneck constraints are volume contention, root mutation, and archive DAG ordering rather than generic work stealing.
 
-Using compio keeps the Windows completion-I/O path explicit. The `Dispatcher` handles concurrent async work and synchronous execution, eliminating custom scheduler/worker loops.
+Using compio keeps the Windows completion-I/O path explicit. The `Dispatcher` handles concurrent async work and synchronous tasks, eliminating custom scheduler/worker loops.
 
 ---
 
@@ -61,8 +61,8 @@ Using compio keeps the Windows completion-I/O path explicit. The `Dispatcher` ha
 
 | Concern | Current design |
 |---|---|
-| Async network and file operations | `Dispatcher::dispatch()` with `compio::fs` |
-| CPU hashing, synchronous libraries, and unsupported directory operations | `Dispatcher::dispatch_blocking()` |
+| Async network and file tasks | `Dispatcher::dispatch()` with `compio::fs` |
+| CPU hashing, synchronous libraries, and unsupported directory tasks | `Dispatcher::dispatch_blocking()` |
 | Completion ownership | one coordinator completion channel |
 | HTTP client lifetime | one lazy client per Dispatcher runtime thread |
 | Concurrency control | coordinator admission permits, not worker counts |

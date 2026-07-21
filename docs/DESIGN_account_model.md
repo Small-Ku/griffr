@@ -18,7 +18,7 @@ Common files:
 - `gf_login_cache`
 - `gameprotocol_cache`
 - `mmkv.default`
-- corresponding `.crc` files
+- matching `.crc` files
 
 Notes:
 

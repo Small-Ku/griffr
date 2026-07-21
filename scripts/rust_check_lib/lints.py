@@ -6,7 +6,7 @@ from typing import Any, Protocol
 from tree_sitter import Node
 
 from .cfg import compatibility
-from .models import CrateTarget, ModuleUnit
+from .records import CrateTarget, ModuleUnit
 from .module_graph import preceding_attributes
 from .name_resolution import NameResolver
 from .parsing import walk_named

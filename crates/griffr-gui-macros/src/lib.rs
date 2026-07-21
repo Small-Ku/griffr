@@ -1,7 +1,7 @@
 mod expand;
 mod flatten;
-mod model;
 mod parse;
+mod tree;
 
 use proc_macro::TokenStream;
 use syn::parse_macro_input;
@@ -9,7 +9,7 @@ use syn::ItemStruct;
 
 use crate::expand::expand_widget_tree;
 use crate::flatten::flatten_tree;
-use crate::model::TreeInput;
+use crate::tree::TreeInput;
 
 #[proc_macro_attribute]
 pub fn widget_tree(attr: TokenStream, item: TokenStream) -> TokenStream {

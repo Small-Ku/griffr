@@ -23,12 +23,12 @@ pub(super) struct StandaloneVolumeProbe {
 }
 
 #[derive(Debug, Serialize)]
-pub(super) struct ArchiveCharacterization {
+pub(super) struct ArchiveFormatReport {
     pub(super) archive: String,
     pub(super) sequences: Vec<u64>,
     pub(super) volume_count: usize,
     pub(super) standalone_zip_volumes: Vec<usize>,
-    pub(super) classification: String,
+    pub(super) format_kind: String,
     pub(super) entry_count: Option<usize>,
     pub(super) central_directory_volumes: Vec<usize>,
     pub(super) cross_volume_entries: Option<usize>,
@@ -41,11 +41,11 @@ pub(super) struct ArchiveCharacterization {
 pub(super) struct RawSplitFixture {
     pub(super) layout: MultiVolumeLayout,
     pub(super) directory: ArchiveDirectory,
-    pub(super) inspection: ArchiveInspection,
+    pub(super) archive_index: ArchiveIndex,
 }
 
-pub(super) struct CharacterizedFixture {
-    pub(super) report: ArchiveCharacterization,
+pub(super) struct CheckedFixture {
+    pub(super) report: ArchiveFormatReport,
     pub(super) raw_split: Option<RawSplitFixture>,
 }
 
@@ -102,16 +102,21 @@ fn probe_standalone_volume(sequence: u64, path: &Path) -> Result<StandaloneVolum
     }
 }
 
-pub(super) fn entry_names(inspection: &ArchiveInspection) -> Vec<Option<String>> {
-    (0..inspection.archive.len())
-        .map(|index| inspection.archive.name_for_index(index).map(str::to_owned))
+pub(super) fn entry_names(archive_index: &ArchiveIndex) -> Vec<Option<String>> {
+    (0..archive_index.archive.len())
+        .map(|index| {
+            archive_index
+                .archive
+                .name_for_index(index)
+                .map(str::to_owned)
+        })
         .collect()
 }
 
-pub(super) fn characterize_fixture(
+pub(super) fn check_fixture_format(
     fixture: &ArchiveFixture,
     sample_count: usize,
-) -> Result<CharacterizedFixture> {
+) -> Result<CheckedFixture> {
     let probes = fixture
         .volumes
         .iter()
@@ -131,7 +136,7 @@ pub(super) fn characterize_fixture(
             .collect::<Result<Vec<_>>>()?,
     )?;
     let extractor = MultiVolumeExtractor::from_layout(layout.clone());
-    let raw_result = (|| -> Result<(ArchiveDirectory, ArchiveInspection)> {
+    let raw_result = (|| -> Result<(ArchiveDirectory, ArchiveIndex)> {
         let directory = match extractor.discover_archive_directory()? {
             ArchiveDirectoryDiscovery::Ready(directory) => directory,
             ArchiveDirectoryDiscovery::NeedsRange(range) => {
@@ -141,18 +146,18 @@ pub(super) fn characterize_fixture(
                 )));
             }
         };
-        let inspection = extractor.inspect_archive_index(&directory)?;
-        Ok((directory, inspection))
+        let archive_index = extractor.read_archive_index(&directory)?;
+        Ok((directory, archive_index))
     })();
 
-    let (classification, raw_split_error) = if standalone_zip_volumes.len() > 1 {
+    let (format_kind, raw_split_error) = if standalone_zip_volumes.len() > 1 {
         let detail = match &raw_result {
-            Ok((_, inspection)) => format!(
+            Ok((_, archive_index)) => format!(
                 concat!(
                     "concatenated parsing also succeeded but exposed only {} entries; ",
                     "multiple volumes are independently readable ZIP archives"
                 ),
-                inspection.archive.len()
+                archive_index.archive.len()
             ),
             Err(error) => error.to_string(),
         };
@@ -169,11 +174,11 @@ pub(super) fn characterize_fixture(
 
     let mut raw_split = None;
     let (entry_count, central_directory_volumes, cross_volume_entries, sampled_entries, coverage) =
-        if classification == "raw_split" {
-            let (directory, inspection) =
-                raw_result.expect("raw_split classification has raw result");
-            let samples = deterministic_sample_indices(&inspection, &layout, sample_count);
-            let names = entry_names(&inspection);
+        if format_kind == "raw_split" {
+            let (directory, archive_index) =
+                raw_result.expect("raw_split format_kind has raw result");
+            let samples = deterministic_sample_indices(&archive_index, &layout, sample_count);
+            let names = entry_names(&archive_index);
             let sampled_entries = samples
                 .iter()
                 .filter_map(|index| names[*index].clone())
@@ -181,7 +186,7 @@ pub(super) fn characterize_fixture(
             let coverage = samples
                 .iter()
                 .flat_map(|index| {
-                    inspection.entry_sources[*index]
+                    archive_index.entry_sources[*index]
                         .volume_indices
                         .iter()
                         .copied()
@@ -196,16 +201,16 @@ pub(super) fn characterize_fixture(
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>();
-            let cross_volume_entries = inspection
+            let cross_volume_entries = archive_index
                 .entry_sources
                 .iter()
                 .filter(|source| source.volume_indices.len() > 1)
                 .count();
-            let entry_count = inspection.archive.len();
+            let entry_count = archive_index.archive.len();
             raw_split = Some(RawSplitFixture {
                 layout,
                 directory,
-                inspection,
+                archive_index,
             });
             (
                 Some(entry_count),
@@ -218,8 +223,8 @@ pub(super) fn characterize_fixture(
             (None, Vec::new(), None, Vec::new(), Vec::new())
         };
 
-    Ok(CharacterizedFixture {
-        report: ArchiveCharacterization {
+    Ok(CheckedFixture {
+        report: ArchiveFormatReport {
             archive: fixture.key.display().to_string(),
             sequences: fixture
                 .volumes
@@ -228,7 +233,7 @@ pub(super) fn characterize_fixture(
                 .collect(),
             volume_count: fixture.volumes.len(),
             standalone_zip_volumes,
-            classification: classification.to_string(),
+            format_kind: format_kind.to_string(),
             entry_count,
             central_directory_volumes,
             cross_volume_entries,

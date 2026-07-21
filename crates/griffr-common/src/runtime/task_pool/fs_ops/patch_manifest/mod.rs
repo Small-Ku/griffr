@@ -10,7 +10,7 @@ use super::path_safety::parse_safe_relative_path;
 mod apply;
 mod transaction;
 
-pub(crate) use transaction::{execute_patch_transaction, resume_patch_transaction};
+pub(crate) use transaction::{resume_patch_transaction, run_patch_transaction};
 
 fn resolve_patch_stage_path(
     install_root: &Path,

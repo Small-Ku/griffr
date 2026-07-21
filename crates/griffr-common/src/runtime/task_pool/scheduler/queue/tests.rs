@@ -233,9 +233,9 @@ fn per_volume_override_can_select_an_exclusive_policy() {
 }
 
 #[test]
-fn reuse_pipeline_window_limits_verified_but_uncommitted_files() {
+fn reuse_queue_limit_limits_verified_but_uncommitted_files() {
     let config = TaskPoolConfig {
-        reuse_pipeline_window: 1,
+        reuse_queue_limit: 1,
         ..Default::default()
     };
     let probe = ResourceRequest {

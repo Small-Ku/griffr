@@ -56,7 +56,7 @@ Expand(GraphExpansion)
 
 `GraphExpansion` is itself append-only and locally acyclic. The coordinator remaps its local node IDs into the command graph, marks the producer as `Waiting`, and attaches the producer to all terminal leaves.
 
-Stable dependency tokens let a later expansion depend on a node installed by an earlier expansion. Archive volume tasks use this to expose verified byte ranges to central-directory, control-file, extraction-shard, and cleanup nodes without flattening the whole pipeline into one initial graph.
+Stable dependency tokens let a later expansion depend on a node installed by an earlier expansion. Archive volume tasks use this to expose verified byte ranges to central-directory, control-file, extraction-shard, and cleanup nodes without putting all work in one initial graph.
 
 This replaces the former implicit `spawned.push(task)` continuation model. Dynamic expansion is used when the graph cannot be known up front:
 
@@ -79,7 +79,7 @@ resource-aware coordinator
 |- activate graph nodes whose dependency count reached zero
 |- acquire network / CPU / blocking / extract / volume / path permits
 |- Dispatcher::dispatch()          async HTTP, compio file I/O, reuse copy, and delete manifests
-|- Dispatcher::dispatch_blocking() MD5, ZIP, HDIFF, and filesystem operations without async APIs
+|- Dispatcher::dispatch_blocking() MD5, ZIP, HDIFF, and filesystem tasks without async APIs
 `- receive TaskCompletion
    |- release every acquired permit
    |- update metrics
@@ -106,7 +106,7 @@ struct ResourceRequest {
 
 Dependency readiness and resource admission are deliberately separate. A node runs only when both are satisfied. `network_slots`, `cpu_slots`, and `blocking_slots` are admission limits, not custom thread counts.
 
-Async transfers, hardlink commits, verified reuse copies, and delete-manifest namespace operations execute on Dispatcher runtimes. CPU and blocking work uses the Dispatcher's bounded blocking pool. A transient blocking-pool rejection restores the same graph node to the queue without losing its resource or dependency identity.
+Async transfers, hardlink commits, verified reuse copies, and delete-manifest namespace actions run on Dispatcher runtimes. CPU and blocking work uses the Dispatcher's bounded blocking pool. A transient blocking-pool rejection restores the same graph node to the queue without losing its resource or dependency identity.
 
 ---
 
@@ -131,7 +131,7 @@ General, archive, and VFS network tasks receive weighted opportunities in a `4:2
 
 ## 5. Physical-Volume Admission
 
-Reads, writes, and metadata operations are keyed by stable physical-volume identity. A `VolumeIoPolicy` controls:
+Reads, writes, and metadata steps are keyed by stable physical-volume identity. A `VolumeIoPolicy` controls:
 
 - `read_limit`, `write_limit`, and `metadata_limit`;
 - `streaming_pressure_limit`;
@@ -179,7 +179,7 @@ Reuse candidates are grouped by physical volume. Probes run as parallel DAG root
 
 ## 7. Lazy Range Archive DAG
 
-Normal install and update no longer download complete `.zip.NNN` files before extraction. The launcher response supplies the immutable logical layout—ordered URLs, declared sizes, and package MD5 values—then the DAG fetches only the byte ranges required by the current planning or materialization step.
+Normal install and update no longer download complete `.zip.NNN` files before extraction. The launcher response supplies the immutable logical layout—ordered URLs, declared sizes, and package MD5 values—then the DAG fetches only the byte ranges required by the current plan or file-write step.
 
 ```text
 InstallArchive
@@ -190,14 +190,14 @@ InstallArchive
             `- InspectArchiveIndex
                `- Fetch control-entry range(s)
                   `- ReadArchiveControls
-                     `- patch/delete preflight
+                     `- patch/delete check
                         |- Fetch ranges for shard A -> Extract shard A
                         |- Fetch ranges for shard B -> Extract shard B
                         `- Fetch ranges for shard C -> Extract shard C
                                                    |- ephemeral -> CommitArchive
-                                                   `- keep -> FillArchiveVolumeGaps
+                                                   `- keep -> FetchMissingArchiveRanges
                                                               |- fetch volume gaps
-                                                              `- FinalizeArchiveVolumes
+                                                              `- SaveArchiveVolumes
                                                                   -> CommitArchive
                                                                       -> manifest follow-up
                                                                       -> CleanupArchive
@@ -211,7 +211,7 @@ Range downloads are exact and resumable:
 - Incomplete ranges are cached as `*.range.part`;
 - Retries resume from the existing partial length and request only the missing suffix;
 - Completed segments are renamed atomically to `*.range`;
-- Nearby requests on the same volume are coalesced to avoid small HTTP operations;
+- Nearby requests on the same volume are coalesced to avoid small HTTP requests;
 - Cache directory keys include package sizes and MD5s to prevent stale range reuse.
 
 The directory planner first reads only the final EOCD search window. ZIP64 locator or end-record dependencies dynamically add preceding ranges. Central-directory parsing then derives a conservative source range for each entry—from its local header to the next local header or central directory—so encryption headers, data descriptors, and alignment padding remain available without exposing ZIP codec details to the scheduler.
@@ -241,12 +241,12 @@ Patch/control payloads not appearing in `game_files` are validated by ZIP CRC, p
 Mutation barriers remain strict during network/extraction overlap:
 
 1. Patch and delete controls are parsed before staging work starts;
-2. Destructive patch preflight completes before extraction shards run;
+2. The destructive patch check completes before extraction shards run;
 3. Every extraction shard must succeed before archive commit;
 4. Ephemeral retention releases cached ranges after their final dependent shard completes;
-5. Complete-volume retention preserves ranges, running `FillArchiveVolumeGaps` post-extraction for uncovered byte intervals;
-6. `FinalizeArchiveVolumes` reconstructs original `.zip.NNN` files, verifies package MD5s, and atomically promotes them;
-7. `CommitArchive` follows successful volume finalization in retention mode;
+5. Complete-volume retention preserves ranges, running `FetchMissingArchiveRanges` post-extraction for uncovered byte intervals;
+6. `SaveArchiveVolumes` reconstructs original `.zip.NNN` files, verifies package MD5s, and atomically promotes them;
+7. `CommitArchive` follows saved volumes in retention mode;
 8. VFS/delete follow-up and cache cleanup remain downstream of commit;
 9. The command-level integrity DAG verifies the final installation.
 
@@ -258,14 +258,14 @@ Mutation barriers remain strict during network/extraction overlap:
 
 Gap filling runs after all extraction shards complete to prevent archival completion traffic from competing with active extraction.
 
-### Official archive characterization
+### Official archive format check
 
 Synthetic tests cover raw byte splits, independent ZIP parts, split central directories, range-local extraction, spanned metadata rejection, and MD5 validation.
 
-An ignored integration test characterizes the production remote source against the official Endfield package:
+An ignored integration test checks the production remote source against the official Endfield package:
 
 ```powershell
-cargo test -p griffr-common characterize_official_archive_sample -- --ignored --nocapture
+cargo test -p griffr-common check_official_archive_sample -- --ignored --nocapture
 ```
 
 It has no custom environment variables. It:
@@ -278,7 +278,7 @@ It has no custom environment variables. It:
 - Extracts sampled entries via `MultiVolumeLayout` and `MultiVolumeExtractor`;
 - Verifies output size and MD5 against the official manifest.
 
-The ignored test characterizes format drift without adding runtime support for independent or PKZIP-spanned archives.
+The ignored test checks for format changes without adding runtime support for independent or PKZIP-spanned archives.
 
 ---
 
@@ -294,9 +294,9 @@ On failure:
 - a dynamic parent waiting on the failed terminal becomes `Failed`;
 - only failures with `report = true` create a durable `WorkerEvent::Failed` outcome.
 
-Task execution is wrapped with `catch_unwind` at the Dispatcher boundary. A panic becomes a reported node failure. Stale queued entries belonging to cancelled nodes are discarded and their acquired permits are immediately released.
+Task runs are wrapped with `catch_unwind` at the Dispatcher boundary. A panic becomes a reported node failure. Stale queued entries belonging to cancelled nodes are discarded and their acquired permits are immediately released.
 
-Cross-expansion token dependencies are checked before graph mutation. A child cannot depend on its expanding parent, a static descendant of that parent, or a dynamic ancestor currently waiting on it; those references are rejected as cycles instead of surfacing later as an admission deadlock.
+Cross-expansion token dependencies are checked before graph mutation. A child cannot depend on its expanding parent, a static descendant of that parent, or a dynamic ancestor that is waiting on it; those references are rejected as cycles instead of surfacing later as an admission deadlock.
 
 The coordinator reports an admission deadlock when unresolved graph nodes remain but there is neither runnable/in-flight work nor a transiently full Dispatcher blocking pool.
 
@@ -324,10 +324,10 @@ The coordinator reports an admission deadlock when unresolved graph nodes remain
 DAG nodes represent meaningful restartable work:
 
 - one archive volume;
-- one file verification, repair, or materialization;
+- one file check, repair, or write;
 - one extraction shard;
 - one archive commit or manifest mutation.
 
 Network chunks, read buffers, and individual hashing blocks are intentionally not nodes. Fine-grained byte processing stays inside one executor to avoid millions of scheduler entries.
 
-Patch transaction ordering and recovery are documented in [`DESIGN_patch_pipeline.md`](DESIGN_patch_pipeline.md). File allocation and Windows storage strategy are documented in [`DESIGN_optimizations.md`](DESIGN_optimizations.md).
+Patch transaction ordering and recovery are documented in [`DESIGN_patch_steps.md`](DESIGN_patch_steps.md). File allocation and Windows storage strategy are documented in [`DESIGN_optimizations.md`](DESIGN_optimizations.md).

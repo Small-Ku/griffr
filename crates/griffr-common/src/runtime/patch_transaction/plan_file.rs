@@ -2,9 +2,9 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 
-use super::{PatchExecutionPlan, PATCH_PLAN_NAME, PATCH_TRANSACTION_DIR};
+use super::{PatchPlan, PATCH_PLAN_NAME, PATCH_TRANSACTION_DIR};
 
-pub(crate) fn write_patch_execution_plan(plan: &PatchExecutionPlan) -> Result<()> {
+pub(crate) fn write_patch_plan(plan: &PatchPlan) -> Result<()> {
     plan.validate()?;
     let transaction_dir = plan.install_root.join(PATCH_TRANSACTION_DIR);
     std::fs::create_dir_all(&transaction_dir).map_err(|source| Error::CreateDirFailed {
@@ -22,16 +22,17 @@ pub(crate) fn write_patch_execution_plan(plan: &PatchExecutionPlan) -> Result<()
     crate::runtime::task_pool::fs_ops::extract::move_path_replace(&temp, &path)
 }
 
-pub(crate) fn read_patch_execution_plan(install_root: &Path) -> Result<PatchExecutionPlan> {
+pub(crate) fn read_patch_plan(install_root: &Path) -> Result<PatchPlan> {
     let path = install_root
         .join(PATCH_TRANSACTION_DIR)
         .join(PATCH_PLAN_NAME);
-    let plan: PatchExecutionPlan = serde_json::from_slice(&std::fs::read(&path).map_err(
-        |source| Error::OpenFileFailed {
-            path: path.clone(),
-            source,
-        },
-    )?)?;
+    let plan: PatchPlan =
+        serde_json::from_slice(
+            &std::fs::read(&path).map_err(|source| Error::OpenFileFailed {
+                path: path.clone(),
+                source,
+            })?,
+        )?;
     plan.validate()?;
     Ok(plan)
 }

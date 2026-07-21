@@ -1,4 +1,4 @@
-use super::models::MediaResponse;
+use super::media::MediaResponse;
 use crate::{
     api::{
         protocol::{
@@ -16,8 +16,8 @@ use crate::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
-    #[error("Resource pipeline unavailable: {0}")]
-    ResourcePipelineUnavailable(String),
+    #[error("Resource API is not available: {0}")]
+    ResourceApiUnavailable(String),
     #[error(transparent)]
     Other(#[from] crate::error::Error),
 }
@@ -196,7 +196,7 @@ impl ApiClient {
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             if status.as_u16() == 400 && body.contains("resource not exist") {
-                return Err(ApiError::ResourcePipelineUnavailable(body));
+                return Err(ApiError::ResourceApiUnavailable(body));
             }
             return Err(ApiError::Other(Error::ApiClient(format!(
                 "get_latest_resources returned error {status}: {body}"

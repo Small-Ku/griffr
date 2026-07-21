@@ -74,7 +74,7 @@ fn remote_args_default_to_region_official_channel() {
 }
 
 #[test]
-fn clap_accepts_explicit_volume_policy_and_reuse_pipeline_tuning() {
+fn clap_accepts_explicit_volume_policy_and_reuse_step_tuning() {
     let cli = Cli::try_parse_from([
         "griffr",
         "--volume-read-limit",
@@ -87,7 +87,7 @@ fn clap_accepts_explicit_volume_policy_and_reuse_pipeline_tuning() {
         "4",
         "--volume-streaming-mode",
         "exclusive",
-        "--reuse-pipeline-window",
+        "--reuse-queue-limit",
         "24",
         "verify",
         "--path",
@@ -100,7 +100,7 @@ fn clap_accepts_explicit_volume_policy_and_reuse_pipeline_tuning() {
     assert_eq!(cli.volume_metadata_limit, 2);
     assert_eq!(cli.volume_streaming_pressure_limit, 4);
     assert_eq!(cli.volume_streaming_mode, VolumeStreamingModeArg::Exclusive);
-    assert_eq!(cli.reuse_pipeline_window, 24);
+    assert_eq!(cli.reuse_queue_limit, 24);
 }
 
 #[test]

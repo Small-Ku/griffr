@@ -35,11 +35,11 @@ fn test_global_options() -> GlobalOptions {
         volume_streaming_pressure_limit:
             griffr_common::runtime::task_pool::DEFAULT_VOLUME_STREAMING_PRESSURE_LIMIT,
         volume_streaming_mode: griffr_common::runtime::task_pool::DEFAULT_VOLUME_STREAMING_MODE,
-        reuse_pipeline_window: griffr_common::runtime::task_pool::DEFAULT_REUSE_PIPELINE_WINDOW,
+        reuse_queue_limit: griffr_common::runtime::task_pool::DEFAULT_REUSE_QUEUE_LIMIT,
         output: OutputFormat::Text,
     }
 }
-mod archive_pipeline;
+mod archives;
 mod live_api;
 mod package_selection;
 
@@ -51,7 +51,7 @@ fn global_options_apply_explicit_task_pool_volume_policy() {
     opts.volume_metadata_limit = 2;
     opts.volume_streaming_pressure_limit = 4;
     opts.volume_streaming_mode = griffr_common::runtime::task_pool::VolumeStreamingMode::Exclusive;
-    opts.reuse_pipeline_window = 24;
+    opts.reuse_queue_limit = 24;
 
     let config = opts.task_pool_config();
     assert_eq!(
@@ -64,5 +64,5 @@ fn global_options_apply_explicit_task_pool_volume_policy() {
             griffr_common::runtime::task_pool::VolumeStreamingMode::Exclusive,
         )
     );
-    assert_eq!(config.reuse_pipeline_window, 24);
+    assert_eq!(config.reuse_queue_limit, 24);
 }

@@ -12,15 +12,15 @@ pub(crate) fn extract_to_with_progress(
     extractor: &MultiVolumeExtractor,
     target_dir: &Path,
     password: Option<&str>,
-    inspection: &ArchiveInspection,
+    archive_index: &ArchiveIndex,
     max_shards: usize,
     progress_buffer_bytes: usize,
     mut progress_callback: Option<impl FnMut(u64, u64)>,
 ) -> Result<()> {
     if let Some(callback) = progress_callback.as_mut() {
-        callback(0, inspection.total_uncompressed_bytes);
+        callback(0, archive_index.total_uncompressed_bytes);
     }
-    let shards = MultiVolumeExtractor::extraction_shards(inspection, max_shards);
+    let shards = MultiVolumeExtractor::extraction_shards(archive_index, max_shards);
     if shards.is_empty() {
         return Ok(());
     }
@@ -40,7 +40,7 @@ pub(crate) fn extract_to_with_progress(
                         .extract_entries_with_progress(
                             target_dir,
                             password,
-                            inspection,
+                            archive_index,
                             &shard.entries,
                             expected_files_ref,
                             progress_buffer_bytes,
@@ -60,7 +60,7 @@ pub(crate) fn extract_to_with_progress(
                 ExtractShardEvent::Bytes(bytes) => {
                     extracted_bytes = extracted_bytes.saturating_add(bytes);
                     if let Some(callback) = progress_callback.as_mut() {
-                        callback(extracted_bytes, inspection.total_uncompressed_bytes);
+                        callback(extracted_bytes, archive_index.total_uncompressed_bytes);
                     }
                 }
                 ExtractShardEvent::Finished(Err(error)) => errors.push(error),
@@ -79,8 +79,8 @@ pub(crate) fn extract_to_with_progress(
     }
     if let Some(callback) = progress_callback.as_mut() {
         callback(
-            inspection.total_uncompressed_bytes,
-            inspection.total_uncompressed_bytes,
+            archive_index.total_uncompressed_bytes,
+            archive_index.total_uncompressed_bytes,
         );
     }
     Ok(())

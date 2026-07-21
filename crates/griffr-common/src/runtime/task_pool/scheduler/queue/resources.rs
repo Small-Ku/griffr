@@ -47,7 +47,7 @@ impl ResourceState {
             && self
                 .reuse_commits_in_use
                 .saturating_add(admission.queued_reuse_commits)
-                >= config.reuse_pipeline_window.max(1)
+                >= config.reuse_queue_limit.max(1)
         {
             return false;
         }

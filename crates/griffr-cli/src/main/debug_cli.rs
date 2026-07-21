@@ -354,7 +354,7 @@ pub struct GlobalOptions {
     pub volume_metadata_limit: usize,
     pub volume_streaming_pressure_limit: usize,
     pub volume_streaming_mode: griffr_common::runtime::task_pool::VolumeStreamingMode,
-    pub reuse_pipeline_window: usize,
+    pub reuse_queue_limit: usize,
     pub output: OutputFormat,
 }
 
@@ -373,7 +373,7 @@ impl GlobalOptions {
             self.volume_streaming_pressure_limit,
             self.volume_streaming_mode,
         );
-        config.reuse_pipeline_window = self.reuse_pipeline_window.max(1);
+        config.reuse_queue_limit = self.reuse_queue_limit.max(1);
         config
     }
 

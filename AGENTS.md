@@ -10,9 +10,10 @@ Primary workspace crates:
 
 - `crates/griffr-common`: shared domain logic, task execution, protocols, storage, and frontend-neutral runtime APIs.
 - `crates/griffr-cli`: command parsing, terminal presentation, and CLI-specific orchestration.
-- Future GUI crates must consume shared APIs without requiring terminal-specific dependencies in `griffr-common`.
+- Future GUI crates must use shared APIs without terminal-specific dependencies in `griffr-common`.
 
 Reference material:
+- `docs/WORDING.md`: controlled project terms and direct naming rules.
 
 - API documentation: `docs/API.md` and `docs/API_*.md`
 - Design documentation: `docs/DESIGN.md` and `docs/DESIGN_*.md`
@@ -25,7 +26,7 @@ Always obey the closest nested `AGENTS.md` when working inside a subdirectory.
 
 1. Record actionable work in `docs/TODO.md` when that file is part of the current workflow.
 2. Select one coherent change set.
-3. Inspect all producers, consumers, tests, and public re-exports before editing an API.
+3. Check all producers, users, tests, and public re-exports before you edit an API.
 4. Implement the smallest complete architectural change, not a partial compatibility layer.
 5. Run structural checks and relevant tests.
 6. Fix findings rather than weakening checks merely to make the patch pass.
@@ -43,7 +44,7 @@ Every domain fact should have one authoritative representation.
 - Derive views and serialization formats from the canonical model.
 - Remove obsolete storage keys, serialized keys, configuration objects, and compatibility fields when no longer used.
 - Do not copy canonical constants into CLI or GUI code. Re-export or consume them from their owning module.
-- When two values look similar, determine whether they are genuinely different concepts before retaining separate types.
+- When two values look similar, find out if they are different concepts before you keep separate types.
 
 ## Cross-Crate API Rules
 
@@ -70,9 +71,9 @@ Shared APIs must expose domain semantics, not frontend mechanics.
 8. Preserve correctness barriers:
    - archive and game-file ensure completion before dependent verification;
    - do not verify files before their ensure dependencies complete unless those dependencies are represented in the same DAG.
-9. New install/update/verify phases should integrate with the shared runner and DAG model by default. Additional pools require a code comment explaining why the shared runner cannot be used.
+9. New install/update/verify phases should integrate with the shared runner and DAG model by default. Other pools require a code comment that explains why the shared runner cannot be used.
 10. Preserve forward-only patch transaction barriers:
-    - preflight the archive and persist the selected plan before staged files mutate the install;
+    - check the archive and save the selected plan before staged files change the install;
     - defer `config.ini` and other completion markers until VFS patch application and cleanup succeed;
     - release a patch base only after its final consumer commits;
     - delete-only paths may be removed early, but planned outputs and still-referenced bases must remain protected.
@@ -142,7 +143,7 @@ Validate affected command flows when touched:
 - `verify`
 - `verify --repair`
 - `predownload` and resume behavior
-- VFS bootstrap/sync
+- VFS setup/sync
 - archive extraction, patch application, and delete manifests
 - launch behavior when launch-related code changes
 
@@ -154,8 +155,8 @@ For progress changes, test at least:
 - each lane retains one unit;
 - the first visible state is available before the first long item completes;
 - retries do not move byte progress backward;
-- no-repair and all-reuse paths terminate cleanly;
-- receiver closure terminates the renderer;
+- no-repair and all-reuse paths stop cleanly;
+- receiver closure stops the renderer;
 - disabling progress has negligible behavioral impact;
 - progress delivery failure does not fail the operation;
 - durable result history contains no transient samples.

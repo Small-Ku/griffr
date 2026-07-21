@@ -21,7 +21,7 @@ Endfield SG:    POST https://launcher.gryphline.com/api/proxy/batch_proxy   (con
 
 **Note**: The implementation uses `launcher.hypergryph.com` for Endfield CN and `launcher.gryphline.com` for Endfield SG.
 
-### Additional discovered API bases (from `config.ts` base64 values)
+### Other API bases found in `config.ts` base64 values
 
 | Key | Decoded | Region | Purpose |
 |-----|---------|--------|---------|

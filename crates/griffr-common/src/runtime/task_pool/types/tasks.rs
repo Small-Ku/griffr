@@ -1,5 +1,5 @@
 use crate::api::types::GameFileEntry;
-use crate::download::extractor::{ArchiveDirectory, ArchiveInspection, ArchiveRangeRequest};
+use crate::download::extractor::{ArchiveDirectory, ArchiveIndex, ArchiveRangeRequest};
 use crate::error::{Error, Result};
 use crate::runtime::PatchApplyOptions;
 use md5::Md5;
@@ -285,7 +285,7 @@ pub enum Task {
         expected_files: Arc<BTreeMap<String, GameFileEntry>>,
         parts: Vec<ArchivePart>,
     },
-    /// CPU-side partial-file inspection and prefix hashing. This task creates
+    /// CPU-side partial-file archive_index and prefix hashing. This task creates
     /// `TransferDownload` only after the resume state is ready.
     Download {
         url: String,
@@ -376,23 +376,23 @@ pub enum Task {
     #[doc(hidden)]
     ReadArchiveControls {
         work: Arc<ArchiveWork>,
-        inspection: Arc<ArchiveInspection>,
+        archive_index: Arc<ArchiveIndex>,
     },
     #[doc(hidden)]
     PlanArchiveExtraction {
         work: Arc<ArchiveWork>,
-        inspection: Arc<ArchiveInspection>,
+        archive_index: Arc<ArchiveIndex>,
     },
     #[doc(hidden)]
     ExtractArchiveShard {
         shard: ArchiveShardTask,
     },
     #[doc(hidden)]
-    FillArchiveVolumeGaps {
+    FetchMissingArchiveRanges {
         work: Arc<ArchiveWork>,
     },
     #[doc(hidden)]
-    FinalizeArchiveVolumes {
+    SaveArchiveVolumes {
         work: Arc<ArchiveWork>,
     },
     #[doc(hidden)]

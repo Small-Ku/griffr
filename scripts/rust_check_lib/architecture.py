@@ -6,7 +6,7 @@ from typing import Any, Protocol
 
 from tree_sitter import Node
 
-from .models import CrateTarget, ModuleUnit, Package, SourceFile
+from .records import CrateTarget, ModuleUnit, Package, SourceFile
 from .parsing import walk_named
 
 
@@ -81,7 +81,10 @@ def _task_enum_shape(
                     variants.add(variant_text)
                     field_names: set[str] = set()
                     variant_body = variant.child_by_field_name("body")
-                    if variant_body is not None and variant_body.type == "field_declaration_list":
+                    if (
+                        variant_body is not None
+                        and variant_body.type == "field_declaration_list"
+                    ):
                         for field in variant_body.named_children:
                             if field.type != "field_declaration":
                                 continue
@@ -96,7 +99,9 @@ def _task_enum_shape(
 
 def _task_variant_from_name(text: str) -> str | None:
     normalized = re.sub(r"\s+", "", text)
-    match = re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_]*::)*Task::([A-Za-z_][A-Za-z0-9_]*)", normalized)
+    match = re.fullmatch(
+        r"(?:[A-Za-z_][A-Za-z0-9_]*::)*Task::([A-Za-z_][A-Za-z0-9_]*)", normalized
+    )
     return match.group(1) if match else None
 
 
@@ -130,7 +135,9 @@ def _check_task_enum_construction(host: ArchitectureHost) -> None:
                         source=module.source,
                         node=name,
                         confidence="definite",
-                        evidence=("constructor path resolves textually to Task::" + variant,),
+                        evidence=(
+                            "constructor path resolves textually to Task::" + variant,
+                        ),
                         hint="Update the constructor or the canonical Task enum before changing executor routing.",
                     )
                     continue
@@ -143,7 +150,11 @@ def _check_task_enum_construction(host: ArchitectureHost) -> None:
                             provided.add(module.source.text(field_name))
                     elif field.type == "shorthand_field_initializer":
                         identifier = next(
-                            (child for child in field.named_children if child.type == "identifier"),
+                            (
+                                child
+                                for child in field.named_children
+                                if child.type == "identifier"
+                            ),
                             None,
                         )
                         if identifier is not None:
@@ -260,7 +271,9 @@ def _check_archive_token_barriers(host: ArchitectureHost) -> None:
                     if current.type == "call_expression":
                         function = current.child_by_field_name("function")
                         if function is not None:
-                            function_text = re.sub(r"\s+", "", module.source.text(function))
+                            function_text = re.sub(
+                                r"\s+", "", module.source.text(function)
+                            )
                             insertion = function_text.rsplit(".", 1)[-1]
                         break
                     current = current.parent
@@ -819,11 +832,17 @@ def _check_lane_unit_conflicts(host: ArchitectureHost) -> None:
 
 
 _TASK_POOL_FORBIDDEN_PATTERNS = (
-    (re.compile(r"\bstd\s*::\s*thread\s*::\s*Builder\b"), "custom std::thread worker construction"),
+    (
+        re.compile(r"\bstd\s*::\s*thread\s*::\s*Builder\b"),
+        "custom std::thread worker construction",
+    ),
     (re.compile(r"\bCondvar\b"), "Condvar-backed task queue"),
     (re.compile(r"\bfn\s+worker_loop\b"), "class-specific worker loop"),
     (re.compile(r"\bfn\s+dispatch_io\b"), "synchronous Dispatcher bridge"),
-    (re.compile(r"\bExecutionClass\s*::\s*Network\b"), "thread-oriented network execution class"),
+    (
+        re.compile(r"\bExecutionClass\s*::\s*Network\b"),
+        "thread-oriented network execution class",
+    ),
     (re.compile(r"\b(?:cpu|blocking)_workers\b"), "worker-count configuration"),
 )
 
@@ -838,8 +857,9 @@ def _check_dispatcher_task_model(host: ArchitectureHost) -> None:
                 continue
             seen_sources.add(source.path)
             normalized = source.rel.replace("\\", "/")
-            if "/runtime/task_pool/" not in f"/{normalized}" and not normalized.endswith(
-                "/runtime/task_pool.rs"
+            if (
+                "/runtime/task_pool/" not in f"/{normalized}"
+                and not normalized.endswith("/runtime/task_pool.rs")
             ):
                 continue
             text = source.data.decode("utf-8", "replace")

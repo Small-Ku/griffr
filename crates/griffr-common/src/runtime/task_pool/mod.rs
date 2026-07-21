@@ -16,7 +16,7 @@ pub use types::{
     archive_expected_files, ArchivePart, ArchiveRetention, DownloadResumeState, FileEnsureTask,
     Task, TaskOutcome, TaskPoolConfig, TaskPoolMetrics, TaskPoolResult, TaskPoolRunner,
     TaskProgress, TransferClass, VolumeIoPolicy, VolumeStreamingMode, VolumeTaskMetrics,
-    DEFAULT_PROGRESS_BUFFER_BYTES, DEFAULT_REUSE_PIPELINE_WINDOW, DEFAULT_VOLUME_METADATA_LIMIT,
+    DEFAULT_PROGRESS_BUFFER_BYTES, DEFAULT_REUSE_QUEUE_LIMIT, DEFAULT_VOLUME_METADATA_LIMIT,
     DEFAULT_VOLUME_READ_LIMIT, DEFAULT_VOLUME_STREAMING_MODE,
     DEFAULT_VOLUME_STREAMING_PRESSURE_LIMIT, DEFAULT_VOLUME_WRITE_LIMIT,
 };

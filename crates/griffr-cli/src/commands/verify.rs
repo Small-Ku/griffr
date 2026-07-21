@@ -133,7 +133,7 @@ pub async fn verify(
     let extra_tasks = if !skip_vfs {
         if opts.output != OutputFormat::Json {
             ui::print_info(
-                "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
+                "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
             );
         }
         let version_info = api_client
@@ -177,13 +177,13 @@ pub async fn verify(
     let pool_cfg = opts.task_pool_config();
     let volume_policy = pool_cfg.default_volume_policy;
     opts.verbose(format!(
-        "Volume policy: mode={:?} reads={} writes={} metadata={} pressure={} reuse_pipeline_window={}",
+        "Volume policy: mode={:?} reads={} writes={} metadata={} pressure={} reuse_queue_limit={}",
         volume_policy.streaming_mode,
         volume_policy.read_limit,
         volume_policy.write_limit,
         volume_policy.metadata_limit,
         volume_policy.streaming_pressure_limit,
-        pool_cfg.reuse_pipeline_window
+        pool_cfg.reuse_queue_limit
     ));
     if repair && !extra_tasks.is_empty() {
         opts.verbose(format!(

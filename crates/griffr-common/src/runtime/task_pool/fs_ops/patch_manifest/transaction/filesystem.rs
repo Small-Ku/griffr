@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 use crate::runtime::patch_transaction::{
-    write_patch_storage_topology, PatchExecutionPlan, PatchStorageTopology, PATCH_DEFERRED_DIR,
+    write_patch_storage_layout, PatchPlan, PatchStorageLayout, PATCH_DEFERRED_DIR,
     PATCH_TRANSACTION_DIR,
 };
 use crate::runtime::task_pool::verify::file_md5;
@@ -132,7 +132,7 @@ pub(super) fn create_directory_link(link: &Path, target: &Path) -> Result<()> {
     }
 }
 
-pub(super) fn prepare_external_vfs_root(plan: &PatchExecutionPlan) -> Result<()> {
+pub(super) fn prepare_external_vfs_root(plan: &PatchPlan) -> Result<()> {
     let logical = plan.install_root.join(&plan.vfs_base_path);
     if logical == plan.vfs_destination {
         return Ok(());
@@ -153,10 +153,10 @@ pub(super) fn prepare_external_vfs_root(plan: &PatchExecutionPlan) -> Result<()>
                     source,
                 }
             })?;
-            return write_patch_storage_topology(
+            return write_patch_storage_layout(
                 &plan.install_root,
-                &PatchStorageTopology {
-                    schema_version: PatchStorageTopology::SCHEMA_VERSION,
+                &PatchStorageLayout {
+                    schema_version: PatchStorageLayout::SCHEMA_VERSION,
                     vfs_link: plan.vfs_base_path.clone(),
                     external_vfs_root: plan.vfs_destination.clone(),
                 },
@@ -183,10 +183,10 @@ pub(super) fn prepare_external_vfs_root(plan: &PatchExecutionPlan) -> Result<()>
         })?;
     }
     create_directory_link(&logical, &plan.vfs_destination)?;
-    write_patch_storage_topology(
+    write_patch_storage_layout(
         &plan.install_root,
-        &PatchStorageTopology {
-            schema_version: PatchStorageTopology::SCHEMA_VERSION,
+        &PatchStorageLayout {
+            schema_version: PatchStorageLayout::SCHEMA_VERSION,
             vfs_link: plan.vfs_base_path.clone(),
             external_vfs_root: plan.vfs_destination.clone(),
         },
@@ -200,7 +200,7 @@ pub(super) fn is_patch_control_path(relative: &Path) -> bool {
 }
 
 pub(super) fn commit_top_level_files(
-    plan: &PatchExecutionPlan,
+    plan: &PatchPlan,
     callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
 ) -> Result<()> {
     let files = collect_staged_files(&plan.stage_root)?;

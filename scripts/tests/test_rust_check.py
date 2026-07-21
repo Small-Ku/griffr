@@ -65,8 +65,7 @@ class RustCheckTests(unittest.TestCase):
 
     def test_async_std_fs_call_is_reported(self) -> None:
         root = self.make_workspace(
-            "async fn load(path: &std::path::Path) { "
-            "let _ = std::fs::read(path); }\n"
+            "async fn load(path: &std::path::Path) { let _ = std::fs::read(path); }\n"
         )
         diagnostics = self.diagnostics(self.run_checker(root), "AFS001")
         self.assertEqual(1, len(diagnostics))
@@ -79,7 +78,7 @@ class RustCheckTests(unittest.TestCase):
             "async fn load(path: &std::path::Path) {\n"
             "    let _ = sync_fs::metadata(path);\n"
             "    let _ = File::open(path);\n"
-            "    let _ = sync_write(path, b\"x\");\n"
+            '    let _ = sync_write(path, b"x");\n'
             "}\n"
         )
         diagnostics = self.diagnostics(self.run_checker(root), "AFS001")
@@ -126,7 +125,7 @@ class RustCheckTests(unittest.TestCase):
     def test_async_path_probe_is_reported(self) -> None:
         root = self.make_workspace(
             "async fn inspect(root: &std::path::Path) {\n"
-            "    let payload = root.join(\"payload.bin\");\n"
+            '    let payload = root.join("payload.bin");\n'
             "    let _ = payload.is_file();\n"
             "}\n"
         )
@@ -881,6 +880,32 @@ class RustCheckTests(unittest.TestCase):
             "}\n"
         )
         self.assertNotIn("CLP004", self.codes(self.run_checker(root3)))
+
+    def test_abstract_project_wording_is_reported(self) -> None:
+        restricted = "boot" + "strap"
+        root = self.make_workspace(f"fn {restricted}() {{}}\n")
+        diagnostics = self.diagnostics(self.run_checker(root), "WRD001")
+        self.assertEqual(1, len(diagnostics))
+
+        restricted_op = "operat" + "ion"
+        root_op = self.make_workspace(f"// Handle {restricted_op} flow.\nfn run() {{}}\n")
+        diagnostics_op = self.diagnostics(self.run_checker(root_op), "WRD001")
+        self.assertEqual(1, len(diagnostics_op))
+
+    def test_vague_file_name_is_reported(self) -> None:
+        vague_name = "models" + ".rs"
+        root = self.make_workspace(
+            "mod data;\n",
+            {f"src/{vague_name}": "pub struct Entry;\n"},
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "WRD002")
+        self.assertEqual(1, len(diagnostics))
+
+    def test_direct_project_wording_is_allowed(self) -> None:
+        root = self.make_workspace("fn setup_files() {}\n")
+        checker = self.run_checker(root)
+        self.assertNotIn("WRD001", self.codes(checker))
+        self.assertNotIn("WRD002", self.codes(checker))
 
 
 if __name__ == "__main__":

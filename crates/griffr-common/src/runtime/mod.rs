@@ -27,10 +27,10 @@ pub use files::reuse::{
     FileEnsureSummary, FileReuseConfig, SourceInstallInput,
 };
 pub use files::vfs::{
-    bootstrap_persistent_vfs_with_runner, download_vfs_resources, get_vfs_resource_info,
-    plan_persistent_bootstrap_tasks, plan_vfs_tasks, VfsBootstrapConfig, VfsBootstrapPlan,
-    VfsBootstrapResult, VfsBootstrapScope, VfsFilePlanOptions, VfsPlanOutcome, VfsTaskPlan,
-    VfsUpdateOutcome, VfsUpdateResult,
+    download_vfs_resources, get_vfs_resource_info, plan_persistent_vfs_tasks, plan_vfs_tasks,
+    setup_persistent_vfs, PersistentVfsConfig, PersistentVfsFileSet, PersistentVfsPlan,
+    PersistentVfsResult, VfsFilePlanOptions, VfsPlanOutcome, VfsTaskPlan, VfsUpdateOutcome,
+    VfsUpdateResult,
 };
 pub use install_plan::required_install_bytes;
 pub use integrity::{run_integrity_pool, IntegrityRunSummary, IntegritySelection};
@@ -41,14 +41,14 @@ pub use local_install::{
     decrypt_config_ini, detect_local_install, resolve_install_path, resolve_named_path,
     LocalInstall, ParsedConfigIni,
 };
-pub(crate) use patch_transaction::build_patch_execution_plan_with_cache;
+pub(crate) use patch_transaction::build_patch_plan_with_cache;
 pub use patch_transaction::{
-    available_space, classify_patch_recovery, preflight_patch_archives,
-    read_patch_storage_topology, read_predownload_stage_metadata, write_predownload_stage_metadata,
-    PatchApplyOptions, PatchExecutionPlan, PatchPreflightReport, PatchRecoveryState,
-    PatchStorageTopology, PlannedPatchEntry, PlannedPatchSource, PredownloadStageMetadata,
-    StagedArchivePart, PATCH_DEFERRED_DIR, PATCH_PLAN_NAME, PATCH_STORAGE_METADATA_NAME,
-    PATCH_TRANSACTION_DIR, PREDOWNLOAD_STAGE_METADATA_NAME,
+    available_space, check_patch_archives, get_patch_recovery_state, read_patch_storage_layout,
+    read_predownload_stage_metadata, write_predownload_stage_metadata, PatchApplyOptions,
+    PatchCheckReport, PatchPlan, PatchRecoveryState, PatchStorageLayout, PlannedPatchEntry,
+    PlannedPatchSource, PredownloadStageMetadata, StagedArchivePart, PATCH_DEFERRED_DIR,
+    PATCH_PLAN_NAME, PATCH_STORAGE_METADATA_NAME, PATCH_TRANSACTION_DIR,
+    PREDOWNLOAD_STAGE_METADATA_NAME,
 };
 pub use paths::{
     build_cdn_file_url, files_base_url, is_launcher_metadata_path, launcher_metadata_url,

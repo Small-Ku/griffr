@@ -16,7 +16,7 @@ use griffr_common::runtime::{
     VfsFilePlanOptions,
 };
 
-use crate::progress::{ArchivePipelineProgress, CountAndByteProgress};
+use crate::progress::{ArchiveProgress, CountAndByteProgress};
 use crate::ui;
 use crate::GlobalOptions;
 
@@ -177,7 +177,7 @@ pub async fn install(
             });
         }
 
-        let progress = ArchivePipelineProgress::new("install", opts.verbose);
+        let progress = ArchiveProgress::new("install", opts.verbose);
         let verify_lane = ProgressLane::ARCHIVE_VERIFY;
         let download_lane = ProgressLane::ARCHIVE_DOWNLOAD;
         let extract_lane = ProgressLane::ARCHIVE_EXTRACT;
@@ -204,8 +204,8 @@ pub async fn install(
         progress.finish();
 
         for outcome in &result.outcomes {
-            if let TaskOutcome::ArchivePreflight { report, .. } = outcome {
-                ui::print_patch_preflight(report);
+            if let TaskOutcome::ArchiveCheck { report, .. } = outcome {
+                ui::print_patch_check(report);
             }
         }
 
@@ -217,7 +217,7 @@ pub async fn install(
         }
         if !failures.is_empty() {
             anyhow::bail!(
-                "Install archive pipeline failed for {} item(s): {}",
+                "Install archive work failed for {} item(s): {}",
                 failures.len(),
                 failures.join(", ")
             );
@@ -277,7 +277,7 @@ pub async fn install(
     let extra_tasks = if !opts.skip_vfs {
         ui::print_phase("Verifying install integrity + syncing VFS resources (single DAG batch)");
         ui::print_info(
-            "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
+            "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
         );
         let streaming_assets =
             streaming_assets_path(&install_path.join(install_target.data_root.clone()));
@@ -305,7 +305,7 @@ pub async fn install(
         {
             griffr_common::runtime::VfsPlanOutcome::Planned(plan) => plan.tasks,
             griffr_common::runtime::VfsPlanOutcome::Unsupported => {
-                ui::print_info("The selected target does not expose the launcher resource-index pipeline; skipping VFS sync.");
+                ui::print_info("The selected target does not provide the launcher resource-index API. Skip VFS sync.");
                 Vec::new()
             }
         }

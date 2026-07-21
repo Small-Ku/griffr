@@ -18,9 +18,10 @@ from . import (
     module_graph,
     name_resolution,
     tools,
+    wording,
     workspace,
 )
-from .models import (
+from .records import (
     AppliedFix,
     CONFIDENCE_ORDER,
     CrateTarget,
@@ -453,6 +454,7 @@ class Checker:
         return applied
 
     def _analyze_once(self) -> None:
+        wording.run(self)
         baseline.compare(self)
         workspace.discover(self)
         module_graph.build(self)

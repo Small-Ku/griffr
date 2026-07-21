@@ -10,8 +10,8 @@ use crate::runtime::{
 };
 
 use super::{
-    read_patch_execution_plan, read_predownload_stage_metadata, PlannedPatchSource,
-    PATCH_DEFERRED_DIR, PATCH_PLAN_NAME, PATCH_TRANSACTION_DIR, PREDOWNLOAD_STAGE_METADATA_NAME,
+    read_patch_plan, read_predownload_stage_metadata, PlannedPatchSource, PATCH_DEFERRED_DIR,
+    PATCH_PLAN_NAME, PATCH_TRANSACTION_DIR, PREDOWNLOAD_STAGE_METADATA_NAME,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +91,7 @@ fn entry_is_recoverable(
     Ok(false)
 }
 
-pub fn classify_patch_recovery(
+pub fn get_patch_recovery_state(
     install_root: &Path,
     stage_dir: Option<&Path>,
 ) -> Result<PatchRecoveryState> {
@@ -106,7 +106,7 @@ pub fn classify_patch_recovery(
         .join(PATCH_TRANSACTION_DIR)
         .join(PATCH_PLAN_NAME);
     if plan_path.is_file() {
-        let plan = read_patch_execution_plan(install_root)?;
+        let plan = read_patch_plan(install_root)?;
         let missing_stage = plan.entries.iter().any(|entry| match &entry.source {
             PlannedPatchSource::AlreadyPresent => false,
             PlannedPatchSource::Local { payload } => {

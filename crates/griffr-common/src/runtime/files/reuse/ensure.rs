@@ -20,10 +20,10 @@ pub async fn ensure_game_files_with_pool(
     install_path: &Path,
     file_path: &str,
     game_files_md5: Option<&str>,
-    config: &super::models::FileReuseConfig,
+    config: &super::types::FileReuseConfig,
     task_pool_runner: Option<&mut crate::runtime::task_pool::TaskPoolRunner>,
     progress: ProgressSender,
-) -> Result<super::models::FileEnsureSummary> {
+) -> Result<super::types::FileEnsureSummary> {
     let manifest = api_client
         .fetch_game_files(file_path, game_files_md5)
         .await
@@ -134,7 +134,7 @@ pub async fn ensure_game_files_with_pool(
             "Game-file ensure dry-run: would_reuse={} would_download={}",
             dry_run_reused, dry_run_downloaded
         );
-        return Ok(super::models::FileEnsureSummary {
+        return Ok(super::types::FileEnsureSummary {
             reused_files: dry_run_reused,
             downloaded_files: dry_run_downloaded,
             issues: Vec::new(),
@@ -198,7 +198,7 @@ pub async fn ensure_game_files_with_pool(
         );
     }
 
-    Ok(super::models::FileEnsureSummary {
+    Ok(super::types::FileEnsureSummary {
         reused_files: summary.reused_files,
         downloaded_files: summary.downloaded_files,
         issues,

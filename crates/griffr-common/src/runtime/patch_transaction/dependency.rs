@@ -3,14 +3,14 @@ use std::path::PathBuf;
 
 use crate::error::{Error, Result};
 
-use super::{PatchExecutionPlan, PlannedPatchSource};
+use super::{PatchPlan, PlannedPatchSource};
 
 /// Returns topological waves for destructive patch application.
 ///
 /// An HDiff consumer must run before any planned writer that replaces its base.
-/// Grouping ready entries into waves gives both the executor and preflight space
+/// Grouping ready entries into waves gives both the runner and archive check space
 /// simulator one authoritative dependency ordering.
-pub(crate) fn entry_wave_indices(plan: &PatchExecutionPlan) -> Result<Vec<Vec<usize>>> {
+pub(crate) fn entry_wave_indices(plan: &PatchPlan) -> Result<Vec<Vec<usize>>> {
     let mut destination_writers = BTreeMap::<PathBuf, usize>::new();
     for (index, entry) in plan.entries.iter().enumerate() {
         let logical_destination = plan
@@ -94,9 +94,9 @@ mod tests {
     use super::*;
     use crate::runtime::patch_transaction::{PlannedPatchEntry, PlannedPatchSource};
 
-    fn plan(entries: Vec<PlannedPatchEntry>) -> PatchExecutionPlan {
-        PatchExecutionPlan {
-            schema_version: PatchExecutionPlan::SCHEMA_VERSION,
+    fn plan(entries: Vec<PlannedPatchEntry>) -> PatchPlan {
+        PatchPlan {
+            schema_version: PatchPlan::SCHEMA_VERSION,
             install_root: PathBuf::from("/install"),
             stage_root: PathBuf::from("/stage"),
             vfs_base_path: PathBuf::from("vfs"),

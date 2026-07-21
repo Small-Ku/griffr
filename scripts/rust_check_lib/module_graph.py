@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from tree_sitter import Node
 
 from .cfg import TRUE, all_of, compatibility, conditions_from_attributes
-from .models import CrateTarget, ModuleUnit, SourceFile
+from .records import CrateTarget, ModuleUnit, SourceFile
 
 
 class ModuleHost(Protocol):
@@ -120,7 +120,9 @@ def _register_child_module(
         source = host.source_for(resolved)
         if source is None:
             return
-        has_path_attr = any(re.search(r'#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]', attr) for attr in attrs)
+        has_path_attr = any(
+            re.search(r'#\s*\[\s*path\s*=\s*"([^"]+)"\s*\]', attr) for attr in attrs
+        )
         child_dir = (
             resolved.parent.resolve()
             if resolved.name == "mod.rs" or has_path_attr

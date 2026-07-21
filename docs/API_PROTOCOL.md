@@ -14,7 +14,7 @@ Part of the Hypergryph Official API Reference. See [`API.md`](API.md) for the fu
 <base_name>.zip.NNN
 ```
 
-### Characteristics
+### Format facts
 - Each volume is typically ~2.2 GB (last volume may be smaller)
 - Endfield v1.1.9 has **39 volumes** for all channels (CN official, CN Bilibili, Global official)
 - Parts must be read sequentially as a single concatenated stream
@@ -176,7 +176,7 @@ OS EXE:     https://launcher-rule.hg-cdn.com/<launcher_appcode>/launcher/{versio
 - **Always fetch fresh URLs from the batch API before starting a download session**
 - Do NOT cache pack URLs across sessions — they will be invalid
 
-**TODO**: Determine the exact auth key TTL to implement caching with proper expiration logic.
+**TODO**: Find the exact auth-key lifetime before URLs are cached.
 
 ---
 
@@ -225,7 +225,7 @@ The `{source_version}` subdirectory indicates which version the patch upgrades *
 ### Key Observations
 - Patches are ALSO split volumes (`.zip.001`, `.zip.002`, etc.), not single files
 - The official launcher may offer multiple patch paths depending on version gap
-- **TODO**: Determine optimal patch chain selection (minimum bytes vs. fewer downloads)
+- **TODO**: Find the best patch chain (minimum bytes or fewer downloads)
 
 ---
 

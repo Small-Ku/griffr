@@ -79,7 +79,7 @@ resIndexKey = "Assets/Beyond/DynamicAssets/Gameplay/UI/Fonts/"
 
 ### Arknights Key
 
-Not currently applicable in the same way as Endfield for this project path, because Arknights has not been validated to serve this VFS resource endpoint flow.
+This does not apply to the Arknights path. Tests have not shown that Arknights serves this VFS resource API.
 
 ---
 
@@ -111,7 +111,7 @@ Notes:
 
 Empirical filesystem observation after wiping both `Persistent` and `StreamingAssets`, running official launcher integrity, then launching the game:
 
-- `StreamingAssets` behaved as launcher baseline materialization target.
+- `StreamingAssets` was the launcher baseline file target.
   - Integrity plan (`download_sdk_config`) listed:
     - `713` VFS files under `Endfield_Data/StreamingAssets/VFS/*`
     - plus `index_initial.json` and `index_main.json`
@@ -129,14 +129,14 @@ Empirical filesystem observation after wiping both `Persistent` and `StreamingAs
 Practical interpretation:
 
 - `index_*.json` is the full candidate set.
-- `pref_*.json` is the selected/materialized working set for `Persistent`.
+- `pref_*.json` lists the selected files that the game writes to `Persistent`.
 - Absence from `pref_*` is the effective "not selected" signal.
 - There is no explicit per-file reason field in `index_*` or `pref_*`.
-- Validation/materialization rule:
+- File-check rule:
   - If `pref_*` exists, `Persistent` should be treated as `pref-only` scope.
   - `index-full` scope should be used for `StreamingAssets` baseline validation, not `Persistent`.
   - If `game_files` and `index_*` collide on a `StreamingAssets` destination, the resource index owns validation and repair.
-- Files are selected by the game, and we still need to further investigate why some files are not selected. Just follow the selection of the game currently.
+- The game selects these files. The reason for each choice is not known. Follow the file set that the game selects.
 
 ### `patch.json`
 

@@ -48,7 +48,7 @@ These values are **verified from `ArknightsCnPresetConfig.cs`** in the Collapse 
 |--------|-----------|---------------|-------|
 | CN Official (官服) | `1` | `1` | Confirmed from local install metadata |
 | CN Bilibili (B服) | `2` | `2` | Confirmed from local install metadata |
-| SG | — | — | No official Arknights PC target is currently known |
+| SG | — | — | No official Arknights PC target is known |
 
 ### Endfield — Confirmed from `config.ts`, decrypted local `config.ini`, and `ak-endfield-api-archive`
 
@@ -138,7 +138,7 @@ This is **NOT** the batch API app code. The u8 service handles authentication to
 |--------|-----------|---------------|----------------|-------|
 | CN Official (官服) | `1` | `1` | `GzD1CpaWgmSq1wew` | Verified from Hi3Helper and local install metadata |
 | CN Bilibili (B服) | `2` | `2` | `GzD1CpaWgmSq1wew` | Verified from Hi3Helper and local install metadata |
-| SG | — | — | — | No official Arknights PC target is currently known |
+| SG | — | — | — | No official Arknights PC target is known |
 
 ---
 

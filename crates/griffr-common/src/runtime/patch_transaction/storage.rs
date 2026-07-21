@@ -8,13 +8,13 @@ use crate::runtime::task_pool::fs_ops::path_safety::parse_safe_relative_path;
 use super::PATCH_STORAGE_METADATA_NAME;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PatchStorageTopology {
+pub struct PatchStorageLayout {
     pub schema_version: u32,
     pub vfs_link: PathBuf,
     pub external_vfs_root: PathBuf,
 }
 
-impl PatchStorageTopology {
+impl PatchStorageLayout {
     pub const SCHEMA_VERSION: u32 = 1;
 
     pub fn validate(&self) -> Result<()> {
@@ -34,29 +34,29 @@ impl PatchStorageTopology {
     }
 }
 
-pub fn read_patch_storage_topology(install_root: &Path) -> Result<Option<PatchStorageTopology>> {
+pub fn read_patch_storage_layout(install_root: &Path) -> Result<Option<PatchStorageLayout>> {
     let path = install_root.join(PATCH_STORAGE_METADATA_NAME);
     if !path.is_file() {
         return Ok(None);
     }
-    let topology: PatchStorageTopology = serde_json::from_slice(&std::fs::read(&path).map_err(
-        |source| Error::OpenFileFailed {
+    let storage_layout: PatchStorageLayout = serde_json::from_slice(
+        &std::fs::read(&path).map_err(|source| Error::OpenFileFailed {
             path: path.clone(),
             source,
-        },
-    )?)?;
-    topology.validate()?;
-    Ok(Some(topology))
+        })?,
+    )?;
+    storage_layout.validate()?;
+    Ok(Some(storage_layout))
 }
 
-pub(crate) fn write_patch_storage_topology(
+pub(crate) fn write_patch_storage_layout(
     install_root: &Path,
-    topology: &PatchStorageTopology,
+    storage_layout: &PatchStorageLayout,
 ) -> Result<()> {
-    topology.validate()?;
+    storage_layout.validate()?;
     let path = install_root.join(PATCH_STORAGE_METADATA_NAME);
     let temp = install_root.join(format!("{PATCH_STORAGE_METADATA_NAME}.tmp"));
-    std::fs::write(&temp, serde_json::to_vec_pretty(topology)?).map_err(|source| {
+    std::fs::write(&temp, serde_json::to_vec_pretty(storage_layout)?).map_err(|source| {
         Error::OpenFileFailed {
             path: temp.clone(),
             source,

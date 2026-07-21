@@ -5,7 +5,7 @@ use std::ops::Range;
 use crate::error::{Error, Result};
 use crate::runtime::{DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME};
 
-use super::super::inspection::*;
+use super::super::archive_index::*;
 use super::super::layout::MultiVolumeLayout;
 
 const EOCD_MIN_SIZE: u64 = 22;
@@ -158,10 +158,7 @@ impl MultiVolumeExtractor {
         }))
     }
 
-    pub(crate) fn inspect_archive_index(
-        &self,
-        directory: &ArchiveDirectory,
-    ) -> Result<ArchiveInspection> {
+    pub(crate) fn read_archive_index(&self, directory: &ArchiveDirectory) -> Result<ArchiveIndex> {
         let parsed_archive = zip::ZipArchive::new(self.layout.open_stream()?)?;
         let archive = parsed_archive.clone();
         drop(parsed_archive);
@@ -345,7 +342,7 @@ impl MultiVolumeExtractor {
             };
         }
 
-        Ok(ArchiveInspection {
+        Ok(ArchiveIndex {
             entries,
             archive,
             total_uncompressed_bytes,
@@ -357,12 +354,12 @@ impl MultiVolumeExtractor {
         })
     }
 
-    pub(crate) fn control_volume_indices(inspection: &ArchiveInspection) -> Vec<usize> {
-        inspection
+    pub(crate) fn control_volume_indices(archive_index: &ArchiveIndex) -> Vec<usize> {
+        archive_index
             .control_indices
             .iter()
             .flat_map(|index| {
-                inspection.entry_sources[*index]
+                archive_index.entry_sources[*index]
                     .volume_indices
                     .iter()
                     .copied()
@@ -373,29 +370,29 @@ impl MultiVolumeExtractor {
     }
 
     pub(crate) fn source_ranges_for_indices(
-        inspection: &ArchiveInspection,
+        archive_index: &ArchiveIndex,
         indices: &[usize],
     ) -> Vec<Range<u64>> {
         indices
             .iter()
-            .filter_map(|index| inspection.entry_sources.get(*index))
+            .filter_map(|index| archive_index.entry_sources.get(*index))
             .map(|source| source.range.clone())
             .collect()
     }
 
-    pub(crate) fn control_source_ranges(inspection: &ArchiveInspection) -> Vec<Range<u64>> {
-        Self::source_ranges_for_indices(inspection, &inspection.control_indices)
+    pub(crate) fn control_source_ranges(archive_index: &ArchiveIndex) -> Vec<Range<u64>> {
+        Self::source_ranges_for_indices(archive_index, &archive_index.control_indices)
     }
 
     pub(crate) fn read_control_payloads(
         &self,
-        inspection: &ArchiveInspection,
+        archive_index: &ArchiveIndex,
         password: Option<&str>,
-    ) -> Result<ArchiveInspection> {
+    ) -> Result<ArchiveIndex> {
         const MAX_CONTROL_FILE_BYTES: u64 = 16 * 1024 * 1024;
-        let mut result = inspection.clone();
-        let mut archive = inspection.archive.clone();
-        for index in &inspection.control_indices {
+        let mut result = archive_index.clone();
+        let mut archive = archive_index.archive.clone();
+        for index in &archive_index.control_indices {
             let mut file = open_archive_entry(&mut archive, *index, password)?;
             let name = normalized_archive_name(file.name())?;
             if file.size() > MAX_CONTROL_FILE_BYTES {
@@ -419,10 +416,7 @@ impl MultiVolumeExtractor {
         Ok(result)
     }
 
-    pub(crate) fn inspect_patch_payload(
-        &self,
-        password: Option<&str>,
-    ) -> Result<ArchiveInspection> {
+    pub(crate) fn read_patch_payload(&self, password: Option<&str>) -> Result<ArchiveIndex> {
         let directory = match self.discover_archive_directory()? {
             ArchiveDirectoryDiscovery::Ready(directory) => directory,
             ArchiveDirectoryDiscovery::NeedsRange(range) => {
@@ -432,7 +426,7 @@ impl MultiVolumeExtractor {
                 )))
             }
         };
-        let inspection = self.inspect_archive_index(&directory)?;
-        self.read_control_payloads(&inspection, password)
+        let archive_index = self.read_archive_index(&directory)?;
+        self.read_control_payloads(&archive_index, password)
     }
 }

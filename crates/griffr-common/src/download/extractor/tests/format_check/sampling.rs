@@ -6,11 +6,11 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 pub(super) fn deterministic_sample_indices(
-    inspection: &ArchiveInspection,
+    archive_index: &ArchiveIndex,
     layout: &MultiVolumeLayout,
     requested_count: usize,
 ) -> Vec<usize> {
-    let names = entry_names(inspection);
+    let names = entry_names(archive_index);
     let candidates = names
         .iter()
         .enumerate()
@@ -32,30 +32,30 @@ pub(super) fn deterministic_sample_indices(
     if let Some(index) = candidates
         .iter()
         .copied()
-        .filter(|index| inspection.entry_sizes[*index] > 0)
-        .min_by_key(|index| inspection.entry_sizes[*index])
+        .filter(|index| archive_index.entry_sizes[*index] > 0)
+        .min_by_key(|index| archive_index.entry_sizes[*index])
     {
         selected.insert(index);
     }
     if let Some(index) = candidates
         .iter()
         .copied()
-        .max_by_key(|index| inspection.entry_sizes[*index])
+        .max_by_key(|index| archive_index.entry_sizes[*index])
     {
         selected.insert(index);
     }
-    selected.extend(inspection.control_indices.iter().copied());
+    selected.extend(archive_index.control_indices.iter().copied());
 
     for volume_index in 0..layout.volume_count() {
         if let Some(index) = candidates
             .iter()
             .copied()
             .filter(|index| {
-                inspection.entry_sources[*index]
+                archive_index.entry_sources[*index]
                     .volume_indices
                     .contains(&volume_index)
             })
-            .min_by_key(|index| inspection.entry_sizes[*index])
+            .min_by_key(|index| archive_index.entry_sizes[*index])
         {
             selected.insert(index);
         }
@@ -67,7 +67,7 @@ pub(super) fn deterministic_sample_indices(
         .take(layout.volume_count().saturating_sub(1))
     {
         if let Some(index) = candidates.iter().copied().min_by_key(|index| {
-            let source = &inspection.entry_sources[*index].range;
+            let source = &archive_index.entry_sources[*index].range;
             source
                 .start
                 .abs_diff(boundary.end)
@@ -89,16 +89,16 @@ pub(super) fn deterministic_sample_indices(
 }
 
 pub(super) fn bounded_samples(
-    inspection: &ArchiveInspection,
+    archive_index: &ArchiveIndex,
     layout: &MultiVolumeLayout,
     requested_count: usize,
     byte_budget: u64,
 ) -> Vec<usize> {
-    let mut candidates = deterministic_sample_indices(inspection, layout, requested_count);
+    let mut candidates = deterministic_sample_indices(archive_index, layout, requested_count);
     candidates.sort_by_key(|index| {
         (
-            !inspection.control_indices.contains(index),
-            inspection.entry_sizes[*index],
+            !archive_index.control_indices.contains(index),
+            archive_index.entry_sizes[*index],
             *index,
         )
     });
@@ -106,13 +106,13 @@ pub(super) fn bounded_samples(
     let mut selected = Vec::new();
     let mut bytes = 0u64;
     for index in candidates {
-        let size = inspection.entry_sizes[index];
-        if selected.len() >= requested_count && !inspection.control_indices.contains(&index) {
+        let size = archive_index.entry_sizes[index];
+        if selected.len() >= requested_count && !archive_index.control_indices.contains(&index) {
             continue;
         }
         if bytes.saturating_add(size) > byte_budget
             && !selected.is_empty()
-            && !inspection.control_indices.contains(&index)
+            && !archive_index.control_indices.contains(&index)
         {
             continue;
         }
@@ -120,14 +120,14 @@ pub(super) fn bounded_samples(
         bytes = bytes.saturating_add(size);
     }
     if selected.is_empty() {
-        if let Some(index) = (0..inspection.entry_sizes.len())
+        if let Some(index) = (0..archive_index.entry_sizes.len())
             .filter(|index| {
-                inspection
+                archive_index
                     .archive
                     .name_for_index(*index)
                     .is_some_and(|name| !name.ends_with('/'))
             })
-            .min_by_key(|index| inspection.entry_sizes[*index])
+            .min_by_key(|index| archive_index.entry_sizes[*index])
         {
             selected.push(index);
         }
@@ -162,10 +162,10 @@ fn shadow_layout(
     Ok((temp, MultiVolumeLayout::from_expected(expected)?))
 }
 
-fn isolated_inspection(
+fn read_isolated_index(
     raw_fixture: &RawSplitFixture,
     required: &BTreeSet<usize>,
-) -> Result<(tempfile::TempDir, MultiVolumeExtractor, ArchiveInspection)> {
+) -> Result<(tempfile::TempDir, MultiVolumeExtractor, ArchiveIndex)> {
     let central = raw_fixture
         .layout
         .volume_indices_for_range(raw_fixture.directory.central_directory.clone())
@@ -184,15 +184,15 @@ fn isolated_inspection(
     let present = required.union(&central).copied().collect::<BTreeSet<_>>();
     let (temp, layout) = shadow_layout(&raw_fixture.layout, &present)?;
     let extractor = MultiVolumeExtractor::from_layout(layout.clone());
-    let mut inspection = extractor.inspect_archive_index(&raw_fixture.directory)?;
+    let mut archive_index = extractor.read_archive_index(&raw_fixture.directory)?;
 
-    inspection.archive = inspection.archive.clone();
+    archive_index.archive = archive_index.archive.clone();
     for index in central.difference(required) {
         if let Some(path) = layout.path(*index) {
             std::fs::remove_file(path)?;
         }
     }
-    Ok((temp, extractor, inspection))
+    Ok((temp, extractor, archive_index))
 }
 
 pub(super) fn validate_raw_sample(
@@ -200,7 +200,7 @@ pub(super) fn validate_raw_sample(
     index: usize,
     check_missing_start: bool,
 ) -> Result<()> {
-    let required = raw_fixture.inspection.entry_sources[index]
+    let required = raw_fixture.archive_index.entry_sources[index]
         .volume_indices
         .iter()
         .copied()
@@ -211,28 +211,28 @@ pub(super) fn validate_raw_sample(
         )));
     }
 
-    let (temp, extractor, inspection) = isolated_inspection(raw_fixture, &required)?;
+    let (temp, extractor, archive_index) = read_isolated_index(raw_fixture, &required)?;
     let output = temp.path().join("output");
     std::fs::create_dir(&output)?;
     extractor.extract_entries_with_progress(
         &output,
         None,
-        &inspection,
+        &archive_index,
         &[index],
         &std::collections::BTreeMap::new(),
         64 * 1024,
         |_| {},
     )?;
-    let name = inspection
+    let name = archive_index
         .archive
         .name_for_index(index)
         .ok_or_else(|| Error::Extraction(format!("entry {index} has no name")))?;
     let extracted = output.join(safe_relative_archive_path(name)?);
     let actual_size = std::fs::metadata(&extracted)?.len();
-    if actual_size != inspection.entry_sizes[index] {
+    if actual_size != archive_index.entry_sizes[index] {
         return Err(Error::Extraction(format!(
             "sampled entry {name} extracted {actual_size} bytes, expected {}",
-            inspection.entry_sizes[index]
+            archive_index.entry_sizes[index]
         )));
     }
 
@@ -240,7 +240,7 @@ pub(super) fn validate_raw_sample(
         let missing = *required
             .first()
             .expect("non-empty required volume set has a first item");
-        let (temp, extractor, inspection) = isolated_inspection(raw_fixture, &required)?;
+        let (temp, extractor, archive_index) = read_isolated_index(raw_fixture, &required)?;
         let missing_path = extractor
             .layout
             .path(missing)
@@ -253,7 +253,7 @@ pub(super) fn validate_raw_sample(
             .extract_entries_with_progress(
                 &output,
                 None,
-                &inspection,
+                &archive_index,
                 &[index],
                 &std::collections::BTreeMap::new(),
                 64 * 1024,

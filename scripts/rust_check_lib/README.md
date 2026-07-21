@@ -44,6 +44,7 @@ The default policy favors recall:
 - `AFS002` reports blocking closures that contain only operations with compio async replacements;
 - `AFS003` follows direct calls into local synchronous helpers and rejects filesystem work hidden
   behind those helpers when it is invoked from production async code.
+- `WRD001` rejects abstract project wording listed in `docs/WORDING.md`, and `WRD002` rejects broad file names when a concrete name is available.
   Test fixture modules are excluded because synchronous fixture construction is not a runtime I/O
   architecture decision. Directory enumeration, recursive removal, link reads, and canonicalization
   remain valid blocking boundaries with compio 0.19.

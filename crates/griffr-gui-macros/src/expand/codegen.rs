@@ -3,7 +3,7 @@ use quote::quote;
 use std::collections::BTreeSet;
 use syn::{Ident, ItemStruct, Type};
 
-use crate::model::{Clip, Direction, FlatNode, Sizing};
+use crate::tree::{Clip, Direction, FlatNode, Sizing};
 
 use super::component;
 

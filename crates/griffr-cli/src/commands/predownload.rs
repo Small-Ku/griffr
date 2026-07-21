@@ -5,12 +5,12 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::{GetLatestGameResponse, PackFile, PrePatchInfo};
 use griffr_common::runtime::task_pool::{Task, TaskOutcome, TaskPoolRunner, TaskProgress};
 use griffr_common::runtime::{
-    classify_patch_recovery, write_predownload_stage_metadata, PatchRecoveryState,
+    get_patch_recovery_state, write_predownload_stage_metadata, PatchRecoveryState,
     PredownloadStageMetadata, ProgressLane, StagedArchivePart, DELETE_FILES_MANIFEST_NAME,
     PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
 };
 
-use crate::progress::{ArchivePipelineProgress, CountAndByteProgress};
+use crate::progress::{ArchiveProgress, CountAndByteProgress};
 use crate::ui;
 use crate::GlobalOptions;
 use griffr_common::runtime::{detect_local_install, LocalInstall};
@@ -140,7 +140,7 @@ async fn resolve_predownload_payload(
         .as_ref()
         .filter(|pre_patch| !pre_patch.patches.is_empty())
         .cloned()
-        .context("No predownload payload is currently available.")?;
+        .context("No predownload payload is available.")?;
 
     Ok((local, api_client, version_info, pre_patch, current_version))
 }
@@ -283,7 +283,7 @@ pub async fn apply(
 pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
     let local = detect_local_install(&path).await?;
     let install_root = local.install_path;
-    let initial_task = match classify_patch_recovery(&install_root, None)? {
+    let initial_task = match get_patch_recovery_state(&install_root, None)? {
         PatchRecoveryState::ExtractedReady => Task::ApplyExtractedVfsPatchManifest {
             install_root: install_root.clone(),
         },
@@ -320,7 +320,7 @@ pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
 
     let task_pool_cfg = opts.task_pool_config();
     let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
-    let progress = ArchivePipelineProgress::new("predownload.resume", opts.verbose);
+    let progress = ArchiveProgress::new("predownload.resume", opts.verbose);
     let verify_lane = ProgressLane::ARCHIVE_VERIFY;
     let download_lane = ProgressLane::ARCHIVE_DOWNLOAD;
     let extract_lane = ProgressLane::ARCHIVE_EXTRACT;

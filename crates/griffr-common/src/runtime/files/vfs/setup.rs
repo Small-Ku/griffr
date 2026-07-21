@@ -64,51 +64,51 @@ pub enum VfsUpdateOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VfsBootstrapScope {
-    /// Ensure only the initial pref set in Persistent.
+pub enum PersistentVfsFileSet {
+    /// Use only the initial pref file set in Persistent.
     Initial,
-    /// Ensure the initial and main pref sets in Persistent.
-    Complete,
+    /// Use the initial and main pref file sets in Persistent.
+    InitialAndMain,
 }
 
-impl VfsBootstrapScope {
+impl PersistentVfsFileSet {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Initial => RESOURCE_GROUP_INITIAL,
-            Self::Complete => "complete",
+            Self::InitialAndMain => "all",
         }
     }
 }
 
-impl std::fmt::Display for VfsBootstrapScope {
+impl std::fmt::Display for PersistentVfsFileSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl std::str::FromStr for VfsBootstrapScope {
+impl std::str::FromStr for PersistentVfsFileSet {
     type Err = Error;
 
     fn from_str(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             RESOURCE_GROUP_INITIAL => Ok(Self::Initial),
-            value if value == Self::Complete.as_str() => Ok(Self::Complete),
+            value if value == Self::InitialAndMain.as_str() => Ok(Self::InitialAndMain),
             other => Err(Error::Config(format!(
-                "invalid bootstrap scope {other:?}: expected {} or {}",
+                "invalid Persistent VFS file set {other:?}: expected {} or {}",
                 Self::Initial.as_str(),
-                Self::Complete.as_str()
+                Self::InitialAndMain.as_str()
             ))),
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct VfsBootstrapConfig {
-    /// Scope for ensuring Persistent files.
-    pub scope: VfsBootstrapScope,
+pub struct PersistentVfsConfig {
+    /// File set to write in Persistent.
+    pub file_set: PersistentVfsFileSet,
     /// Primary StreamingAssets root for local file reuse.
     pub source_streaming_assets: std::path::PathBuf,
-    /// Additional StreamingAssets roots from other installs for reuse.
+    /// Other StreamingAssets roots that can supply files.
     pub extra_source_streaming_assets: Vec<std::path::PathBuf>,
     /// Allow copy fallback when hardlinking fails.
     pub allow_copy_fallback: bool,
@@ -116,29 +116,29 @@ pub struct VfsBootstrapConfig {
     pub prefer_reuse: bool,
     /// Allow downloading missing files from CDN when not found in source roots.
     pub allow_download: bool,
-    /// Remove files under Persistent/VFS that are outside the selected bootstrap scope.
+    /// Remove files under Persistent/VFS that are not in the selected file set.
     pub prune_extra_files: bool,
 }
 
 #[derive(Debug, Clone)]
-pub struct VfsBootstrapManifestDownload {
+pub struct PersistentVfsManifestDownload {
     pub url: String,
     pub filename: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct VfsBootstrapPlan {
+pub struct PersistentVfsPlan {
     pub tasks: Vec<Task>,
-    pub manifest_downloads: Vec<VfsBootstrapManifestDownload>,
+    pub manifest_downloads: Vec<PersistentVfsManifestDownload>,
     pub total_files: usize,
     pub total_bytes: u64,
     pub expected_paths: HashSet<String>,
     pub res_version: String,
-    pub scope_label: String,
+    pub file_set: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct VfsBootstrapResult {
+pub struct PersistentVfsResult {
     pub total_files: usize,
     pub downloaded_files: usize,
     pub downloaded_bytes: u64,
@@ -146,16 +146,13 @@ pub struct VfsBootstrapResult {
     pub skipped_files: usize,
     pub failed_files: usize,
     pub res_version: String,
-    pub scope_label: String,
+    pub file_set: String,
 }
 
-pub(super) fn should_include_bootstrap_group(
-    scope: VfsBootstrapScope,
-    resource_name: &str,
-) -> bool {
-    match scope {
-        VfsBootstrapScope::Initial => resource_name.eq_ignore_ascii_case(RESOURCE_GROUP_INITIAL),
-        VfsBootstrapScope::Complete => {
+pub(super) fn file_set_includes_group(file_set: PersistentVfsFileSet, resource_name: &str) -> bool {
+    match file_set {
+        PersistentVfsFileSet::Initial => resource_name.eq_ignore_ascii_case(RESOURCE_GROUP_INITIAL),
+        PersistentVfsFileSet::InitialAndMain => {
             resource_name.eq_ignore_ascii_case(RESOURCE_GROUP_INITIAL)
                 || resource_name.eq_ignore_ascii_case(RESOURCE_GROUP_MAIN)
         }
@@ -188,7 +185,7 @@ fn res_index_to_ensure_tasks(
     source_candidates: &[std::path::PathBuf],
     resource_path: &str,
     persistent_root: &Path,
-    cfg: &VfsBootstrapConfig,
+    cfg: &PersistentVfsConfig,
 ) -> (Vec<Task>, usize, u64) {
     let mut tasks = Vec::new();
     let mut total_files = 0usize;
@@ -233,20 +230,20 @@ fn res_index_to_ensure_tasks(
     (tasks, total_files, total_bytes)
 }
 
-pub async fn plan_persistent_bootstrap_tasks(
+pub async fn plan_persistent_vfs_tasks(
     api_client: &ApiClient,
     target: &ApiTarget,
     game_version: &str,
     rand_str: &str,
     persistent_root: &Path,
-    cfg: &VfsBootstrapConfig,
-) -> Result<Option<VfsBootstrapPlan>> {
+    cfg: &PersistentVfsConfig,
+) -> Result<Option<PersistentVfsPlan>> {
     let resources = match api_client
         .get_latest_resources(target, game_version, rand_str, DEFAULT_PLATFORM)
         .await
     {
         Ok(res) => res,
-        Err(ApiError::ResourcePipelineUnavailable(_)) => return Ok(None),
+        Err(ApiError::ResourceApiUnavailable(_)) => return Ok(None),
         Err(err) => return Err(err.into()),
     };
 
@@ -255,7 +252,7 @@ pub async fn plan_persistent_bootstrap_tasks(
     let mut total_files = 0usize;
     let mut total_bytes = 0u64;
     let mut expected_paths = HashSet::default();
-    let mut scope_parts = Vec::new();
+    let mut file_set_parts = Vec::new();
 
     let mut source_roots = vec![cfg.source_streaming_assets.clone()];
     for root in &cfg.extra_source_streaming_assets {
@@ -265,7 +262,7 @@ pub async fn plan_persistent_bootstrap_tasks(
     }
 
     for resource in &resources.resources {
-        if !should_include_bootstrap_group(cfg.scope, &resource.name) {
+        if !file_set_includes_group(cfg.file_set, &resource.name) {
             continue;
         }
 
@@ -287,7 +284,7 @@ pub async fn plan_persistent_bootstrap_tasks(
         let (selected_index, manifest_kind) = if let Some(pref) = local_pref {
             (pref, "pref-local")
         } else if let Ok(pref) = api_client.fetch_res_index(&pref_url, RES_INDEX_KEY).await {
-            manifest_downloads.push(VfsBootstrapManifestDownload {
+            manifest_downloads.push(PersistentVfsManifestDownload {
                 url: pref_url,
                 filename: pref_filename.clone(),
             });
@@ -304,7 +301,7 @@ pub async fn plan_persistent_bootstrap_tasks(
                         resource.name
                     ))
                 })?;
-            manifest_downloads.push(VfsBootstrapManifestDownload {
+            manifest_downloads.push(PersistentVfsManifestDownload {
                 url: index_url,
                 filename: index_filename.clone(),
             });
@@ -332,31 +329,31 @@ pub async fn plan_persistent_bootstrap_tasks(
         tasks.extend(group_tasks);
         total_files += group_files;
         total_bytes = total_bytes.saturating_add(group_bytes);
-        scope_parts.push(format!("{}:{}", resource.name, manifest_kind));
+        file_set_parts.push(format!("{}:{}", resource.name, manifest_kind));
     }
 
-    Ok(Some(VfsBootstrapPlan {
+    Ok(Some(PersistentVfsPlan {
         tasks,
         manifest_downloads,
         total_files,
         total_bytes,
         expected_paths,
         res_version: resources.res_version,
-        scope_label: scope_parts.join(","),
+        file_set: file_set_parts.join(","),
     }))
 }
 
-pub async fn bootstrap_persistent_vfs_with_runner(
+pub async fn setup_persistent_vfs(
     api_client: &ApiClient,
     target: &ApiTarget,
     game_version: &str,
     rand_str: &str,
     persistent_root: &Path,
-    cfg: &VfsBootstrapConfig,
+    cfg: &PersistentVfsConfig,
     task_pool_runner: &mut TaskPoolRunner,
     progress: ProgressSender,
-) -> Result<Option<VfsBootstrapResult>> {
-    let plan = match plan_persistent_bootstrap_tasks(
+) -> Result<Option<PersistentVfsResult>> {
+    let plan = match plan_persistent_vfs_tasks(
         api_client,
         target,
         game_version,
@@ -390,11 +387,7 @@ pub async fn bootstrap_persistent_vfs_with_runner(
         .with_download(ProgressLane::VFS_DOWNLOAD);
     let result = task_pool_runner
         .run_batch(plan.tasks, task_progress)
-        .map_err(|e| {
-            Error::TaskPool(format!(
-                "Failed to ensure Persistent VFS bootstrap files: {e}"
-            ))
-        })?;
+        .map_err(|e| Error::TaskPool(format!("Failed to set up Persistent VFS files: {e}")))?;
 
     let mut outcomes = PathOutcomeTracker::new();
     for event in result.outcomes {
@@ -447,7 +440,7 @@ pub async fn bootstrap_persistent_vfs_with_runner(
 
     let summary = outcomes.summary();
 
-    Ok(Some(VfsBootstrapResult {
+    Ok(Some(PersistentVfsResult {
         total_files: plan.total_files,
         downloaded_files: summary.downloaded_files,
         downloaded_bytes: summary.downloaded_bytes,
@@ -455,6 +448,6 @@ pub async fn bootstrap_persistent_vfs_with_runner(
         skipped_files: summary.skipped_files,
         failed_files: summary.failed_files,
         res_version: plan.res_version,
-        scope_label: plan.scope_label,
+        file_set: plan.file_set,
     }))
 }

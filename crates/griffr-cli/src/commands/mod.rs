@@ -1,19 +1,18 @@
 //! CLI command implementations
 
 pub mod account;
-pub mod bootstrap;
 pub mod debug;
 pub mod info;
 pub mod install;
 pub mod launch;
 pub mod news;
 pub mod predownload;
+pub mod setup_vfs;
 pub mod uninstall;
 pub mod update;
 pub mod verify;
 
 pub use account::{activate as account_activate, capture as account_capture};
-pub use bootstrap::bootstrap;
 pub use debug::{
     api_get_latest_game as debug_api_get_latest_game,
     api_get_latest_resources as debug_api_get_latest_resources,
@@ -32,6 +31,7 @@ pub use predownload::{
     apply as predownload_apply, check as predownload_check, fetch as predownload_fetch,
     resume as predownload_resume,
 };
+pub use setup_vfs::setup_vfs;
 pub use uninstall::uninstall;
 pub use update::update;
 pub use verify::verify;

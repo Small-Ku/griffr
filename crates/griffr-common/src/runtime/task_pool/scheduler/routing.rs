@@ -135,9 +135,12 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                     .map(|path| volume_key(path)),
             );
         }
-        Task::ReadArchiveControls { work, inspection } => {
+        Task::ReadArchiveControls {
+            work,
+            archive_index,
+        } => {
             let indices = crate::download::extractor::MultiVolumeExtractor::control_volume_indices(
-                inspection,
+                archive_index,
             );
             request.read_volumes.extend(
                 work.paths_for_indices(&indices)
@@ -166,12 +169,12 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.write_volumes.push(volume_key(&shard.staging_dir));
             request.extract = true;
         }
-        Task::FillArchiveVolumeGaps { work } => {
+        Task::FetchMissingArchiveRanges { work } => {
             request
                 .metadata_volumes
                 .extend(work.layout.paths().iter().map(|path| volume_key(path)));
         }
-        Task::FinalizeArchiveVolumes { work } => {
+        Task::SaveArchiveVolumes { work } => {
             request
                 .read_volumes
                 .extend(work.layout.paths().iter().map(|path| volume_key(path)));
@@ -233,16 +236,14 @@ fn task_estimated_bytes(task: &Task) -> u64 {
         | Task::VerifyReuseVolume { expected_size, .. }
         | Task::ReuseFile { expected_size, .. } => *expected_size,
         Task::ExtractArchiveShard { shard } => shard.uncompressed_bytes,
-        Task::FinalizeArchiveVolumes { work } => {
-            work.parts.iter().map(|part| part.expected_size).sum()
-        }
+        Task::SaveArchiveVolumes { work } => work.parts.iter().map(|part| part.expected_size).sum(),
         Task::InstallArchive { .. }
         | Task::Extract { .. }
         | Task::DiscoverArchiveDirectory { .. }
         | Task::InspectArchiveIndex { .. }
         | Task::ReadArchiveControls { .. }
         | Task::PlanArchiveExtraction { .. }
-        | Task::FillArchiveVolumeGaps { .. }
+        | Task::FetchMissingArchiveRanges { .. }
         | Task::CommitArchive { .. }
         | Task::CleanupArchive { .. }
         | Task::ApplyExtractedVfsPatchManifest { .. }
@@ -269,8 +270,8 @@ fn execution_class(task: &Task) -> ExecutionClass {
         | Task::ReadArchiveControls { .. }
         | Task::PlanArchiveExtraction { .. }
         | Task::ExtractArchiveShard { .. }
-        | Task::FillArchiveVolumeGaps { .. }
-        | Task::FinalizeArchiveVolumes { .. }
+        | Task::FetchMissingArchiveRanges { .. }
+        | Task::SaveArchiveVolumes { .. }
         | Task::CommitArchive { .. }
         | Task::CleanupArchive { .. }
         | Task::ApplyExtractedVfsPatchManifest { .. } => ExecutionClass::Blocking,
@@ -311,8 +312,8 @@ pub(super) fn task_path(task: &Task) -> String {
         | Task::InspectArchiveIndex { work, .. }
         | Task::ReadArchiveControls { work, .. }
         | Task::PlanArchiveExtraction { work, .. }
-        | Task::FillArchiveVolumeGaps { work }
-        | Task::FinalizeArchiveVolumes { work }
+        | Task::FetchMissingArchiveRanges { work }
+        | Task::SaveArchiveVolumes { work }
         | Task::CommitArchive { work }
         | Task::CleanupArchive { work } => work.base_name.clone(),
         Task::ExtractArchiveShard { shard } => shard.work.base_name.clone(),

@@ -10,9 +10,9 @@ fn plan(
     entries: Vec<PlannedPatchEntry>,
     delete_paths: Vec<PathBuf>,
     deferred_paths: Vec<PathBuf>,
-) -> PatchExecutionPlan {
-    PatchExecutionPlan {
-        schema_version: PatchExecutionPlan::SCHEMA_VERSION,
+) -> PatchPlan {
+    PatchPlan {
+        schema_version: PatchPlan::SCHEMA_VERSION,
         install_root: install_root.to_path_buf(),
         stage_root: stage_root.to_path_buf(),
         vfs_base_path: PathBuf::from("Game_Data/StreamingAssets/VFS"),
@@ -51,7 +51,7 @@ fn transaction_defers_version_marker_and_preserves_final_output() {
         vec![PathBuf::from("config.ini")],
     );
 
-    execute_patch_transaction(
+    run_patch_transaction(
         &plan,
         None,
         None,

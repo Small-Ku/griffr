@@ -62,7 +62,7 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-pub fn print_patch_preflight(report: &griffr_common::runtime::PatchPreflightReport) {
+pub fn print_patch_check(report: &griffr_common::runtime::PatchCheckReport) {
     let available_install = report
         .available_install_bytes
         .map(format_bytes)
@@ -76,7 +76,7 @@ pub fn print_patch_preflight(report: &griffr_common::runtime::PatchPreflightRepo
         .map(format_bytes)
         .unwrap_or_else(|| "unknown".to_string());
     print_kv_section(
-        "Patch Preflight",
+        "Patch Check",
         &[
             (
                 "archive expanded".to_string(),

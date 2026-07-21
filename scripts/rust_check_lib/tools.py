@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Protocol
 
-from .models import ToolResult
+from .records import ToolResult
 
 
 class ToolHost(Protocol):

@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::runtime::task_pool::TaskPoolRunner;
 use griffr_common::runtime::{
-    bootstrap_persistent_vfs_with_runner, inspect_reuse_installations, ProgressLane,
-    VfsBootstrapConfig, VfsBootstrapScope,
+    inspect_reuse_installations, setup_persistent_vfs, PersistentVfsConfig, PersistentVfsFileSet,
+    ProgressLane,
 };
 
 use crate::progress::CountAndByteProgress;
@@ -13,10 +13,10 @@ use crate::ui;
 use crate::GlobalOptions;
 use griffr_common::runtime::detect_local_install;
 
-pub async fn bootstrap(
+pub async fn setup_vfs(
     path: PathBuf,
     overrides: crate::InstallTargetOverrideArgs,
-    scope: VfsBootstrapScope,
+    file_set: PersistentVfsFileSet,
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
     allow_download: bool,
@@ -40,7 +40,7 @@ pub async fn bootstrap(
     let version_info = api_client
         .get_latest_game(&install_target.api, Some(&installed_version))
         .await
-        .context("Failed to fetch version information for bootstrap")?;
+        .context("Failed to get version data for Persistent VFS setup")?;
 
     let rand_str = version_info.rand_str();
     if rand_str.is_empty() {
@@ -78,13 +78,13 @@ pub async fn bootstrap(
 
     if opts.is_dry_run() {
         opts.dry_run(format!(
-            "Would bootstrap Persistent VFS for {} (region={}, channel={}, sub-channel={}) at {} with scope={:?}",
+            "Would set up Persistent VFS for {} (region={}, channel={}, sub-channel={}) at {} with file_set={:?}",
             game_id,
             region_id,
             channel_id.channel(),
             channel_id.sub_channel(),
             local.install_path.display(),
-            scope
+            file_set
         ));
         opts.dry_run(format!(
             "Would use source StreamingAssets: {}",
@@ -92,7 +92,7 @@ pub async fn bootstrap(
         ));
         if !extra_source_streaming_assets.is_empty() {
             opts.dry_run(format!(
-                "Would use additional reuse StreamingAssets roots: {}",
+                "Would use other StreamingAssets sources: {}",
                 extra_source_streaming_assets
                     .iter()
                     .map(|p| p.display().to_string())
@@ -101,7 +101,7 @@ pub async fn bootstrap(
             ));
         }
         opts.dry_run(format!(
-            "Would ensure files in Persistent root: {}",
+            "Would check and write files in Persistent: {}",
             persistent_root.display()
         ));
         opts.dry_run(format!(
@@ -112,8 +112,8 @@ pub async fn bootstrap(
     }
 
     ui::print_phase(format!(
-        "Bootstrapping Persistent VFS ({:?}) for {} (region={}, channel={}, sub-channel={})",
-        scope,
+        "Setting up Persistent VFS ({:?}) for {} (region={}, channel={}, sub-channel={})",
+        file_set,
         game_id,
         region_id,
         channel_id.channel(),
@@ -129,19 +129,19 @@ pub async fn bootstrap(
     let mut task_pool_runner = TaskPoolRunner::new(pool_cfg)?;
 
     let progress = CountAndByteProgress::new(
-        "bootstrap.persistent-vfs",
-        "bootstrap.persistent-vfs.download",
+        "setup-vfs.persistent",
+        "setup-vfs.persistent.download",
         opts.verbose,
     );
     let progress_session = progress.start(ProgressLane::VFS_VERIFY, ProgressLane::VFS_DOWNLOAD);
-    let result = bootstrap_persistent_vfs_with_runner(
+    let result = setup_persistent_vfs(
         &api_client,
         &install_target.api,
         &version_info.version,
         &rand_str,
         &persistent_root,
-        &VfsBootstrapConfig {
-            scope,
+        &PersistentVfsConfig {
+            file_set,
             source_streaming_assets: streaming_assets_root,
             extra_source_streaming_assets,
             allow_copy_fallback: force_copy,
@@ -153,14 +153,14 @@ pub async fn bootstrap(
         progress_session.sender(),
     )
     .await
-    .context("Failed to bootstrap Persistent VFS")?;
+    .context("Failed to set up Persistent VFS")?;
     progress_session.finish();
     progress.finish();
 
     if let Some(result) = result {
         ui::print_info(format!(
-            "Bootstrap scope: {} | res_version={}",
-            result.scope_label, result.res_version
+            "File set: {} | res_version={}",
+            result.file_set, result.res_version
         ));
         ui::print_info(format!(
             "Persistent VFS: total={} reused={} downloaded={} ({}) skipped={} failed={}",
@@ -173,13 +173,15 @@ pub async fn bootstrap(
         ));
         if result.failed_files > 0 {
             anyhow::bail!(
-                "Persistent bootstrap finished with {} failed file(s)",
+                "Persistent VFS setup failed for {} file(s)",
                 result.failed_files
             );
         }
-        ui::print_success("Persistent bootstrap complete");
+        ui::print_success("Persistent VFS setup is complete");
     } else {
-        ui::print_info("Persistent VFS bootstrap skipped (VFS not supported for this target).");
+        ui::print_info(
+            "Persistent VFS setup was skipped because this target does not support VFS.",
+        );
     }
 
     Ok(())

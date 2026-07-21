@@ -9,7 +9,7 @@ use md5::{Digest, Md5};
 mod fixture;
 mod sampling;
 
-use fixture::{characterize_fixture, ArchiveFixture};
+use fixture::{check_fixture_format, ArchiveFixture};
 use sampling::{bounded_samples, deterministic_sample_indices, validate_raw_sample};
 
 const OFFICIAL_SAMPLE_MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -129,15 +129,15 @@ fn raw_split_is_not_misclassified_as_independent_archives() -> Result<()> {
             .map(|(index, path)| ((index + 1) as u64, path))
             .collect(),
     };
-    let characterized = characterize_fixture(&fixture, 8)?;
-    assert_eq!(characterized.report.classification, "raw_split");
-    assert!(characterized.raw_split.is_some());
-    assert!(characterized.report.standalone_zip_volumes.len() <= 1);
+    let checked = check_fixture_format(&fixture, 8)?;
+    assert_eq!(checked.report.format_kind, "raw_split");
+    assert!(checked.raw_split.is_some());
+    assert!(checked.report.standalone_zip_volumes.len() <= 1);
     Ok(())
 }
 
 #[test]
-fn independent_archives_are_characterized_separately() -> Result<()> {
+fn independent_archives_get_separate_format_results() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut volumes = Vec::new();
     for index in 0..3 {
@@ -153,10 +153,10 @@ fn independent_archives_are_characterized_separately() -> Result<()> {
         key: temp.path().join("independent.zip"),
         volumes,
     };
-    let characterized = characterize_fixture(&fixture, 8)?;
-    assert_eq!(characterized.report.classification, "independent_archives");
-    assert_eq!(characterized.report.standalone_zip_volumes, vec![0, 1, 2]);
-    assert!(characterized.raw_split.is_none());
+    let checked = check_fixture_format(&fixture, 8)?;
+    assert_eq!(checked.report.format_kind, "independent_archives");
+    assert_eq!(checked.report.standalone_zip_volumes, vec![0, 1, 2]);
+    assert!(checked.raw_split.is_none());
     Ok(())
 }
 
@@ -201,8 +201,8 @@ fn central_directory_may_cross_a_raw_split_boundary() -> Result<()> {
             .len(),
         2
     );
-    let inspection = extractor.inspect_archive_index(&split_directory)?;
-    assert_eq!(inspection.archive.len(), entries.len());
+    let archive_index = extractor.read_archive_index(&split_directory)?;
+    assert_eq!(archive_index.archive.len(), entries.len());
     Ok(())
 }
 
@@ -227,11 +227,11 @@ fn declared_entry_volumes_are_sufficient_for_isolated_extraction() -> Result<()>
             .map(|(index, path)| ((index + 1) as u64, path))
             .collect(),
     };
-    let characterized = characterize_fixture(&fixture, 8)?;
-    let raw_fixture = characterized
+    let checked = check_fixture_format(&fixture, 8)?;
+    let raw_fixture = checked
         .raw_split
         .ok_or_else(|| Error::Extraction("fixture was not raw split".to_string()))?;
-    let samples = deterministic_sample_indices(&raw_fixture.inspection, &raw_fixture.layout, 8);
+    let samples = deterministic_sample_indices(&raw_fixture.archive_index, &raw_fixture.layout, 8);
     for (position, index) in samples.into_iter().enumerate() {
         validate_raw_sample(&raw_fixture, index, position < 2)?;
     }
@@ -240,7 +240,7 @@ fn declared_entry_volumes_are_sufficient_for_isolated_extraction() -> Result<()>
 
 #[test]
 #[ignore = "downloads a bounded sample from the current official full package"]
-fn characterize_official_archive_sample() -> Result<()> {
+fn check_official_archive_sample() -> Result<()> {
     compio::runtime::Runtime::new()
         .map_err(|error| Error::Extraction(format!("Failed to create compio runtime: {error}")))?
         .block_on(async {
@@ -288,7 +288,7 @@ fn characterize_official_archive_sample() -> Result<()> {
             let extractor = MultiVolumeExtractor::from_layout(layout.clone());
             let mut downloaded = 0u64;
 
-            // Characterize every official part with the same remote range
+            // Check every official part with the same remote range
             // source used by production. Multiple per-volume EOCD records mean
             // the provider changed from one raw byte-split ZIP to independent
             // ZIP archives, which the production installer intentionally does
@@ -339,7 +339,7 @@ fn characterize_official_archive_sample() -> Result<()> {
                 )
                 .await?,
             );
-            let inspection = extractor.inspect_archive_index(&directory)?;
+            let archive_index = extractor.read_archive_index(&directory)?;
 
             let expected_entries = client
                 .fetch_game_files(&package.file_path, package.game_files_md5.as_deref())
@@ -353,7 +353,7 @@ fn characterize_official_archive_sample() -> Result<()> {
                     )
                 })
                 .collect::<std::collections::BTreeMap<_, _>>();
-            let archive_paths = inspection
+            let archive_paths = archive_index
                 .entries
                 .keys()
                 .map(|path| path.to_ascii_lowercase())
@@ -371,14 +371,14 @@ fn characterize_official_archive_sample() -> Result<()> {
             }
 
             let mut samples = bounded_samples(
-                &inspection,
+                &archive_index,
                 &layout,
                 OFFICIAL_SAMPLE_COUNT * 4,
                 OFFICIAL_SAMPLE_MAX_BYTES,
             )
             .into_iter()
             .filter(|index| {
-                inspection
+                archive_index
                     .archive
                     .name_for_index(*index)
                     .and_then(|name| normalized_archive_name(name).ok())
@@ -395,7 +395,7 @@ fn characterize_official_archive_sample() -> Result<()> {
             downloaded = downloaded.saturating_add(
                 ensure_remote_ranges(
                     &layout,
-                    MultiVolumeExtractor::source_ranges_for_indices(&inspection, &samples),
+                    MultiVolumeExtractor::source_ranges_for_indices(&archive_index, &samples),
                 )
                 .await?,
             );
@@ -404,7 +404,7 @@ fn characterize_official_archive_sample() -> Result<()> {
             extractor.extract_entries_with_progress(
                 output.path(),
                 None,
-                &inspection,
+                &archive_index,
                 &samples,
                 &expected,
                 256 * 1024,

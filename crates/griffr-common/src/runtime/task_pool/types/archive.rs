@@ -1,7 +1,7 @@
 use crate::api::types::GameFileEntry;
-use crate::download::extractor::{ArchiveInspection, MultiVolumeLayout};
+use crate::download::extractor::{ArchiveIndex, MultiVolumeLayout};
 use crate::error::{Error, Result};
-use crate::runtime::{PatchApplyOptions, PatchExecutionPlan, PatchPreflightReport};
+use crate::runtime::{PatchApplyOptions, PatchCheckReport, PatchPlan};
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use super::tasks::{ArchivePart, ArchiveRetention};
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedArchive {
     pub(crate) staging_dir: PathBuf,
-    pub(crate) patch_plan: Option<(PatchExecutionPlan, PatchPreflightReport)>,
+    pub(crate) patch_plan: Option<(PatchPlan, PatchCheckReport)>,
 }
 
 #[doc(hidden)]
@@ -258,7 +258,7 @@ impl ArchiveRangeReleaseState {
 #[derive(Debug, Clone)]
 pub struct ArchiveShardTask {
     pub(crate) work: Arc<ArchiveWork>,
-    pub(crate) inspection: Arc<ArchiveInspection>,
+    pub(crate) archive_index: Arc<ArchiveIndex>,
     pub(crate) staging_dir: PathBuf,
     pub(crate) entries: Vec<usize>,
     pub(crate) volume_indices: Vec<usize>,

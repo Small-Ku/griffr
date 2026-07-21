@@ -1,3 +1,3 @@
-mod workflow;
+mod run;
 
-pub use workflow::install;
+pub use run::install;

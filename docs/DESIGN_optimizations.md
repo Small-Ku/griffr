@@ -18,7 +18,7 @@ and packaging metadata.
   doomed hardlink operation.
 - Unknown identity keeps the hardlink-first fallback.
 
-## 3. Lazy Range ZIP Materialization
+## 3. Write ZIP Volumes from Cached Ranges
 
 - EOCD, ZIP64 records, and the central directory are fetched before payload data.
 - `MultiVolumeLayout` presents complete local parts and cached HTTP ranges through
@@ -38,7 +38,7 @@ and packaging metadata.
 
 ## 4. Dependency-Wave Peak-Space Model
 
-- Preflight and execution use the same topological wave builder.
+- The archive check and patch run use the same dependency-wave builder.
 - A signed per-physical-volume ledger models extraction, parallel wave outputs,
   cross-volume copies, external-work overlap, safe early deletes, consumed
   payload removal, and last-consumer base release.

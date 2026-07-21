@@ -1,7 +1,7 @@
 use syn::parse::{Parse, ParseStream};
 use syn::{braced, parenthesized, Expr, Ident, LitFloat, LitInt, Path, Result, Token};
 
-use crate::model::{Clip, Direction, NodeInput, NodeProps, TreeInput};
+use crate::tree::{Clip, Direction, NodeInput, NodeProps, TreeInput};
 
 impl Parse for NodeInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {

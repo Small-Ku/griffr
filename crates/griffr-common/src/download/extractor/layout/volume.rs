@@ -2,7 +2,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::super::inspection::EOCD_MAX_SEARCH;
+use super::super::archive_index::EOCD_MAX_SEARCH;
 use super::super::range::ArchiveRangeRequest;
 use crate::error::{Error, Result};
 

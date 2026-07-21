@@ -10,8 +10,7 @@ use crate::GlobalOptions;
 use griffr_common::runtime::detect_local_install;
 
 pub async fn launch(path: PathBuf, force: bool, opts: GlobalOptions) -> Result<()> {
-    ensure_admin()
-        .map_err(|e| anyhow::anyhow!("Failed to obtain administrator privileges: {}", e))?;
+    ensure_admin().map_err(|e| anyhow::anyhow!("Failed to get administrator rights: {}", e))?;
 
     let local = detect_local_install(&path).await?;
     let game_id = local.require_known_game()?;
@@ -51,8 +50,8 @@ pub async fn launch(path: PathBuf, force: bool, opts: GlobalOptions) -> Result<(
                 local.install_path.display()
             );
         }
-        ui::print_info("Existing game process detected; terminating due to --force");
-        launcher.kill_game().await?;
+        ui::print_info("A game process is running; stop it because --force is set");
+        launcher.stop_game().await?;
     }
 
     let _child = launcher.launch().await?;

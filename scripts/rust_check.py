@@ -58,7 +58,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--exclude",
         action="append",
         default=[],
-        help="Additional glob to exclude; repeatable",
+        help="Other glob to exclude; repeatable",
     )
     parser.add_argument(
         "--max-width",

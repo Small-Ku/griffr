@@ -371,7 +371,7 @@ fn validate_config(config: &TaskPoolConfig) -> Result<()> {
         ("blocking_slots", config.blocking_slots),
         ("blocking_pool_limit", config.blocking_pool_limit),
         ("extract_slots", config.extract_slots),
-        ("reuse_pipeline_window", config.reuse_pipeline_window),
+        ("reuse_queue_limit", config.reuse_queue_limit),
     ] {
         if value == 0 {
             return Err(Error::TaskPool(format!("{name} must be non-zero")));

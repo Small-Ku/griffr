@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
-/// Indeterminate progress for long operations without a cheap total.
+/// Progress for long tasks that do not have a low-cost total.
 pub struct ActivityProgress {
     bar: ProgressBar,
     label: String,

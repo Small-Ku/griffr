@@ -55,7 +55,7 @@ pub(crate) async fn run() -> Result<()> {
         volume_metadata_limit: cli.volume_metadata_limit,
         volume_streaming_pressure_limit: cli.volume_streaming_pressure_limit,
         volume_streaming_mode: cli.volume_streaming_mode.into(),
-        reuse_pipeline_window: cli.reuse_pipeline_window,
+        reuse_queue_limit: cli.reuse_queue_limit,
         output: cli.output,
     };
 
@@ -262,10 +262,10 @@ pub(crate) async fn run() -> Result<()> {
             )
             .await?;
         }
-        Commands::Bootstrap {
+        Commands::SetupVfs {
             path,
             overrides,
-            scope,
+            file_set,
             reuse,
             allow_download,
             relink_reuse,
@@ -277,13 +277,13 @@ pub(crate) async fn run() -> Result<()> {
                 force_copy,
             } = reuse;
             opts.verbose(format!(
-                "Bootstrap path={:?}, scope={:?}, reuse_from={:?}, force_copy={}, allow_download={}, relink_reuse={}, no_prune={}",
-                path, scope, reuse_from, force_copy, allow_download, relink_reuse, no_prune
+                "Setup VFS path={:?}, file_set={:?}, reuse_from={:?}, force_copy={}, allow_download={}, relink_reuse={}, no_prune={}",
+                path, file_set, reuse_from, force_copy, allow_download, relink_reuse, no_prune
             ));
-            commands::bootstrap(
+            commands::setup_vfs(
                 path,
                 overrides,
-                scope,
+                file_set,
                 reuse_from,
                 force_copy,
                 allow_download,

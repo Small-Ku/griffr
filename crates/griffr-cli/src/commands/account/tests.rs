@@ -1,4 +1,4 @@
-use super::operations::*;
+use super::bundle::*;
 use griffr_common::config::RegionId;
 use griffr_common::runtime::copy_dir_recursive;
 use std::path::PathBuf;

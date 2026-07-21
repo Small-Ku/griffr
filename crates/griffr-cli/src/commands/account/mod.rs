@@ -1,5 +1,5 @@
-mod operations;
+mod bundle;
 #[cfg(test)]
 mod tests;
 
-pub use operations::{activate, capture};
+pub use bundle::{activate, capture};

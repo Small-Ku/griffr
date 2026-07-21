@@ -17,15 +17,15 @@ fn test_multi_volume_extractor() -> Result<()> {
 
     let volumes = split_archive(&zip_path, 5)?;
     let extractor = MultiVolumeExtractor::new(volumes)?;
-    let inspection = extractor.inspect_patch_payload(None)?;
-    assert_eq!(inspection.archive.len(), 1);
+    let archive_index = extractor.read_patch_payload(None)?;
+    assert_eq!(archive_index.archive.len(), 1);
     let output_dir = temp_dir.path().join("output");
     std::fs::create_dir(&output_dir)?;
     extract_to_with_progress(
         &extractor,
         &output_dir,
         None,
-        &inspection,
+        &archive_index,
         2,
         64,
         None::<fn(u64, u64)>,
@@ -72,9 +72,9 @@ fn directory_discovery_only_opens_tail_range() -> Result<()> {
     assert_eq!(directory.entry_count, 1);
     assert!(directory.central_directory.start > 32_000);
 
-    let inspection = extractor.inspect_archive_index(&directory)?;
+    let archive_index = extractor.read_archive_index(&directory)?;
     std::fs::write(first, first_bytes)?;
-    let shards = MultiVolumeExtractor::extraction_shards(&inspection, 4);
+    let shards = MultiVolumeExtractor::extraction_shards(&archive_index, 4);
     assert_eq!(shards.len(), 1);
     assert_eq!(shards[0].volume_indices.first(), Some(&0));
     assert!(shards[0].volume_indices.len() > 1);
@@ -118,7 +118,7 @@ fn directory_discovery_reports_unavailable_tail_range() -> Result<()> {
 #[test]
 fn extraction_shard_does_not_open_unrelated_volumes() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
-    let zip_path = temp_dir.path().join("pipelined.zip");
+    let zip_path = temp_dir.path().join("sharded.zip");
     let file = std::fs::File::create(&zip_path)?;
     let mut zip = zip::ZipWriter::new(file);
     let options =
@@ -131,8 +131,8 @@ fn extraction_shard_does_not_open_unrelated_volumes() -> Result<()> {
 
     let volumes = split_archive(&zip_path, 24_000)?;
     let extractor = MultiVolumeExtractor::new(volumes.clone())?;
-    let inspection = extractor.inspect_patch_payload(None)?;
-    let shard = MultiVolumeExtractor::extraction_shards(&inspection, 4)
+    let archive_index = extractor.read_patch_payload(None)?;
+    let shard = MultiVolumeExtractor::extraction_shards(&archive_index, 4)
         .into_iter()
         .find(|shard| (0..volumes.len()).any(|index| !shard.volume_indices.contains(&index)))
         .ok_or_else(|| Error::Extraction("test archive produced no range-local shard".into()))?;
@@ -146,7 +146,7 @@ fn extraction_shard_does_not_open_unrelated_volumes() -> Result<()> {
     extractor.extract_entries_with_progress(
         &output_dir,
         None,
-        &inspection,
+        &archive_index,
         &shard.entries,
         &std::collections::BTreeMap::new(),
         64 * 1024,
@@ -177,22 +177,23 @@ fn extraction_shards_preserve_release_frontiers_when_budget_allows() -> Result<(
 
     let volumes = split_archive(&zip_path, 24_000)?;
     let extractor = MultiVolumeExtractor::new(volumes)?;
-    let inspection = extractor.inspect_patch_payload(None)?;
-    let expected_frontiers = inspection
+    let archive_index = extractor.read_patch_payload(None)?;
+    let expected_frontiers = archive_index
         .entry_sources
         .iter()
         .map(|source| source.volume_indices.last().copied().unwrap_or(0))
         .collect::<std::collections::BTreeSet<_>>();
     assert!(expected_frontiers.len() > 1);
 
-    let shards = MultiVolumeExtractor::extraction_shards(&inspection, inspection.entry_sizes.len());
+    let shards =
+        MultiVolumeExtractor::extraction_shards(&archive_index, archive_index.entry_sizes.len());
     let mut actual_frontiers = std::collections::BTreeSet::new();
     for shard in shards {
         let frontiers = shard
             .entries
             .iter()
             .map(|index| {
-                inspection.entry_sources[*index]
+                archive_index.entry_sources[*index]
                     .volume_indices
                     .last()
                     .copied()
@@ -225,10 +226,10 @@ fn extraction_shards_bound_compressed_source_chunks() -> Result<()> {
     zip.finish()?;
 
     let extractor = MultiVolumeExtractor::new(vec![zip_path])?;
-    let inspection = extractor.inspect_patch_payload(None)?;
+    let archive_index = extractor.read_patch_payload(None)?;
     let source_limit = 70_000;
     let shards =
-        MultiVolumeExtractor::extraction_shards_with_source_limit(&inspection, 1, source_limit);
+        MultiVolumeExtractor::extraction_shards_with_source_limit(&archive_index, 1, source_limit);
     assert!(
         shards.len() > 1,
         "one release frontier remained one large range barrier"
@@ -238,7 +239,7 @@ fn extraction_shards_bound_compressed_source_chunks() -> Result<()> {
             .entries
             .iter()
             .map(|index| {
-                let range = &inspection.entry_sources[*index].range;
+                let range = &archive_index.entry_sources[*index].range;
                 range.end - range.start
             })
             .sum::<u64>();
@@ -266,15 +267,15 @@ fn extraction_shards_never_merge_distinct_release_frontiers() -> Result<()> {
 
     let volumes = split_archive(&zip_path, 24_000)?;
     let extractor = MultiVolumeExtractor::new(volumes)?;
-    let inspection = extractor.inspect_patch_payload(None)?;
-    let expected_frontiers = inspection
+    let archive_index = extractor.read_patch_payload(None)?;
+    let expected_frontiers = archive_index
         .entry_sources
         .iter()
         .map(|source| source.volume_indices.last().copied().unwrap_or(0))
         .collect::<std::collections::BTreeSet<_>>();
     assert!(expected_frontiers.len() > 2);
 
-    let shards = MultiVolumeExtractor::extraction_shards(&inspection, 2);
+    let shards = MultiVolumeExtractor::extraction_shards(&archive_index, 2);
     let actual_frontiers = shards
         .iter()
         .map(|shard| {
@@ -282,7 +283,7 @@ fn extraction_shards_never_merge_distinct_release_frontiers() -> Result<()> {
                 .entries
                 .iter()
                 .map(|index| {
-                    inspection.entry_sources[*index]
+                    archive_index.entry_sources[*index]
                         .volume_indices
                         .last()
                         .copied()
@@ -340,8 +341,8 @@ fn extraction_checks_manifest_md5_and_removes_bad_output() -> Result<()> {
     zip.finish()?;
 
     let extractor = MultiVolumeExtractor::new(vec![zip_path])?;
-    let inspection = extractor.inspect_patch_payload(None)?;
-    let entries = (0..inspection.archive.len()).collect::<Vec<_>>();
+    let archive_index = extractor.read_patch_payload(None)?;
+    let entries = (0..archive_index.archive.len()).collect::<Vec<_>>();
     let expected_md5 = crate::to_hex(&Md5::digest(payload));
     let expected = std::collections::BTreeMap::from([(
         "data/payload.bin".to_string(),
@@ -357,7 +358,7 @@ fn extraction_checks_manifest_md5_and_removes_bad_output() -> Result<()> {
     extractor.extract_entries_with_progress(
         &valid_output,
         None,
-        &inspection,
+        &archive_index,
         &entries,
         &expected,
         64 * 1024,
@@ -379,7 +380,7 @@ fn extraction_checks_manifest_md5_and_removes_bad_output() -> Result<()> {
         .extract_entries_with_progress(
             &invalid_output,
             None,
-            &inspection,
+            &archive_index,
             &entries,
             &invalid_expected,
             64 * 1024,

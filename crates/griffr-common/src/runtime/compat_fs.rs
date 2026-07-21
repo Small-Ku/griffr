@@ -153,7 +153,7 @@ pub async fn copy_dir_recursive(
         })?;
 
     // compio 0.19 has no async directory iterator. Keep only the namespace walk
-    // on the blocking pool, then perform the potentially large file transfers
+    // on the blocking pool, then run the large file transfers
     // through positional compio I/O.
     let plan_source = source.clone();
     let plan_target = target.clone();

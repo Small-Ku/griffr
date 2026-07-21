@@ -1,5 +1,5 @@
-mod bootstrap;
+mod setup;
 mod sync;
 
-pub use bootstrap::*;
+pub use setup::*;
 pub use sync::*;

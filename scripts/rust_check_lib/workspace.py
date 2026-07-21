@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol
 
-from .models import CrateTarget, Dependency, Package
+from .records import CrateTarget, Dependency, Package
 
 
 class WorkspaceHost(Protocol):

@@ -62,7 +62,7 @@ pub async fn plan_vfs_tasks(
         .await
     {
         Ok(res) => res,
-        Err(ApiError::ResourcePipelineUnavailable(_)) => return Ok(VfsPlanOutcome::Unsupported),
+        Err(ApiError::ResourceApiUnavailable(_)) => return Ok(VfsPlanOutcome::Unsupported),
         Err(err) => return Err(err.into()),
     };
 
@@ -241,7 +241,7 @@ pub async fn get_vfs_resource_info(
         .await
     {
         Ok(res) => res,
-        Err(ApiError::ResourcePipelineUnavailable(_)) => return Ok(None),
+        Err(ApiError::ResourceApiUnavailable(_)) => return Ok(None),
         Err(err) => return Err(err.into()),
     };
 
@@ -267,7 +267,7 @@ pub async fn get_vfs_resource_info(
 
 #[cfg(test)]
 mod tests {
-    use super::super::bootstrap::{should_include_bootstrap_group, VfsBootstrapScope};
+    use super::super::setup::{file_set_includes_group, PersistentVfsFileSet};
     use super::*;
 
     #[test]
@@ -285,21 +285,21 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_scope_includes_expected_groups() {
-        assert!(should_include_bootstrap_group(
-            VfsBootstrapScope::Initial,
+    fn persistent_vfs_file_set_includes_expected_groups() {
+        assert!(file_set_includes_group(
+            PersistentVfsFileSet::Initial,
             "initial"
         ));
-        assert!(!should_include_bootstrap_group(
-            VfsBootstrapScope::Initial,
+        assert!(!file_set_includes_group(
+            PersistentVfsFileSet::Initial,
             "main"
         ));
-        assert!(should_include_bootstrap_group(
-            VfsBootstrapScope::Complete,
+        assert!(file_set_includes_group(
+            PersistentVfsFileSet::InitialAndMain,
             "initial"
         ));
-        assert!(should_include_bootstrap_group(
-            VfsBootstrapScope::Complete,
+        assert!(file_set_includes_group(
+            PersistentVfsFileSet::InitialAndMain,
             "main"
         ));
     }

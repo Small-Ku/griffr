@@ -3,33 +3,32 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::runtime::patch_transaction::{
-    read_patch_execution_plan, write_patch_execution_plan, PatchExecutionPlan,
-    PatchPreflightReport, PlannedPatchSource,
+    read_patch_plan, write_patch_plan, PatchCheckReport, PatchPlan, PlannedPatchSource,
 };
 use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 
 mod filesystem;
-mod operations;
+mod steps;
 
 use filesystem::{commit_top_level_files, prepare_external_vfs_root};
 #[cfg(test)]
-use operations::ordered_entries;
-use operations::{
+use steps::ordered_entries;
+use steps::{
     apply_planned_entry, apply_remaining_deletes, cleanup_staging, cleanup_transaction,
     commit_deferred_files, delete_unreferenced_paths_before_patch, entry_waves, final_output_paths,
     release_base_if_unused,
 };
 
-pub(crate) fn execute_patch_transaction(
-    plan: &PatchExecutionPlan,
-    _report: Option<&PatchPreflightReport>,
+pub(crate) fn run_patch_transaction(
+    plan: &PatchPlan,
+    _report: Option<&PatchCheckReport>,
     commit_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
     mut patch_callback: Option<&mut dyn FnMut(&str, usize, usize)>,
     delete_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
     verification_cache: &VerifiedArtifactCache,
 ) -> Result<()> {
     plan.validate()?;
-    write_patch_execution_plan(plan)?;
+    write_patch_plan(plan)?;
     prepare_external_vfs_root(plan)?;
     commit_top_level_files(plan, commit_callback)?;
     delete_unreferenced_paths_before_patch(plan)?;
@@ -84,9 +83,9 @@ pub(crate) fn resume_patch_transaction(
     patch_callback: Option<&mut dyn FnMut(&str, usize, usize)>,
     delete_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
 ) -> Result<()> {
-    let plan = read_patch_execution_plan(install_root)?;
+    let plan = read_patch_plan(install_root)?;
     let verification_cache = VerifiedArtifactCache::default();
-    execute_patch_transaction(
+    run_patch_transaction(
         &plan,
         None,
         commit_callback,

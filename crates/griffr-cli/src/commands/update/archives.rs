@@ -11,7 +11,7 @@ use griffr_common::runtime::task_pool::{
 };
 
 use super::*;
-use crate::progress::ArchivePipelineProgress;
+use crate::progress::ArchiveProgress;
 use crate::ui;
 use crate::GlobalOptions;
 use griffr_common::runtime::{PatchApplyOptions, ProgressLane};
@@ -81,7 +81,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
             )?;
         }
 
-        let progress = ArchivePipelineProgress::new(&format!("update.{label}.apply"), opts.verbose);
+        let progress = ArchiveProgress::new(&format!("update.{label}.apply"), opts.verbose);
         let verify_lane = ProgressLane::ARCHIVE_VERIFY;
         let download_lane = ProgressLane::ARCHIVE_DOWNLOAD;
         let extract_lane = ProgressLane::ARCHIVE_EXTRACT;
@@ -107,8 +107,8 @@ pub(super) async fn download_and_extract_archives_from_dir(
         progress.finish();
 
         for outcome in &result.outcomes {
-            if let TaskOutcome::ArchivePreflight { report, .. } = outcome {
-                ui::print_patch_preflight(report);
+            if let TaskOutcome::ArchiveCheck { report, .. } = outcome {
+                ui::print_patch_check(report);
             }
         }
 
@@ -155,7 +155,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
         });
     }
 
-    let progress = ArchivePipelineProgress::new(&format!("update.{label}"), opts.verbose);
+    let progress = ArchiveProgress::new(&format!("update.{label}"), opts.verbose);
     let verify_lane = ProgressLane::ARCHIVE_VERIFY;
     let download_lane = ProgressLane::ARCHIVE_DOWNLOAD;
     let extract_lane = ProgressLane::ARCHIVE_EXTRACT;
@@ -182,8 +182,8 @@ pub(super) async fn download_and_extract_archives_from_dir(
     progress.finish();
 
     for outcome in &result.outcomes {
-        if let TaskOutcome::ArchivePreflight { report, .. } = outcome {
-            ui::print_patch_preflight(report);
+        if let TaskOutcome::ArchiveCheck { report, .. } = outcome {
+            ui::print_patch_check(report);
         }
     }
 
@@ -202,7 +202,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
     }
     if !failures.is_empty() {
         anyhow::bail!(
-            "Update archive pipeline failed for {} item(s): {}",
+            "Update archive work failed for {} item(s): {}",
             failures.len(),
             failures.join(", ")
         );

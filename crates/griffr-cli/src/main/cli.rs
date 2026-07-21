@@ -2,11 +2,11 @@ use clap::builder::TypedValueParser;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use griffr_common::api::protocol::DEFAULT_LANGUAGE;
 use griffr_common::runtime::task_pool::{
-    DEFAULT_PROGRESS_BUFFER_BYTES, DEFAULT_REUSE_PIPELINE_WINDOW, DEFAULT_VOLUME_METADATA_LIMIT,
+    DEFAULT_PROGRESS_BUFFER_BYTES, DEFAULT_REUSE_QUEUE_LIMIT, DEFAULT_VOLUME_METADATA_LIMIT,
     DEFAULT_VOLUME_READ_LIMIT, DEFAULT_VOLUME_STREAMING_MODE,
     DEFAULT_VOLUME_STREAMING_PRESSURE_LIMIT, DEFAULT_VOLUME_WRITE_LIMIT,
 };
-use griffr_common::runtime::VfsBootstrapScope;
+use griffr_common::runtime::PersistentVfsFileSet;
 
 use crate::debug_cli::{AccountCommands, DebugCommands, PredownloadCommands};
 
@@ -16,7 +16,7 @@ use crate::debug_cli::{AccountCommands, DebugCommands, PredownloadCommands};
 #[command(about = "A CLI launcher for Hypergryph games (Arknights / Endfield)")]
 #[command(version)]
 pub(crate) struct Cli {
-    /// Perform a dry run without making changes
+    /// Show planned changes and do not change files
     #[arg(
         long,
         global = true,
@@ -95,10 +95,10 @@ pub(crate) struct Cli {
     #[arg(
         long,
         global = true,
-        default_value_t = DEFAULT_REUSE_PIPELINE_WINDOW,
+        default_value_t = DEFAULT_REUSE_QUEUE_LIMIT,
         value_parser = clap::value_parser!(u64).range(1..).map(|v| v as usize)
     )]
-    pub(crate) reuse_pipeline_window: usize,
+    pub(crate) reuse_queue_limit: usize,
 
     #[command(subcommand)]
     pub(crate) command: Commands,
@@ -348,7 +348,7 @@ pub(crate) enum Commands {
         #[arg(long)]
         path: std::path::PathBuf,
 
-        /// Kill existing process if running
+        /// Stop the existing process if it is running
         #[arg(short, long)]
         force: bool,
     },
@@ -383,17 +383,17 @@ pub(crate) enum Commands {
         #[arg(long, requires = "game", requires = "region")]
         skip_local_detect: bool,
     },
-    /// Bootstrap Persistent VFS state from StreamingAssets with launcher-parity scopes
-    Bootstrap {
+    /// Set up Persistent VFS files from StreamingAssets
+    SetupVfs {
         #[command(flatten)]
         path: PathArg,
 
         #[command(flatten)]
         overrides: InstallTargetOverrideArgs,
 
-        /// Bootstrap scope for ensuring Persistent files
-        #[arg(long, default_value_t = VfsBootstrapScope::Initial)]
-        scope: VfsBootstrapScope,
+        /// File set to write in Persistent
+        #[arg(long, default_value_t = PersistentVfsFileSet::Initial)]
+        file_set: PersistentVfsFileSet,
 
         #[command(flatten)]
         reuse: ReuseSourcesArg,
@@ -406,7 +406,7 @@ pub(crate) enum Commands {
         #[arg(long)]
         relink_reuse: bool,
 
-        /// Keep files outside the selected bootstrap scope (do not prune Persistent/VFS extras)
+        /// Keep Persistent/VFS files that are not in the selected file set
         #[arg(long)]
         no_prune: bool,
     },

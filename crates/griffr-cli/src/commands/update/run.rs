@@ -26,7 +26,7 @@ pub(super) async fn update_internal(
 ) -> Result<()> {
     let mut local = detect_local_install(&path).await?;
     let mut resumed_pending_transaction = false;
-    match griffr_common::runtime::classify_patch_recovery(&local.install_path, None)? {
+    match griffr_common::runtime::get_patch_recovery_state(&local.install_path, None)? {
         griffr_common::runtime::PatchRecoveryState::ExtractedReady
         | griffr_common::runtime::PatchRecoveryState::DeletePending => {
             if opts.is_dry_run() {
@@ -324,7 +324,7 @@ pub(super) async fn update_internal(
     let extra_tasks = if !opts.skip_vfs {
         ui::print_phase("Verifying update + syncing VFS resources (single DAG batch)");
         ui::print_info(
-            "VFS scope: StreamingAssets index-full (Persistent bootstrap is a separate step).",
+            "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
         );
         let streaming_assets =
             streaming_assets_path(&local.install_path.join(install_target.data_root.clone()));

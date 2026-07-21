@@ -8,7 +8,7 @@ from typing import Any, Iterable, Protocol
 from tree_sitter import Node
 
 from .cfg import CfgExpr
-from .models import ModuleUnit, SourceFile
+from .records import ModuleUnit, SourceFile
 from .parsing import walk_named
 
 
@@ -116,7 +116,9 @@ _TRIVIAL_CALL_ADAPTERS = {
 }
 
 _PATH_TYPE = re.compile(r"(?:^|::)(?:Path|PathBuf)\b")
-_PATH_NAME = re.compile(r"(?:^|_)(?:path|root|dir|directory|dest|destination|source|target)$")
+_PATH_NAME = re.compile(
+    r"(?:^|_)(?:path|root|dir|directory|dest|destination|source|target)$"
+)
 
 
 def run(host: AsyncFsHost) -> None:
@@ -168,7 +170,9 @@ def _excluded_test_module(host: AsyncFsHost, module: ModuleUnit) -> bool:
     )
 
 
-def _collect_sync_fs_helpers(host: AsyncFsHost, target: Any) -> dict[str, list[SyncFsHelper]]:
+def _collect_sync_fs_helpers(
+    host: AsyncFsHost, target: Any
+) -> dict[str, list[SyncFsHelper]]:
     helpers: dict[str, list[SyncFsHelper]] = {}
     for module in target.iter_modules():
         if _excluded_test_module(host, module):
@@ -204,7 +208,9 @@ def _sync_operations_in_function(module: ModuleUnit, function: Node) -> list[str
     functions = {**imported_functions, **local_functions}
     operations: list[str] = []
     for node in _walk_scope(function, skip_nested_functions=True):
-        if node.type != "call_expression" or _inside_blocking_boundary(source, node, function):
+        if node.type != "call_expression" or _inside_blocking_boundary(
+            source, node, function
+        ):
             continue
         operation = _std_fs_call_operation(
             source,
@@ -233,7 +239,11 @@ def _called_sync_fs_helper(
     if not candidates:
         return None
     unique = {
-        (candidate.qualified_name, candidate.source.path, candidate.node.start_byte): candidate
+        (
+            candidate.qualified_name,
+            candidate.source.path,
+            candidate.node.start_byte,
+        ): candidate
         for candidate in candidates
     }
     candidates = list(unique.values())
@@ -260,16 +270,22 @@ def _direct_call_path(source: SourceFile, call: Node) -> tuple[str, ...] | None:
         function = function.child_by_field_name("function") or (
             function.named_children[0] if function.named_children else function
         )
-    if function.type not in {"identifier", "scoped_identifier", "scoped_type_identifier"}:
+    if function.type not in {
+        "identifier",
+        "scoped_identifier",
+        "scoped_type_identifier",
+    }:
         return None
-    return tuple(
-        part for part in re.split(r"\s*::\s*", source.text(function)) if part
-    )
+    return tuple(part for part in re.split(r"\s*::\s*", source.text(function)) if part)
 
 
 def _function_is_async(source: SourceFile, function: Node) -> bool:
     modifiers = next(
-        (child for child in function.named_children if child.type == "function_modifiers"),
+        (
+            child
+            for child in function.named_children
+            if child.type == "function_modifiers"
+        ),
         None,
     )
     return modifiers is not None and "async" in source.text(modifiers).split()
@@ -293,7 +309,11 @@ def _walk_scope(root: Node, *, skip_nested_functions: bool) -> Iterable[Node]:
         yield node
         children = list(node.named_children)
         for child in reversed(children):
-            if skip_nested_functions and child != root and child.type == "function_item":
+            if (
+                skip_nested_functions
+                and child != root
+                and child.type == "function_item"
+            ):
                 continue
             stack.append(child)
 
@@ -327,7 +347,9 @@ def _check_async_contexts(
         api_text = ""
         if operation is not None:
             function = node.child_by_field_name("function")
-            api_text = source.text(function) if function is not None else source.text(node)
+            api_text = (
+                source.text(function) if function is not None else source.text(node)
+            )
         else:
             path_method = _path_method_operation(source, node, owner)
             if path_method is None:
@@ -344,11 +366,14 @@ def _check_async_contexts(
                     evidence=(
                         f"async context: {_owner_label(source, owner)}",
                         f"resolved helper: {'::'.join(helper.qualified_name)}",
-                        *(f"helper filesystem operation: {item}" for item in helper.operations[:4]),
+                        *(
+                            f"helper filesystem operation: {item}"
+                            for item in helper.operations[:4]
+                        ),
                     ),
                     hint=(
                         "Make the helper async and use compio::fs, or invoke it inside an explicit "
-                        "spawn_blocking/dispatch_blocking boundary if it performs an unsupported namespace walk."
+                        "spawn_blocking/dispatch_blocking boundary if it runs an unsupported namespace walk."
                     ),
                 )
                 continue
@@ -360,7 +385,9 @@ def _check_async_contexts(
             f"Synchronous filesystem access {api_text!r} runs directly in async code",
             source=source,
             node=node,
-            confidence="definite" if operation in _COMPIO_CAPABLE_OPERATIONS else "probable",
+            confidence="definite"
+            if operation in _COMPIO_CAPABLE_OPERATIONS
+            else "probable",
             evidence=(
                 f"async context: {_owner_label(source, owner)}",
                 f"resolved filesystem operation: {operation}",
@@ -378,7 +405,9 @@ def _check_redundant_blocking_wrappers(host: AsyncFsHost, module: ModuleUnit) ->
     module_aliases, imported_functions, glob_import = _std_fs_imports(module.imports)
 
     for call in walk_named(module.body, skip_inline_modules=True):
-        if call.type != "call_expression" or not _is_blocking_boundary_call(source, call):
+        if call.type != "call_expression" or not _is_blocking_boundary_call(
+            source, call
+        ):
             continue
         closure = _closure_argument(call)
         if closure is None:
@@ -405,14 +434,20 @@ def _check_redundant_blocking_wrappers(host: AsyncFsHost, module: ModuleUnit) ->
             if operation is not None:
                 function = nested.child_by_field_name("function")
                 api_text = (
-                    source.text(function) if function is not None else source.text(nested)
+                    source.text(function)
+                    if function is not None
+                    else source.text(nested)
                 )
             else:
                 path_method = _path_method_operation(source, nested, closure)
                 if path_method is None:
                     function = nested.child_by_field_name("function")
-                    function_text = source.text(function) if function is not None else ""
-                    terminal = re.sub(r"\s+", "", function_text).split("::")[-1].split(".")[-1]
+                    function_text = (
+                        source.text(function) if function is not None else ""
+                    )
+                    terminal = (
+                        re.sub(r"\s+", "", function_text).split("::")[-1].split(".")[-1]
+                    )
                     if terminal not in _TRIVIAL_CALL_ADAPTERS:
                         has_other_calls = True
                     continue
@@ -421,15 +456,20 @@ def _check_redundant_blocking_wrappers(host: AsyncFsHost, module: ModuleUnit) ->
 
         if not operations or has_other_calls:
             continue
-        if any(operation in _BLOCKING_ONLY_OPERATIONS for operation, _, _ in operations):
+        if any(
+            operation in _BLOCKING_ONLY_OPERATIONS for operation, _, _ in operations
+        ):
             continue
-        if not all(operation in _COMPIO_CAPABLE_OPERATIONS for operation, _, _ in operations):
+        if not all(
+            operation in _COMPIO_CAPABLE_OPERATIONS for operation, _, _ in operations
+        ):
             continue
 
         function = call.child_by_field_name("function")
         boundary = source.text(function) if function is not None else "blocking wrapper"
         evidence = tuple(
-            f"{api_text} resolves to {operation}" for operation, _, api_text in operations[:6]
+            f"{api_text} resolves to {operation}"
+            for operation, _, api_text in operations[:6]
         )
         host.add(
             "AFS002",
@@ -525,7 +565,9 @@ def _flatten_use_node(
         list_node = node.child_by_field_name("list")
         if path_node is None or list_node is None:
             return []
-        base = tuple(part for part in re.split(r"\s*::\s*", source.text(path_node)) if part)
+        base = tuple(
+            part for part in re.split(r"\s*::\s*", source.text(path_node)) if part
+        )
         return _flatten_use_node(source, list_node, prefix + base)
     if node_type == "use_list":
         out: list[tuple[tuple[str, ...], str | None, bool, Node]] = []
@@ -616,7 +658,9 @@ def _path_bindings(source: SourceFile, owner: Node) -> set[str]:
         for names, type_text, value_text in lets:
             if names <= bindings:
                 continue
-            if _PATH_TYPE.search(type_text) or _path_expression(value_text, bindings, ""):
+            if _PATH_TYPE.search(type_text) or _path_expression(
+                value_text, bindings, ""
+            ):
                 before = len(bindings)
                 bindings.update(names)
                 changed |= len(bindings) != before
@@ -625,9 +669,7 @@ def _path_bindings(source: SourceFile, owner: Node) -> set[str]:
 
 def _pattern_identifiers(source: SourceFile, pattern: Node) -> set[str]:
     return {
-        source.text(node)
-        for node in walk_named(pattern)
-        if node.type == "identifier"
+        source.text(node) for node in walk_named(pattern) if node.type == "identifier"
     } | ({source.text(pattern)} if pattern.type == "identifier" else set())
 
 
@@ -642,9 +684,13 @@ def _path_expression(text: str, bindings: set[str], method: str) -> bool:
         return True
     if "Path::new(" in compact or "PathBuf::from(" in compact:
         return True
-    if any(part in compact for part in (".join(", ".with_extension(", ".with_file_name(")):
+    if any(
+        part in compact for part in (".join(", ".with_extension(", ".with_file_name(")
+    ):
         return True
-    if re.search(r"\.(?:path|root|dir|directory|dest|destination|source|target)\b", compact):
+    if re.search(
+        r"\.(?:path|root|dir|directory|dest|destination|source|target)\b", compact
+    ):
         return True
     if root and _PATH_NAME.search(root):
         return True
@@ -665,7 +711,11 @@ def _async_owner(node: Node, source: SourceFile) -> Node | None:
             return None
         if current.type == "function_item":
             modifiers = next(
-                (child for child in current.named_children if child.type == "function_modifiers"),
+                (
+                    child
+                    for child in current.named_children
+                    if child.type == "function_modifiers"
+                ),
                 None,
             )
             if modifiers is not None and "async" in source.text(modifiers).split():
@@ -683,8 +733,10 @@ def _closure_is_blocking_boundary(source: SourceFile, closure: Node) -> bool:
         "reference_expression",
     }:
         current = current.parent
-    return current is not None and current.type == "call_expression" and _is_blocking_boundary_call(
-        source, current
+    return (
+        current is not None
+        and current.type == "call_expression"
+        and _is_blocking_boundary_call(source, current)
     )
 
 
