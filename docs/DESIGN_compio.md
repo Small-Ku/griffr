@@ -9,8 +9,8 @@
 Windows asynchronous I/O is completion based. `compio` maps this model directly and lets Griffr submit futures to a threaded `Dispatcher` processing completions concurrently.
 
 Instead of custom worker pools, the Dispatcher acts as the single execution gateway:
-*   `dispatch()`: asynchronous HTTP, compio file I/O, and metadata operations.
-*   `dispatch_blocking()`: synchronous hashing, ZIP extraction, and HDiff patching.
+*   `dispatch()`: asynchronous HTTP, compio file I/O, metadata operations, hardlinks, verified reuse copies, and delete-manifest work.
+*   `dispatch_blocking()`: synchronous hashing, ZIP extraction, HDiff patching, and filesystem operations for which compio has no async API (notably directory enumeration and recursive directory removal).
 
 ---
 
@@ -61,8 +61,8 @@ Using compio keeps the Windows completion-I/O path explicit. The `Dispatcher` ha
 
 | Concern | Current design |
 |---|---|
-| Async network and file operations | `Dispatcher::dispatch()` |
-| CPU hashing and synchronous libraries | `Dispatcher::dispatch_blocking()` |
+| Async network and file operations | `Dispatcher::dispatch()` with `compio::fs` |
+| CPU hashing, synchronous libraries, and unsupported directory operations | `Dispatcher::dispatch_blocking()` |
 | Completion ownership | one coordinator completion channel |
 | HTTP client lifetime | one lazy client per Dispatcher runtime thread |
 | Concurrency control | coordinator admission permits, not worker counts |

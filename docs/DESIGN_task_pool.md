@@ -78,8 +78,8 @@ One coordinator owns graph state, ready queues, admission state, progress reduct
 resource-aware coordinator
 |- activate graph nodes whose dependency count reached zero
 |- acquire network / CPU / blocking / extract / volume / path permits
-|- Dispatcher::dispatch()          async HTTP and compio file I/O
-|- Dispatcher::dispatch_blocking() MD5, ZIP, HDIFF, sync filesystem work
+|- Dispatcher::dispatch()          async HTTP, compio file I/O, reuse copy, and delete manifests
+|- Dispatcher::dispatch_blocking() MD5, ZIP, HDIFF, and filesystem operations without async APIs
 `- receive TaskCompletion
    |- release every acquired permit
    |- update metrics
@@ -106,7 +106,7 @@ struct ResourceRequest {
 
 Dependency readiness and resource admission are deliberately separate. A node runs only when both are satisfied. `network_slots`, `cpu_slots`, and `blocking_slots` are admission limits, not custom thread counts.
 
-Async transfers execute on Dispatcher runtimes. CPU and blocking work uses the Dispatcher's bounded blocking pool. A transient blocking-pool rejection restores the same graph node to the queue without losing its resource or dependency identity.
+Async transfers, hardlink commits, verified reuse copies, and delete-manifest namespace operations execute on Dispatcher runtimes. CPU and blocking work uses the Dispatcher's bounded blocking pool. A transient blocking-pool rejection restores the same graph node to the queue without losing its resource or dependency identity.
 
 ---
 
@@ -173,60 +173,112 @@ RepairFile
 `- no source -> Verify destination -> optional Download
 ```
 
-Reuse candidates are grouped by physical volume. Probes run as parallel DAG roots; the winning probe expands the selected commit node. The enclosing repair node waits for all probe terminals and the selected commit chain. Failed candidates do not release an unrelated download branch prematurely.
+Reuse candidates are grouped by physical volume. Probes run as parallel DAG roots; the winning probe expands the selected commit node. Both hardlink and copy commits use the async executor; copy commits stream with positional `compio::fs::File` I/O while verifying MD5 inline. The enclosing repair node waits for all probe terminals and the selected commit chain. Failed candidates do not release an unrelated download branch prematurely.
 
 ---
 
-## 7. Range-Aware Archive DAG
+## 7. Lazy Range Archive DAG
 
-Archive install no longer places one global barrier between all split-volume downloads and extraction. The package manifest first provides an immutable expected byte layout. Each volume download is bound to a stable dependency token, and tail volumes are queued first so archive planning can start on the critical path.
+Normal install and update no longer download complete `.zip.NNN` files before extraction. The launcher response supplies the immutable logical layout—ordered URLs, declared sizes, and package MD5 values—then the DAG fetches only the byte ranges required by the current planning or materialization step.
 
 ```text
 InstallArchive
-|- tail InstallArchivePart nodes first -----------------------|
-|- remaining InstallArchivePart nodes continue in parallel   |
-`- tail token(s) -> DiscoverArchiveDirectory                 |
-                       |- EOCD / ZIP64 locator needs range ---+
-                       `-> central-directory token(s)
-                           -> InspectArchiveIndex
-                           -> control-entry token(s)
-                           -> ReadArchiveControls
-                           -> PlanArchiveExtraction
+`- DiscoverArchiveDirectory
+   `- Fetch tail range(s)
+      `- Parse EOCD / ZIP64
+         `- Fetch central-directory range(s)
+            `- InspectArchiveIndex
+               `- Fetch control-entry range(s)
+                  `- ReadArchiveControls
+                     `- patch/delete preflight
+                        |- Fetch ranges for shard A -> Extract shard A
+                        |- Fetch ranges for shard B -> Extract shard B
+                        `- Fetch ranges for shard C -> Extract shard C
+                                                   |- ephemeral -> CommitArchive
+                                                   `- keep -> FillArchiveVolumeGaps
+                                                              |- fetch volume gaps
+                                                              `- FinalizeArchiveVolumes
+                                                                  -> CommitArchive
+                                                                      -> manifest follow-up
+                                                                      -> CleanupArchive
 ```
 
-`DiscoverArchiveDirectory` reads only the final EOCD search window. If a ZIP64 locator or end record crosses into an earlier unavailable volume, it returns the required byte range and dynamically creates another discovery node depending on exactly those volume tokens. Griffr accepts raw externally split ZIP streams and rejects true spanned/multi-disk ZIP metadata. Central-directory parsing then derives a conservative source range for every entry, from its local-header offset to the next local header or the central directory.
+`MultiVolumeLayout` maps one logical ZIP address space onto remote package volumes, retained complete local parts, and small cached range files. `MultiVolumeStream` implements `Read + Seek` over whichever backing segment contains the requested offset. The same EOCD, ZIP64, central-directory, and extraction code therefore serves complete local archives, production HTTP Range installs, and the ignored official sample test.
 
-Extraction shards carry explicit entry lists and the union of only the source volumes those entries can touch:
+Range downloads are exact and resumable:
+
+- Every request requires HTTP `206 Partial Content`;
+- Incomplete ranges are cached as `*.range.part`;
+- Retries resume from the existing partial length and request only the missing suffix;
+- Completed segments are renamed atomically to `*.range`;
+- Nearby requests on the same volume are coalesced to avoid small HTTP operations;
+- Cache directory keys include package sizes and MD5s to prevent stale range reuse.
+
+The directory planner first reads only the final EOCD search window. ZIP64 locator or end-record dependencies dynamically add preceding ranges. Central-directory parsing then derives a conservative source range for each entry—from its local header to the next local header or central directory—so encryption headers, data descriptors, and alignment padding remain available without exposing ZIP codec details to the scheduler.
+
+Extraction shards preserve release frontiers and carry explicit entry lists. Frontiers are divided into compressed-source chunks (~256 MiB, unless a single entry is larger). Shards coalesce range requests internally and depend directly on their missing fetch nodes, allowing extraction to overlap with downloading without collapsing adjacent shards into full-volume requests.
 
 ```text
-Verify volume 001 ----|
-Verify volume 002 ----+-> Extract shard A (entries using 001..002) --|
-                                                                    |
-Verify volume 017 ----+-> Extract shard B (entries using 017) -------+-> shard join
-                                                                    |
-Verify volume 038 ----|
-Verify volume 039 ----+-> Extract shard C (entries using 038..039) --|
+Fetch range 001:A ----|
+Fetch range 002:B ----+-> Extract shard A --|
+                                            |
+Fetch range 017:C ------> Extract shard B --+-> CommitArchive
+                                            |
+Fetch range 038:D ----|                     |
+Fetch range 039:E ----+-> Extract shard C --|
 ```
 
-This permits download and extraction overlap without reading a partial or unverified volume. The ranges intentionally over-approximate through the next local header so data descriptors, encryption headers, and alignment padding remain covered. Shards are ordered by their latest required volume and balanced by uncompressed bytes, which keeps early-volume work available without creating one node per ZIP entry.
+Each regular entry in the target `game_files` manifest is verified while written to staging:
 
-The destructive-update barriers remain stricter than the data pipeline:
+1. Decompression completes and the ZIP CRC check passes;
+2. Written size matches the manifest size;
+3. Written MD5 matches the target file MD5;
+4. Mismatching staged files are deleted and the archive range cache is invalidated;
+5. Invalid cache data is removed after all graph references release the archive work.
 
-1. patch and delete control entries must be available and parsed;
-2. patch transaction preflight completes before any shard mutates staging;
-3. every extraction shard **and every package-part token** succeeds before `CommitArchive` becomes ready;
-4. normal staged commit applies VFS and delete manifests in order;
-5. archive cleanup remains downstream of commit and the manifest follow-up chain.
+Patch/control payloads not appearing in `game_files` are validated by ZIP CRC, patch transaction verification, and the command-level integrity DAG.
 
-```text
-required shard tokens -> extraction shards --|
-                                              +-> CommitArchive -> manifest follow-up -> CleanupArchive
-all archive volume tokens --------------------|
+Mutation barriers remain strict during network/extraction overlap:
+
+1. Patch and delete controls are parsed before staging work starts;
+2. Destructive patch preflight completes before extraction shards run;
+3. Every extraction shard must succeed before archive commit;
+4. Ephemeral retention releases cached ranges after their final dependent shard completes;
+5. Complete-volume retention preserves ranges, running `FillArchiveVolumeGaps` post-extraction for uncovered byte intervals;
+6. `FinalizeArchiveVolumes` reconstructs original `.zip.NNN` files, verifies package MD5s, and atomically promotes them;
+7. `CommitArchive` follows successful volume finalization in retention mode;
+8. VFS/delete follow-up and cache cleanup remain downstream of commit;
+9. The command-level integrity DAG verifies the final installation.
+
+`ArchiveRetention` is the single policy switch across complete and range downloads:
+
+- `Ephemeral`: Streams required ranges, releases them by shard lifetime, and cleans up residual archive data after commit.
+- `KeepCompleteVolumes`: Retains range data, fills volume gaps post-extraction, verifies package MD5s, preserves `.zip.NNN` files, and removes the range cache.
+- Predownload apply uses the same retention policy for local volumes.
+
+Gap filling runs after all extraction shards complete to prevent archival completion traffic from competing with active extraction.
+
+### Official archive characterization
+
+Synthetic tests cover raw byte splits, independent ZIP parts, split central directories, range-local extraction, spanned metadata rejection, and MD5 validation.
+
+An ignored integration test characterizes the production remote source against the official Endfield package:
+
+```powershell
+cargo test -p griffr-common characterize_official_archive_sample -- --ignored --nocapture
 ```
 
-The all-volume join is intentionally placed at the irreversible commit boundary rather than at extraction. It preserves download/extraction overlap while preventing a late MD5 failure in an otherwise unused archive range from leaving a committed install.
+It has no custom environment variables. It:
 
-A failed volume cancels only shards that need that volume and their commit descendant. Independent downloads and shards remain runnable. `ArchiveWork` owns the staging lifecycle and removes abandoned staging when the final graph references are dropped, covering cancellation paths where a shard never enters its executor. The small shared shard execution state remains only for first-error reporting and earlier cleanup after all actually started shards exit; it does not implement the commit barrier.
+- Queries the launcher API;
+- Caches ranges under `target/griffr-test-fixtures/archive-range-sample/<version>-<payload-id>`;
+- Downloads EOCD tails, ZIP64/end records, central directories, and a bounded set of entry ranges;
+- Fails if multiple volume boundaries expose standalone EOCD records;
+- Compares central-directory paths with the decrypted `game_files` manifest;
+- Extracts sampled entries via `MultiVolumeLayout` and `MultiVolumeExtractor`;
+- Verifies output size and MD5 against the official manifest.
+
+The ignored test characterizes format drift without adding runtime support for independent or PKZIP-spanned archives.
 
 ---
 

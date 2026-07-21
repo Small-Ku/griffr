@@ -18,12 +18,23 @@ and packaging metadata.
   doomed hardlink operation.
 - Unknown identity keeps the hardlink-first fallback.
 
-## 3. Shared ZIP Metadata
+## 3. Lazy Range ZIP Materialization
 
-- Archive inspection owns the initially parsed `ZipArchive`.
-- Shards clone the inspected archive and shared volume layout rather than
-  reparsing the central directory.
-- Each shard keeps an independent stream cursor and contiguous entry range.
+- EOCD, ZIP64 records, and the central directory are fetched before payload data.
+- `MultiVolumeLayout` presents complete local parts and cached HTTP ranges through
+  one seekable stream.
+- Range partials resume from their cached prefix instead of restarting a large
+  segment after a transient failure.
+- Cached compressed ranges carry shard-level lifetime tracking and are deleted
+  when the last overlapping shard completes, preventing double disk footprint
+  during staging.
+- Archive inspection owns the parsed `ZipArchive`; shards clone that metadata and
+  fetch only overlapping ranges. Release frontiers are split into ~256 MiB compressed
+  chunks to avoid monolithic download barriers.
+- Files represented in `game_files` are size/MD5 verified while written to staging,
+  before the atomic commit and final integrity pass.
+- `--keep-pack-archives` reuses the lazy range DAG, fills uncovered volume gaps
+  post-extraction, reconstructs original parts, and verifies package MD5s before preservation.
 
 ## 4. Dependency-Wave Peak-Space Model
 
