@@ -42,6 +42,7 @@ class RustCheckTests(unittest.TestCase):
         *,
         min_confidence: str = "speculative",
         fix: bool = False,
+        include_tests: bool = False,
     ) -> Checker:
         checker = Checker(
             root,
@@ -49,6 +50,7 @@ class RustCheckTests(unittest.TestCase):
             min_confidence=min_confidence,
             max_width=200,
             fix=fix,
+            include_tests=include_tests,
         )
         checker.run()
         return checker
@@ -60,6 +62,126 @@ class RustCheckTests(unittest.TestCase):
         return [
             diagnostic for diagnostic in checker.diagnostics if diagnostic.code == code
         ]
+
+    def test_async_std_fs_call_is_reported(self) -> None:
+        root = self.make_workspace(
+            "async fn load(path: &std::path::Path) { "
+            "let _ = std::fs::read(path); }\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "AFS001")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("std::fs::read", diagnostics[0].message)
+
+    def test_async_std_fs_aliases_are_reported(self) -> None:
+        root = self.make_workspace(
+            "use std::fs as sync_fs;\n"
+            "use std::fs::{File, write as sync_write};\n"
+            "async fn load(path: &std::path::Path) {\n"
+            "    let _ = sync_fs::metadata(path);\n"
+            "    let _ = File::open(path);\n"
+            "    let _ = sync_write(path, b\"x\");\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "AFS001")
+        self.assertEqual(3, len(diagnostics))
+
+    def test_async_local_std_fs_alias_is_reported(self) -> None:
+        root = self.make_workspace(
+            "async fn load(path: &std::path::Path) {\n"
+            "    use std::fs::read as sync_read;\n"
+            "    let _ = sync_read(path);\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "AFS001")
+        self.assertEqual(1, len(diagnostics))
+
+    def test_sync_fs_helper_called_from_async_is_reported(self) -> None:
+        root = self.make_workspace(
+            "fn read_sync(path: &std::path::Path) -> std::io::Result<Vec<u8>> {\n"
+            "    std::fs::read(path)\n"
+            "}\n"
+            "async fn load(path: &std::path::Path) {\n"
+            "    let _ = read_sync(path);\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "AFS003")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("read_sync", diagnostics[0].message)
+
+    def test_test_only_async_fs_is_skipped_unless_requested(self) -> None:
+        root = self.make_workspace(
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    async fn fixture(path: &std::path::Path) {\n"
+            "        let _ = std::fs::read(path);\n"
+            "    }\n"
+            "}\n"
+        )
+        self.assertNotIn("AFS001", self.codes(self.run_checker(root)))
+        self.assertIn(
+            "AFS001",
+            self.codes(self.run_checker(root, include_tests=True)),
+        )
+
+    def test_async_path_probe_is_reported(self) -> None:
+        root = self.make_workspace(
+            "async fn inspect(root: &std::path::Path) {\n"
+            "    let payload = root.join(\"payload.bin\");\n"
+            "    let _ = payload.is_file();\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "AFS001")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("payload.is_file", diagnostics[0].message)
+
+    def test_sync_std_fs_call_is_allowed(self) -> None:
+        root = self.make_workspace(
+            "fn load(path: &std::path::Path) { let _ = std::fs::read(path); }\n"
+        )
+        self.assertNotIn("AFS001", self.codes(self.run_checker(root)))
+
+    def test_std_fs_inside_blocking_boundary_is_allowed(self) -> None:
+        root = self.make_workspace(
+            "async fn scan(path: std::path::PathBuf) {\n"
+            "    let _ = compio::runtime::spawn_blocking(move || {\n"
+            "        std::fs::read_dir(path).unwrap().count()\n"
+            "    }).await;\n"
+            "}\n"
+        )
+        checker = self.run_checker(root)
+        self.assertNotIn("AFS001", self.codes(checker))
+        self.assertNotIn("AFS002", self.codes(checker))
+
+    def test_redundant_blocking_wrapper_is_reported(self) -> None:
+        root = self.make_workspace(
+            "async fn load(path: std::path::PathBuf) {\n"
+            "    let _ = compio::runtime::spawn_blocking(move || {\n"
+            "        std::fs::read(path)\n"
+            "    }).await;\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "AFS002")
+        self.assertEqual(1, len(diagnostics))
+        self.assertIn("spawn_blocking", diagnostics[0].message)
+
+    def test_blocking_wrapper_with_cpu_work_is_not_called_fs_only(self) -> None:
+        root = self.make_workspace(
+            "fn decode(_: Vec<u8>) -> usize { 0 }\n"
+            "async fn load(path: std::path::PathBuf) {\n"
+            "    let _ = compio::runtime::spawn_blocking(move || {\n"
+            "        decode(std::fs::read(path).unwrap())\n"
+            "    }).await;\n"
+            "}\n"
+        )
+        self.assertNotIn("AFS002", self.codes(self.run_checker(root)))
+
+    def test_async_block_inside_sync_function_is_checked(self) -> None:
+        root = self.make_workspace(
+            "fn future(path: std::path::PathBuf) {\n"
+            "    let _future = async move { std::fs::metadata(path) };\n"
+            "}\n"
+        )
+        self.assertIn("AFS001", self.codes(self.run_checker(root)))
 
     def test_task_pool_custom_worker_model_is_rejected(self) -> None:
         root = self.make_workspace(

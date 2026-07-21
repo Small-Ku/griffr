@@ -12,6 +12,7 @@ from tree_sitter import Node
 
 from . import (
     architecture,
+    async_fs,
     baseline,
     lints,
     module_graph,
@@ -458,6 +459,7 @@ class Checker:
         resolver = name_resolution.analyze(self)
         lints.run(self, resolver)
         architecture.run(self)
+        async_fs.run(self)
         self.parsed_file_count = max(self.parsed_file_count, len(self.sources))
 
     def run(self) -> None:

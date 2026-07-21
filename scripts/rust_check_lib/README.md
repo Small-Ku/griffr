@@ -37,7 +37,16 @@ The default policy favors recall:
 - `DAG001` checks exhaustive `Task` routing matches that deliberately omit a catch-all, while
   `DAG002` keeps struct-like `Task::Variant { ... }` constructors synchronized with the canonical
   enum payload. These are high-confidence structural fallbacks for large DAG refactors, not a
-  replacement for rustc type checking.
+  replacement for rustc type checking;
+- `AFS001` rejects direct `std::fs` calls and blocking `Path` probes in production async functions
+  and async blocks, while recognizing `spawn_blocking`, `dispatch_blocking`, and `run_blocking`
+  closures as explicit synchronous boundaries;
+- `AFS002` reports blocking closures that contain only operations with compio async replacements;
+- `AFS003` follows direct calls into local synchronous helpers and rejects filesystem work hidden
+  behind those helpers when it is invoked from production async code.
+  Test fixture modules are excluded because synchronous fixture construction is not a runtime I/O
+  architecture decision. Directory enumeration, recursive removal, link reads, and canonicalization
+  remain valid blocking boundaries with compio 0.19.
 
 Useful policy overrides:
 
