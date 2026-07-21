@@ -242,87 +242,8 @@ pub(super) async fn update_internal(
         archive_expected_files(Vec::new())
     };
 
-    let mut modified_paths = Vec::new();
-    if !reuse_paths.is_empty() {
-        ui::print_phase("Applying update via local file reuse");
-        update_via_reuse(
-            &api_client,
-            &local,
-            &version_info,
-            &reuse_paths,
-            force_copy,
-            &opts,
-            &mut task_pool_runner,
-        )
-        .await?;
-    }
-
-    if reuse_paths.is_empty() {
-        match package_kind {
-            UpdatePackageKind::Patch => {
-                validate_patch_target(&install_target.executable, &local.install_path).await?;
-                let patch = version_info
-                    .patch
-                    .as_ref()
-                    .context("No patch package information available")?;
-                let patch_password = patch.cd_key.as_deref();
-                if let Some(stage_dir) = predownload_stage_dir.as_ref() {
-                    modified_paths = download_and_extract_archives_from_dir(
-                        &patch.patches,
-                        stage_dir,
-                        &local.install_path,
-                        "patch",
-                        opts.keep_pack_archives,
-                        patch_password,
-                        if require_staged_predownload {
-                            ArchiveAcquireMode::RequireExisting
-                        } else {
-                            ArchiveAcquireMode::DownloadIfMissing
-                        },
-                        &patch_options,
-                        expected_archive_files.clone(),
-                        &opts,
-                        &mut task_pool_runner,
-                    )
-                    .await?;
-                } else {
-                    modified_paths = download_and_extract_archives(
-                        &patch.patches,
-                        &local.install_path,
-                        "patch",
-                        opts.keep_pack_archives,
-                        patch_password,
-                        &patch_options,
-                        expected_archive_files.clone(),
-                        &opts,
-                        &mut task_pool_runner,
-                    )
-                    .await?;
-                }
-            }
-            UpdatePackageKind::Full => {
-                let pkg = version_info
-                    .pkg
-                    .as_ref()
-                    .context("No full package information available")?;
-                modified_paths = download_and_extract_archives(
-                    &pkg.packs,
-                    &local.install_path,
-                    "full",
-                    opts.keep_pack_archives,
-                    None,
-                    &patch_options,
-                    expected_archive_files.clone(),
-                    &opts,
-                    &mut task_pool_runner,
-                )
-                .await?;
-            }
-        }
-    }
-
-    let extra_tasks = if !opts.skip_vfs {
-        ui::print_phase("Verifying update + syncing VFS resources (single DAG batch)");
+    let mut extra_tasks = if !opts.skip_vfs {
+        ui::print_phase("Planning VFS resources for the update DAG");
         ui::print_info(
             "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
         );
@@ -356,6 +277,92 @@ pub(super) async fn update_internal(
     } else {
         Vec::new()
     };
+
+    let mut archive_result = ArchiveRunResult::default();
+    if !reuse_paths.is_empty() {
+        ui::print_phase("Applying update via local file reuse");
+        update_via_reuse(
+            &api_client,
+            &local,
+            &version_info,
+            &reuse_paths,
+            force_copy,
+            &opts,
+            &mut task_pool_runner,
+        )
+        .await?;
+    }
+
+    if reuse_paths.is_empty() {
+        match package_kind {
+            UpdatePackageKind::Patch => {
+                validate_patch_target(&install_target.executable, &local.install_path).await?;
+                let patch = version_info
+                    .patch
+                    .as_ref()
+                    .context("No patch package information available")?;
+                let patch_password = patch.cd_key.as_deref();
+                if let Some(stage_dir) = predownload_stage_dir.as_ref() {
+                    archive_result = download_and_extract_archives_from_dir(
+                        &patch.patches,
+                        stage_dir,
+                        &local.install_path,
+                        "patch",
+                        opts.keep_pack_archives,
+                        patch_password,
+                        if require_staged_predownload {
+                            ArchiveAcquireMode::RequireExisting
+                        } else {
+                            ArchiveAcquireMode::DownloadIfMissing
+                        },
+                        &patch_options,
+                        expected_archive_files.clone(),
+                        std::mem::take(&mut extra_tasks),
+                        false,
+                        &opts,
+                        &mut task_pool_runner,
+                    )
+                    .await?;
+                } else {
+                    archive_result = download_and_extract_archives(
+                        &patch.patches,
+                        &local.install_path,
+                        "patch",
+                        opts.keep_pack_archives,
+                        patch_password,
+                        &patch_options,
+                        expected_archive_files.clone(),
+                        std::mem::take(&mut extra_tasks),
+                        false,
+                        &opts,
+                        &mut task_pool_runner,
+                    )
+                    .await?;
+                }
+            }
+            UpdatePackageKind::Full => {
+                let pkg = version_info
+                    .pkg
+                    .as_ref()
+                    .context("No full package information available")?;
+                archive_result = download_and_extract_archives(
+                    &pkg.packs,
+                    &local.install_path,
+                    "full",
+                    opts.keep_pack_archives,
+                    None,
+                    &patch_options,
+                    expected_archive_files.clone(),
+                    std::mem::take(&mut extra_tasks),
+                    true,
+                    &opts,
+                    &mut task_pool_runner,
+                )
+                .await?;
+            }
+        }
+    }
+
     verify_updated_install(
         &api_client,
         &local.install_path,
@@ -363,7 +370,8 @@ pub(super) async fn update_internal(
         &version_info.version,
         opts.skip_verify,
         extra_tasks,
-        modified_paths,
+        archive_result.modified_paths,
+        archive_result.verified_paths,
         &opts,
         &mut task_pool_runner,
     )

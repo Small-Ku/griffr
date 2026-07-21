@@ -21,6 +21,7 @@ pub(super) async fn verify_updated_install(
     skip_verify: bool,
     extra_tasks: Vec<Task>,
     modified_paths: Vec<String>,
+    already_verified_paths: Vec<String>,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<()> {
@@ -55,6 +56,7 @@ pub(super) async fn verify_updated_install(
         install_target,
         Some(target_version),
         IntegritySelection::Paths(modified_paths),
+        &already_verified_paths,
         true,
         &[],
         false,

@@ -183,24 +183,28 @@ Normal install and update no longer download complete `.zip.NNN` files before ex
 
 ```text
 InstallArchive
-`- DiscoverArchiveDirectory
-   `- Fetch tail range(s)
-      `- Parse EOCD / ZIP64
-         `- Fetch central-directory range(s)
-            `- InspectArchiveIndex
-               `- Fetch control-entry range(s)
-                  `- ReadArchiveControls
-                     `- patch/delete check
-                        |- Fetch ranges for shard A -> Extract shard A
-                        |- Fetch ranges for shard B -> Extract shard B
-                        `- Fetch ranges for shard C -> Extract shard C
-                                                   |- ephemeral -> CommitArchive
-                                                   `- keep -> FetchMissingArchiveRanges
-                                                              |- fetch volume gaps
-                                                              `- SaveArchiveVolumes
-                                                                  -> CommitArchive
-                                                                      -> manifest follow-up
-                                                                      -> CleanupArchive
+  1. Discovery:
+     DiscoverArchiveDirectory -> Fetch tail range -> Parse EOCD / ZIP64
+     -> Fetch central directory -> InspectArchiveIndex
+     -> Fetch control entries -> ReadArchiveControls
+
+  2. Planning & Extraction:
+     ReadArchiveControls
+       |- Probe outputs / bases ------\
+       |- Measure VFS relocation -----+-> FinalizePatchPlan
+       `- Fetch ranges for shards A..C -+-> Extract shards A..C
+
+  3. Retention & Cleanup:
+     Extract shards A..C
+       |- Ephemeral:
+       |    `-> CommitArchive -> manifest follow-up -> CleanupArchive
+       `-> Keep complete volumes:
+            |- last reader 001 -> FillArchiveVolumeGaps(001) -> FinalizeArchiveVolume(001) -\
+            |- last reader 002 -> FillArchiveVolumeGaps(002) -> FinalizeArchiveVolume(002) --+-> ArchiveVolumesComplete
+            `---------------------------------------------------------------------------------/      `-> CommitArchive
+                                                                                                         `-> manifest follow-up
+                                                                                                         `-> CleanupArchive
+```
 ```
 
 `MultiVolumeLayout` maps one logical ZIP address space onto remote package volumes, retained complete local parts, and small cached range files. `MultiVolumeStream` implements `Read + Seek` over whichever backing segment contains the requested offset. The same EOCD, ZIP64, central-directory, and extraction code therefore serves complete local archives, production HTTP Range installs, and the ignored official sample test.
@@ -216,7 +220,7 @@ Range downloads are exact and resumable:
 
 The directory planner first reads only the final EOCD search window. ZIP64 locator or end-record dependencies dynamically add preceding ranges. Central-directory parsing then derives a conservative source range for each entry—from its local header to the next local header or central directory—so encryption headers, data descriptors, and alignment padding remain available without exposing ZIP codec details to the scheduler.
 
-Extraction shards preserve release frontiers and carry explicit entry lists. Frontiers are divided into compressed-source chunks (~256 MiB, unless a single entry is larger). Shards coalesce range requests internally and depend directly on their missing fetch nodes, allowing extraction to overlap with downloading without collapsing adjacent shards into full-volume requests.
+Extraction shards preserve release frontiers and carry explicit entry lists. The planner targets two ready shards per extraction slot, then balances contiguous entries by estimated work: compressed source bytes, uncompressed hash/write bytes, compression-method CPU weight, and per-entry metadata cost. The 256 MiB compressed-source ceiling remains, a 512-entry cap bounds small-file batches, and a single ZIP entry is never split. Hard frontier/range/entry limits may therefore create more shards than the target. The scheduler uses the same estimated cost for CPU ordering. Shards coalesce range requests internally and depend directly on their missing fetch nodes, allowing extraction to overlap with downloading without collapsing adjacent shards into full-volume requests.
 
 ```text
 Fetch range 001:A ----|
@@ -238,25 +242,33 @@ Each regular entry in the target `game_files` manifest is verified while written
 
 Patch/control payloads not appearing in `game_files` are validated by ZIP CRC, patch transaction verification, and the command-level integrity DAG.
 
+Patch archive commit expands into dynamic entry DAG tasks after extraction. For exact entry-level dependency graphs, base consumer releases, and forward-only recovery rules, see [`DESIGN_patch_steps.md`](DESIGN_patch_steps.md).
+
+A normal archive commit also expands after staging. The lightweight `CommitArchive` continuation collects commit jobs, then groups jobs by source volume, destination volume, and destination parent. Cross-volume batches target about 384 MiB; same-volume moves stay metadata-oriented and split only by file-count bounds. Each `CommitArchiveBatch` runs `VerifyCommittedBatch` immediately after, which re-reads final destinations against `game_files`. `FinishArchiveCommit` joins verified batches before delete/VFS follow-up and staging cleanup. The scheduler admits at most one same-volume metadata batch or three cross-volume copy batches per destination volume.
+
+Install and update build one command graph for archive and VFS file work. Full packages use an explicit path-ownership set: paths assigned to VFS tasks still extract to private staging, but are omitted from archive commit, so VFS is the only final writer and runs as an independent root. Patch packages cannot omit an entry without changing patch/delete semantics; overlapping VFS tasks therefore depend on every patch archive root, while VFS-only paths run immediately. The fallback integrity planner receives successful `VerifyCommittedBatch` outcomes and removes already-verified manifest entries instead of reading them again.
+
 Mutation barriers remain strict during network/extraction overlap:
 
 1. Patch and delete controls are parsed before staging work starts;
-2. The destructive patch check completes before extraction shards run;
-3. Every extraction shard must succeed before archive commit;
-4. Ephemeral retention releases cached ranges after their final dependent shard completes;
-5. Complete-volume retention preserves ranges, running `FetchMissingArchiveRanges` post-extraction for uncovered byte intervals;
-6. `SaveArchiveVolumes` reconstructs original `.zip.NNN` files, verifies package MD5s, and atomically promotes them;
-7. `CommitArchive` follows saved volumes in retention mode;
-8. VFS/delete follow-up and cache cleanup remain downstream of commit;
-9. The command-level integrity DAG verifies the final installation.
+2. Patch output/base MD5 probes and relocation-size measurement run as independent check nodes while extraction-critical range fetches may start in parallel;
+3. `FinalizePatchPlan` joins those probes, replays the full planning rules through the batch-local verification cache, and remains a dependency of every extraction shard;
+4. Every extraction shard must succeed before archive commit;
+5. Ephemeral retention releases cached ranges after their final dependent shard completes;
+6. Complete-volume retention gives each volume a join over only the extraction shards that read that volume;
+7. `FillArchiveVolumeGaps(N)` fetches uncovered byte intervals at background archive priority, then `FinalizeArchiveVolume(N)` reconstructs, verifies, and atomically promotes that one `.zip.NNN` file;
+8. One finalizer per physical volume may run at a time, and a completed volume releases only its own cached ranges while unfinished volumes remain protected;
+9. `ArchiveVolumesComplete` joins all volume finalizers before `CommitArchive`;
+10. VFS/delete follow-up and cache cleanup remain downstream of commit;
+11. The command-level integrity DAG verifies the final installation.
 
 `ArchiveRetention` is the single policy switch across complete and range downloads:
 
 - `Ephemeral`: Streams required ranges, releases them by shard lifetime, and cleans up residual archive data after commit.
-- `KeepCompleteVolumes`: Retains range data, fills volume gaps post-extraction, verifies package MD5s, preserves `.zip.NNN` files, and removes the range cache.
+- `KeepCompleteVolumes`: Retains range data until each volume's last reader finishes, fills that volume's gaps, verifies its package MD5, preserves the `.zip.NNN` file, and releases its cache independently.
 - Predownload apply uses the same retention policy for local volumes.
 
-Gap filling runs after all extraction shards complete to prevent archival completion traffic from competing with active extraction.
+Gap filling starts after the last extraction shard for that volume. Its network class is lower priority than extraction-critical ranges, and finalization is limited to one writer per physical volume.
 
 ### Official archive format check
 
@@ -284,7 +296,7 @@ The ignored test checks for format changes without adding runtime support for in
 
 ## 8. Failure and Cancellation
 
-Each dispatched node produces exactly one completion. Resource permits are released only by the coordinator.
+Each dispatched node produces exactly one completion. Only the coordinator releases resource permits.
 
 On failure:
 
@@ -294,7 +306,7 @@ On failure:
 - a dynamic parent waiting on the failed terminal becomes `Failed`;
 - only failures with `report = true` create a durable `WorkerEvent::Failed` outcome.
 
-Task runs are wrapped with `catch_unwind` at the Dispatcher boundary. A panic becomes a reported node failure. Stale queued entries belonging to cancelled nodes are discarded and their acquired permits are immediately released.
+The Dispatcher boundary wraps task runs with `catch_unwind`. A panic becomes a reported node failure. The coordinator discards stale queued entries for cancelled nodes and releases their acquired permits immediately.
 
 Cross-expansion token dependencies are checked before graph mutation. A child cannot depend on its expanding parent, a static descendant of that parent, or a dynamic ancestor that is waiting on it; those references are rejected as cycles instead of surfacing later as an admission deadlock.
 

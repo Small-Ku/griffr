@@ -1,6 +1,7 @@
 //! CLI command implementations
 
 pub mod account;
+mod archive_graph;
 pub mod debug;
 pub mod info;
 pub mod install;

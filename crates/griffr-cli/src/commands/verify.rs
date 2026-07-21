@@ -198,6 +198,7 @@ pub async fn verify(
         &install_target,
         Some(&installed_version),
         IntegritySelection::Full,
+        &[],
         repair,
         &source_roots,
         force_copy,

@@ -35,7 +35,7 @@ Griffr implements a **forward-only transaction model** with no backward rollback
 
 1.  **Check:** Scan the destination, build dependencies, select sources, verify hashes, and estimate disk use.
 2.  **Persisted Plan:** Save plan state to `.griffr-patch/plan.json` before starting mutations.
-3.  **Destructive Wave Processing:** Process changes in waves. Delete files only when their last consumer finishes.
+3.  **Entry DAG Processing:** Process changes as exact entry DAG nodes. Writers depend on consumers of the paths they replace; base files are released after their last consumer node completes.
 4.  **Deferred Markers:** Write configuration changes (`config.ini`) only after all VFS and staging directories are successfully processed and cleaned up.
 
 ### 3. File Allocation & Storage

@@ -6,16 +6,16 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::PackageInfo;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::{
-    archive_expected_files, plan_archive_groups, ArchiveRetention, Task, TaskOutcome,
-    TaskPoolRunner, TaskProgress,
+    archive_expected_files, plan_archive_groups, ArchiveRetention, Task, TaskGraphBuilder,
+    TaskOutcome, TaskPoolRunner, TaskProgress,
 };
-use griffr_common::runtime::{directory_has_entries, is_launcher_metadata_path};
 use griffr_common::runtime::{
-    ensure_game_files_with_pool, plan_vfs_tasks, resolve_file_reuse_sources, run_integrity_pool,
-    streaming_assets_path, sync_launcher_metadata, FileReuseConfig, ProgressLane,
-    VfsFilePlanOptions,
+    directory_has_entries, ensure_game_files_with_pool, is_launcher_metadata_path, plan_vfs_tasks,
+    resolve_file_reuse_sources, run_integrity_pool, streaming_assets_path, sync_launcher_metadata,
+    FileReuseConfig, ProgressLane, VfsFilePlanOptions,
 };
 
+use crate::commands::archive_graph::{add_file_tasks, owned_archive_paths};
 use crate::progress::{ArchiveProgress, CountAndByteProgress};
 use crate::ui;
 use crate::GlobalOptions;
@@ -144,6 +144,47 @@ pub async fn install(
     let task_pool_cfg = opts.task_pool_config();
     let mut task_pool = TaskPoolRunner::new(task_pool_cfg)?;
 
+    let mut extra_tasks = if !opts.skip_vfs {
+        ui::print_phase("Planning VFS resources for the install DAG");
+        ui::print_info(
+            "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
+        );
+        let streaming_assets =
+            streaming_assets_path(&install_path.join(install_target.data_root.clone()));
+        let source_streaming_assets = reuse_paths
+            .iter()
+            .filter(|path| **path != install_path)
+            .map(|path| streaming_assets_path(&path.join(install_target.data_root.clone())))
+            .collect::<Vec<_>>();
+        let rand_str = version_info.rand_str();
+        match plan_vfs_tasks(
+            &api_client,
+            &install_target.api,
+            &version_info.version,
+            &rand_str,
+            &streaming_assets,
+            &VfsFilePlanOptions {
+                source_streaming_assets,
+                allow_repair: true,
+                allow_copy_fallback: force_copy,
+                prefer_reuse: false,
+            },
+        )
+        .await
+        .context("Failed to plan VFS tasks")?
+        {
+            griffr_common::runtime::VfsPlanOutcome::Planned(plan) => plan.tasks,
+            griffr_common::runtime::VfsPlanOutcome::Unsupported => {
+                ui::print_info("The selected target does not provide the launcher resource-index API. Skip VFS sync.");
+                Vec::new()
+            }
+        }
+    } else {
+        ui::print_phase("Verifying install integrity");
+        Vec::new()
+    };
+
+    let mut already_verified_paths = Vec::new();
     if reuse_paths.is_empty() {
         ui::print_phase("Downloading and extracting archives");
         let download_dir = install_path.join("downloads");
@@ -159,23 +200,39 @@ pub async fn install(
                 .context("Failed to fetch game_files before archive streaming")?,
         );
         let archive_group_count = archive_groups.len();
+        let excluded_commit_paths =
+            owned_archive_paths(&extra_tasks, &install_path, expected_archive_files.as_ref());
         let archive_verify_count = if opts.keep_pack_archives {
             pkg.packs.len()
         } else {
             archive_group_count
         };
-        let mut tasks = Vec::with_capacity(archive_groups.len());
+        let mut graph = TaskGraphBuilder::new();
+        let mut archive_nodes = Vec::with_capacity(archive_groups.len());
         for group in archive_groups {
-            tasks.push(Task::InstallArchive {
+            archive_nodes.push(graph.add_root(Task::InstallArchive {
                 base_name: group.base_name,
                 dest: install_path.clone(),
                 retention: ArchiveRetention::from_keep_complete_volumes(opts.keep_pack_archives),
                 password: None,
                 patch_options: griffr_common::runtime::PatchApplyOptions::default(),
                 expected_files: expected_archive_files.clone(),
+                excluded_commit_paths: excluded_commit_paths.clone(),
                 parts: group.parts,
-            });
+            }));
         }
+        let archive_vfs_task_count = extra_tasks.len();
+        let (parallel_vfs, dependent_vfs) = add_file_tasks(
+            &mut graph,
+            std::mem::take(&mut extra_tasks),
+            &archive_nodes,
+            &install_path,
+            expected_archive_files.as_ref(),
+            false,
+        )?;
+        opts.verbose(format!(
+            "VFS/archive ownership: {parallel_vfs} independent task(s), {dependent_vfs} archive-dependent task(s)"
+        ));
 
         let progress = ArchiveProgress::new("install", opts.verbose);
         let verify_lane = ProgressLane::ARCHIVE_VERIFY;
@@ -193,13 +250,22 @@ pub async fn install(
             delete_lane,
         );
         let task_progress = TaskProgress::new(progress_session.sender())
-            .with_verify(verify_lane, archive_verify_count)
+            .with_verify(
+                verify_lane,
+                archive_verify_count
+                    .saturating_add(
+                        expected_archive_files
+                            .len()
+                            .saturating_sub(excluded_commit_paths.len()),
+                    )
+                    .saturating_add(archive_vfs_task_count),
+            )
             .with_download(download_lane)
             .with_extract(extract_lane)
             .with_commit(commit_lane)
             .with_patch(patch_lane)
             .with_delete(delete_lane);
-        let result = task_pool.run_batch(tasks, task_progress)?;
+        let result = task_pool.run_graph(graph.build_checked()?, task_progress)?;
         progress_session.finish();
         progress.finish();
 
@@ -211,8 +277,17 @@ pub async fn install(
 
         let mut failures = Vec::new();
         for event in result.outcomes {
-            if let TaskOutcome::Failed { path, reason } = event {
-                failures.push(format!("{} ({})", path, reason));
+            match event {
+                TaskOutcome::Verified { path, ok: true, .. }
+                    if expected_archive_files
+                        .contains_key(&path.replace('\\', "/").to_ascii_lowercase()) =>
+                {
+                    already_verified_paths.push(path);
+                }
+                TaskOutcome::Failed { path, reason } => {
+                    failures.push(format!("{} ({})", path, reason));
+                }
+                _ => {}
             }
         }
         if !failures.is_empty() {
@@ -274,45 +349,6 @@ pub async fn install(
     .await
     .context("Failed to sync launcher metadata after install staging")?;
 
-    let extra_tasks = if !opts.skip_vfs {
-        ui::print_phase("Verifying install integrity + syncing VFS resources (single DAG batch)");
-        ui::print_info(
-            "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
-        );
-        let streaming_assets =
-            streaming_assets_path(&install_path.join(install_target.data_root.clone()));
-        let source_streaming_assets = reuse_paths
-            .iter()
-            .filter(|path| **path != install_path)
-            .map(|path| streaming_assets_path(&path.join(install_target.data_root.clone())))
-            .collect::<Vec<_>>();
-        let rand_str = version_info.rand_str();
-        match plan_vfs_tasks(
-            &api_client,
-            &install_target.api,
-            &version_info.version,
-            &rand_str,
-            &streaming_assets,
-            &VfsFilePlanOptions {
-                source_streaming_assets,
-                allow_repair: true,
-                allow_copy_fallback: force_copy,
-                prefer_reuse: false,
-            },
-        )
-        .await
-        .context("Failed to plan VFS tasks")?
-        {
-            griffr_common::runtime::VfsPlanOutcome::Planned(plan) => plan.tasks,
-            griffr_common::runtime::VfsPlanOutcome::Unsupported => {
-                ui::print_info("The selected target does not provide the launcher resource-index API. Skip VFS sync.");
-                Vec::new()
-            }
-        }
-    } else {
-        ui::print_phase("Verifying install integrity");
-        Vec::new()
-    };
     let verify_progress =
         CountAndByteProgress::new("install.verify", "install.repair.download", opts.verbose);
     let verify_session = verify_progress.start(
@@ -325,6 +361,7 @@ pub async fn install(
         &install_target,
         Some(&version_info.version),
         griffr_common::runtime::IntegritySelection::Full,
+        &already_verified_paths,
         true,
         &[],
         false,

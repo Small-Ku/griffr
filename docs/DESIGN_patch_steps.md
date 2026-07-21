@@ -42,26 +42,34 @@ Rollbacks are not supported. The transaction runs forward:
 2.  Prepare VFS folder/links.
 3.  Commit top-level files; write deferred markers (e.g., `config.ini`) to `.griffr-patch/deferred`.
 4.  Remove files marked for deletion (unless needed as active patch bases).
-5.  Apply patches in wave-dependency order to temporary files, verify MD5, and atomically rename.
-6.  Delete a base file as soon as its last consumer wave commits.
+5.  Apply each patch entry as a DAG node, verify MD5, and atomically rename. A writer depends only on consumers of the file it will replace.
+6.  Delete a base file after all of its consumer nodes complete.
 7.  Commit deferred markers.
 8.  Clean up staging directories and plan files.
 
 ---
 
-## 5. Dependency Waves
+## 5. Entry DAG
 
-To prevent a patch output from overwriting a file that is still needed as a base for another patch, planning groups work into destructive dependency waves:
+To prevent a patch output from overwriting a file that another patch still needs as a base, the runner creates exact entry dependencies:
 
 ```text
-wave 0: entry A | entry B     (Run concurrently)
-             barrier
-wave 1: entry C               (Overwrites A's base file)
+PreparePatchTransaction
+  |- ApplyPatchEntry A ---\
+  |- ApplyPatchEntry B ---+-> ReleasePatchBase X
+  `- ApplyPatchEntry C ---> ApplyPatchEntry D (replaces C's base)
+                              |
+       all entry/base leaves -+-> ApplyPatchDeletes
+                              `-> CommitPatchDeferred
+                              `-> CleanupPatchTransaction
 ```
 
-*   Consumers run in earlier waves before writers.
+*   A writer depends only on the consumers of the path it replaces; unrelated entries do not share a wave-wide join.
+*   Each entry declares its base and payload reads, output/work writes, and destination mutation path to the scheduler.
+*   Path mutation locks reject equal, ancestor, and descendant conflicts while allowing unrelated files to run together.
 *   If a dependency cycle is detected, the transaction fails before step work begins.
-*   A command-local `VerifiedArtifactCache` prevents redundant base checks between waves.
+*   A command-local `VerifiedArtifactCache` prevents redundant base checks across entry nodes.
+*   Dependency waves remain as a derived view for peak-space simulation and the serial recovery fallback; they no longer control normal archive commit execution.
 
 ---
 
