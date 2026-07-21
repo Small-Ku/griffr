@@ -7,7 +7,7 @@ use griffr_common::config::{
     game_definition, local_low_vendor, GameId, RegionId, GRYPHLINE_LOCAL_LOW_VENDOR,
     HYPERGRYPH_LOCAL_LOW_VENDOR,
 };
-use griffr_common::runtime::{copy_dir_recursive, remove_dir_all};
+use griffr_common::runtime::{copy_dir_recursive, path_is_dir_or_err, remove_dir_all};
 
 use crate::ui;
 use crate::GlobalOptions;
@@ -15,6 +15,15 @@ use crate::GlobalOptions;
 const BUNDLE_SDK_DIR: &str = "sdk_data";
 const MMKV_DIR: &str = "mmkv";
 const SDK_DATA_PREFIX: &str = "sdk_data_";
+
+async fn run_blocking<T: Send + 'static>(
+    label: &'static str,
+    task: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    compio::runtime::spawn_blocking(task)
+        .await
+        .map_err(|_| anyhow::anyhow!("{label} task panicked"))?
+}
 
 pub(super) async fn create_dir_all(path: &Path) -> Result<()> {
     compio::fs::create_dir_all(path)
@@ -33,7 +42,7 @@ pub async fn capture(
     force: bool,
     opts: GlobalOptions,
 ) -> Result<()> {
-    let source_sdk_dir = resolve_source_sdk_dir(game_id, region_hint, sdk_dir.as_deref())?;
+    let source_sdk_dir = resolve_source_sdk_dir(game_id, region_hint, sdk_dir.as_deref()).await?;
     let bundle_sdk_dir = bundle_path.join(BUNDLE_SDK_DIR);
 
     if opts.is_dry_run() {
@@ -87,7 +96,7 @@ pub async fn capture(
             .as_ref()
             .context("Missing --install-path while --include-install-mmkv is set")?;
         let source_mmkv = install_path.join(MMKV_DIR);
-        if !source_mmkv.is_dir() {
+        if !path_is_dir(&source_mmkv).await? {
             anyhow::bail!(
                 "Install mmkv path does not exist: {} (omit --include-install-mmkv or provide a compatible install)",
                 source_mmkv.display()
@@ -126,14 +135,14 @@ pub async fn activate(
     opts: GlobalOptions,
 ) -> Result<()> {
     let bundle_sdk_dir = bundle_path.join(BUNDLE_SDK_DIR);
-    if !bundle_sdk_dir.is_dir() {
+    if !path_is_dir(&bundle_sdk_dir).await? {
         anyhow::bail!(
             "Bundle is missing sdk_data payload: {}",
             bundle_sdk_dir.display()
         );
     }
 
-    let target_sdk_dir = resolve_target_sdk_dir(game_id, region_hint, sdk_dir.as_deref())?;
+    let target_sdk_dir = resolve_target_sdk_dir(game_id, region_hint, sdk_dir.as_deref()).await?;
     if opts.is_dry_run() {
         opts.dry_run(format!(
             "Would activate account state from {} to {}",
@@ -187,7 +196,7 @@ pub async fn activate(
             .as_ref()
             .context("Missing --install-path while --include-install-mmkv is set")?;
         let bundle_mmkv = bundle_path.join(MMKV_DIR);
-        if !bundle_mmkv.is_dir() {
+        if !path_is_dir(&bundle_mmkv).await? {
             anyhow::bail!(
                 "Bundle is missing optional mmkv payload: {}",
                 bundle_mmkv.display()
@@ -223,19 +232,23 @@ pub async fn activate(
     Ok(())
 }
 
-pub(super) fn resolve_source_sdk_dir(
+pub(super) async fn resolve_source_sdk_dir(
     game_id: GameId,
     region_hint: Option<RegionId>,
     sdk_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     if let Some(explicit) = sdk_dir {
-        validate_explicit_sdk_dir(explicit)?;
+        validate_explicit_sdk_dir(explicit).await?;
         return Ok(explicit.to_path_buf());
     }
-    select_latest_sdk_dir_from_roots(&default_game_local_low_roots(game_id, region_hint)?)
+    let roots = default_game_local_low_roots(game_id, region_hint)?;
+    run_blocking("sdk_data directory discovery", move || {
+        select_latest_sdk_dir_from_roots(&roots)
+    })
+    .await
 }
 
-pub(super) fn resolve_target_sdk_dir(
+pub(super) async fn resolve_target_sdk_dir(
     game_id: GameId,
     region_hint: Option<RegionId>,
     sdk_dir: Option<&Path>,
@@ -251,11 +264,15 @@ pub(super) fn resolve_target_sdk_dir(
         }
         return Ok(explicit.to_path_buf());
     }
-    select_latest_sdk_dir_from_roots(&default_game_local_low_roots(game_id, region_hint)?)
+    let roots = default_game_local_low_roots(game_id, region_hint)?;
+    run_blocking("sdk_data directory discovery", move || {
+        select_latest_sdk_dir_from_roots(&roots)
+    })
+    .await
 }
 
-pub(super) fn validate_explicit_sdk_dir(path: &Path) -> Result<()> {
-    if !path.is_dir() {
+pub(super) async fn validate_explicit_sdk_dir(path: &Path) -> Result<()> {
+    if !path_is_dir(path).await? {
         anyhow::bail!("SDK dir not found: {}", path.display());
     }
     if let Some(name) = path.file_name().and_then(OsStr::to_str) {
@@ -381,19 +398,31 @@ pub(super) fn select_latest_sdk_dir_from_roots(roots: &[PathBuf]) -> Result<Path
     Ok(path)
 }
 
+async fn path_is_dir(path: &Path) -> Result<bool> {
+    path_is_dir_or_err(path)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 pub(super) async fn ensure_destination_dir(path: &Path, force: bool) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
+    let metadata = match compio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(source).with_context(|| format!("Failed to inspect {}", path.display()))
+        }
+    };
     if !force {
         anyhow::bail!("Destination exists: {}", path.display());
     }
-    if path.is_file() {
+    if metadata.is_dir() {
+        // compio 0.19 does not expose remove_dir_all; keep the recursive namespace
+        // operation on the runtime blocking pool.
+        remove_dir_all(path.to_path_buf()).await?;
+    } else {
         compio::fs::remove_file(path)
             .await
             .with_context(|| format!("Failed to remove {}", path.display()))?;
-    } else {
-        remove_dir_all(path.to_path_buf()).await?;
     }
     Ok(())
 }

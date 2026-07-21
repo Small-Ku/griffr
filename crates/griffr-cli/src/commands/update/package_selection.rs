@@ -83,7 +83,7 @@ pub(super) fn build_update_dry_run_plan(
         ));
     } else if let Some(plan) = selected_archive_plan(version_info, package_kind) {
         lines.push(format!(
-            "Would download {} archive parts: {} ({})",
+            "Would process {} archive parts: {} declared parts ({})",
             plan.label,
             plan.part_count,
             ui::format_bytes(plan.total_size)
@@ -97,9 +97,15 @@ pub(super) fn build_update_dry_run_plan(
             }
         }
         if keep_pack_archives {
-            lines.push("Would keep downloaded package archives after extraction.".to_string());
+            lines.push(
+                "Would stream archive ranges during extraction, retain them, fill only missing gaps, verify each complete volume, and keep the package archives."
+                    .to_string(),
+            );
         } else {
-            lines.push("Would delete package archives after successful extraction.".to_string());
+            lines.push(
+                "Would stream required package byte ranges, verify extracted files, and remove the range cache after commit."
+                    .to_string(),
+            );
         }
     } else {
         lines.push("Would download update archives based on API response.".to_string());

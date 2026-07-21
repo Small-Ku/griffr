@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
+use compio::buf::BufResult;
+use compio::io::AsyncReadAt;
 use griffr_common::api::crypto;
 use griffr_common::api::types::ResIndex;
-use griffr_common::runtime::normalize_logical_path;
+use griffr_common::runtime::{
+    collect_files_recursive, normalize_logical_path, path_is_dir, path_is_file,
+};
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,7 +17,6 @@ use griffr_common::runtime::{
     persistent_path, streaming_assets_path, vfs_path, CONFIG_INI_NAME, PERSISTENT_DIR,
     STREAMING_ASSETS_DIR, VFS_DIR,
 };
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LocalResManifests {
     pub index_initial: Option<ResIndex>,
@@ -258,9 +261,9 @@ pub fn select_expected_vfs_map(
     })
 }
 
-pub fn resolve_vfs_root(path: &Path) -> Result<PathBuf> {
+pub async fn resolve_vfs_root(path: &Path) -> Result<PathBuf> {
     let direct_vfs = vfs_path(path);
-    if direct_vfs.is_dir() {
+    if path_is_dir(&direct_vfs).await {
         return Ok(path.to_path_buf());
     }
     if path
@@ -272,7 +275,7 @@ pub fn resolve_vfs_root(path: &Path) -> Result<PathBuf> {
             .parent()
             .context("VFS path has no parent directory")?
             .to_path_buf();
-        if vfs_path(&parent).is_dir() {
+        if path_is_dir(&vfs_path(&parent)).await {
             return Ok(parent);
         }
     }
@@ -283,8 +286,13 @@ pub fn resolve_vfs_root(path: &Path) -> Result<PathBuf> {
 }
 
 pub async fn try_read_local_res_index(path: &Path, key: &str) -> Result<Option<ResIndex>> {
-    if !path.is_file() {
-        return Ok(None);
+    match compio::fs::metadata(path).await {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(None),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(source).with_context(|| format!("Failed to inspect {}", path.display()))
+        }
     }
     let encrypted_b64 = compio::fs::read(path)
         .await
@@ -300,57 +308,56 @@ pub async fn try_read_local_res_index(path: &Path, key: &str) -> Result<Option<R
     Ok(Some(index))
 }
 
-pub fn collect_actual_vfs_files(root: &Path) -> Result<std::collections::BTreeSet<String>> {
+pub async fn collect_actual_vfs_files(root: &Path) -> Result<std::collections::BTreeSet<String>> {
     let vfs_root = vfs_path(root);
-    if !vfs_root.is_dir() {
+    if !path_is_dir(&vfs_root).await {
         anyhow::bail!("Missing VFS directory at {}", vfs_root.display());
     }
 
-    let mut files = std::collections::BTreeSet::new();
-    let mut stack = vec![vfs_root];
-    while let Some(dir) = stack.pop() {
-        for entry in
-            std::fs::read_dir(&dir).with_context(|| format!("Failed to read {}", dir.display()))?
-        {
-            let entry = entry.with_context(|| format!("Failed to read {}", dir.display()))?;
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if !path.is_file() {
-                continue;
-            }
+    let files = collect_files_recursive(vfs_root).await?;
+    files
+        .into_iter()
+        .map(|path| {
             let rel = path
                 .strip_prefix(root)
                 .with_context(|| format!("Failed to strip prefix {}", root.display()))?;
-            files.insert(normalize_logical_path(&rel.to_string_lossy()));
-        }
-    }
-    Ok(files)
+            Ok(normalize_logical_path(&rel.to_string_lossy()))
+        })
+        .collect()
 }
 
-pub fn file_md5(path: &Path) -> Result<String> {
-    let mut file =
-        std::fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+pub async fn file_md5(path: &Path) -> Result<String> {
+    const BUFFER_BYTES: usize = 1024 * 1024;
+
+    let file = compio::fs::File::open(path)
+        .await
+        .with_context(|| format!("Failed to open {}", path.display()))?;
     let mut hasher = Md5::new();
-    let mut buf = vec![0u8; 1024 * 1024];
+    let mut offset = 0u64;
+    let mut buffer = vec![0u8; BUFFER_BYTES];
     loop {
-        use std::io::Read;
-        let n = file.read(&mut buf)?;
-        if n == 0 {
+        let BufResult(result, mut returned_buffer) = file.read_at(buffer, offset).await;
+        let read = result.with_context(|| format!("Failed to read {}", path.display()))?;
+        if read == 0 {
             break;
         }
-        hasher.update(&buf[..n]);
+        returned_buffer.truncate(read);
+        hasher.update(&returned_buffer);
+        offset = offset.saturating_add(read as u64);
+        returned_buffer.resize(BUFFER_BYTES, 0);
+        buffer = returned_buffer;
     }
+    file.close()
+        .await
+        .with_context(|| format!("Failed to close {}", path.display()))?;
     Ok(griffr_common::to_hex(&hasher.finalize()))
 }
 
-pub fn resolve_endfield_data_root(path: &Path) -> Result<PathBuf> {
+pub async fn resolve_endfield_data_root(path: &Path) -> Result<PathBuf> {
     let data_root_name = game_definition(&GameId::ENDFIELD)
         .expect("Endfield must be present in the product catalog")
         .data_root;
-    let mut candidate = if path.is_file() {
+    let mut candidate = if path_is_file(path).await {
         path.parent()
             .context("Input file path has no parent directory")?
             .to_path_buf()
@@ -365,13 +372,16 @@ pub fn resolve_endfield_data_root(path: &Path) -> Result<PathBuf> {
     {
         return Ok(candidate);
     }
-    if candidate.join(data_root_name).is_dir() {
-        return Ok(candidate.join(data_root_name));
+    let nested_data_root = candidate.join(data_root_name);
+    if path_is_dir(&nested_data_root).await {
+        return Ok(nested_data_root);
     }
-    if persistent_path(&candidate).is_dir() && streaming_assets_path(&candidate).is_dir() {
+    if path_is_dir(&persistent_path(&candidate)).await
+        && path_is_dir(&streaming_assets_path(&candidate)).await
+    {
         return Ok(candidate);
     }
-    if candidate.join(CONFIG_INI_NAME).is_file() {
+    if path_is_file(&candidate.join(CONFIG_INI_NAME)).await {
         return Ok(candidate.join(data_root_name));
     }
     if candidate
@@ -385,7 +395,9 @@ pub fn resolve_endfield_data_root(path: &Path) -> Result<PathBuf> {
             .parent()
             .context("Persistent/StreamingAssets path has no parent")?
             .to_path_buf();
-        if persistent_path(&candidate).is_dir() && streaming_assets_path(&candidate).is_dir() {
+        if path_is_dir(&persistent_path(&candidate)).await
+            && path_is_dir(&streaming_assets_path(&candidate)).await
+        {
             return Ok(candidate);
         }
     }
@@ -419,21 +431,21 @@ pub fn sorted_difference(left: &[String], right: &[String]) -> std::collections:
         .collect::<std::collections::BTreeSet<_>>()
 }
 
-pub(super) fn collect_hash_mismatches(
+pub(super) async fn collect_hash_mismatches(
     root: &Path,
     expected_checksums: &std::collections::BTreeMap<String, String>,
     progress_callback: Option<&dyn Fn(usize, usize, &str)>,
 ) -> Vec<VfsHashMismatch> {
     let total = expected_checksums.len();
-    if let Some(cb) = progress_callback {
-        cb(0, total, "");
+    if let Some(callback) = progress_callback {
+        callback(0, total, "");
     }
     let mut mismatches = Vec::new();
     let mut completed = 0usize;
     for (rel_path, expected_md5) in expected_checksums {
         let file_path = root.join(rel_path.replace('/', "\\"));
-        if file_path.is_file() {
-            if let Ok(actual_md5) = file_md5(&file_path) {
+        if path_is_file(&file_path).await {
+            if let Ok(actual_md5) = file_md5(&file_path).await {
                 if actual_md5 != *expected_md5 {
                     mismatches.push(VfsHashMismatch {
                         path: rel_path.clone(),
@@ -444,8 +456,8 @@ pub(super) fn collect_hash_mismatches(
             }
         }
         completed = completed.saturating_add(1);
-        if let Some(cb) = progress_callback {
-            cb(completed, total, rel_path);
+        if let Some(callback) = progress_callback {
+            callback(completed, total, rel_path);
         }
     }
     mismatches

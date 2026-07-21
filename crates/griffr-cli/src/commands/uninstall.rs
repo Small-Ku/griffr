@@ -15,7 +15,7 @@ pub async fn uninstall(
     yes: bool,
     opts: GlobalOptions,
 ) -> Result<()> {
-    let target = resolve_install_path(&path);
+    let target = resolve_install_path(&path).await;
 
     ui::print_phase(format!("Uninstall target: {}", target.display()));
 
@@ -64,7 +64,8 @@ pub async fn uninstall(
         }
         progress.finish();
         if let Some(external) = external_vfs_root {
-            if external.exists() && !external.starts_with(&target) {
+            let external_exists = compio::fs::metadata(&external).await.is_ok();
+            if external_exists && !external.starts_with(&target) {
                 let external_progress =
                     ActivityProgress::new(format!("Deleting external VFS {}", external.display()));
                 if let Err(err) = remove_dir_all(external.clone()).await {

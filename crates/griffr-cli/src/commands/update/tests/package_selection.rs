@@ -88,7 +88,7 @@ fn dry_run_plan_includes_archive_verify_and_vfs_steps() {
 
     assert!(lines
         .iter()
-        .any(|line| line.contains("Would download full archive parts")));
+        .any(|line| line.contains("Would process full archive parts")));
     assert!(lines
         .iter()
         .any(|line| line.contains("Would run post-update integrity verification")));

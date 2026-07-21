@@ -1,7 +1,6 @@
 use super::operations::*;
 use griffr_common::config::RegionId;
 use griffr_common::runtime::copy_dir_recursive;
-use std::io::Write;
 use std::path::PathBuf;
 
 #[test]
@@ -55,31 +54,31 @@ fn local_low_roots_for_sg_prefers_gryphline() {
 async fn ensure_destination_dir_requires_force_when_existing() {
     let temp = tempfile::tempdir().unwrap();
     let existing = temp.path().join("existing");
-    std::fs::create_dir_all(&existing).unwrap();
+    compio::fs::create_dir_all(&existing).await.unwrap();
 
     let err = ensure_destination_dir(&existing, false).await.unwrap_err();
     assert!(err.to_string().contains("Destination exists"));
 }
 
-#[test]
-fn copy_dir_recursive_copies_nested_content() {
+#[compio::test]
+async fn copy_dir_recursive_copies_nested_content() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
     let nested = source.join("nested");
-    std::fs::create_dir_all(&nested).unwrap();
+    compio::fs::create_dir_all(&nested).await.unwrap();
     let file = nested.join("token_cache.bin");
-    let mut f = std::fs::File::create(&file).unwrap();
-    f.write_all(&[1, 2, 3, 4]).unwrap();
+    compio::fs::write(&file, vec![1, 2, 3, 4]).await.0.unwrap();
 
     let target = temp.path().join("target");
-    let stats = compio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(copy_dir_recursive(source.clone(), target.clone()))
+    let stats = copy_dir_recursive(source.clone(), target.clone())
+        .await
         .unwrap();
     assert_eq!(stats.files, 1);
     assert_eq!(stats.bytes, 4);
     assert_eq!(
-        std::fs::read(target.join("nested").join("token_cache.bin")).unwrap(),
+        compio::fs::read(target.join("nested").join("token_cache.bin"))
+            .await
+            .unwrap(),
         vec![1, 2, 3, 4]
     );
 }

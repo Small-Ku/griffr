@@ -1,10 +1,13 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use griffr_common::api::types::GameFileEntry;
 use griffr_common::runtime::task_pool::{
-    plan_archive_groups, Task, TaskGraphBuilder, TaskOutcome, TaskPoolRunner, TaskProgress,
+    plan_archive_groups, ArchiveRetention, Task, TaskGraphBuilder, TaskOutcome, TaskPoolRunner,
+    TaskProgress,
 };
 
 use super::*;
@@ -22,6 +25,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
     archive_password: Option<&str>,
     mode: ArchiveAcquireMode,
     patch_options: &PatchApplyOptions,
+    expected_files: Arc<BTreeMap<String, GameFileEntry>>,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<Vec<String>> {
@@ -68,9 +72,10 @@ pub(super) async fn download_and_extract_archives_from_dir(
                     base_name: group.base_name.clone(),
                     volumes: group.parts.iter().map(|part| part.dest.clone()).collect(),
                     dest: install_path.to_path_buf(),
-                    cleanup: !keep_pack_archives,
+                    retention: ArchiveRetention::from_keep_complete_volumes(keep_pack_archives),
                     password: archive_password.map(str::to_owned),
                     patch_options: patch_options.clone(),
+                    expected_files: expected_files.clone(),
                 },
                 verify_nodes,
             )?;
@@ -130,15 +135,22 @@ pub(super) async fn download_and_extract_archives_from_dir(
         return Ok(modified_paths.into_iter().collect());
     }
 
-    let mut tasks = Vec::with_capacity(archive_groups.len());
+    let archive_group_count = archive_groups.len();
+    let archive_verify_count = if keep_pack_archives {
+        archives.len()
+    } else {
+        archive_group_count
+    };
+    let mut tasks = Vec::with_capacity(archive_group_count);
     for group in archive_groups {
         opts.verbose(format!("queued archive state-machine {}", group.base_name));
         tasks.push(Task::InstallArchive {
             base_name: group.base_name,
             dest: install_path.to_path_buf(),
-            cleanup: !keep_pack_archives,
+            retention: ArchiveRetention::from_keep_complete_volumes(keep_pack_archives),
             password: archive_password.map(str::to_owned),
             patch_options: patch_options.clone(),
+            expected_files: expected_files.clone(),
             parts: group.parts,
         });
     }
@@ -159,7 +171,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
         delete_lane,
     );
     let task_progress = TaskProgress::new(progress_session.sender())
-        .with_verify(verify_lane, archives.len())
+        .with_verify(verify_lane, archive_verify_count)
         .with_download(download_lane)
         .with_extract(extract_lane)
         .with_commit(commit_lane)
@@ -206,6 +218,7 @@ pub(super) async fn download_and_extract_archives(
     keep_pack_archives: bool,
     archive_password: Option<&str>,
     patch_options: &PatchApplyOptions,
+    expected_files: Arc<BTreeMap<String, GameFileEntry>>,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<Vec<String>> {
@@ -219,6 +232,7 @@ pub(super) async fn download_and_extract_archives(
         archive_password,
         ArchiveAcquireMode::DownloadIfMissing,
         patch_options,
+        expected_files,
         opts,
         task_pool_runner,
     )

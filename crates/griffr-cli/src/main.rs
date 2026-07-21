@@ -5,7 +5,7 @@ mod cli;
 mod commands;
 #[path = "main/debug_cli.rs"]
 mod debug_cli;
-#[path = "main/entrypoint.rs"]
+#[path = "main/entrypoint/mod.rs"]
 mod entrypoint;
 mod progress;
 mod ui;

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::runtime::task_pool::TaskPoolRunner;
+use griffr_common::runtime::task_pool::{archive_expected_files, TaskPoolRunner};
 use griffr_common::runtime::{
     plan_vfs_tasks, resolve_staged_patch_recovery_dir, select_update_package,
     streaming_assets_path, UpdatePackageKind, VfsFilePlanOptions,
@@ -227,6 +227,21 @@ pub(super) async fn update_internal(
         return Ok(());
     }
 
+    let expected_archive_files = if reuse_paths.is_empty() {
+        if let Some(pkg) = version_info.pkg.as_ref() {
+            archive_expected_files(
+                api_client
+                    .fetch_game_files(&pkg.file_path, pkg.game_files_md5.as_deref())
+                    .await
+                    .context("Failed to fetch target game_files before archive streaming")?,
+            )
+        } else {
+            archive_expected_files(Vec::new())
+        }
+    } else {
+        archive_expected_files(Vec::new())
+    };
+
     let mut modified_paths = Vec::new();
     if !reuse_paths.is_empty() {
         ui::print_phase("Applying update via local file reuse");
@@ -265,6 +280,7 @@ pub(super) async fn update_internal(
                             ArchiveAcquireMode::DownloadIfMissing
                         },
                         &patch_options,
+                        expected_archive_files.clone(),
                         &opts,
                         &mut task_pool_runner,
                     )
@@ -277,6 +293,7 @@ pub(super) async fn update_internal(
                         opts.keep_pack_archives,
                         patch_password,
                         &patch_options,
+                        expected_archive_files.clone(),
                         &opts,
                         &mut task_pool_runner,
                     )
@@ -295,6 +312,7 @@ pub(super) async fn update_internal(
                     opts.keep_pack_archives,
                     None,
                     &patch_options,
+                    expected_archive_files.clone(),
                     &opts,
                     &mut task_pool_runner,
                 )

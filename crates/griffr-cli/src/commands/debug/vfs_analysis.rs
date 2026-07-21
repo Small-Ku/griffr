@@ -7,8 +7,8 @@ use super::vfs_support::*;
 use crate::progress::StepProgress;
 use crate::{GlobalOptions, SnapshotHashScope, VfsDiffAgainst};
 use griffr_common::runtime::{
-    persistent_path, resource_manifest_filename, streaming_assets_path, ResourceManifestKind,
-    RESOURCE_GROUP_INITIAL, RESOURCE_GROUP_MAIN,
+    path_is_dir, persistent_path, resource_manifest_filename, streaming_assets_path,
+    ResourceManifestKind, RESOURCE_GROUP_INITIAL, RESOURCE_GROUP_MAIN,
 };
 
 pub(super) async fn snapshot_root_state(
@@ -18,7 +18,8 @@ pub(super) async fn snapshot_root_state(
     hash_check: bool,
     hash_progress_callback: Option<&dyn Fn(usize, usize, &str)>,
 ) -> ResourceRootSnapshot {
-    if !root.is_dir() {
+    let root_is_dir = path_is_dir(&root).await;
+    if !root_is_dir {
         return ResourceRootSnapshot {
             root_path: root.display().to_string(),
             present: false,
@@ -132,7 +133,7 @@ pub(super) async fn snapshot_root_state(
         }
     };
     let expected_with_checksums = select_expected_vfs_map(against, &manifests).ok();
-    let actual = match collect_actual_vfs_files(&root) {
+    let actual = match collect_actual_vfs_files(&root).await {
         Ok(v) => v,
         Err(err) => {
             return ResourceRootSnapshot {
@@ -165,10 +166,10 @@ pub(super) async fn snapshot_root_state(
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
     let hash_mismatches = if hash_check {
-        expected_with_checksums
-            .as_ref()
-            .map(|map| collect_hash_mismatches(&root, &map.entries, hash_progress_callback))
-            .unwrap_or_default()
+        match expected_with_checksums.as_ref() {
+            Some(map) => collect_hash_mismatches(&root, &map.entries, hash_progress_callback).await,
+            None => Vec::new(),
+        }
     } else {
         Vec::new()
     };
@@ -217,7 +218,7 @@ pub async fn vfs_diff(
     show_limit: usize,
     _opts: GlobalOptions,
 ) -> Result<()> {
-    let root = resolve_vfs_root(&path)?;
+    let root = resolve_vfs_root(&path).await?;
     let key = key.unwrap_or_else(|| crypto::RES_INDEX_KEY.to_string());
 
     let manifests = LocalResManifests {
@@ -255,7 +256,7 @@ pub async fn vfs_diff(
         .await?,
     };
     let expected = select_expected_vfs_set(against, &manifests)?;
-    let actual = collect_actual_vfs_files(&root)?;
+    let actual = collect_actual_vfs_files(&root).await?;
 
     let missing = expected
         .entries
@@ -305,7 +306,7 @@ pub async fn snapshot_resource_state(
     } else {
         std::env::current_dir()?.join(path.clone())
     };
-    let endfield_data_root = resolve_endfield_data_root(&source_path)?;
+    let endfield_data_root = resolve_endfield_data_root(&source_path).await?;
     let key = crypto::RES_INDEX_KEY;
 
     let persistent_hash_check = matches!(

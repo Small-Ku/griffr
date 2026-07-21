@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use griffr_common::api::crypto;
-use griffr_common::runtime::{list_files_with_extension, GAME_FILES_NAME};
+use griffr_common::runtime::{list_files_with_extension, path_is_dir, GAME_FILES_NAME};
 
 use crate::GlobalOptions;
 use griffr_common::runtime::{decrypt_config_ini, detect_local_install, resolve_named_path};
@@ -27,7 +27,7 @@ pub async fn config_ini(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
 }
 
 pub async fn game_files(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
-    let game_files_path = resolve_named_path(&path, GAME_FILES_NAME);
+    let game_files_path = resolve_named_path(&path, GAME_FILES_NAME).await;
     let encrypted = compio::fs::read(&game_files_path)
         .await
         .with_context(|| format!("Failed to read {}", game_files_path.display()))?;
@@ -41,7 +41,7 @@ pub async fn res_index(path: PathBuf, key: Option<String>, _opts: GlobalOptions)
     let key = key.unwrap_or_else(|| crypto::RES_INDEX_KEY.to_string());
     let mut targets = Vec::new();
 
-    if path.is_dir() {
+    if path_is_dir(&path).await {
         targets = list_files_with_extension(path.clone(), "json").await?;
         if targets.is_empty() {
             anyhow::bail!("No .json files found under {}", path.display());

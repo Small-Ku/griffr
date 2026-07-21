@@ -6,7 +6,8 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::PackageInfo;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::{
-    plan_archive_groups, Task, TaskOutcome, TaskPoolRunner, TaskProgress,
+    archive_expected_files, plan_archive_groups, ArchiveRetention, Task, TaskOutcome,
+    TaskPoolRunner, TaskProgress,
 };
 use griffr_common::runtime::{directory_has_entries, is_launcher_metadata_path};
 use griffr_common::runtime::{
@@ -80,9 +81,11 @@ pub async fn install(
             install_path.display()
         ));
         if opts.keep_pack_archives {
-            opts.dry_run("Would keep downloaded package archives after extraction.");
+            opts.dry_run(
+                "Would stream archive ranges during extraction, retain them, fill only missing gaps, verify each complete volume, and keep the package archives.",
+            );
         } else {
-            opts.dry_run("Would delete package archives after successful extraction.");
+            opts.dry_run("Would stream required package byte ranges, verify extracted files, and remove the range cache after commit.");
         }
         if !reuse_paths.is_empty() {
             opts.dry_run(format!(
@@ -149,15 +152,27 @@ pub async fn install(
             .with_context(|| format!("Failed to create {}", download_dir.display()))?;
 
         let archive_groups = plan_archive_groups(&pkg.packs, &download_dir)?;
-        let archive_part_count = pkg.packs.len();
+        let expected_archive_files = archive_expected_files(
+            api_client
+                .fetch_game_files(&pkg.file_path, pkg.game_files_md5.as_deref())
+                .await
+                .context("Failed to fetch game_files before archive streaming")?,
+        );
+        let archive_group_count = archive_groups.len();
+        let archive_verify_count = if opts.keep_pack_archives {
+            pkg.packs.len()
+        } else {
+            archive_group_count
+        };
         let mut tasks = Vec::with_capacity(archive_groups.len());
         for group in archive_groups {
             tasks.push(Task::InstallArchive {
                 base_name: group.base_name,
                 dest: install_path.clone(),
-                cleanup: !opts.keep_pack_archives,
+                retention: ArchiveRetention::from_keep_complete_volumes(opts.keep_pack_archives),
                 password: None,
                 patch_options: griffr_common::runtime::PatchApplyOptions::default(),
+                expected_files: expected_archive_files.clone(),
                 parts: group.parts,
             });
         }
@@ -178,7 +193,7 @@ pub async fn install(
             delete_lane,
         );
         let task_progress = TaskProgress::new(progress_session.sender())
-            .with_verify(verify_lane, archive_part_count)
+            .with_verify(verify_lane, archive_verify_count)
             .with_download(download_lane)
             .with_extract(extract_lane)
             .with_commit(commit_lane)

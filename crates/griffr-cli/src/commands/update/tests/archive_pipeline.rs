@@ -35,12 +35,39 @@ fn start_test_http_channel(
                     }
 
                     if let Some(body) = routes.get(&path) {
-                        let header = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                            body.len()
-                        );
-                        let _ = stream.write_all(header.as_bytes());
-                        let _ = stream.write_all(body);
+                        let range = req.lines().find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("range: bytes=")
+                                .and_then(|value| value.split_once('-'))
+                                .and_then(|(start, end)| {
+                                    Some((
+                                        start.trim().parse::<usize>().ok()?,
+                                        end.trim().parse::<usize>().ok()?,
+                                    ))
+                                })
+                        });
+                        if let Some((start, end)) = range {
+                            let start = start.min(body.len());
+                            let end = end.min(body.len().saturating_sub(1));
+                            let response_body = if start <= end {
+                                &body[start..=end]
+                            } else {
+                                &body[0..0]
+                            };
+                            let header = format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+                                response_body.len(), start, end, body.len()
+                            );
+                            let _ = stream.write_all(header.as_bytes());
+                            let _ = stream.write_all(response_body);
+                        } else {
+                            let header = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(header.as_bytes());
+                            let _ = stream.write_all(body);
+                        }
                     } else {
                         let body = b"not found";
                         let header = format!(
@@ -128,6 +155,7 @@ async fn download_and_extract_archives_recovers_partial_part_on_rerun() {
         false,
         None,
         &griffr_common::runtime::PatchApplyOptions::default(),
+        griffr_common::runtime::task_pool::archive_expected_files(Vec::new()),
         &opts,
         &mut pool_runner,
     )
@@ -142,10 +170,9 @@ async fn download_and_extract_archives_recovers_partial_part_on_rerun() {
         0,
         "valid part should be reused and skipped"
     );
-    assert_eq!(
-        guard.get(&format!("/{}", part2_name)).copied().unwrap_or(0),
-        1,
-        "truncated part should be fetched once on rerun"
+    assert!(
+        guard.get(&format!("/{}", part2_name)).copied().unwrap_or(0) >= 1,
+        "truncated part should be fetched through one or more exact range requests"
     );
     drop(guard);
 
@@ -202,6 +229,7 @@ async fn download_and_extract_archives_applies_delete_files_manifest() {
         false,
         None,
         &griffr_common::runtime::PatchApplyOptions::default(),
+        griffr_common::runtime::task_pool::archive_expected_files(Vec::new()),
         &opts,
         &mut pool_runner,
     )
