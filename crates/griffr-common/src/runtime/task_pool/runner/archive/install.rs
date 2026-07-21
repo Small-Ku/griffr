@@ -9,65 +9,69 @@ use crate::download::extractor::MultiVolumeLayout;
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::fs_ops::{commit_partial_download, make_partial_download_path};
 use crate::runtime::task_pool::graph::TaskRun;
-use crate::runtime::task_pool::types::{ArchivePart, ArchiveRetention, ArchiveWork, Task};
+use crate::runtime::task_pool::types::{
+    ArchivePart, ArchiveRetention, ArchiveSource, ArchiveWork, Task,
+};
 use crate::runtime::task_pool::verify;
 use crate::runtime::PatchApplyOptions;
 
-pub(crate) fn run_install_archive(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_open_archive(
     base_name: String,
+    source: ArchiveSource,
     dest: PathBuf,
     retention: ArchiveRetention,
     password: Option<String>,
     patch_options: PatchApplyOptions,
     expected_files: Arc<std::collections::BTreeMap<String, GameFileEntry>>,
     excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
-    mut parts: Vec<ArchivePart>,
 ) -> TaskRun {
     let result = (|| -> Result<_> {
-        parts.sort_by(|left, right| {
-            left.sequence
-                .cmp(&right.sequence)
-                .then_with(|| left.logical_path.cmp(&right.logical_path))
-        });
-        if parts.is_empty() {
-            return Err(Error::Message {
-                context: "Task pool error: ",
-                detail: "install archive has no parts".to_string(),
-            });
-        }
-
-        prepare_trusted_archive_files(&parts)?;
-        let archive_parent = parts[0]
-            .dest
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| dest.clone());
-        let cache_key = base_name
-            .chars()
-            .map(|character| {
-                if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-                    character
-                } else {
-                    '_'
+        let (layout, parts) = match source {
+            ArchiveSource::Remote(mut parts) => {
+                parts.sort_by(|left, right| {
+                    left.sequence
+                        .cmp(&right.sequence)
+                        .then_with(|| left.logical_path.cmp(&right.logical_path))
+                });
+                if parts.is_empty() {
+                    return Err(Error::Message {
+                        context: "Task pool error: ",
+                        detail: "remote archive has no parts".to_string(),
+                    });
                 }
-            })
-            .collect::<String>();
-        let mut identity = Md5::new();
-        for part in &parts {
-            identity.update(part.expected_md5.as_bytes());
-            identity.update(part.expected_size.to_le_bytes());
-        }
-        let identity = crate::to_hex(&identity.finalize());
-        let cache_dir = archive_parent
-            .join(".griffr-range-cache")
-            .join(format!("{cache_key}-{}", &identity[..16]));
-        let layout = MultiVolumeLayout::from_remote(
-            parts
-                .iter()
-                .map(|part| (part.dest.clone(), part.url.clone(), part.expected_size))
-                .collect(),
-            cache_dir,
-        )?;
+
+                prepare_trusted_archive_files(&parts)?;
+                let archive_parent = parts[0]
+                    .dest
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| dest.clone());
+                let cache_key = safe_cache_key(&base_name);
+                let identity = archive_identity(&parts);
+                let cache_dir = archive_parent
+                    .join(".griffr-range-cache")
+                    .join(format!("{cache_key}-{}", &identity[..16]));
+                let layout = MultiVolumeLayout::from_remote(
+                    parts
+                        .iter()
+                        .map(|part| (part.dest.clone(), part.url.clone(), part.expected_size))
+                        .collect(),
+                    cache_dir,
+                )?;
+                (layout, parts)
+            }
+            ArchiveSource::Local(volumes) => {
+                if volumes.is_empty() {
+                    return Err(Error::Message {
+                        context: "Task pool error: ",
+                        detail: "local archive has no volumes".to_string(),
+                    });
+                }
+                (MultiVolumeLayout::from_files(volumes)?, Vec::new())
+            }
+        };
+
         ArchiveWork::new(
             base_name,
             layout.clone(),
@@ -89,6 +93,28 @@ pub(crate) fn run_install_archive(
         }),
         Err(error) => TaskRun::failed(error.to_string()),
     }
+}
+
+fn safe_cache_key(base_name: &str) -> String {
+    base_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn archive_identity(parts: &[ArchivePart]) -> String {
+    let mut identity = Md5::new();
+    for part in parts {
+        identity.update(part.expected_md5.as_bytes());
+        identity.update(part.expected_size.to_le_bytes());
+    }
+    crate::to_hex(&identity.finalize())
 }
 
 fn prepare_trusted_archive_files(parts: &[ArchivePart]) -> Result<()> {

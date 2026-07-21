@@ -285,17 +285,25 @@ pub struct ArchivePart {
     pub expected_size: u64,
 }
 
+/// Selects the backing data for one archive flow. Both sources use the same
+/// directory scan, index read, extraction, commit, and cleanup DAG.
+#[derive(Debug, Clone)]
+pub enum ArchiveSource {
+    Remote(Vec<ArchivePart>),
+    Local(Vec<PathBuf>),
+}
+
 #[derive(Debug, Clone)]
 pub enum Task {
-    InstallArchive {
+    OpenArchive {
         base_name: String,
+        source: ArchiveSource,
         dest: PathBuf,
         retention: ArchiveRetention,
         password: Option<String>,
         patch_options: PatchApplyOptions,
         expected_files: Arc<BTreeMap<String, GameFileEntry>>,
         excluded_commit_paths: Arc<BTreeSet<String>>,
-        parts: Vec<ArchivePart>,
     },
     /// A download changes from CPU preparation to async transfer when `resume`
     /// becomes `Some`; both stages retain this same canonical task payload.
@@ -351,16 +359,6 @@ pub enum Task {
         retry_count: u32,
         transfer_class: TransferClass,
     },
-    Extract {
-        base_name: String,
-        volumes: Vec<PathBuf>,
-        dest: PathBuf,
-        retention: ArchiveRetention,
-        password: Option<String>,
-        patch_options: PatchApplyOptions,
-        expected_files: Arc<BTreeMap<String, GameFileEntry>>,
-        excluded_commit_paths: Arc<BTreeSet<String>>,
-    },
     #[doc(hidden)]
     FetchArchiveRange {
         work: Arc<ArchiveWork>,
@@ -384,11 +382,6 @@ pub enum Task {
         archive_index: Arc<ArchiveIndex>,
     },
     #[doc(hidden)]
-    PlanArchiveExtraction {
-        work: Arc<ArchiveWork>,
-        archive_index: Arc<ArchiveIndex>,
-    },
-    #[doc(hidden)]
     ProbePatchArtifact {
         patch_check: Arc<PatchCheckWork>,
         probe_index: usize,
@@ -408,18 +401,9 @@ pub enum Task {
         shard: ArchiveShardTask,
     },
     #[doc(hidden)]
-    FillArchiveVolumeGaps {
+    RetainArchiveVolume {
         work: Arc<ArchiveWork>,
         volume_index: usize,
-    },
-    #[doc(hidden)]
-    SaveArchiveVolume {
-        work: Arc<ArchiveWork>,
-        volume_index: usize,
-    },
-    #[doc(hidden)]
-    ArchiveVolumesReady {
-        work: Arc<ArchiveWork>,
     },
     #[doc(hidden)]
     CommitArchive {
@@ -427,11 +411,6 @@ pub enum Task {
     },
     #[doc(hidden)]
     CommitArchiveBatch {
-        commit: Arc<ArchiveCommitWork>,
-        batch_index: usize,
-    },
-    #[doc(hidden)]
-    VerifyCommittedBatch {
         commit: Arc<ArchiveCommitWork>,
         batch_index: usize,
     },

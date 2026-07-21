@@ -6,8 +6,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use griffr_common::api::types::GameFileEntry;
 use griffr_common::runtime::task_pool::{
-    plan_archive_groups, ArchiveRetention, Task, TaskGraphBuilder, TaskOutcome, TaskPoolRunner,
-    TaskProgress,
+    plan_archive_groups, ArchiveRetention, ArchiveSource, Task, TaskGraphBuilder, TaskOutcome,
+    TaskPoolRunner, TaskProgress,
 };
 use griffr_common::runtime::{PatchApplyOptions, ProgressLane};
 
@@ -116,9 +116,11 @@ pub(super) async fn download_and_extract_archives_from_dir(
                 })
                 .collect::<Vec<_>>();
             archive_nodes.push(graph.add_task(
-                Task::Extract {
+                Task::OpenArchive {
                     base_name: group.base_name.clone(),
-                    volumes: group.parts.iter().map(|part| part.dest.clone()).collect(),
+                    source: ArchiveSource::Local(
+                        group.parts.iter().map(|part| part.dest.clone()).collect(),
+                    ),
                     dest: install_path.to_path_buf(),
                     retention: ArchiveRetention::from_keep_full_volumes(keep_pack_archives),
                     password: archive_password.map(str::to_owned),
@@ -198,15 +200,15 @@ pub(super) async fn download_and_extract_archives_from_dir(
     let mut archive_nodes = Vec::with_capacity(archive_group_count);
     for group in archive_groups {
         opts.verbose(format!("queued archive state-machine {}", group.base_name));
-        archive_nodes.push(graph.add_root(Task::InstallArchive {
+        archive_nodes.push(graph.add_root(Task::OpenArchive {
             base_name: group.base_name,
+            source: ArchiveSource::Remote(group.parts),
             dest: install_path.to_path_buf(),
             retention: ArchiveRetention::from_keep_full_volumes(keep_pack_archives),
             password: archive_password.map(str::to_owned),
             patch_options: patch_options.clone(),
             expected_files: expected_files.clone(),
             excluded_commit_paths: excluded_commit_paths.clone(),
-            parts: group.parts,
         }));
     }
     let extra_task_count = extra_tasks.len();

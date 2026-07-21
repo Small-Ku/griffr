@@ -15,7 +15,11 @@ use crate::runtime::task_pool::verify;
 
 const COPY_BUFFER_BYTES: usize = 1024 * 1024;
 
-pub(crate) fn run_fill_archive_volume_gaps(work: Arc<ArchiveWork>, volume_index: usize) -> TaskRun {
+pub(crate) fn run_retain_archive_volume(
+    work: Arc<ArchiveWork>,
+    volume_index: usize,
+    event_tx: &flume::Sender<WorkerEvent>,
+) -> TaskRun {
     if !work.should_save_full_volumes() {
         return TaskRun::succeeded();
     }
@@ -28,35 +32,20 @@ pub(crate) fn run_fill_archive_volume_gaps(work: Arc<ArchiveWork>, volume_index:
         Ok(requests) => requests,
         Err(error) => return TaskRun::failed(error.to_string()),
     };
-    if requests.is_empty() {
-        return TaskRun::then(Task::SaveArchiveVolume { work, volume_index });
-    }
-
-    let mut expansion = GraphExpansion::new();
-    let fetches = requests
-        .into_iter()
-        .map(|request| {
+    if !requests.is_empty() {
+        let mut expansion = GraphExpansion::new();
+        for request in requests {
             expansion.add_root(Task::FetchArchiveRange {
                 work: work.clone(),
                 request,
                 retry_count: 0,
                 priority: ArchiveRangePriority::RetentionBackground,
-            })
-        })
-        .collect::<Vec<_>>();
-    match expansion.add_task(Task::SaveArchiveVolume { work, volume_index }, fetches) {
-        Ok(_) => TaskRun::expand(expansion),
-        Err(error) => TaskRun::failed(error.to_string()),
+            });
+        }
+        return TaskRun::expand_then(expansion, Task::RetainArchiveVolume { work, volume_index });
     }
-}
 
-pub(crate) fn run_save_archive_volume(
-    work: Arc<ArchiveWork>,
-    volume_index: usize,
-    event_tx: &flume::Sender<WorkerEvent>,
-) -> TaskRun {
-    let result = save_archive_volume(&work, volume_index, event_tx);
-    match result {
+    match save_archive_volume(&work, volume_index, event_tx) {
         Ok(()) => TaskRun::succeeded(),
         Err(error) => {
             if matches!(
@@ -73,14 +62,6 @@ pub(crate) fn run_save_archive_volume(
             }
             TaskRun::failed(error.to_string())
         }
-    }
-}
-
-pub(crate) fn run_archive_volumes_ready(work: Arc<ArchiveWork>) -> TaskRun {
-    if work.should_save_full_volumes() {
-        TaskRun::succeeded()
-    } else {
-        TaskRun::failed("archive volume finish barrier used for an ephemeral archive")
     }
 }
 

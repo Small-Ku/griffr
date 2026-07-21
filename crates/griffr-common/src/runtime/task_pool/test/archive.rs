@@ -50,9 +50,9 @@ fn extract_task_spawns_vfs_patch_and_delete_manifest_follow_up_tasks() {
     let zip_bytes = std::fs::read(&zip_path).unwrap();
     std::fs::write(source_dir.join("bundle.zip.001"), &zip_bytes).unwrap();
 
-    let tasks = vec![Task::Extract {
+    let tasks = vec![Task::OpenArchive {
         base_name: "bundle".to_string(),
-        volumes: vec![source_dir.join("bundle.zip.001")],
+        source: ArchiveSource::Local(vec![source_dir.join("bundle.zip.001")]),
         dest: install_dir.clone(),
         retention: ArchiveRetention::KeepFullVolumes,
         password: None,

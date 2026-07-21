@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::runtime::task_pool::{ArchiveRangePriority, Task, TransferClass};
+use crate::runtime::task_pool::{ArchiveRangePriority, ArchiveSource, Task, TransferClass};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RunClass {
@@ -113,7 +113,23 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                 request.reuse_commit = true;
             }
         }
-        Task::Extract { .. } => {}
+        Task::OpenArchive { source, .. } => match source {
+            ArchiveSource::Remote(parts) => {
+                for part in parts {
+                    let volume = volume_key(&part.dest);
+                    request.read_volumes.push(volume.clone());
+                    request.metadata_volumes.push(volume);
+                    request.mutation_paths.push(path_key(&part.dest));
+                }
+            }
+            ArchiveSource::Local(volumes) => {
+                for volume_path in volumes {
+                    let volume = volume_key(volume_path);
+                    request.read_volumes.push(volume.clone());
+                    request.metadata_volumes.push(volume);
+                }
+            }
+        },
         Task::DiscoverArchiveDirectory {
             work,
             required_range,
@@ -160,8 +176,6 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                     .iter()
                     .map(|path| volume_key(path)),
             );
-        }
-        Task::PlanArchiveExtraction { work, .. } => {
             request.read_volumes.push(volume_key(&work.dest));
             let staging_parent = work
                 .patch_options
@@ -205,23 +219,28 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.write_volumes.push(volume_key(&shard.staging_dir));
             request.extract = true;
         }
-        Task::FillArchiveVolumeGaps { work, volume_index } => {
+        Task::RetainArchiveVolume { work, volume_index } => {
+            let full_volume_is_ready = work
+                .layout
+                .volume_range(*volume_index)
+                .is_some_and(|range| work.layout.range_is_available(&range));
             if let Some(path) = work.layout.path(*volume_index) {
-                request.metadata_volumes.push(volume_key(path));
+                let volume = volume_key(path);
+                if full_volume_is_ready {
+                    request.read_volumes.push(volume);
+                } else {
+                    request.metadata_volumes.push(volume);
+                }
+            }
+            if full_volume_is_ready {
+                if let Some(part) = work.parts.get(*volume_index) {
+                    let volume = volume_key(&part.dest);
+                    request.write_volumes.push(volume.clone());
+                    request.archive_save_volumes.push(volume);
+                    request.mutation_paths.push(path_key(&part.dest));
+                }
             }
         }
-        Task::SaveArchiveVolume { work, volume_index } => {
-            if let Some(path) = work.layout.path(*volume_index) {
-                request.read_volumes.push(volume_key(path));
-            }
-            if let Some(part) = work.parts.get(*volume_index) {
-                let volume = volume_key(&part.dest);
-                request.write_volumes.push(volume.clone());
-                request.archive_save_volumes.push(volume);
-                request.mutation_paths.push(path_key(&part.dest));
-            }
-        }
-        Task::ArchiveVolumesReady { .. } => {}
         Task::CommitArchive { work } => {
             if let Some(prepared) = work.prepared.lock().unwrap().as_ref() {
                 request
@@ -242,21 +261,12 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                     } else {
                         request.metadata_volumes.push(destination_volume.clone());
                     }
+                    request.read_volumes.push(destination_volume.clone());
                     request
                         .archive_commit_volumes
                         .push((destination_volume, batch.cross_volume));
                     request.mutation_paths.push(path_key(&job.destination));
                 }
-            }
-        }
-        Task::VerifyCommittedBatch {
-            commit,
-            batch_index,
-        } => {
-            if let Some(batch) = commit.batch(*batch_index) {
-                request
-                    .read_volumes
-                    .extend(batch.jobs.iter().map(|job| volume_key(&job.destination)));
             }
         }
         Task::FinishArchiveCommit { commit } => {
@@ -356,7 +366,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.metadata_volumes.push(volume_key(dest));
             request.mutation_paths.push(path_key(dest));
         }
-        Task::InstallArchive { .. } | Task::RepairFile { .. } => {}
+        Task::RepairFile { .. } => {}
     }
     request.estimated_bytes = task_estimated_bytes(task);
     normalize_volumes(&mut request);
@@ -382,10 +392,6 @@ fn task_estimated_bytes(task: &Task) -> u64 {
         Task::CommitArchiveBatch {
             commit,
             batch_index,
-        }
-        | Task::VerifyCommittedBatch {
-            commit,
-            batch_index,
         } => commit
             .batch(*batch_index)
             .map(|batch| batch.estimated_bytes)
@@ -394,21 +400,30 @@ fn task_estimated_bytes(task: &Task) -> u64 {
             .entry(*entry_index)
             .map(|entry| entry.expected_size)
             .unwrap_or(0),
-        Task::SaveArchiveVolume { work, volume_index } => work
+        Task::RetainArchiveVolume { work, volume_index } => work
             .parts
             .get(*volume_index)
             .map(|part| part.expected_size)
             .unwrap_or(0),
-        Task::InstallArchive { .. }
-        | Task::Extract { .. }
-        | Task::DiscoverArchiveDirectory { .. }
+        Task::OpenArchive { source, .. } => match source {
+            ArchiveSource::Remote(parts) => parts
+                .iter()
+                .filter_map(|part| std::fs::metadata(&part.dest).ok())
+                .filter(|metadata| metadata.is_file())
+                .map(|metadata| metadata.len())
+                .sum(),
+            ArchiveSource::Local(volumes) => volumes
+                .iter()
+                .filter_map(|path| std::fs::metadata(path).ok())
+                .filter(|metadata| metadata.is_file())
+                .map(|metadata| metadata.len())
+                .sum(),
+        },
+        Task::DiscoverArchiveDirectory { .. }
         | Task::InspectArchiveIndex { .. }
         | Task::ReadArchiveControls { .. }
-        | Task::PlanArchiveExtraction { .. }
         | Task::MeasurePatchRelocation { .. }
         | Task::SavePatchPlan { .. }
-        | Task::FillArchiveVolumeGaps { .. }
-        | Task::ArchiveVolumesReady { .. }
         | Task::CommitArchive { .. }
         | Task::FinishArchiveCommit { .. }
         | Task::PreparePatchApply { .. }
@@ -439,8 +454,7 @@ fn run_class(task: &Task) -> RunClass {
         Task::Verify { .. }
         | Task::RepairFile { .. }
         | Task::VerifyReuseVolume { .. }
-        | Task::ProbePatchArtifact { .. }
-        | Task::VerifyCommittedBatch { .. } => RunClass::Cpu,
+        | Task::ProbePatchArtifact { .. } => RunClass::Cpu,
         Task::ApplyPatchEntry { patch, entry_index } => patch
             .entry(*entry_index)
             .map(|entry| match &entry.source {
@@ -449,18 +463,14 @@ fn run_class(task: &Task) -> RunClass {
                 | crate::runtime::PlannedPatchSource::Hdiff { .. } => RunClass::Cpu,
             })
             .unwrap_or(RunClass::Blocking),
-        Task::InstallArchive { .. }
-        | Task::Extract { .. }
+        Task::OpenArchive { .. }
         | Task::DiscoverArchiveDirectory { .. }
         | Task::InspectArchiveIndex { .. }
         | Task::ReadArchiveControls { .. }
-        | Task::PlanArchiveExtraction { .. }
         | Task::MeasurePatchRelocation { .. }
         | Task::SavePatchPlan { .. }
         | Task::ExtractArchiveShard { .. }
-        | Task::FillArchiveVolumeGaps { .. }
-        | Task::SaveArchiveVolume { .. }
-        | Task::ArchiveVolumesReady { .. }
+        | Task::RetainArchiveVolume { .. }
         | Task::CommitArchive { .. }
         | Task::CommitArchiveBatch { .. }
         | Task::FinishArchiveCommit { .. }
@@ -523,9 +533,7 @@ fn path_key(path: &Path) -> String {
 
 pub(super) fn task_path(task: &Task) -> String {
     match task {
-        Task::InstallArchive { base_name, .. } | Task::Extract { base_name, .. } => {
-            base_name.clone()
-        }
+        Task::OpenArchive { base_name, .. } => base_name.clone(),
         Task::ProbePatchArtifact {
             patch_check,
             probe_index,
@@ -540,11 +548,8 @@ pub(super) fn task_path(task: &Task) -> String {
         Task::DiscoverArchiveDirectory { work, .. }
         | Task::InspectArchiveIndex { work, .. }
         | Task::ReadArchiveControls { work, .. }
-        | Task::PlanArchiveExtraction { work, .. }
         | Task::SavePatchPlan { work, .. }
-        | Task::FillArchiveVolumeGaps { work, .. }
-        | Task::SaveArchiveVolume { work, .. }
-        | Task::ArchiveVolumesReady { work }
+        | Task::RetainArchiveVolume { work, .. }
         | Task::CommitArchive { work }
         | Task::CleanupArchive { work } => work.base_name.clone(),
         Task::ExtractArchiveShard { shard } => shard.work.base_name.clone(),
@@ -561,10 +566,6 @@ pub(super) fn task_path(task: &Task) -> String {
         | Task::VerifyReuseVolume { logical_path, .. }
         | Task::ReuseFile { logical_path, .. } => logical_path.clone(),
         Task::CommitArchiveBatch {
-            commit,
-            batch_index,
-        }
-        | Task::VerifyCommittedBatch {
             commit,
             batch_index,
         } => format!("{}#commit-batch-{batch_index}", commit.archive.base_name),

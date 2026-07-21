@@ -20,13 +20,13 @@ This design uses six code stages followed by packaging metadata.
 - `MultiVolumeLayout` presents retained local parts and cached HTTP ranges through one seekable stream.
 - Range partials resume from their cached prefix instead of restarting a large segment after a transient failure.
 - Cached compressed ranges carry shard-level lifetime tracking and are deleted when the last overlapping shard finishes, preventing double disk footprint during staging.
-- `--keep-pack-archives` fills uncovered gaps after the last extraction reader for that volume, then reconstructs and verifies that part independently using background archive priority.
+- `--keep-pack-archives` uses one re-entrant retention node per volume: after the last extraction reader, it fetches uncovered gaps at background priority, resumes itself, reconstructs the part, verifies package MD5, and promotes it.
 - For lazy range archive DAG run details, see [`DESIGN_task_pool.md#7-lazy-range-archive-dag`](DESIGN_task_pool.md#7-lazy-range-archive-dag).
 
 ## 4. Peak-Space Model & Commit Batching
 
 - A signed per-physical-volume ledger models extraction, parallel DAG outputs, cross-volume copies, external-work overlap, safe early deletes, consumed payload removal, and last-consumer base release.
-- Normal commits use bounded batches (cross-volume up to 384 MiB, same-volume metadata serially per volume) with direct destination-verification successors (`VerifyCommittedBatch`).
+- Normal commits use bounded batches (cross-volume up to 384 MiB, same-volume metadata serially per volume); each batch verifies final destinations inline before the commit node continues.
 - The fallback integrity pass receives successful destination checks to skip re-verifying manifest entries.
 - For task pool DAG commitment and VFS integration, see [`DESIGN_task_pool.md`](DESIGN_task_pool.md).
 - For patch apply steps and entry DAG base release, see [`DESIGN_patch_steps.md`](DESIGN_patch_steps.md).

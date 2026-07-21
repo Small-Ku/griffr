@@ -72,7 +72,7 @@ pub(crate) fn add_file_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use griffr_common::runtime::task_pool::{ArchiveRetention, TransferClass};
+    use griffr_common::runtime::task_pool::{ArchiveRetention, ArchiveSource, TransferClass};
 
     fn verify_task(path: &Path, logical_path: &str) -> Task {
         Task::Verify {
@@ -96,15 +96,15 @@ mod tests {
     }
 
     fn archive_task(root: &Path, expected: &BTreeMap<String, GameFileEntry>) -> Task {
-        Task::InstallArchive {
+        Task::OpenArchive {
             base_name: "pack".to_string(),
+            source: ArchiveSource::Remote(Vec::new()),
             dest: root.to_path_buf(),
             retention: ArchiveRetention::Ephemeral,
             password: None,
             patch_options: Default::default(),
             expected_files: Arc::new(expected.clone()),
             excluded_commit_paths: Arc::new(BTreeSet::new()),
-            parts: Vec::new(),
         }
     }
 

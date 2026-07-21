@@ -1,18 +1,12 @@
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::api::types::GameFileEntry;
 use crate::download::extractor::{
     ArchiveDirectory, ArchiveDirectoryDiscovery, ArchiveIndex, ArchiveRangeRequest,
-    MultiVolumeExtractor, MultiVolumeLayout,
+    MultiVolumeExtractor,
 };
-use crate::runtime::PatchApplyOptions;
-
 use crate::runtime::task_pool::graph::{GraphExpansion, TaskRun};
-use crate::runtime::task_pool::types::{
-    ArchiveRangePriority, ArchiveRetention, ArchiveWork, Task, WorkerEvent,
-};
+use crate::runtime::task_pool::types::{ArchiveRangePriority, ArchiveWork, Task, WorkerEvent};
 
 pub(crate) async fn run_fetch_archive_range(
     work: Arc<ArchiveWork>,
@@ -93,41 +87,6 @@ pub(crate) async fn run_fetch_archive_range(
     }
 }
 
-pub(crate) fn run_schedule_extract(
-    base_name: String,
-    volumes: Vec<PathBuf>,
-    dest: PathBuf,
-    retention: ArchiveRetention,
-    password: Option<String>,
-    patch_options: PatchApplyOptions,
-    expected_files: Arc<std::collections::BTreeMap<String, GameFileEntry>>,
-    excluded_commit_paths: Arc<std::collections::BTreeSet<String>>,
-) -> TaskRun {
-    let layout = match MultiVolumeLayout::from_files(volumes) {
-        Ok(layout) => layout,
-        Err(error) => return TaskRun::failed(error.to_string()),
-    };
-    let work = match ArchiveWork::new(
-        base_name,
-        layout.clone(),
-        vec![None; layout.volume_count()],
-        dest,
-        retention,
-        Vec::new(),
-        password,
-        patch_options,
-        expected_files,
-        excluded_commit_paths,
-    ) {
-        Ok(work) => work,
-        Err(error) => return TaskRun::failed(error.to_string()),
-    };
-    TaskRun::then(Task::DiscoverArchiveDirectory {
-        work,
-        required_range: None,
-    })
-}
-
 fn fetch_ranges_then(
     work: Arc<ArchiveWork>,
     ranges: impl IntoIterator<Item = std::ops::Range<u64>>,
@@ -158,19 +117,15 @@ fn fetch_ranges_then(
         return TaskRun::then(next);
     }
     let mut expansion = GraphExpansion::new();
-    let mut fetches = Vec::with_capacity(requests.len());
     for request in requests {
-        fetches.push(expansion.add_root(Task::FetchArchiveRange {
+        expansion.add_root(Task::FetchArchiveRange {
             work: work.clone(),
             request,
             retry_count: 0,
             priority: ArchiveRangePriority::ExtractionCritical,
-        }));
+        });
     }
-    match expansion.add_task(next, fetches) {
-        Ok(_) => TaskRun::expand(expansion),
-        Err(error) => TaskRun::failed(error.to_string()),
-    }
+    TaskRun::expand_then(expansion, next)
 }
 
 pub(crate) fn run_discover_archive_directory(
@@ -242,13 +197,17 @@ pub(crate) fn run_read_archive_index(
 pub(crate) fn run_read_archive_controls(
     work: Arc<ArchiveWork>,
     archive_index: Arc<ArchiveIndex>,
+    extract_shards: usize,
+    event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskRun {
     let extractor = MultiVolumeExtractor::from_layout(work.layout.clone());
     match extractor.read_control_payloads(&archive_index, work.password.as_deref()) {
-        Ok(archive_index) => TaskRun::then(Task::PlanArchiveExtraction {
+        Ok(archive_index) => super::extract::run_plan_archive_extraction(
             work,
-            archive_index: Arc::new(archive_index),
-        }),
+            Arc::new(archive_index),
+            extract_shards,
+            event_tx,
+        ),
         Err(error) => {
             work.invalidate_range_cache();
             TaskRun::failed(error.to_string())

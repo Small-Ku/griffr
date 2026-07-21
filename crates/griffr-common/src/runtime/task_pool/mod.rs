@@ -13,7 +13,7 @@ pub use scheduler::{
     run_task_graph, run_task_graph_with_progress, run_tasks, run_tasks_with_progress,
 };
 pub use types::{
-    archive_expected_files, ArchivePart, ArchiveRangePriority, ArchiveRetention,
+    archive_expected_files, ArchivePart, ArchiveRangePriority, ArchiveRetention, ArchiveSource,
     DownloadResumeState, FileEnsureTask, Task, TaskOutcome, TaskPoolConfig, TaskPoolMetrics,
     TaskPoolResult, TaskPoolRunner, TaskProgress, TransferClass, VolumeIoPolicy,
     VolumeStreamingMode, VolumeTaskMetrics, DEFAULT_PROGRESS_BUFFER_BYTES,

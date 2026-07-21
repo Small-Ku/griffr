@@ -145,8 +145,12 @@ impl TaskGraph {
             TaskRun::Succeeded => self.finish_succeeded(id, &mut ready),
             TaskRun::Failed { .. } => self.finish_failed(id, &mut ready),
             TaskRun::Cancelled => self.finish_cancelled(id, &mut ready),
+            TaskRun::Continue(task) => self.continue_node(id, task, &mut ready),
             TaskRun::Expand(expansion) => {
-                self.install_expansion(id, expansion, &mut ready)?;
+                self.install_expansion(id, expansion, None, &mut ready)?;
+            }
+            TaskRun::ExpandThen { expansion, next } => {
+                self.install_expansion(id, expansion, Some(next), &mut ready)?;
             }
         }
         Ok(ready)
@@ -170,11 +174,16 @@ impl TaskGraph {
         &mut self,
         parent: NodeId,
         expansion: GraphExpansion,
+        next: Option<Task>,
         ready: &mut Vec<ReadyTask>,
     ) -> Result<()> {
         let GraphExpansion { nodes } = expansion;
         if nodes.is_empty() {
-            self.finish_succeeded(parent, ready);
+            if let Some(task) = next {
+                self.continue_node(parent, task, ready);
+            } else {
+                self.finish_succeeded(parent, ready);
+            }
             return Ok(());
         }
 
@@ -321,6 +330,7 @@ impl TaskGraph {
         let parent_node = &mut self.nodes[parent.index()];
         parent_node.state = NodeState::Waiting;
         parent_node.waiting_remaining = terminals.len();
+        parent_node.task = next;
         for terminal in terminals {
             self.nodes[terminal.index()].waiters.push(parent);
         }
@@ -352,11 +362,25 @@ impl TaskGraph {
         });
     }
 
+    fn continue_node(&mut self, id: NodeId, task: Task, ready: &mut Vec<ReadyTask>) {
+        let node = &mut self.nodes[id.index()];
+        node.state = NodeState::Ready;
+        node.waiting_remaining = 0;
+        node.task = None;
+        node.continuation = true;
+        ready.push(ReadyTask {
+            id,
+            task,
+            continuation: true,
+        });
+    }
+
     fn finish_succeeded(&mut self, id: NodeId, ready: &mut Vec<ReadyTask>) {
         if self.nodes[id.index()].state.is_terminal() {
             return;
         }
         self.nodes[id.index()].state = NodeState::Succeeded;
+        self.nodes[id.index()].task = None;
         self.unresolved = self.unresolved.saturating_sub(1);
 
         let dependents = self.nodes[id.index()].dependents.clone();
@@ -374,6 +398,7 @@ impl TaskGraph {
             return;
         }
         self.nodes[id.index()].state = NodeState::Failed;
+        self.nodes[id.index()].task = None;
         self.unresolved = self.unresolved.saturating_sub(1);
 
         let dependents = self.nodes[id.index()].dependents.clone();
@@ -388,6 +413,7 @@ impl TaskGraph {
             return;
         }
         self.nodes[id.index()].state = NodeState::Cancelled;
+        self.nodes[id.index()].task = None;
         self.unresolved = self.unresolved.saturating_sub(1);
 
         let dependents = self.nodes[id.index()].dependents.clone();
@@ -407,6 +433,7 @@ impl TaskGraph {
         }
 
         self.nodes[id.index()].state = NodeState::Cancelled;
+        self.nodes[id.index()].task = None;
         self.unresolved = self.unresolved.saturating_sub(1);
         let dependents = self.nodes[id.index()].dependents.clone();
         for dependent in dependents {
@@ -432,7 +459,11 @@ impl TaskGraph {
                 node.waiting_remaining == 0
             };
             if should_finish {
-                self.finish_succeeded(waiter, ready);
+                if let Some(task) = self.nodes[waiter.index()].task.take() {
+                    self.continue_node(waiter, task, ready);
+                } else {
+                    self.finish_succeeded(waiter, ready);
+                }
             }
         }
     }

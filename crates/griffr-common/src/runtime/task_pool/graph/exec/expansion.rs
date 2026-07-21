@@ -26,12 +26,6 @@ impl GraphExpansion {
         Self::default()
     }
 
-    pub(crate) fn single(task: Task) -> Self {
-        let mut expansion = Self::new();
-        expansion.add_root(task);
-        expansion
-    }
-
     pub(crate) fn parallel(tasks: impl IntoIterator<Item = Task>) -> Self {
         let mut expansion = Self::new();
         for task in tasks {
@@ -116,9 +110,17 @@ impl GraphExpansion {
 #[derive(Debug)]
 pub(crate) enum TaskRun {
     Succeeded,
-    Failed { reason: String, report: bool },
+    Failed {
+        reason: String,
+        report: bool,
+    },
     Cancelled,
+    Continue(Task),
     Expand(GraphExpansion),
+    ExpandThen {
+        expansion: GraphExpansion,
+        next: Task,
+    },
 }
 
 impl TaskRun {
@@ -153,13 +155,25 @@ impl TaskRun {
     }
 
     pub(crate) fn then(task: Task) -> Self {
-        Self::Expand(GraphExpansion::single(task))
+        Self::Continue(task)
+    }
+
+    pub(crate) fn expand_then(expansion: GraphExpansion, next: Task) -> Self {
+        if expansion.is_empty() {
+            Self::Continue(next)
+        } else {
+            Self::ExpandThen { expansion, next }
+        }
     }
 
     pub(crate) fn failure_details(&self) -> Option<(&str, bool)> {
         match self {
             Self::Failed { reason, report } => Some((reason, *report)),
-            Self::Succeeded | Self::Cancelled | Self::Expand(_) => None,
+            Self::Succeeded
+            | Self::Cancelled
+            | Self::Continue(_)
+            | Self::Expand(_)
+            | Self::ExpandThen { .. } => None,
         }
     }
 }

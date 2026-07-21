@@ -13,7 +13,7 @@ pub(crate) fn schedule_archive_commit(
     staging_dir: std::path::PathBuf,
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskRun {
-    let result: Result<GraphExpansion> = (|| {
+    let result: Result<(GraphExpansion, Task)> = (|| {
         let jobs = collect_commit_jobs_excluding(
             &staging_dir,
             &archive.dest,
@@ -31,29 +31,16 @@ pub(crate) fn schedule_archive_commit(
             ));
         }
         let mut expansion = GraphExpansion::new();
-        let mut verified = Vec::with_capacity(commit.batch_count());
         for batch_index in 0..commit.batch_count() {
-            let write = expansion.add_root(Task::CommitArchiveBatch {
+            expansion.add_root(Task::CommitArchiveBatch {
                 commit: commit.clone(),
                 batch_index,
             });
-            verified.push(expansion.add_task(
-                Task::VerifyCommittedBatch {
-                    commit: commit.clone(),
-                    batch_index,
-                },
-                [write],
-            )?);
         }
-        if verified.is_empty() {
-            expansion.add_root(Task::FinishArchiveCommit { commit });
-        } else {
-            expansion.add_task(Task::FinishArchiveCommit { commit }, verified)?;
-        }
-        Ok(expansion)
+        Ok((expansion, Task::FinishArchiveCommit { commit }))
     })();
     match result {
-        Ok(expansion) => TaskRun::expand(expansion),
+        Ok((expansion, next)) => TaskRun::expand_then(expansion, next),
         Err(error) => TaskRun::failed(error.to_string()),
     }
 }
@@ -72,32 +59,18 @@ pub(crate) fn run_commit_archive_batch(
         if let Err(error) = commit_file_job(job) {
             return TaskRun::failed(error.to_string());
         }
+
+        let logical = job.logical_path.to_string_lossy().replace('\\', "/");
         let finished = commit.finish_file();
-        let normalized = job.logical_path.to_string_lossy().replace('\\', "/");
-        let _ = event_tx.send(WorkerEvent::changed(normalized.clone()));
+        let _ = event_tx.send(WorkerEvent::changed(logical.clone()));
         let _ = event_tx.send(WorkerEvent::progress(
             crate::runtime::ProgressPhase::Commit,
-            normalized,
+            logical.clone(),
             finished as u64,
             commit.total_files() as u64,
             false,
         ));
-    }
-    TaskRun::succeeded()
-}
 
-pub(crate) fn run_verify_committed_batch(
-    commit: Arc<ArchiveCommitWork>,
-    batch_index: usize,
-    event_tx: &flume::Sender<WorkerEvent>,
-) -> TaskRun {
-    let Some(batch) = commit.batch(batch_index) else {
-        return TaskRun::failed(format!(
-            "archive verify batch index {batch_index} is out of range"
-        ));
-    };
-    for job in &batch.jobs {
-        let logical = job.logical_path.to_string_lossy().replace('\\', "/");
         let Some(expected) = commit
             .archive
             .expected_files

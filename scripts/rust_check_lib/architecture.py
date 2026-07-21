@@ -47,6 +47,7 @@ def run(host: ArchitectureHost) -> None:
     _check_dispatcher_task_model(host)
     _check_task_enum_construction(host)
     _check_task_match_exhaustiveness(host)
+    _check_task_run_continuation(host)
     _check_archive_token_barriers(host)
     _check_removed_data_structure_names(host)
     _check_canonical_worker_events(host)
@@ -64,11 +65,17 @@ def run(host: ArchitectureHost) -> None:
 
 _REMOVED_DATA_STRUCTURE_NAMES = {
     "ApiError",
+    "ArchiveVolumesReady",
     "DownloadExecInput",
+    "FillArchiveVolumeGaps",
+    "InstallArchive",
+    "PlanArchiveExtraction",
     "RepairFileInput",
     "ReuseFileInput",
     "ReuseMethod",
+    "SaveArchiveVolume",
     "TransferDownload",
+    "VerifyCommittedBatch",
     "VfsPlanOutcome",
     "VfsUpdateOutcome",
 }
@@ -877,6 +884,46 @@ def _check_task_match_exhaustiveness(host: ArchitectureHost) -> None:
                     ),
                     hint="Update runner, resource routing, path, estimate, and run-class matches whenever Task gains a variant.",
                 )
+
+
+def _check_task_run_continuation(host: ArchitectureHost) -> None:
+    """Keep one-step continuations on the current graph node."""
+    for target in host.targets:
+        for module in target.iter_modules():
+            for item in walk_named(module.body):
+                if item.type != "impl_item":
+                    continue
+                impl_type = item.child_by_field_name("type")
+                if impl_type is None or module.source.text(impl_type).strip() != "TaskRun":
+                    continue
+                body = item.child_by_field_name("body")
+                if body is None:
+                    continue
+                for function in body.named_children:
+                    if function.type != "function_item":
+                        continue
+                    name = function.child_by_field_name("name")
+                    if name is None or module.source.text(name) != "then":
+                        continue
+                    function_body = function.child_by_field_name("body")
+                    if function_body is None:
+                        continue
+                    text = module.source.text(function_body)
+                    if re.search(r"\b(?:Self::)?Continue\s*\(", text):
+                        continue
+                    host.add(
+                        "DAG004",
+                        "error",
+                        "TaskRun::then must reuse the current graph node",
+                        source=module.source,
+                        node=function,
+                        confidence="definite",
+                        evidence=("the function body does not construct Continue",),
+                        hint=(
+                            "Return TaskRun::Continue(task); reserve GraphExpansion for real "
+                            "fan-out, fan-in, or token dependencies."
+                        ),
+                    )
 
 
 def _check_archive_token_barriers(host: ArchitectureHost) -> None:

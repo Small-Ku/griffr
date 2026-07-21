@@ -6,8 +6,8 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::PackageInfo;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::{
-    archive_expected_files, plan_archive_groups, ArchiveRetention, Task, TaskGraphBuilder,
-    TaskOutcome, TaskPoolRunner, TaskProgress,
+    archive_expected_files, plan_archive_groups, ArchiveRetention, ArchiveSource, Task,
+    TaskGraphBuilder, TaskOutcome, TaskPoolRunner, TaskProgress,
 };
 use griffr_common::runtime::{
     directory_has_entries, ensure_game_files_with_pool, is_launcher_metadata_path, plan_vfs_tasks,
@@ -210,15 +210,15 @@ pub async fn install(
         let mut graph = TaskGraphBuilder::new();
         let mut archive_nodes = Vec::with_capacity(archive_groups.len());
         for group in archive_groups {
-            archive_nodes.push(graph.add_root(Task::InstallArchive {
+            archive_nodes.push(graph.add_root(Task::OpenArchive {
                 base_name: group.base_name,
+                source: ArchiveSource::Remote(group.parts),
                 dest: install_path.clone(),
                 retention: ArchiveRetention::from_keep_full_volumes(opts.keep_pack_archives),
                 password: None,
                 patch_options: griffr_common::runtime::PatchApplyOptions::default(),
                 expected_files: expected_archive_files.clone(),
                 excluded_commit_paths: excluded_commit_paths.clone(),
-                parts: group.parts,
             }));
         }
         let archive_vfs_task_count = extra_tasks.len();

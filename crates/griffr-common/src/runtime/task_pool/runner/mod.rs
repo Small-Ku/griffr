@@ -16,24 +16,24 @@ pub(crate) fn run_blocking_task(
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskRun {
     match task {
-        Task::InstallArchive {
+        Task::OpenArchive {
             base_name,
+            source,
             dest,
             retention,
             password,
             patch_options,
             expected_files,
             excluded_commit_paths,
-            parts,
-        } => archive::run_install_archive(
+        } => archive::run_open_archive(
             base_name,
+            source,
             dest,
             retention,
             password,
             patch_options,
             expected_files,
             excluded_commit_paths,
-            parts,
         ),
         Task::Verify {
             path,
@@ -68,25 +68,6 @@ pub(crate) fn run_blocking_task(
             expected_size,
             group,
         ),
-        Task::Extract {
-            base_name,
-            volumes,
-            dest,
-            retention,
-            password,
-            patch_options,
-            expected_files,
-            excluded_commit_paths,
-        } => archive::run_schedule_extract(
-            base_name,
-            volumes,
-            dest,
-            retention,
-            password,
-            patch_options,
-            expected_files,
-            excluded_commit_paths,
-        ),
         Task::DiscoverArchiveDirectory {
             work,
             required_range,
@@ -97,11 +78,7 @@ pub(crate) fn run_blocking_task(
         Task::ReadArchiveControls {
             work,
             archive_index,
-        } => archive::run_read_archive_controls(work, archive_index),
-        Task::PlanArchiveExtraction {
-            work,
-            archive_index,
-        } => archive::run_plan_archive_extraction(work, archive_index, extract_shards, event_tx),
+        } => archive::run_read_archive_controls(work, archive_index, extract_shards, event_tx),
         Task::ProbePatchArtifact {
             patch_check,
             probe_index,
@@ -117,22 +94,14 @@ pub(crate) fn run_blocking_task(
         Task::ExtractArchiveShard { shard } => {
             archive::run_extract_archive_shard(shard, extraction_progress_buffer_bytes, event_tx)
         }
-        Task::FillArchiveVolumeGaps { work, volume_index } => {
-            archive::run_fill_archive_volume_gaps(work, volume_index)
+        Task::RetainArchiveVolume { work, volume_index } => {
+            archive::run_retain_archive_volume(work, volume_index, event_tx)
         }
-        Task::SaveArchiveVolume { work, volume_index } => {
-            archive::run_save_archive_volume(work, volume_index, event_tx)
-        }
-        Task::ArchiveVolumesReady { work } => archive::run_archive_volumes_ready(work),
         Task::CommitArchive { work } => archive::run_commit_archive(work, event_tx),
         Task::CommitArchiveBatch {
             commit,
             batch_index,
         } => archive::run_commit_archive_batch(commit, batch_index, event_tx),
-        Task::VerifyCommittedBatch {
-            commit,
-            batch_index,
-        } => archive::run_verify_committed_batch(commit, batch_index, event_tx),
         Task::FinishArchiveCommit { commit } => archive::run_finish_archive_commit(commit),
         Task::PreparePatchApply { patch } => archive::run_prepare_patch_apply(patch, event_tx),
         Task::ApplyPatchEntry { patch, entry_index } => {

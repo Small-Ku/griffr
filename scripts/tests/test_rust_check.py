@@ -249,6 +249,28 @@ class RustCheckTests(unittest.TestCase):
         self.assertIn("missing fields", diagnostics[0].message)
         self.assertIn("unknown fields", diagnostics[0].message)
 
+    def test_task_run_then_must_reuse_the_current_node(self) -> None:
+        root = self.make_workspace(
+            "enum Task { A }\n"
+            "struct GraphExpansion;\n"
+            "enum TaskRun { Continue(Task), Expand(GraphExpansion) }\n"
+            "impl TaskRun {\n"
+            "    fn then(_task: Task) -> Self { Self::Expand(GraphExpansion) }\n"
+            "}\n"
+        )
+        diagnostics = self.diagnostics(self.run_checker(root), "DAG004")
+        self.assertEqual(1, len(diagnostics))
+
+    def test_task_run_then_accepts_direct_continuation(self) -> None:
+        root = self.make_workspace(
+            "enum Task { A }\n"
+            "enum TaskRun { Continue(Task) }\n"
+            "impl TaskRun {\n"
+            "    fn then(task: Task) -> Self { Self::Continue(task) }\n"
+            "}\n"
+        )
+        self.assertNotIn("DAG004", self.codes(self.run_checker(root)))
+
     def test_archive_commit_requires_token_aware_graph_insertion(self) -> None:
         root = self.make_workspace(
             "pub enum Task { CommitArchive { work: usize }, ExtractArchiveShard { shard: usize } }\n"

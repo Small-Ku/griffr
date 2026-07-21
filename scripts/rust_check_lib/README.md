@@ -34,10 +34,11 @@ The default policy favors recall:
 - repository architecture checks enforce frontend-neutral progress channels, canonical
   progress lanes, durable-only task-pool results, and a Dispatcher-only task runs model
   (no class-specific `std::thread`/`Condvar` worker pools or synchronous dispatch bridge);
-- `DAG001` checks exhaustive `Task` routing matches that deliberately omit a catch-all, while
+- `DAG001` checks exhaustive `Task` routing matches that deliberately omit a catch-all;
   `DAG002` keeps struct-like `Task::Variant { ... }` constructors synchronized with the canonical
-  enum payload. These are high-confidence structural fallbacks for large DAG refactors, not a
-  replacement for rustc type checking;
+  enum payload; `DAG003` preserves archive range-token barriers; and `DAG004` requires linear
+  `TaskRun::then` transitions to reuse the current node. These are high-confidence structural
+  fallbacks for large DAG refactors, not a replacement for rustc type checking;
 - `DST001` through `DST011` enforce the reduced data model: removed wrapper names cannot return,
   `WorkerEvent` and `TaskOutcome` keep one terminal-result model, `Task::Download` owns both
   preparation and transfer state, unsupported resource APIs return `Result<Option<_>>`, filesystem

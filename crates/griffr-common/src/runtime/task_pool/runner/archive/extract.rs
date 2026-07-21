@@ -72,48 +72,7 @@ pub(crate) fn run_plan_archive_extraction(
             None
         };
         let commit_tokens = work.all_tokens();
-        if plans.is_empty() {
-            if work.should_save_full_volumes() {
-                let mut volume_nodes = Vec::with_capacity(work.layout.volume_count());
-                for volume_index in 0..work.layout.volume_count() {
-                    let node = expansion.add_task_with_tokens(
-                        Task::FillArchiveVolumeGaps {
-                            work: work.clone(),
-                            volume_index,
-                        },
-                        std::iter::empty(),
-                        work.tokens_for_indices(&[volume_index]),
-                    )?;
-                    volume_nodes.push(node);
-                }
-                let volumes_ready = expansion.add_task(
-                    Task::ArchiveVolumesReady { work: work.clone() },
-                    volume_nodes,
-                )?;
-                let mut commit_dependencies = vec![volumes_ready];
-                commit_dependencies.extend(patch_check_node);
-                expansion.add_task_with_tokens(
-                    Task::CommitArchive { work: work.clone() },
-                    commit_dependencies,
-                    commit_tokens,
-                )?;
-            } else {
-                if let Some(patch_check_node) = patch_check_node {
-                    expansion.add_task_with_tokens(
-                        Task::CommitArchive { work: work.clone() },
-                        [patch_check_node],
-                        commit_tokens,
-                    )?;
-                } else {
-                    expansion.add_root_with_tokens(
-                        Task::CommitArchive { work: work.clone() },
-                        commit_tokens,
-                    )?;
-                }
-            }
-            return Ok(expansion);
-        }
-
+        let has_shards = !plans.is_empty();
         let plan_ranges = plans
             .iter()
             .map(|plan| {
@@ -170,11 +129,11 @@ pub(crate) fn run_plan_archive_extraction(
             }
             shard_nodes.push(node);
         }
-        let commit_dependencies = if work.should_save_full_volumes() {
+        let mut commit_dependencies = if work.should_save_full_volumes() {
             let mut volume_nodes = Vec::with_capacity(work.layout.volume_count());
             for (volume_index, readers) in volume_shards.into_iter().enumerate() {
                 let node = expansion.add_task_with_tokens(
-                    Task::FillArchiveVolumeGaps {
+                    Task::RetainArchiveVolume {
                         work: work.clone(),
                         volume_index,
                     },
@@ -183,13 +142,13 @@ pub(crate) fn run_plan_archive_extraction(
                 )?;
                 volume_nodes.push(node);
             }
-            vec![expansion.add_task(
-                Task::ArchiveVolumesReady { work: work.clone() },
-                volume_nodes,
-            )?]
+            volume_nodes
         } else {
             shard_nodes
         };
+        if !has_shards {
+            commit_dependencies.extend(patch_check_node);
+        }
         expansion.add_task_with_tokens(
             Task::CommitArchive { work: work.clone() },
             commit_dependencies,

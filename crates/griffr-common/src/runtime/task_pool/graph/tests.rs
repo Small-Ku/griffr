@@ -13,6 +13,12 @@ impl TaskDependencyToken {
 }
 
 impl GraphExpansion {
+    fn single(task: Task) -> Self {
+        let mut expansion = Self::new();
+        expansion.add_root(task);
+        expansion
+    }
+
     fn add_root_bound(&mut self, task: Task, binding: TaskDependencyToken) -> usize {
         self.add_task_internal(task, std::iter::empty(), std::iter::empty(), Some(binding))
             .expect("bound root expansion task insertion cannot fail")
@@ -45,6 +51,88 @@ fn fan_in_releases_only_after_all_dependencies_succeed() {
     let ready = graph.finish(right, TaskRun::succeeded()).unwrap();
     assert_eq!(ready.len(), 1);
     assert_eq!(ready[0].id, join);
+}
+
+#[test]
+fn sequential_continuation_reuses_the_running_node() {
+    let mut builder = TaskGraphBuilder::new();
+    let root = builder.add_root(task("root"));
+    let mut graph = builder.build_checked().unwrap();
+    let ready = graph.start();
+    assert_eq!(ready.len(), 1);
+
+    graph.mark_running(root).unwrap();
+    let ready = graph.finish(root, TaskRun::then(task("next"))).unwrap();
+
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, root);
+    assert!(ready[0].continuation);
+    assert_eq!(graph.node_count(), 1);
+    assert_eq!(graph.node_state(root), Some(NodeState::Ready));
+    assert_eq!(graph.summary().dynamic_expansions, 0);
+}
+
+#[test]
+fn dependent_waits_until_continued_node_finishes() {
+    let mut builder = TaskGraphBuilder::new();
+    let root = builder.add_root(task("root"));
+    let dependent = builder.add_task(task("dependent"), [root]).unwrap();
+    let mut graph = builder.build_checked().unwrap();
+    let _ = graph.start();
+
+    graph.mark_running(root).unwrap();
+    let ready = graph.finish(root, TaskRun::then(task("next"))).unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, root);
+    assert_eq!(graph.node_state(dependent), Some(NodeState::Pending));
+
+    graph.mark_running(root).unwrap();
+    let ready = graph.finish(root, TaskRun::succeeded()).unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, dependent);
+}
+
+#[test]
+fn fan_out_then_continuation_reuses_the_parent_node() {
+    let mut builder = TaskGraphBuilder::new();
+    let parent = builder.add_root(task("parent"));
+    let dependent = builder.add_task(task("dependent"), [parent]).unwrap();
+    let mut graph = builder.build_checked().unwrap();
+    let _ = graph.start();
+    graph.mark_running(parent).unwrap();
+
+    let ready = graph
+        .finish(
+            parent,
+            TaskRun::expand_then(
+                GraphExpansion::parallel([task("left"), task("right")]),
+                task("next"),
+            ),
+        )
+        .unwrap();
+    assert_eq!(ready.len(), 2);
+    assert_eq!(graph.node_count(), 4);
+    assert_eq!(graph.node_state(parent), Some(NodeState::Waiting));
+    assert_eq!(graph.node_state(dependent), Some(NodeState::Pending));
+
+    let left = ready[0].id;
+    let right = ready[1].id;
+    graph.mark_running(left).unwrap();
+    assert!(graph.finish(left, TaskRun::succeeded()).unwrap().is_empty());
+    assert_eq!(graph.node_state(parent), Some(NodeState::Waiting));
+
+    graph.mark_running(right).unwrap();
+    let ready = graph.finish(right, TaskRun::succeeded()).unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, parent);
+    assert!(ready[0].continuation);
+    assert_eq!(graph.node_state(parent), Some(NodeState::Ready));
+    assert_eq!(graph.node_state(dependent), Some(NodeState::Pending));
+
+    graph.mark_running(parent).unwrap();
+    let ready = graph.finish(parent, TaskRun::succeeded()).unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, dependent);
 }
 
 #[test]

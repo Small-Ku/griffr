@@ -27,11 +27,13 @@ A node moves through:
 ```text
 Pending -> Ready -> Running -> Succeeded
                          |-> Failed
+                         `-> Ready       (sequential continuation)
 Running -> Waiting -> Succeeded / Failed
+                   `-> Ready             (fan-in then continuation)
 Pending / Ready -> Cancelled
 ```
 
-`Waiting` means the task body discovered and installed a dynamic subgraph. Its original node does not succeed until every terminal leaf of that subgraph succeeds.
+`Waiting` means the task body installed a real dynamic subgraph. The original node waits for every terminal leaf. It then either finishes or resumes with a new task payload on the same node. Linear phase changes, retries, and fallbacks use `Running -> Ready` directly and do not allocate child nodes.
 
 The graph natively supports:
 
@@ -51,22 +53,25 @@ Task runners return one `TaskRun` value:
 Succeeded
 Failed { reason, report }
 Cancelled
+Continue(Task)
 Expand(GraphExpansion)
+ExpandThen { expansion, next }
 ```
 
-`GraphExpansion` is itself append-only and locally acyclic. The coordinator remaps its local node IDs into the command graph, marks the producer as `Waiting`, and attaches the producer to all terminal leaves.
+`Continue` replaces the current node payload and puts the same node back in the continuation queue. It is used for download preparation, retry, verification fallback, archive discovery phases, and other one-to-one state changes. The node ID, dependencies, waiters, and unresolved count stay unchanged.
+
+`GraphExpansion` is append-only and locally acyclic. The coordinator remaps local node IDs into the command graph and attaches the producer to all terminal leaves. Plain `Expand` finishes the producer after those leaves. `ExpandThen` resumes the producer with `next`, so a `one node -> parallel work -> one node` shape does not need an extra join node.
 
 Stable dependency tokens let a later expansion depend on a node installed by an earlier expansion. Archive volume tasks use this to expose verified byte ranges to central-directory, control-file, extraction-shard, and cleanup nodes without putting all work in the first graph.
 
-This replaces the former implicit `spawned.push(task)` continuation model. Dynamic expansion is used when the graph cannot be known up front:
+Dynamic nodes are now reserved for work that is truly parallel or has external token dependencies:
 
-- partial-download inspection selects resume, restart, or done;
-- verify failure selects repair;
-- reuse probing selects hardlink, copy, another source, or download;
-- archive inspection discovers extraction shards;
-- a staged commit discovers manifest follow-up work.
+- reuse probing fans out across source volumes;
+- archive planning creates patch probes, range fetches, extraction shards, retention work, and commit batches;
+- patch apply creates an entry DAG with base-consumer ordering;
+- cleanup waits for package-part tokens installed by earlier expansions.
 
-Policy choices are resolved before adding work. Mutually exclusive alternatives are not represented as AND dependencies. For example, a matching reuse source creates only the chosen reuse branch; failed reuse may then expand another repair branch.
+Policy choices are resolved before adding work. Mutually exclusive alternatives are not represented as AND dependencies. For example, a matching reuse source creates only the chosen reuse branch; failed reuse continues the same repair node with the next choice.
 
 ---
 
@@ -83,7 +88,7 @@ resource-aware coordinator
 `- receive TaskFinish
    |- release every acquired permit
    |- update metrics
-   |- apply Succeeded / Failed / Expand to the graph
+   |- apply terminal, continuation, or expansion results to the graph
    `- enqueue newly ready nodes
 ```
 
@@ -112,7 +117,7 @@ Async transfers, hardlink commits, verified reuse copies, and delete-manifest na
 
 ## 4. Ready-Queue Priority and Fairness
 
-Root nodes enter the bulk queue. Nodes created by dynamic expansion enter the continuation queue.
+Root nodes enter the bulk queue. Requeued nodes and nodes created by dynamic expansion enter the continuation queue.
 
 The scheduler admits up to three continuations before forcing a bulk admission when bulk work is runnable. This keeps retries and dependency-unblocking work near the critical path without starving a large first scan.
 
@@ -179,35 +184,46 @@ Reuse candidates are grouped by physical volume. Probes run as parallel DAG root
 
 ## 7. Lazy Range Archive DAG
 
-Normal install and update no longer download finished `.zip.NNN` files before extraction. The launcher response supplies the immutable logical layout—ordered URLs, declared sizes, and package MD5 values—then the DAG fetches only the byte ranges required by the current plan or file-write step.
+Remote install/update and retained local predownload archives now share one entry task. `ArchiveSource` selects only the backing layout; all later discovery, planning, extraction, retention, and commit code is common.
 
 ```text
-InstallArchive
-  1. Discovery:
-     DiscoverArchiveDirectory -> Fetch tail range -> Parse EOCD / ZIP64
-     -> Fetch central directory -> InspectArchiveIndex
-     -> Fetch control entries -> ReadArchiveControls
+OpenArchive(Remote | Local)
+  -> DiscoverArchiveDirectory
+     -> [missing range fetches]
+     -> InspectArchiveIndex
+     -> [control range fetches]
+     -> ReadArchiveControls + plan extraction
 
-  2. Planning & Extraction:
-     ReadArchiveControls
-       |- Probe outputs / bases ------\
-  2. Planning & Extraction:
-     ReadArchiveControls
-       |- Probe outputs / bases ------\
-       |- Measure VFS relocation -----+-> SavePatchPlan
-       `- Fetch ranges for shards A..C -+-> Extract shards A..C
+  -> plan extraction:
+     |- patch probes / relocation measurement
+     |- extraction-critical range fetches
+     `- SavePatchPlan when required
+        `-> ExtractArchiveShard * N
 
-  3. Retention & Cleanup:
-     Extract shards A..C
-       |- Ephemeral:
-       |    `-> CommitArchive -> manifest follow-up -> CleanupArchive
-       `-> Keep full volumes:
-            |- last reader 001 -> FillArchiveVolumeGaps(001) -> SaveArchiveVolume(001) -\
-            |- last reader 002 -> FillArchiveVolumeGaps(002) -> SaveArchiveVolume(002) --+-> ArchiveVolumesReady
-            `---------------------------------------------------------------------------------/      `-> CommitArchive
-                                                                                                         `-> manifest follow-up
-                                                                                                         `-> CleanupArchive
+  -> Ephemeral:
+       extraction shards -> CommitArchive
+  -> KeepFullVolumes:
+       last reader of each volume -> RetainArchiveVolume(N)
+          -> [background gap fetches]
+          -> reconstruct + package MD5 verify + promote
+       all retained volumes ---------------------> CommitArchive
+
+  -> CommitArchive
+       -> CommitArchiveBatch * B
+          (commit each file + verify final destination)
+       -> FinishArchiveCommit
+       -> VFS/delete follow-up
+       -> CleanupArchive
 ```
+
+Square-bracket steps are optional. A missing-range fetch group uses `ExpandThen`: the current discovery or retention node waits for the fetch roots and then resumes itself. It does not add a separate planning, saver, ready-barrier, or finish child.
+
+The structural node reduction, excluding actual transfer and extraction work, is:
+
+- every linear `then` transition adds zero nodes instead of one;
+- full-volume retention uses `N` nodes instead of `2N + 1` (`fill`, `save`, and one global ready barrier);
+- normal commit adds `B` batch nodes instead of `2B + 1` (`batch`, separate verification, and finish);
+- the zero-shard and nonzero-shard planners use the same retention/commit builder.
 
 `MultiVolumeLayout` maps one logical ZIP address space onto remote package volumes, retained local parts, and small cached range files. `MultiVolumeStream` implements `Read + Seek` over whichever backing segment contains the requested offset. The same EOCD, ZIP64, central-directory, and extraction code therefore serves retained local archives, production HTTP Range installs, and the ignored official sample test.
 
@@ -246,9 +262,9 @@ Patch/control payloads not appearing in `game_files` are validated by ZIP CRC, p
 
 Patch archive commit expands into dynamic entry DAG tasks after extraction. For exact entry-level dependency graphs, base consumer releases, and forward-only recovery rules, see [`DESIGN_patch_steps.md`](DESIGN_patch_steps.md).
 
-A normal archive commit also expands after staging. The lightweight `CommitArchive` continuation collects commit jobs, then groups jobs by source volume, destination volume, and destination parent. Cross-volume batches target about 384 MiB; same-volume moves stay metadata-oriented and split only by file-count bounds. Each `CommitArchiveBatch` runs `VerifyCommittedBatch` immediately after, which re-reads final destinations against `game_files`. `FinishArchiveCommit` joins verified batches before delete/VFS follow-up and staging cleanup. The scheduler admits at most one same-volume metadata batch or three cross-volume copy batches per destination volume.
+A normal archive commit expands after staging. `CommitArchive` collects jobs and groups them by source volume, destination volume, and destination parent. Cross-volume batches target about 384 MiB; same-volume moves stay metadata-oriented and split only by file-count bounds. Each `CommitArchiveBatch` commits and immediately re-reads each final destination against `game_files`; a mismatch fails the batch before later follow-up. After all batches finish, `ExpandThen` resumes the original commit node as `FinishArchiveCommit`. The scheduler admits at most one same-volume metadata batch or three cross-volume copy batches per destination volume.
 
-Install and update build one command graph for archive and VFS file work. Full packages use an explicit path-ownership set: paths assigned to VFS tasks still extract to private staging, but are omitted from archive commit, so VFS is the only final writer and runs as an independent root. Patch packages cannot omit an entry without changing patch/delete semantics; overlapping VFS tasks therefore depend on every patch archive root, while VFS-only paths run immediately. The fallback integrity planner receives successful `VerifyCommittedBatch` outcomes and removes already-verified manifest entries instead of reading them again.
+Install and update build one command graph for archive and VFS file work. Full packages use an explicit path-ownership set: paths assigned to VFS tasks still extract to private staging, but are omitted from archive commit, so VFS is the only final writer and runs as an independent root. Patch packages cannot omit an entry without changing patch/delete semantics; overlapping VFS tasks therefore depend on every patch archive root, while VFS-only paths run immediately. The fallback integrity planner receives successful commit-batch verification outcomes and removes already-verified manifest entries instead of reading them again.
 
 Mutation barriers remain strict during network/extraction overlap:
 
@@ -257,12 +273,13 @@ Mutation barriers remain strict during network/extraction overlap:
 3. `SavePatchPlan` joins those probes, replays the full planning rules through the batch-local verification cache, and remains a dependency of every extraction shard;
 4. Every extraction shard must succeed before archive commit;
 5. Ephemeral retention releases cached ranges after their final dependent shard finishes;
-6. Full-volume retention gives each volume a join over only the extraction shards that read that volume;
-7. `FillArchiveVolumeGaps(N)` fetches uncovered byte intervals at background archive priority, then `SaveArchiveVolume(N)` reconstructs, verifies, and atomically promotes that one `.zip.NNN` file;
-8. One saver per physical volume may run at a time, and a saved volume releases only its own cached ranges while unfinished volumes remain protected;
-9. `ArchiveVolumesReady` joins all volume savers before `CommitArchive`;
-10. VFS/delete follow-up and cache cleanup remain downstream of commit;
-11. The command-level integrity DAG verifies the final installation.
+6. Full-volume retention gives each volume one `RetainArchiveVolume(N)` node after only the extraction shards that read that volume;
+7. That node fetches uncovered intervals at background archive priority, resumes itself, reconstructs the part, verifies package MD5, and atomically promotes the `.zip.NNN` file;
+8. One retention writer per physical volume may run at a time, and a saved volume releases only its own cached ranges while unfinished volumes remain protected;
+9. `CommitArchive` depends directly on every required retention node; no all-volume ready barrier is needed;
+10. Each commit batch verifies its final destinations before the original commit node resumes for follow-up;
+11. VFS/delete follow-up and cache cleanup remain downstream of commit;
+12. The command-level integrity DAG verifies the final installation.
 
 `ArchiveRetention` is the single policy switch across full-volume and range downloads:
 
