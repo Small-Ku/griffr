@@ -2,7 +2,6 @@ pub mod admin;
 mod compat_fs;
 mod file_allocation;
 pub mod files;
-mod install_plan;
 mod integrity;
 pub mod issues;
 pub mod launcher;
@@ -31,7 +30,6 @@ pub use files::vfs::{
     setup_persistent_vfs, PersistentVfsConfig, PersistentVfsFileSet, PersistentVfsPlan,
     PersistentVfsResult, VfsFilePlanOptions, VfsTaskPlan, VfsUpdateResult,
 };
-pub use install_plan::required_install_bytes;
 pub use integrity::{run_integrity_pool, IntegrityRunSummary, IntegritySelection};
 pub use issues::{FileIssue, FileIssueKind};
 pub use launcher::{GameProcess, Launcher};

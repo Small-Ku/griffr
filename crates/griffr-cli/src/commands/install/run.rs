@@ -1,9 +1,8 @@
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::api::types::PackageInfo;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::{
     archive_expected_files, plan_archive_groups, ArchiveRetention, ArchiveSource, Task,
@@ -19,31 +18,6 @@ use crate::commands::archive_graph::{add_file_tasks, owned_archive_paths};
 use crate::progress::{ArchiveProgress, CountAndByteProgress};
 use crate::ui;
 use crate::GlobalOptions;
-
-pub(super) fn validate_install_disk_space(
-    package: &PackageInfo,
-    install_path: &Path,
-) -> Result<()> {
-    let required_bytes = griffr_common::runtime::required_install_bytes(package);
-    let Some(available_bytes) = griffr_common::runtime::available_space(install_path)? else {
-        return Ok(());
-    };
-
-    if available_bytes < required_bytes {
-        anyhow::bail!(
-            "Insufficient disk space for install at {}: required {} ({}), available {} ({}), shortfall {} ({})",
-            install_path.display(),
-            required_bytes,
-            ui::format_bytes(required_bytes),
-            available_bytes,
-            ui::format_bytes(available_bytes),
-            required_bytes - available_bytes,
-            ui::format_bytes(required_bytes - available_bytes)
-        );
-    }
-
-    Ok(())
-}
 
 pub async fn install(
     game_id: GameId,
@@ -121,7 +95,6 @@ pub async fn install(
         .as_ref()
         .context("No package information available")?;
     let total_size: u64 = pkg.packs.iter().map(|p| p.size()).sum();
-    validate_install_disk_space(pkg, &install_path)?;
 
     ui::print_phase(format!(
         "Installing {} (region={}, channel={}, sub-channel={}) into {}",
