@@ -5,13 +5,22 @@ use std::sync::Arc;
 use anyhow::Result;
 use griffr_common::api::types::GameFileEntry;
 use griffr_common::runtime::task_pool::{NodeId, Task, TaskGraphBuilder};
-use griffr_common::runtime::{CONFIG_INI_NAME, GAME_FILES_NAME, PACKAGE_FILES_NAME};
+use griffr_common::runtime::{
+    CONFIG_INI_NAME, GAME_FILES_NAME, INSTALL_CHANGE_DIR, INSTALL_CHANGE_STATE_NAME,
+    PACKAGE_FILES_NAME,
+};
 
 fn normalize_relative_path(path: &Path) -> String {
     path.to_string_lossy()
         .replace('\\', "/")
         .trim_start_matches("./")
         .to_ascii_lowercase()
+}
+
+pub(crate) fn protected_archive_paths() -> BTreeSet<String> {
+    BTreeSet::from([
+        format!("{INSTALL_CHANGE_DIR}/{INSTALL_CHANGE_STATE_NAME}").to_ascii_lowercase()
+    ])
 }
 
 fn archive_task_path(
@@ -55,6 +64,7 @@ pub(crate) fn full_archive_excluded_paths(
     let mut excluded = owned_archive_paths(tasks, install_path, expected_files)
         .as_ref()
         .clone();
+    excluded.extend(protected_archive_paths());
     excluded.extend([
         CONFIG_INI_NAME.to_string(),
         GAME_FILES_NAME.to_string(),
@@ -156,6 +166,7 @@ mod tests {
             &BTreeSet::from([
                 "config.ini".to_string(),
                 "data/vfs/a.bin".to_string(),
+                ".griffr-change/state.json".to_string(),
                 "game_files".to_string(),
                 "package_files".to_string(),
             ])

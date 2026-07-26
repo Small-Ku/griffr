@@ -3,6 +3,7 @@ mod artifact;
 mod compat_fs;
 mod file_allocation;
 pub mod files;
+mod install_change;
 mod integrity;
 pub mod issues;
 pub mod launcher;
@@ -12,6 +13,8 @@ mod patch_apply;
 mod paths;
 mod progress;
 pub mod task_pool;
+#[cfg(test)]
+mod test_checkpoint;
 mod update_plan;
 
 pub use admin::{ensure_admin, is_running_as_admin, restart_as_admin};
@@ -32,6 +35,11 @@ pub use files::vfs::{
     download_vfs_resources, get_vfs_resource_info, plan_persistent_vfs_tasks, plan_vfs_tasks,
     setup_persistent_vfs, PersistentVfsConfig, PersistentVfsFileSet, PersistentVfsPlan,
     PersistentVfsResult, VfsFilePlanOptions, VfsTaskPlan, VfsUpdateResult,
+};
+pub use install_change::{
+    ensure_install_ready, finish_install_change, is_install_change_path, read_install_change,
+    start_install_change, InstallChangeKind, InstallChangeSource, InstallChangeStart,
+    InstallChangeState, INSTALL_CHANGE_DIR, INSTALL_CHANGE_STATE_NAME,
 };
 pub use integrity::{run_integrity_pool, IntegrityRunSummary, IntegritySelection};
 pub use issues::{FileIssue, FileIssueKind};

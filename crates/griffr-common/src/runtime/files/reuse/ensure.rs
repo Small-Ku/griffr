@@ -9,8 +9,9 @@ use crate::api::types::GameFileEntry;
 use crate::api::ApiClient;
 use crate::runtime::task_pool::{FileEnsureTask, Task, TransferClass};
 use crate::runtime::{
-    build_cdn_file_url, files_base_url, is_launcher_metadata_path, logical_path_from_root,
-    path_is_file, PathOutcomeTracker, PathReuseMethod, ProgressLane, ProgressSender,
+    build_cdn_file_url, files_base_url, is_install_change_path, is_launcher_metadata_path,
+    logical_path_from_root, path_is_file, PathOutcomeTracker, PathReuseMethod, ProgressLane,
+    ProgressSender,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -31,6 +32,18 @@ pub async fn ensure_game_files_with_pool(
             context: "API client wrapper error: ",
             detail: format!("Failed to fetch target manifest for reuse planning: {e}"),
         })?;
+    if let Some(entry) = manifest
+        .iter()
+        .find(|entry| is_install_change_path(Path::new(&entry.path)))
+    {
+        return Err(Error::Message {
+            context: "File reuse planning error: ",
+            detail: format!(
+                "Target manifest cannot own private install change path {}",
+                entry.path
+            ),
+        });
+    }
     let files_url_base = files_base_url(file_path)?;
 
     let source_manifest_results = stream::iter(config.source_installs.iter().cloned())

@@ -16,6 +16,7 @@ use crate::error::{Error, Result};
 use tracing::{debug, info, warn};
 
 use crate::config::{GameId, InstallTarget};
+use crate::runtime::install_change::ensure_install_ready;
 
 /// Data for a running game process
 #[derive(Debug, Clone)]
@@ -321,8 +322,13 @@ impl Launcher {
         Ok(())
     }
 
+    fn check_install_ready(&self) -> Result<()> {
+        ensure_install_ready(&self.install_path)
+    }
+
     /// Start the game
     pub async fn launch(&self) -> Result<Child> {
+        self.check_install_ready()?;
         let exe_path = self.game_exe_path()?;
 
         match compio::fs::metadata(&exe_path).await {

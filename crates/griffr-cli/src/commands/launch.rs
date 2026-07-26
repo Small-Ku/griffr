@@ -3,16 +3,17 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use griffr_common::runtime::admin::ensure_admin;
-use griffr_common::runtime::Launcher;
+use griffr_common::runtime::{ensure_install_ready, Launcher};
 
 use crate::ui;
 use crate::GlobalOptions;
 use griffr_common::runtime::detect_local_install;
 
 pub async fn launch(path: PathBuf, force: bool, opts: GlobalOptions) -> Result<()> {
+    let local = detect_local_install(&path).await?;
+    ensure_install_ready(&local.install_path)?;
     ensure_admin().map_err(|e| anyhow::anyhow!("Failed to get administrator rights: {}", e))?;
 
-    let local = detect_local_install(&path).await?;
     let game_id = local.require_known_game()?;
     let region_id = local.require_known_region()?;
     let channel_id = local.require_known_channel()?;

@@ -13,6 +13,12 @@ use crate::progress::CountAndByteProgress;
 use crate::ui;
 use crate::GlobalOptions;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PostUpdateCompletion {
+    Verified,
+    VerificationDeferred,
+}
+
 pub(super) async fn verify_updated_install(
     api_client: &ApiClient,
     install_path: &Path,
@@ -24,7 +30,7 @@ pub(super) async fn verify_updated_install(
     verified_artifacts: Vec<griffr_common::runtime::ArtifactProof>,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
-) -> Result<()> {
+) -> Result<PostUpdateCompletion> {
     if skip_verify {
         run_extra_tasks_without_integrity(extra_tasks, opts, task_pool_runner)?;
         ui::print_info("Skipping post-update integrity verification (--skip-verify)");
@@ -36,7 +42,7 @@ pub(super) async fn verify_updated_install(
         )
         .await
         .context("Failed to sync launcher metadata after update")?;
-        return Ok(());
+        return Ok(PostUpdateCompletion::VerificationDeferred);
     }
 
     match &selection {
@@ -109,7 +115,7 @@ pub(super) async fn verify_updated_install(
     )
     .await
     .context("Failed to sync launcher metadata after update")?;
-    Ok(())
+    Ok(PostUpdateCompletion::Verified)
 }
 
 fn run_extra_tasks_without_integrity(

@@ -5,9 +5,9 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::{GetLatestGameResponse, PackFile, PrePatchInfo};
 use griffr_common::runtime::task_pool::{Task, TaskOutcome, TaskPoolRunner, TaskProgress};
 use griffr_common::runtime::{
-    get_patch_recovery_state, write_predownload_stage_metadata, PatchRecoveryState,
-    PredownloadStageMetadata, ProgressLane, StagedArchivePart, DELETE_FILES_MANIFEST_NAME,
-    PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
+    get_patch_recovery_state, read_install_change, write_predownload_stage_metadata,
+    InstallChangeKind, PatchRecoveryState, PredownloadStageMetadata, ProgressLane,
+    StagedArchivePart, DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
 };
 
 use crate::progress::{ArchiveProgress, CountAndByteProgress};
@@ -284,7 +284,38 @@ pub async fn apply(
 
 pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
     let local = detect_local_install(&path).await?;
+    let game_id = local.require_known_game()?;
+    let region_id = local.require_known_region()?;
+    let channel_id = local.require_known_channel()?;
     let install_root = local.install_path;
+    let change = read_install_change(&install_root)?.context(
+        "No install change marker found. Run `griffr update` to rebuild or resume the patch safely.",
+    )?;
+    if change.kind != InstallChangeKind::Update {
+        anyhow::bail!(
+            "Patch resume requires an update marker, found {} target {}",
+            change.kind,
+            change.target_version
+        );
+    }
+    if !change.matches_install(
+        &game_id.to_string(),
+        &region_id.to_string(),
+        channel_id.channel().as_str(),
+        channel_id.sub_channel().as_str(),
+    ) {
+        anyhow::bail!(
+            "Patch resume marker belongs to {}/{}/{}/{}, not {}/{}/{}/{}",
+            change.game,
+            change.region,
+            change.channel,
+            change.sub_channel,
+            game_id,
+            region_id,
+            channel_id.channel(),
+            channel_id.sub_channel()
+        );
+    }
     let root_task = match get_patch_recovery_state(&install_root, None)? {
         PatchRecoveryState::ExtractedReady => Task::ApplyExtractedVfsPatchManifest {
             install_root: install_root.clone(),
@@ -361,6 +392,8 @@ pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
         );
     }
 
-    ui::print_success("Local extracted patch state resumed");
+    ui::print_success(
+        "Local extracted patch state resumed; run update or verify --repair to finish the target check",
+    );
     Ok(())
 }

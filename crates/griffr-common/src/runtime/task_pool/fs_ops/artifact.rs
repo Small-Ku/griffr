@@ -117,7 +117,11 @@ pub(crate) fn commit_observed_artifact(
     if !expectation.accepts_digest(digest) {
         return Err(digest_error(expectation, digest, "Integrity error: "));
     }
+    #[cfg(test)]
+    crate::runtime::test_checkpoint::hit("artifact.before_replace");
     move_path_replace_cross_volume(source_path, destination)?;
+    #[cfg(test)]
+    crate::runtime::test_checkpoint::hit("artifact.after_replace");
     proof_from_digest(destination, expectation, source, digest)
 }
 
@@ -152,6 +156,8 @@ pub(crate) fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
             source,
         })?;
         drop(output);
+        #[cfg(test)]
+        crate::runtime::test_checkpoint::hit("atomic_write.after_sync");
         move_path_replace(&temp, path)
     })();
     if result.is_err() {

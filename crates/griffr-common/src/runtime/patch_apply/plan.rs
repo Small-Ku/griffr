@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::runtime::is_install_change_path;
 use crate::runtime::task_pool::fs_ops::path_safety::parse_safe_relative_path;
 
 use super::{PATCH_PLAN_NAME, PATCH_WORK_DIR};
@@ -267,6 +268,15 @@ impl PatchPlan {
         for relative in &self.delete_paths {
             let parsed =
                 parse_safe_relative_path("patch plan delete path", &relative.to_string_lossy())?;
+            if is_install_change_path(&parsed) {
+                return Err(Error::Message {
+                    context: "Configuration error: ",
+                    detail: format!(
+                        "Patch plan cannot delete private install change state {}",
+                        parsed.display()
+                    ),
+                });
+            }
             if !delete_paths.insert(parsed.clone()) {
                 return Err(Error::Message {
                     context: "Configuration error: ",
@@ -284,7 +294,17 @@ impl PatchPlan {
             }
         }
         for relative in &self.deferred_paths {
-            parse_safe_relative_path("patch plan deferred path", &relative.to_string_lossy())?;
+            let parsed =
+                parse_safe_relative_path("patch plan deferred path", &relative.to_string_lossy())?;
+            if is_install_change_path(&parsed) {
+                return Err(Error::Message {
+                    context: "Configuration error: ",
+                    detail: format!(
+                        "Patch plan cannot replace private install change state {}",
+                        parsed.display()
+                    ),
+                });
+            }
         }
         Ok(())
     }
@@ -303,4 +323,55 @@ pub struct PatchCheckReport {
     pub available_work_bytes: Option<u64>,
     pub patch_entries: usize,
     pub delete_entries: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_rejects_delete_of_install_change_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let install_root = temp.path().join("install");
+        let stage_root = temp.path().join("stage");
+        let vfs_destination = install_root.join("Data/VFS");
+        let plan = PatchPlan {
+            schema_version: PatchPlan::SCHEMA_VERSION,
+            install_root,
+            stage_root,
+            vfs_base_path: PathBuf::from("Data/VFS"),
+            vfs_destination,
+            work_dir: None,
+            entries: Vec::new(),
+            delete_paths: vec![PathBuf::from(".griffr-change/state.json")],
+            deferred_paths: Vec::new(),
+        };
+
+        let error = plan.validate().unwrap_err();
+        assert!(error.to_string().contains("private install change state"));
+    }
+
+    #[test]
+    fn plan_rejects_deferred_replace_of_install_change_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let install_root = temp.path().join("install");
+        let stage_root = temp.path().join("stage");
+        let vfs_destination = install_root.join("Data/VFS");
+        let plan = PatchPlan {
+            schema_version: PatchPlan::SCHEMA_VERSION,
+            install_root,
+            stage_root,
+            vfs_base_path: PathBuf::from("Data/VFS"),
+            vfs_destination,
+            work_dir: None,
+            entries: Vec::new(),
+            delete_paths: Vec::new(),
+            deferred_paths: vec![PathBuf::from(".GRIFFR-CHANGE\\STATE.JSON")],
+        };
+
+        let error = plan.validate().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("replace private install change state"));
+    }
 }

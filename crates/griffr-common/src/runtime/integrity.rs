@@ -10,8 +10,9 @@ use crate::runtime::task_pool::{
     TaskOutcome, TaskPoolConfig, TaskPoolRunner, TaskProgress, TransferClass,
 };
 use crate::runtime::{
-    build_cdn_file_url, files_base_url, is_launcher_metadata_path, normalize_logical_path,
-    ArtifactProof, FileIssue, PathOutcomeTracker, PathReuseMethod, ProgressLane, ProgressSender,
+    build_cdn_file_url, files_base_url, is_install_change_path, is_launcher_metadata_path,
+    normalize_logical_path, ArtifactProof, FileIssue, PathOutcomeTracker, PathReuseMethod,
+    ProgressLane, ProgressSender,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -170,6 +171,18 @@ pub async fn run_integrity_pool(
         let mut entries = api_client
             .fetch_game_files(&pkg.file_path, pkg.game_files_md5.as_deref())
             .await?;
+        if let Some(entry) = entries
+            .iter()
+            .find(|entry| is_install_change_path(Path::new(&entry.path)))
+        {
+            return Err(Error::Message {
+                context: "Integrity error: ",
+                detail: format!(
+                    "Target manifest cannot own private install change path {}",
+                    entry.path
+                ),
+            });
+        }
         if skip_launcher_metadata {
             remove_launcher_metadata_entries(&mut entries);
         }

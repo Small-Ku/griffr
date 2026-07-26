@@ -3,8 +3,10 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::TaskPoolRunner;
 use griffr_common::runtime::{
-    inspect_reuse_installations, is_launcher_metadata_path, run_integrity_pool,
-    sync_launcher_metadata, IntegritySelection, ProgressLane, ProgressSender,
+    finish_install_change, inspect_reuse_installations, is_launcher_metadata_path,
+    read_install_change, run_integrity_pool, start_install_change, sync_launcher_metadata,
+    InstallChangeKind, InstallChangeSource, InstallChangeStart, InstallChangeState,
+    IntegritySelection, ProgressLane, ProgressSender,
 };
 use griffr_common::runtime::{plan_vfs_tasks, streaming_assets_path, VfsFilePlanOptions};
 use serde_json::json;
@@ -59,6 +61,35 @@ pub async fn verify(
         channel_override.unwrap_or(local.require_known_channel()?)
     };
     let installed_version = local.require_config_ini_version()?.to_string();
+    let pending_change = read_install_change(&local.install_path)?;
+    let mut active_change = pending_change.clone();
+    if let Some(state) = active_change.as_ref() {
+        let same_install = state.matches_install(
+            &game_id.to_string(),
+            &region_id.to_string(),
+            channel_id.channel().as_str(),
+            channel_id.sub_channel().as_str(),
+        );
+        if !same_install {
+            anyhow::bail!(
+                "Pending {} change at {} belongs to {}/{}/{}/{}, not {}/{}/{}/{}",
+                state.kind,
+                local.install_path.display(),
+                state.game,
+                state.region,
+                state.channel,
+                state.sub_channel,
+                game_id,
+                region_id,
+                channel_id.channel(),
+                channel_id.sub_channel()
+            );
+        }
+    }
+    let mut checked_version = active_change
+        .as_ref()
+        .map(|state| state.target_version.clone())
+        .unwrap_or_else(|| installed_version.clone());
     let install_target = griffr_common::config::resolve_install_target(
         &game_id,
         region_id,
@@ -66,6 +97,63 @@ pub async fn verify(
         &overrides.clone().into(),
     )?;
     let api_client = ApiClient::new()?;
+
+    if let Some(state) = active_change.clone() {
+        let release = api_client
+            .get_latest_game(&install_target.api, Some(&state.target_version))
+            .await
+            .context("Failed to resolve the unfinished change target")?;
+        let release_md5 = release
+            .pkg
+            .as_ref()
+            .and_then(|pkg| pkg.game_files_md5.as_deref());
+        if release.version == state.target_version {
+            if !state.matches_release(&release.version, release_md5) {
+                anyhow::bail!(
+                    "Unfinished {} target {} no longer matches its saved game_files identity; refusing to use changed metadata under the same version",
+                    state.kind,
+                    state.target_version
+                );
+            }
+        } else if !repair {
+            anyhow::bail!(
+                "Unfinished {} target {} was superseded by {}. Run verify --repair or update to advance the mixed installation to the current release.",
+                state.kind,
+                state.target_version,
+                release.version
+            );
+        } else {
+            let advanced = InstallChangeState::new(
+                InstallChangeKind::Update,
+                InstallChangeSource::Repair,
+                game_id.to_string(),
+                region_id.to_string(),
+                channel_id.channel().to_string(),
+                channel_id.sub_channel().to_string(),
+                Some(state.target_version.clone()),
+                release.version.clone(),
+                release
+                    .pkg
+                    .as_ref()
+                    .and_then(|pkg| pkg.game_files_md5.clone()),
+                Vec::new(),
+                !skip_vfs,
+            );
+            match start_install_change(&local.install_path, &advanced)? {
+                InstallChangeStart::Advance => ui::print_warning(format!(
+                    "Advancing unfinished target {} to current release {} during repair",
+                    state.target_version, advanced.target_version
+                )),
+                InstallChangeStart::Resume => ui::print_info(format!(
+                    "Resuming repair toward current release {}",
+                    advanced.target_version
+                )),
+                InstallChangeStart::New => unreachable!("an active marker was read above"),
+            }
+            checked_version = advanced.target_version.clone();
+            active_change = Some(advanced);
+        }
+    }
 
     if !skip_local_detect {
         if let Some(detected_game) = detected_game {
@@ -106,6 +194,12 @@ pub async fn verify(
         local.install_path.display(),
     ));
     ui::print_info(format!("Installed version: {}", installed_version));
+    if let Some(state) = active_change.as_ref() {
+        ui::print_warning(format!(
+            "Unfinished {} change targets {}. Integrity will use the target manifest.",
+            state.kind, state.target_version
+        ));
+    }
 
     let progress = (opts.output != OutputFormat::Json)
         .then(|| CountAndByteProgress::new("verify", "repair.download", opts.verbose));
@@ -130,14 +224,23 @@ pub async fn verify(
         Vec::new()
     };
 
-    let extra_tasks = if !skip_vfs {
+    let sync_vfs = active_change
+        .as_ref()
+        .map(|state| state.sync_vfs)
+        .unwrap_or(!skip_vfs);
+    if skip_vfs && sync_vfs && opts.output != OutputFormat::Json {
+        ui::print_warning(
+            "Ignoring --skip-vfs because the unfinished change marker requires VFS closure.",
+        );
+    }
+    let extra_tasks = if sync_vfs {
         if opts.output != OutputFormat::Json {
             ui::print_info(
                 "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
             );
         }
         let version_info = api_client
-            .get_latest_game(&install_target.api, Some(&installed_version))
+            .get_latest_game(&install_target.api, Some(&checked_version))
             .await
             .context("Failed to fetch version information for VFS planning")?;
         let rand_str = version_info.rand_str();
@@ -190,11 +293,43 @@ pub async fn verify(
         ));
     }
     let mut pool_runner = TaskPoolRunner::new(pool_cfg)?;
+    let repair_change = if repair {
+        if let Some(state) = active_change.as_ref() {
+            Some(state.clone())
+        } else {
+            let state = InstallChangeState::new(
+                InstallChangeKind::Repair,
+                InstallChangeSource::Repair,
+                game_id.to_string(),
+                region_id.to_string(),
+                channel_id.channel().to_string(),
+                channel_id.sub_channel().to_string(),
+                Some(checked_version.clone()),
+                checked_version.clone(),
+                None,
+                Vec::new(),
+                !skip_vfs,
+            );
+            match start_install_change(&local.install_path, &state)? {
+                InstallChangeStart::New => {}
+                InstallChangeStart::Resume => {
+                    ui::print_info(format!(
+                        "Resuming unfinished repair for {}",
+                        checked_version
+                    ));
+                }
+                InstallChangeStart::Advance => unreachable!("repair cannot advance a change"),
+            }
+            Some(state)
+        }
+    } else {
+        None
+    };
     let summary = run_integrity_pool(
         &api_client,
         &local.install_path,
         &install_target,
-        Some(&installed_version),
+        Some(&checked_version),
         IntegritySelection::Full,
         &[],
         repair,
@@ -236,7 +371,15 @@ pub async fn verify(
             "region": region_id.to_string(),
             "channel": channel_id.channel().to_string(),
             "sub_channel": channel_id.sub_channel().to_string(),
-            "version": installed_version,
+            "version": checked_version.as_str(),
+            "config_version": installed_version.as_str(),
+            "pending_change": active_change.as_ref().map(|state| json!({
+                "kind": state.kind.to_string(),
+                "source": state.source.to_string(),
+                "from_version": state.from_version.as_deref(),
+                "target_version": state.target_version.as_str(),
+                "sync_vfs": state.sync_vfs,
+            })),
             "repair": repair,
             "issues": issue_list,
             "downloaded_files": summary.downloaded_files,
@@ -258,10 +401,21 @@ pub async fn verify(
                 &api_client,
                 &local.install_path,
                 &install_target,
-                Some(&installed_version),
+                Some(&checked_version),
             )
             .await
             .context("Failed to sync launcher metadata")?;
+            if let Some(state) = repair_change.as_ref() {
+                finish_install_change(&local.install_path, state)
+                    .context("Failed to remove the install change marker")?;
+            }
+        } else if let Some(state) = active_change.as_ref() {
+            if opts.output != OutputFormat::Json {
+                ui::print_warning(format!(
+                    "Target {} is valid, but the unfinished {} marker remains. Run verify --repair to sync launcher metadata and finish the change.",
+                    state.target_version, state.kind
+                ));
+            }
         }
         return Ok(());
     }
@@ -297,6 +451,13 @@ pub async fn verify(
                 metadata_issues.len()
             ));
         }
+        if remaining_non_metadata > 0 {
+            anyhow::bail!(
+                "verify+repair stopped with {} remaining non-metadata issue(s); the install change marker was kept",
+                remaining_non_metadata
+            );
+        }
+
         if opts.output != OutputFormat::Json {
             ui::print_phase("Syncing launcher metadata");
         }
@@ -304,19 +465,16 @@ pub async fn verify(
             &api_client,
             &local.install_path,
             &install_target,
-            Some(&installed_version),
+            Some(&checked_version),
         )
         .await
         .context("Failed to sync launcher metadata after repair")?;
+        if let Some(state) = repair_change.as_ref() {
+            finish_install_change(&local.install_path, state)
+                .context("Failed to remove the install change marker")?;
+        }
         if opts.output != OutputFormat::Json {
             ui::print_success("Launcher metadata synced");
-        }
-
-        if remaining_non_metadata > 0 {
-            anyhow::bail!(
-                "verify+repair finished with {} remaining non-metadata issue(s)",
-                remaining_non_metadata
-            );
         }
     }
 

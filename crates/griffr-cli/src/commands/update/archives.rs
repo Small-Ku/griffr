@@ -12,7 +12,9 @@ use griffr_common::runtime::task_pool::{
 use griffr_common::runtime::{ArtifactProof, PatchApplyOptions, ProgressLane};
 
 use super::*;
-use crate::commands::archive_graph::{add_file_tasks, full_archive_excluded_paths};
+use crate::commands::archive_graph::{
+    add_file_tasks, full_archive_excluded_paths, protected_archive_paths,
+};
 use crate::progress::ArchiveProgress;
 use crate::ui;
 use crate::GlobalOptions;
@@ -99,7 +101,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
         let excluded_commit_paths = if file_tasks_own_archive_paths {
             full_archive_excluded_paths(&extra_tasks, install_path, expected_files.as_ref())
         } else {
-            Arc::new(BTreeSet::new())
+            Arc::new(protected_archive_paths())
         };
         let mut graph = TaskGraphBuilder::new();
         let mut archive_nodes = Vec::with_capacity(archive_groups.len());
@@ -212,7 +214,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
     let excluded_commit_paths = if file_tasks_own_archive_paths {
         full_archive_excluded_paths(&extra_tasks, install_path, expected_files.as_ref())
     } else {
-        Arc::new(BTreeSet::new())
+        Arc::new(protected_archive_paths())
     };
     let mut graph = TaskGraphBuilder::new();
     let mut archive_nodes = Vec::with_capacity(archive_group_count);

@@ -9,9 +9,10 @@ use griffr_common::runtime::task_pool::{
     TaskGraphBuilder, TaskOutcome, TaskPoolRunner, TaskProgress,
 };
 use griffr_common::runtime::{
-    directory_has_entries, ensure_game_files_with_pool, plan_vfs_tasks, resolve_file_reuse_sources,
-    run_integrity_pool, streaming_assets_path, sync_launcher_metadata, FileReuseConfig,
-    ProgressLane, VfsFilePlanOptions,
+    directory_has_entries, ensure_game_files_with_pool, finish_install_change, plan_vfs_tasks,
+    read_install_change, resolve_file_reuse_sources, run_integrity_pool, start_install_change,
+    streaming_assets_path, sync_launcher_metadata, FileReuseConfig, InstallChangeKind,
+    InstallChangeSource, InstallChangeStart, InstallChangeState, ProgressLane, VfsFilePlanOptions,
 };
 
 use crate::commands::archive_graph::{add_file_tasks, full_archive_excluded_paths};
@@ -30,6 +31,10 @@ pub async fn install(
     force_copy: bool,
     opts: GlobalOptions,
 ) -> Result<()> {
+    let pending_change = read_install_change(&install_path)?;
+    let can_resume_install = pending_change
+        .as_ref()
+        .is_some_and(|state| state.kind == InstallChangeKind::Install);
     let install_path_exists = match compio::fs::metadata(&install_path).await {
         Ok(_) => true,
         Err(err) if err.kind() == ErrorKind::NotFound => false,
@@ -39,7 +44,11 @@ pub async fn install(
         }
     };
 
-    if install_path_exists && !force && directory_has_entries(install_path.clone()).await? {
+    if install_path_exists
+        && !force
+        && !can_resume_install
+        && directory_has_entries(install_path.clone()).await?
+    {
         anyhow::bail!(
             "Install path is not empty: {} (pass --force to reuse it)",
             install_path.display()
@@ -114,6 +123,27 @@ pub async fn install(
         ui::print_info(format!("Reuse sources: {}", reuse_paths.len()));
     }
 
+    let change_state = InstallChangeState::new(
+        InstallChangeKind::Install,
+        if reuse_paths.is_empty() {
+            InstallChangeSource::FullArchive
+        } else {
+            InstallChangeSource::Reuse
+        },
+        game_id.to_string(),
+        region_id.to_string(),
+        channel_id.channel().to_string(),
+        channel_id.sub_channel().to_string(),
+        None,
+        version_info.version.clone(),
+        pkg.game_files_md5.clone(),
+        if reuse_paths.is_empty() {
+            pkg.packs.iter().map(|part| part.md5.clone()).collect()
+        } else {
+            Vec::new()
+        },
+        !opts.skip_vfs,
+    );
     let task_pool_cfg = opts.task_pool_config();
     let mut task_pool = TaskPoolRunner::new(task_pool_cfg)?;
 
@@ -156,6 +186,83 @@ pub async fn install(
         ui::print_phase("Verifying install integrity");
         Vec::new()
     };
+
+    let change_start = start_install_change(&install_path, &change_state)?;
+    match change_start {
+        InstallChangeStart::New => {}
+        InstallChangeStart::Resume => {
+            ui::print_info(format!(
+                "Resuming unfinished install for target {}",
+                change_state.target_version
+            ));
+        }
+        InstallChangeStart::Advance => {
+            ui::print_info(format!(
+                "Advancing unfinished install to target {}",
+                change_state.target_version
+            ));
+        }
+    }
+
+    // A matching marker means a previous run already selected this exact
+    // release and source identity. Resume from the target manifest instead of
+    // replaying every full-archive entry: correct files are verified in place,
+    // missing files use reuse/archive/CDN fallbacks, and the marker remains if
+    // any final path still cannot be repaired.
+    if change_start == InstallChangeStart::Resume {
+        ui::print_phase("Resuming install from the target manifest");
+        let source_roots = resolve_file_reuse_sources(&game_id, &install_path, &reuse_paths)
+            .await?
+            .into_iter()
+            .map(|source| source.install_path)
+            .collect::<Vec<_>>();
+        let progress = CountAndByteProgress::new(
+            "install.resume.verify",
+            "install.resume.download",
+            opts.verbose,
+        );
+        let session = progress.start(
+            ProgressLane::INTEGRITY_VERIFY,
+            ProgressLane::INTEGRITY_DOWNLOAD,
+        );
+        let summary = run_integrity_pool(
+            &api_client,
+            &install_path,
+            &install_target,
+            Some(&change_state.target_version),
+            griffr_common::runtime::IntegritySelection::GameFiles,
+            &[],
+            true,
+            &source_roots,
+            force_copy,
+            !source_roots.is_empty(),
+            extra_tasks,
+            Some(&mut task_pool),
+            session.sender(),
+        )
+        .await
+        .context("Failed to resume install from the target manifest")?;
+        session.finish();
+        progress.finish();
+        if !summary.issues.is_empty() {
+            anyhow::bail!(
+                "Install resume kept the change marker because {} target file issue(s) remain",
+                summary.issues.len()
+            );
+        }
+        sync_launcher_metadata(
+            &api_client,
+            &install_path,
+            &install_target,
+            Some(&change_state.target_version),
+        )
+        .await
+        .context("Failed to sync launcher metadata after resumed install verification")?;
+        finish_install_change(&install_path, &change_state)
+            .context("Failed to remove the install change marker")?;
+        ui::print_success("Install resume finished");
+        return Ok(());
+    }
 
     let mut already_verified_paths = Vec::new();
     if reuse_paths.is_empty() {
@@ -368,6 +475,8 @@ pub async fn install(
     )
     .await
     .context("Failed to sync launcher metadata after final install verification")?;
+    finish_install_change(&install_path, &change_state)
+        .context("Failed to remove the install change marker")?;
 
     ui::print_success("Install finished");
     Ok(())

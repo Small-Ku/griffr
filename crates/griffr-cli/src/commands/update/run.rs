@@ -2,10 +2,14 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::runtime::task_pool::{archive_expected_files, TaskPoolRunner};
+use griffr_common::api::types::GetLatestGameResponse;
+use griffr_common::config::InstallTarget;
+use griffr_common::runtime::task_pool::{archive_expected_files, Task, TaskPoolRunner};
 use griffr_common::runtime::{
-    plan_vfs_tasks, resolve_staged_patch_recovery_dir, select_update_package,
-    streaming_assets_path, IntegritySelection, UpdatePackageKind, VfsFilePlanOptions,
+    finish_install_change, plan_vfs_tasks, read_install_change, resolve_staged_patch_recovery_dir,
+    select_update_package, start_install_change, streaming_assets_path, InstallChangeKind,
+    InstallChangeSource, InstallChangeStart, InstallChangeState, IntegritySelection,
+    UpdatePackageKind, VfsFilePlanOptions,
 };
 
 use super::*;
@@ -25,6 +29,7 @@ pub(super) async fn update_internal(
     opts: GlobalOptions,
 ) -> Result<()> {
     let mut local = detect_local_install(&path).await?;
+    let pending_change = read_install_change(&local.install_path)?;
     let mut resumed_pending_patch = false;
     match griffr_common::runtime::get_patch_recovery_state(&local.install_path, None)? {
         griffr_common::runtime::PatchRecoveryState::ExtractedReady
@@ -77,7 +82,7 @@ pub(super) async fn update_internal(
         griffr_common::runtime::PatchRecoveryState::ArchiveReady { .. }
         | griffr_common::runtime::PatchRecoveryState::Idle => {}
     }
-    if resumed_pending_patch && require_staged_predownload {
+    if resumed_pending_patch && require_staged_predownload && pending_change.is_none() {
         ui::print_success("Pending staged predownload patch finished");
         return Ok(());
     }
@@ -86,6 +91,36 @@ pub(super) async fn update_internal(
     let region_id = local.require_known_region()?;
     let channel_id = local.require_known_channel()?;
     let current_version = local.require_config_ini_version()?.to_string();
+    if let Some(state) = pending_change.as_ref() {
+        let same_install = state.matches_install(
+            &game_id.to_string(),
+            &region_id.to_string(),
+            channel_id.channel().as_str(),
+            channel_id.sub_channel().as_str(),
+        );
+        if !same_install {
+            anyhow::bail!(
+                "Pending {} change at {} belongs to {}/{}/{}/{}, not {}/{}/{}/{}",
+                state.kind,
+                local.install_path.display(),
+                state.game,
+                state.region,
+                state.channel,
+                state.sub_channel,
+                game_id,
+                region_id,
+                channel_id.channel(),
+                channel_id.sub_channel()
+            );
+        }
+        if state.kind == InstallChangeKind::Repair {
+            anyhow::bail!(
+                "A repair is unfinished for target {}. Run `griffr verify --path \"{}\" --repair` before update.",
+                state.target_version,
+                local.install_path.display()
+            );
+        }
+    }
     let mut package_request_version = current_version.clone();
     let install_target = griffr_common::config::resolve_install_target(
         &game_id,
@@ -100,6 +135,22 @@ pub(super) async fn update_internal(
     let mut version_info = api_client
         .get_latest_game(&install_target.api, Some(&current_version))
         .await?;
+    if let Some(state) = pending_change
+        .as_ref()
+        .filter(|state| state.target_version == version_info.version)
+    {
+        let live_game_files_md5 = version_info
+            .pkg
+            .as_ref()
+            .and_then(|pkg| pkg.game_files_md5.as_deref());
+        if !state.matches_release(&version_info.version, live_game_files_md5) {
+            anyhow::bail!(
+                "Unfinished {} target {} no longer matches its saved game_files identity; refusing to continue with changed metadata under the same version",
+                state.kind,
+                state.target_version
+            );
+        }
+    }
     let mut recovery_stage_dir = None;
 
     if require_staged_predownload
@@ -152,9 +203,67 @@ pub(super) async fn update_internal(
         ));
     }
 
+    if let Some(state) = pending_change.as_ref().filter(|state| {
+        state.target_version == current_version
+            && matches!(
+                state.kind,
+                InstallChangeKind::Install | InstallChangeKind::Update
+            )
+            && (current_version == version_info.version || !version_info.has_update())
+    }) {
+        if opts.is_dry_run() {
+            opts.dry_run(format!(
+                "Would verify target {} and remove the unfinished {} marker",
+                state.target_version, state.kind
+            ));
+            return Ok(());
+        }
+        ui::print_phase(format!(
+            "Checking unfinished {} target {}",
+            state.kind, state.target_version
+        ));
+        let extra_tasks = plan_update_vfs_tasks(
+            &api_client,
+            &install_target,
+            &version_info,
+            &local.install_path,
+            &reuse_paths,
+            force_copy,
+            !state.sync_vfs,
+        )
+        .await?;
+        let completion = verify_updated_install(
+            &api_client,
+            &local.install_path,
+            &install_target,
+            &state.target_version,
+            false,
+            extra_tasks,
+            IntegritySelection::GameFiles,
+            Vec::new(),
+            &opts,
+            &mut task_pool_runner,
+        )
+        .await?;
+        debug_assert_eq!(completion, PostUpdateCompletion::Verified);
+        finish_install_change(&local.install_path, state)
+            .context("Failed to remove the install change marker")?;
+        ui::print_success(format!("Unfinished {} target verified", state.kind));
+        return Ok(());
+    }
+
     if current_version == version_info.version && recovery_stage_dir.is_none()
         || !version_info.has_update()
     {
+        if let Some(state) = pending_change.as_ref() {
+            anyhow::bail!(
+                "Unfinished {} change targets {}, but config.ini reports {} and no matching update is available. Run `griffr verify --path \"{}\" --repair`.",
+                state.kind,
+                state.target_version,
+                current_version,
+                local.install_path.display()
+            );
+        }
         if require_staged_predownload {
             anyhow::bail!(
                 "Predownload apply requires the live release patch to be available; current version {} is still reported as up to date.",
@@ -165,7 +274,21 @@ pub(super) async fn update_internal(
         return Ok(());
     }
 
-    let package_kind = if opts.force_full_package {
+    let force_full_for_mixed_recovery = pending_change.as_ref().is_some_and(|state| {
+        current_version != state.target_version && version_info.version != state.target_version
+    });
+    if force_full_for_mixed_recovery {
+        ui::print_warning(format!(
+            "Unfinished target {} was superseded by {} while config.ini still reports {}. Use the full package so mixed forward progress does not depend on obsolete patch bases.",
+            pending_change
+                .as_ref()
+                .map(|state| state.target_version.as_str())
+                .unwrap_or("unknown"),
+            version_info.version,
+            current_version
+        ));
+    }
+    let package_kind = if opts.force_full_package || force_full_for_mixed_recovery {
         UpdatePackageKind::Full
     } else {
         select_update_package(&version_info, Some(&package_request_version))?
@@ -191,7 +314,7 @@ pub(super) async fn update_internal(
         &version_info,
         Some(&package_request_version),
         package_kind,
-        opts.force_full_package,
+        opts.force_full_package || force_full_for_mixed_recovery,
     ));
     if require_staged_predownload && package_kind != UpdatePackageKind::Patch {
         anyhow::bail!(
@@ -225,7 +348,7 @@ pub(super) async fn update_internal(
             opts.skip_verify,
             opts.skip_vfs,
             opts.keep_pack_archives,
-            opts.force_full_package,
+            opts.force_full_package || force_full_for_mixed_recovery,
         ) {
             opts.dry_run(line);
         }
@@ -235,6 +358,50 @@ pub(super) async fn update_internal(
         return Ok(());
     }
 
+    let selected_parts = if !reuse_paths.is_empty() {
+        Vec::new()
+    } else {
+        match package_kind {
+            UpdatePackageKind::Patch => version_info
+                .patch
+                .as_ref()
+                .map(|patch| patch.patches.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .map(|part| part.md5.clone())
+                .collect(),
+            UpdatePackageKind::Full => version_info
+                .pkg
+                .as_ref()
+                .map(|pkg| pkg.packs.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .map(|part| part.md5.clone())
+                .collect(),
+        }
+    };
+    let change_state = InstallChangeState::new(
+        InstallChangeKind::Update,
+        if !reuse_paths.is_empty() {
+            InstallChangeSource::Reuse
+        } else if package_kind == UpdatePackageKind::Patch {
+            InstallChangeSource::PatchArchive
+        } else {
+            InstallChangeSource::FullArchive
+        },
+        game_id.to_string(),
+        region_id.to_string(),
+        channel_id.channel().to_string(),
+        channel_id.sub_channel().to_string(),
+        Some(package_request_version.clone()),
+        version_info.version.clone(),
+        version_info
+            .pkg
+            .as_ref()
+            .and_then(|pkg| pkg.game_files_md5.clone()),
+        selected_parts,
+        !opts.skip_vfs,
+    );
     let expected_archive_files = if reuse_paths.is_empty() {
         if let Some(pkg) = version_info.pkg.as_ref() {
             archive_expected_files(
@@ -250,39 +417,34 @@ pub(super) async fn update_internal(
         archive_expected_files(Vec::new())
     };
 
-    let mut extra_tasks = if !opts.skip_vfs {
-        ui::print_phase("Planning VFS resources for the update DAG");
-        ui::print_info(
-            "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
-        );
-        let streaming_assets =
-            streaming_assets_path(&local.install_path.join(install_target.data_root.clone()));
-        let source_streaming_assets = reuse_paths
-            .iter()
-            .filter(|path| **path != local.install_path)
-            .map(|path| streaming_assets_path(&path.join(install_target.data_root.clone())))
-            .collect::<Vec<_>>();
-        let rand_str = version_info.rand_str();
-        plan_vfs_tasks(
-            &api_client,
-            &install_target.api,
-            &version_info.version,
-            &rand_str,
-            &streaming_assets,
-            &VfsFilePlanOptions {
-                source_streaming_assets,
-                allow_repair: true,
-                allow_copy_fallback: force_copy,
-                prefer_reuse: false,
-            },
-        )
-        .await
-        .context("Failed to plan VFS tasks")?
-        .map(|plan| plan.tasks)
-        .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let mut extra_tasks = plan_update_vfs_tasks(
+        &api_client,
+        &install_target,
+        &version_info,
+        &local.install_path,
+        &reuse_paths,
+        force_copy,
+        opts.skip_vfs,
+    )
+    .await?;
+
+    if reuse_paths.is_empty() && package_kind == UpdatePackageKind::Patch {
+        validate_patch_target(&install_target.exe_name, &local.install_path).await?;
+    }
+
+    match start_install_change(&local.install_path, &change_state)? {
+        InstallChangeStart::New => {}
+        InstallChangeStart::Resume => ui::print_info(format!(
+            "Resuming unfinished update {} -> {}",
+            change_state.from_version.as_deref().unwrap_or("unknown"),
+            change_state.target_version
+        )),
+        InstallChangeStart::Advance => ui::print_info(format!(
+            "Advancing unfinished change to update {} -> {}",
+            change_state.from_version.as_deref().unwrap_or("unknown"),
+            change_state.target_version
+        )),
+    }
 
     let mut archive_result = ArchiveRunResult::default();
     if !reuse_paths.is_empty() {
@@ -302,7 +464,6 @@ pub(super) async fn update_internal(
     if reuse_paths.is_empty() {
         match package_kind {
             UpdatePackageKind::Patch => {
-                validate_patch_target(&install_target.exe_name, &local.install_path).await?;
                 let patch = version_info
                     .patch
                     .as_ref()
@@ -379,7 +540,7 @@ pub(super) async fn update_internal(
         } else {
             IntegritySelection::Paths(archive_result.modified_paths)
         };
-    verify_updated_install(
+    let completion = verify_updated_install(
         &api_client,
         &local.install_path,
         &install_target,
@@ -392,9 +553,60 @@ pub(super) async fn update_internal(
         &mut task_pool_runner,
     )
     .await?;
-
-    ui::print_success("Update finished");
+    if completion == PostUpdateCompletion::Verified {
+        finish_install_change(&local.install_path, &change_state)
+            .context("Failed to remove the install change marker")?;
+        ui::print_success("Update finished");
+    } else {
+        ui::print_warning(format!(
+            "Update payload and metadata finished, but the change marker was kept because verification was skipped. Run `griffr verify --path \"{}\" --repair` before launch.",
+            local.install_path.display()
+        ));
+    }
     Ok(())
+}
+
+async fn plan_update_vfs_tasks(
+    api_client: &ApiClient,
+    install_target: &InstallTarget,
+    version_info: &GetLatestGameResponse,
+    install_path: &std::path::Path,
+    reuse_paths: &[PathBuf],
+    force_copy: bool,
+    skip_vfs: bool,
+) -> Result<Vec<Task>> {
+    if skip_vfs {
+        return Ok(Vec::new());
+    }
+
+    ui::print_phase("Planning VFS resources for the update DAG");
+    ui::print_info(
+        "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
+    );
+    let streaming_assets = streaming_assets_path(&install_path.join(&install_target.data_root));
+    let source_streaming_assets = reuse_paths
+        .iter()
+        .filter(|path| path.as_path() != install_path)
+        .map(|path| streaming_assets_path(&path.join(&install_target.data_root)))
+        .collect::<Vec<_>>();
+    let rand_str = version_info.rand_str();
+    Ok(plan_vfs_tasks(
+        api_client,
+        &install_target.api,
+        &version_info.version,
+        &rand_str,
+        &streaming_assets,
+        &VfsFilePlanOptions {
+            source_streaming_assets,
+            allow_repair: true,
+            allow_copy_fallback: force_copy,
+            prefer_reuse: false,
+        },
+    )
+    .await
+    .context("Failed to plan VFS tasks")?
+    .map(|plan| plan.tasks)
+    .unwrap_or_default())
 }
 
 pub async fn update(
