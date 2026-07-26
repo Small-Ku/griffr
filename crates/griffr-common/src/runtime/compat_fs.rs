@@ -345,18 +345,41 @@ async fn copy_file_async(source: &Path, target: &Path, expected_bytes: u64) -> R
     Ok(())
 }
 
-fn dir_size_sync(path: &Path) -> Result<u64> {
-    let mut total_size = 0u64;
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        if metadata.is_file() {
-            total_size += metadata.len();
-        } else if metadata.is_dir() {
-            total_size += dir_size_sync(&entry.path())?;
+pub(crate) fn dir_size_sync(path: &Path) -> Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let mut total = 0u64;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).map_err(|source| Error::IoAt {
+            action: "read directory",
+            path: directory.clone(),
+            source,
+        })? {
+            let entry = entry.map_err(|source| Error::IoAt {
+                action: "read directory",
+                path: directory.clone(),
+                source,
+            })?;
+            let entry_path = entry.path();
+            let metadata =
+                std::fs::symlink_metadata(&entry_path).map_err(|source| Error::IoAt {
+                    action: "query file metadata/stat for",
+                    path: entry_path.clone(),
+                    source,
+                })?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(entry_path);
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
         }
     }
-    Ok(total_size)
+    Ok(total)
 }
 
 fn collect_copy_plan_sync(source: &Path, target: &Path) -> Result<CopyPlan> {
@@ -475,4 +498,37 @@ fn remove_empty_dirs_recursive_sync(root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dir_size_sync;
+
+    #[test]
+    fn directory_size_counts_nested_files_and_accepts_missing_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("a.bin"), [0u8; 4]).unwrap();
+        std::fs::write(root.join("nested/b.bin"), [0u8; 9]).unwrap();
+
+        assert_eq!(dir_size_sync(&root).unwrap(), 13);
+        assert_eq!(dir_size_sync(&temp.path().join("missing")).unwrap(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_size_does_not_follow_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let external = temp.path().join("external.bin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("local.bin"), [0u8; 3]).unwrap();
+        std::fs::write(&external, [0u8; 20]).unwrap();
+        symlink(&external, root.join("linked.bin")).unwrap();
+
+        assert_eq!(dir_size_sync(&root).unwrap(), 3);
+    }
 }

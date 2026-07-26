@@ -9,6 +9,7 @@ use futures_util::StreamExt;
 
 use crate::api::protocol::{RANGE_HEADER, USER_AGENT_HEADER};
 use crate::error::{Error, Result};
+use crate::runtime::preallocate_file;
 
 const ARCHIVE_RANGE_SEND_TIMEOUT: Duration = Duration::from_secs(60);
 const ARCHIVE_RANGE_BODY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -131,6 +132,7 @@ pub(crate) async fn fetch_archive_range_to_cache(
             path: part_path.clone(),
             source,
         })?;
+    preallocate_file(&file, &part_path, expected)?;
 
     let mut current_offset = resume_offset;
     let mut buffered_bytes = 0usize;

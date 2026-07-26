@@ -8,8 +8,8 @@ use crate::runtime::task_pool::fs_ops::{
 };
 use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 use crate::runtime::{
-    DELETE_FILES_MANIFEST_NAME, PATCH_DIFF_STAGE_DIR, PATCH_FILES_STAGE_DIR, PATCH_MANIFEST_NAME,
-    PATCH_STAGE_DIR,
+    dir_size_sync, DELETE_FILES_MANIFEST_NAME, PATCH_DIFF_STAGE_DIR, PATCH_FILES_STAGE_DIR,
+    PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
 };
 
 use super::{
@@ -95,43 +95,6 @@ fn metadata_len(path: &Path) -> u64 {
         .filter(|metadata| metadata.is_file())
         .map(|metadata| metadata.len())
         .unwrap_or(0)
-}
-
-fn directory_size(path: &Path) -> Result<u64> {
-    if !path.exists() {
-        return Ok(0);
-    }
-    let mut total = 0u64;
-    let mut pending = vec![path.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory).map_err(|source| Error::IoAt {
-            action: "read directory",
-            path: directory.clone(),
-            source,
-        })? {
-            let entry = entry.map_err(|source| Error::IoAt {
-                action: "read directory",
-                path: directory.clone(),
-                source,
-            })?;
-            let entry_path = entry.path();
-            let metadata =
-                std::fs::symlink_metadata(&entry_path).map_err(|source| Error::IoAt {
-                    action: "query file metadata/stat for",
-                    path: entry_path.clone(),
-                    source,
-                })?;
-            if metadata.file_type().is_symlink() {
-                continue;
-            }
-            if metadata.is_dir() {
-                pending.push(entry_path);
-            } else if metadata.is_file() {
-                total = total.saturating_add(metadata.len());
-            }
-        }
-    }
-    Ok(total)
 }
 
 fn directory_is_empty(path: &Path) -> Result<bool> {
@@ -539,7 +502,7 @@ pub(crate) fn build_patch_plan_with_probe_cache(
     {
         measured_relocation_bytes
             .map(Ok)
-            .unwrap_or_else(|| directory_size(&logical_vfs_destination))?
+            .unwrap_or_else(|| dir_size_sync(&logical_vfs_destination))?
     } else {
         0
     };

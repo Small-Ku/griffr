@@ -6,6 +6,7 @@ use crate::runtime::task_pool::{TaskPoolConfig, VolumeStreamingMode};
 #[derive(Debug, Default)]
 pub(crate) struct AdmissionSnapshot {
     pub(crate) reserved_write_volumes: HashSet<String>,
+    pub(crate) storage_available_bytes: HashMap<String, Option<u64>>,
     pub(crate) queued_reuse_commits: usize,
 }
 
@@ -20,6 +21,7 @@ pub(crate) struct ResourceState {
     pub(crate) volume_metadata: HashMap<String, usize>,
     pub(crate) archive_savers: HashMap<String, usize>,
     pub(crate) archive_commits: HashMap<String, usize>,
+    pub(crate) storage_reserved_bytes: HashMap<String, u64>,
     pub(crate) mutation_paths: HashSet<String>,
     pub(crate) reuse_commits_in_use: usize,
 }
@@ -69,6 +71,9 @@ impl ResourceState {
             return false;
         }
         if self.has_mutation_conflict(&request.mutation_paths) {
+            return false;
+        }
+        if !self.can_reserve_storage(request, admission) {
             return false;
         }
 
@@ -137,6 +142,32 @@ impl ResourceState {
         true
     }
 
+    fn can_reserve_storage(
+        &self,
+        request: &ResourceRequest,
+        admission: &AdmissionSnapshot,
+    ) -> bool {
+        request.storage_reservations.iter().all(|reservation| {
+            let active = self
+                .storage_reserved_bytes
+                .get(&reservation.volume)
+                .copied()
+                .unwrap_or(0);
+            if active == 0 {
+                return true;
+            }
+            let Some(available) = admission
+                .storage_available_bytes
+                .get(&reservation.volume)
+                .copied()
+                .flatten()
+            else {
+                return true;
+            };
+            storage_reservation_fits(active, reservation.bytes, available)
+        })
+    }
+
     pub(crate) fn has_mutation_conflict(&self, requested: &[String]) -> bool {
         requested.iter().any(|requested| {
             self.mutation_paths
@@ -172,6 +203,13 @@ impl ResourceState {
         for (volume, _) in &request.archive_commit_volumes {
             *self.archive_commits.entry(volume.clone()).or_default() += 1;
         }
+        for reservation in &request.storage_reservations {
+            let reserved = self
+                .storage_reserved_bytes
+                .entry(reservation.volume.clone())
+                .or_default();
+            *reserved = reserved.saturating_add(reservation.bytes);
+        }
         self.mutation_paths
             .extend(request.mutation_paths.iter().cloned());
         if request.reuse_commit {
@@ -206,6 +244,13 @@ impl ResourceState {
         for (volume, _) in &request.archive_commit_volumes {
             decrement(&mut self.archive_commits, volume);
         }
+        for reservation in &request.storage_reservations {
+            decrement_bytes(
+                &mut self.storage_reserved_bytes,
+                &reservation.volume,
+                reservation.bytes,
+            );
+        }
         for path in &request.mutation_paths {
             self.mutation_paths.remove(path);
         }
@@ -213,6 +258,13 @@ impl ResourceState {
             self.reuse_commits_in_use = self.reuse_commits_in_use.saturating_sub(1);
         }
     }
+}
+
+fn storage_reservation_fits(active: u64, requested: u64, available: u64) -> bool {
+    // A single writer is never rejected by an install-wide estimate. Its own
+    // preallocation remains the authoritative space check. Once a writer is
+    // active, later writers must fit beside its declared peak allocation.
+    active == 0 || active.saturating_add(requested) <= available
 }
 
 fn mutation_paths_conflict(left: &str, right: &str) -> bool {
@@ -247,9 +299,92 @@ fn decrement(counts: &mut HashMap<String, usize>, key: &str) {
     }
 }
 
+fn decrement_bytes(counts: &mut HashMap<String, u64>, key: &str, bytes: u64) {
+    let should_remove = if let Some(count) = counts.get_mut(key) {
+        *count = count.saturating_sub(bytes);
+        *count == 0
+    } else {
+        false
+    };
+    if should_remove {
+        counts.remove(key);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::mutation_paths_conflict;
+    use super::{
+        mutation_paths_conflict, storage_reservation_fits, AdmissionSnapshot, ResourceState,
+    };
+    use crate::runtime::task_pool::scheduler::routing::{ResourceRequest, StorageReservation};
+    use crate::runtime::task_pool::TaskPoolConfig;
+    use std::path::PathBuf;
+
+    #[test]
+    fn first_storage_writer_is_not_rejected_by_a_global_estimate() {
+        assert!(storage_reservation_fits(0, u64::MAX, 1));
+    }
+
+    #[test]
+    fn concurrent_storage_reservations_must_fit_current_free_space() {
+        assert!(storage_reservation_fits(10, 20, 30));
+        assert!(!storage_reservation_fits(10, 21, 30));
+    }
+
+    #[test]
+    fn active_writer_uses_the_shared_volume_space_snapshot() {
+        let active = ResourceRequest {
+            storage_reservations: vec![StorageReservation {
+                volume: "volume-a".to_string(),
+                probe_path: PathBuf::from("volume-a"),
+                bytes: 10,
+            }],
+            ..ResourceRequest::default()
+        };
+        let fitting = ResourceRequest {
+            storage_reservations: vec![StorageReservation {
+                volume: "volume-a".to_string(),
+                probe_path: PathBuf::from("volume-a"),
+                bytes: 20,
+            }],
+            ..ResourceRequest::default()
+        };
+        let too_large = ResourceRequest {
+            storage_reservations: vec![StorageReservation {
+                volume: "volume-a".to_string(),
+                probe_path: PathBuf::from("volume-a"),
+                bytes: 21,
+            }],
+            ..ResourceRequest::default()
+        };
+        let admission = AdmissionSnapshot {
+            storage_available_bytes: [("volume-a".to_string(), Some(30))].into_iter().collect(),
+            ..AdmissionSnapshot::default()
+        };
+        let mut state = ResourceState::default();
+        state.acquire(&active);
+
+        assert!(state.can_acquire(&fitting, &TaskPoolConfig::default(), &admission));
+        assert!(!state.can_acquire(&too_large, &TaskPoolConfig::default(), &admission));
+    }
+
+    #[test]
+    fn storage_reservations_are_released_with_task_resources() {
+        let request = ResourceRequest {
+            storage_reservations: vec![StorageReservation {
+                volume: "volume-a".to_string(),
+                probe_path: PathBuf::from("volume-a"),
+                bytes: 32,
+            }],
+            ..ResourceRequest::default()
+        };
+        let mut state = ResourceState::default();
+
+        state.acquire(&request);
+        assert_eq!(state.storage_reserved_bytes.get("volume-a"), Some(&32));
+        state.release(&request);
+        assert!(!state.storage_reserved_bytes.contains_key("volume-a"));
+    }
 
     #[test]
     fn mutation_paths_reject_ancestor_conflicts() {

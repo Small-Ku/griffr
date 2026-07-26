@@ -20,6 +20,7 @@ mod update_plan;
 pub use admin::{ensure_admin, is_running_as_admin, restart_as_admin};
 pub(crate) use artifact::ArtifactDigest;
 pub use artifact::{ArtifactExpectation, ArtifactProof, ArtifactSource};
+pub(crate) use compat_fs::dir_size_sync;
 pub use compat_fs::{
     collect_files_recursive, copy_dir_recursive, dir_size, directory_has_entries,
     list_files_with_extension, path_is_dir, path_is_dir_or_err, path_is_file, read_link,

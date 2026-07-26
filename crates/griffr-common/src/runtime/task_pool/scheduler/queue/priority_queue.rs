@@ -55,6 +55,27 @@ impl QueueState {
     fn admission_snapshot(&self, config: &TaskPoolConfig) -> AdmissionSnapshot {
         let mut admission = AdmissionSnapshot::default();
         for queued in self.continuation.iter().chain(&self.bulk) {
+            for reservation in &queued.resources.storage_reservations {
+                if self
+                    .resources
+                    .storage_reserved_bytes
+                    .get(&reservation.volume)
+                    .copied()
+                    .unwrap_or(0)
+                    == 0
+                    || admission
+                        .storage_available_bytes
+                        .contains_key(&reservation.volume)
+                {
+                    continue;
+                }
+                let available = crate::runtime::available_space(&reservation.probe_path)
+                    .ok()
+                    .flatten();
+                admission
+                    .storage_available_bytes
+                    .insert(reservation.volume.clone(), available);
+            }
             if queued.resources.reuse_probe {
                 admission.queued_reuse_commits = admission.queued_reuse_commits.saturating_add(1);
             }
@@ -82,13 +103,14 @@ impl QueueState {
         config: &TaskPoolConfig,
         blocking_dispatch_available: bool,
     ) -> Option<QueuedTask> {
+        let admission = self.admission_snapshot(config);
         for offset in 0..RUN_SCHEDULE.len() {
             let index = (self.run_cursor + offset) % RUN_SCHEDULE.len();
             let class = RUN_SCHEDULE[index];
             if !blocking_dispatch_available && class != RunClass::AsyncIo {
                 continue;
             }
-            if let Some(task) = self.pop_runnable(class, config) {
+            if let Some(task) = self.pop_runnable(class, config, &admission) {
                 self.run_cursor = (index + 1) % RUN_SCHEDULE.len();
                 return Some(task);
             }
@@ -96,7 +118,12 @@ impl QueueState {
         None
     }
 
-    fn pop_runnable(&mut self, class: RunClass, config: &TaskPoolConfig) -> Option<QueuedTask> {
+    fn pop_runnable(
+        &mut self,
+        class: RunClass,
+        config: &TaskPoolConfig,
+        admission: &AdmissionSnapshot,
+    ) -> Option<QueuedTask> {
         let class_index = Self::class_index(class);
         let force_bulk = self.continuation_streak[class_index] >= CONTINUATION_BURST;
         let preferred_network = if class == RunClass::AsyncIo {
@@ -106,8 +133,6 @@ impl QueueState {
         } else {
             None
         };
-        let admission = self.admission_snapshot(config);
-
         if !force_bulk {
             if let Some(task) = remove_runnable(
                 &mut self.continuation,
@@ -115,7 +140,7 @@ impl QueueState {
                 preferred_network,
                 &self.resources,
                 config,
-                &admission,
+                admission,
             ) {
                 self.continuation_streak[class_index] =
                     self.continuation_streak[class_index].saturating_add(1);
@@ -128,7 +153,7 @@ impl QueueState {
             preferred_network,
             &self.resources,
             config,
-            &admission,
+            admission,
         ) {
             self.continuation_streak[class_index] = 0;
             return Some(task);
@@ -140,7 +165,7 @@ impl QueueState {
                 preferred_network,
                 &self.resources,
                 config,
-                &admission,
+                admission,
             ) {
                 self.continuation_streak[class_index] = 1;
                 return Some(task);

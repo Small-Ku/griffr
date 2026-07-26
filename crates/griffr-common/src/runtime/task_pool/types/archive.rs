@@ -2,8 +2,8 @@ use crate::api::types::GameFileEntry;
 use crate::download::extractor::{ArchiveIndex, MultiVolumeLayout};
 use crate::error::{Error, Result};
 use crate::runtime::{
-    PatchApplyOptions, PatchArtifactProbe, PatchCheckReport, PatchPlan, PatchProbePlan,
-    PlannedPatchEntry,
+    dir_size_sync, PatchApplyOptions, PatchArtifactProbe, PatchCheckReport, PatchPlan,
+    PatchProbePlan, PlannedPatchEntry,
 };
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -107,7 +107,7 @@ impl PatchCheckWork {
         let result = self
             .relocation_root
             .as_deref()
-            .map(directory_size_sync)
+            .map(dir_size_sync)
             .transpose()
             .map(|size| size.unwrap_or(0))
             .map_err(|error| error.to_string());
@@ -139,43 +139,6 @@ impl PatchCheckWork {
     pub(crate) fn verification_cache(&self) -> &VerifiedArtifactCache {
         &self.verification_cache
     }
-}
-
-fn directory_size_sync(path: &Path) -> Result<u64> {
-    if !path.exists() {
-        return Ok(0);
-    }
-    let mut total = 0u64;
-    let mut pending = vec![path.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        for entry in std::fs::read_dir(&directory).map_err(|source| Error::IoAt {
-            action: "read directory",
-            path: directory.clone(),
-            source,
-        })? {
-            let entry = entry.map_err(|source| Error::IoAt {
-                action: "read directory",
-                path: directory.clone(),
-                source,
-            })?;
-            let entry_path = entry.path();
-            let metadata =
-                std::fs::symlink_metadata(&entry_path).map_err(|source| Error::IoAt {
-                    action: "query file metadata for",
-                    path: entry_path.clone(),
-                    source,
-                })?;
-            if metadata.file_type().is_symlink() {
-                continue;
-            }
-            if metadata.is_dir() {
-                pending.push(entry_path);
-            } else if metadata.is_file() {
-                total = total.saturating_add(metadata.len());
-            }
-        }
-    }
-    Ok(total)
 }
 
 #[derive(Debug, Clone)]
