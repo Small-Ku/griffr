@@ -20,7 +20,7 @@ pub(crate) fn extract_to_with_progress(
     if let Some(callback) = progress_callback.as_mut() {
         callback(0, archive_index.total_uncompressed_bytes);
     }
-    let shards = MultiVolumeExtractor::extraction_shards(archive_index, max_shards);
+    let shards = extraction_shards(archive_index, max_shards);
     if shards.is_empty() {
         return Ok(());
     }
@@ -98,4 +98,28 @@ pub(crate) fn split_archive(path: &Path, chunk_size: usize) -> Result<Vec<PathBu
         volumes.push(volume_path);
     }
     Ok(volumes)
+}
+
+pub(crate) fn extraction_shards(
+    archive_index: &ArchiveIndex,
+    target_shards: usize,
+) -> Vec<ArchiveExtractionShardPlan> {
+    MultiVolumeExtractor::extraction_shards_for_indices(
+        archive_index,
+        (0..archive_index.entry_sizes.len()).collect(),
+        target_shards,
+    )
+}
+
+pub(crate) fn extraction_shards_with_source_limit(
+    archive_index: &ArchiveIndex,
+    target_shards: usize,
+    max_source_bytes: u64,
+) -> Vec<ArchiveExtractionShardPlan> {
+    MultiVolumeExtractor::extraction_shards_for_indices_with_source_limit(
+        archive_index,
+        (0..archive_index.entry_sizes.len()).collect(),
+        target_shards,
+        max_source_bytes,
+    )
 }

@@ -93,7 +93,7 @@ fn logical_path_for_physical(plan: &PatchPlan, path: &Path) -> PathBuf {
 pub(super) fn simulate_space_peaks(
     plan: &PatchPlan,
     archive_entries: &BTreeMap<String, u64>,
-    archive_uncompressed_bytes: u64,
+    planned_extract_bytes: u64,
     relocating_vfs_bytes: u64,
 ) -> Result<SimulatedSpacePeaks> {
     let install_key = storage_volume_group_key(&plan.install_root);
@@ -102,8 +102,10 @@ pub(super) fn simulate_space_peaks(
     let work_key = plan.work_dir.as_deref().map(storage_volume_group_key);
     let mut ledger = VolumeSpaceLedger::default();
 
-    // Extraction writes the full archive before commit starts.
-    ledger.add(&stage_key, archive_uncompressed_bytes);
+    // The source-directed patch DAG extracts only selected payloads and
+    // top-level outputs. Model them as one conservative staging wave even
+    // though direct entries commit as soon as each file verifies.
+    ledger.add(&stage_key, planned_extract_bytes);
 
     // First-time external VFS setup copies each file before deleting its source.
     // A move on the same volume only renames the file and needs no more blocks.

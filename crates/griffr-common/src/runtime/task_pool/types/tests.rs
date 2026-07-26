@@ -57,6 +57,30 @@ fn normal_file_ensure_starts_with_cpu_verification() {
 }
 
 #[test]
+fn final_file_view_normalizes_static_file_task_fields() {
+    let task = Task::Download {
+        url: "https://example.invalid/file.bin".to_string(),
+        dest: PathBuf::from("game/Data/file.bin"),
+        logical_path: "Data/file.bin".to_string(),
+        expected_md5: "00".repeat(16),
+        expected_size: Some(4),
+        retry_count: 0,
+        transfer_class: TransferClass::General,
+        resume: None,
+        archive_repair: None,
+    };
+
+    let file = task
+        .final_file()
+        .expect("download task must expose final file");
+    assert_eq!(file.target(), std::path::Path::new("game/Data/file.bin"));
+    assert_eq!(file.logical_path(), "Data/file.bin");
+    assert_eq!(file.expected_md5(), "00000000000000000000000000000000");
+    assert_eq!(file.expected_size(), Some(4));
+    assert_eq!(file.expectation().logical_path(), "Data/file.bin");
+}
+
+#[test]
 fn explicit_relink_skips_target_verification() {
     let task = Task::ensure_file(FileEnsureTask {
         dest: PathBuf::from("game/file.bin"),
@@ -275,6 +299,7 @@ fn archive_work_drop_removes_abandoned_staging() {
     .unwrap();
     *work.prepared.lock().unwrap() = Some(PreparedArchive {
         staging_dir: staging.clone(),
+        deferred_commit_paths: Vec::new(),
         patch_plan: None,
     });
 

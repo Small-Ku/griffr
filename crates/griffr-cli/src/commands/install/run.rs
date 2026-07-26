@@ -9,12 +9,12 @@ use griffr_common::runtime::task_pool::{
     TaskGraphBuilder, TaskOutcome, TaskPoolRunner, TaskProgress,
 };
 use griffr_common::runtime::{
-    directory_has_entries, ensure_game_files_with_pool, is_launcher_metadata_path, plan_vfs_tasks,
-    resolve_file_reuse_sources, run_integrity_pool, streaming_assets_path, sync_launcher_metadata,
-    FileReuseConfig, ProgressLane, VfsFilePlanOptions,
+    directory_has_entries, ensure_game_files_with_pool, plan_vfs_tasks, resolve_file_reuse_sources,
+    run_integrity_pool, streaming_assets_path, sync_launcher_metadata, FileReuseConfig,
+    ProgressLane, VfsFilePlanOptions,
 };
 
-use crate::commands::archive_graph::{add_file_tasks, owned_archive_paths};
+use crate::commands::archive_graph::{add_file_tasks, full_archive_excluded_paths};
 use crate::progress::{ArchiveProgress, CountAndByteProgress};
 use crate::ui;
 use crate::GlobalOptions;
@@ -173,8 +173,11 @@ pub async fn install(
                 .context("Failed to fetch game_files before archive streaming")?,
         );
         let archive_group_count = archive_groups.len();
-        let excluded_commit_paths =
-            owned_archive_paths(&extra_tasks, &install_path, expected_archive_files.as_ref());
+        let excluded_commit_paths = full_archive_excluded_paths(
+            &extra_tasks,
+            &install_path,
+            expected_archive_files.as_ref(),
+        );
         let archive_verify_count = if opts.keep_pack_archives {
             pkg.packs.len()
         } else {
@@ -228,8 +231,9 @@ pub async fn install(
                 archive_verify_count
                     .saturating_add(
                         expected_archive_files
-                            .len()
-                            .saturating_sub(excluded_commit_paths.len()),
+                            .keys()
+                            .filter(|path| !excluded_commit_paths.contains(*path))
+                            .count(),
                     )
                     .saturating_add(archive_vfs_task_count),
             )
@@ -251,11 +255,12 @@ pub async fn install(
         let mut failures = Vec::new();
         for event in result.outcomes {
             match event {
-                TaskOutcome::Verified { path, ok: true, .. }
-                    if expected_archive_files
-                        .contains_key(&path.replace('\\', "/").to_ascii_lowercase()) =>
+                TaskOutcome::Committed { proof }
+                    if expected_archive_files.contains_key(
+                        &proof.logical_path().replace('\\', "/").to_ascii_lowercase(),
+                    ) =>
                 {
-                    already_verified_paths.push(path);
+                    already_verified_paths.push(proof);
                 }
                 TaskOutcome::Failed { path, reason } => {
                     failures.push(format!("{} ({})", path, reason));
@@ -313,15 +318,6 @@ pub async fn install(
         }
     }
 
-    sync_launcher_metadata(
-        &api_client,
-        &install_path,
-        &install_target,
-        Some(&version_info.version),
-    )
-    .await
-    .context("Failed to sync launcher metadata after install staging")?;
-
     let verify_progress =
         CountAndByteProgress::new("install.verify", "install.repair.download", opts.verbose);
     let verify_session = verify_progress.start(
@@ -333,7 +329,7 @@ pub async fn install(
         &install_path,
         &install_target,
         Some(&version_info.version),
-        griffr_common::runtime::IntegritySelection::Full,
+        griffr_common::runtime::IntegritySelection::GameFiles,
         &already_verified_paths,
         true,
         &[],
@@ -347,8 +343,6 @@ pub async fn install(
     verify_session.finish();
     verify_progress.finish();
     if !summary.issues.is_empty() {
-        let mut repairable_issues = Vec::new();
-        let mut metadata_issues = Vec::new();
         for issue in summary.issues.iter().take(20) {
             ui::print_warning(format!(
                 "integrity issue path={} kind={:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
@@ -360,28 +354,20 @@ pub async fn install(
                 issue.actual_md5
             ));
         }
-        for issue in &summary.issues {
-            if is_launcher_metadata_path(&issue.path) {
-                metadata_issues.push(issue.clone());
-            } else {
-                repairable_issues.push(issue.clone());
-            }
-        }
-
-        if !metadata_issues.is_empty() {
-            ui::print_info(format!(
-                "Ignored metadata-only issues: {} (launcher metadata files will be normalized)",
-                metadata_issues.len()
-            ));
-        }
-
-        if !repairable_issues.is_empty() {
-            anyhow::bail!(
-                "Post-install integrity still reports {} non-metadata issue(s)",
-                repairable_issues.len()
-            );
-        }
+        anyhow::bail!(
+            "Post-install integrity still reports {} game-file issue(s)",
+            summary.issues.len()
+        );
     }
+
+    sync_launcher_metadata(
+        &api_client,
+        &install_path,
+        &install_target,
+        Some(&version_info.version),
+    )
+    .await
+    .context("Failed to sync launcher metadata after final install verification")?;
 
     ui::print_success("Install finished");
     Ok(())

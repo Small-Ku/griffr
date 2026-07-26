@@ -9,10 +9,10 @@ use griffr_common::runtime::task_pool::{
     plan_archive_groups, ArchiveRetention, ArchiveSource, Task, TaskGraphBuilder, TaskOutcome,
     TaskPoolRunner, TaskProgress,
 };
-use griffr_common::runtime::{PatchApplyOptions, ProgressLane};
+use griffr_common::runtime::{ArtifactProof, PatchApplyOptions, ProgressLane};
 
 use super::*;
-use crate::commands::archive_graph::{add_file_tasks, owned_archive_paths};
+use crate::commands::archive_graph::{add_file_tasks, full_archive_excluded_paths};
 use crate::progress::ArchiveProgress;
 use crate::ui;
 use crate::GlobalOptions;
@@ -20,7 +20,7 @@ use crate::GlobalOptions;
 #[derive(Debug, Default)]
 pub(super) struct ArchiveRunResult {
     pub(super) modified_paths: Vec<String>,
-    pub(super) verified_paths: Vec<String>,
+    pub(super) verified_paths: Vec<ArtifactProof>,
 }
 
 fn collect_archive_result(
@@ -29,17 +29,20 @@ fn collect_archive_result(
     failure_label: &str,
 ) -> Result<ArchiveRunResult> {
     let mut modified_paths = BTreeSet::new();
-    let mut verified_paths = BTreeSet::new();
+    let mut verified_paths = BTreeMap::<String, ArtifactProof>::new();
     let mut failures = Vec::new();
     for event in outcomes {
         match event {
             TaskOutcome::Changed { path } => {
                 modified_paths.insert(path);
             }
-            TaskOutcome::Verified { path, ok: true, .. }
-                if expected_files.contains_key(&path.replace('\\', "/").to_ascii_lowercase()) =>
+            TaskOutcome::Committed { proof }
+                if expected_files.contains_key(
+                    &proof.logical_path().replace('\\', "/").to_ascii_lowercase(),
+                ) =>
             {
-                verified_paths.insert(path);
+                let key = proof.logical_path().replace('\\', "/").to_ascii_lowercase();
+                verified_paths.insert(key, proof);
             }
             TaskOutcome::Failed { path, reason } => {
                 failures.push(format!("{} ({})", path, reason));
@@ -56,7 +59,7 @@ fn collect_archive_result(
     }
     Ok(ArchiveRunResult {
         modified_paths: modified_paths.into_iter().collect(),
-        verified_paths: verified_paths.into_iter().collect(),
+        verified_paths: verified_paths.into_values().collect(),
     })
 }
 
@@ -93,6 +96,11 @@ pub(super) async fn download_and_extract_archives_from_dir(
     let archive_groups = plan_archive_groups(archives, archive_dir)?;
 
     if mode == ArchiveAcquireMode::RequireExisting {
+        let excluded_commit_paths = if file_tasks_own_archive_paths {
+            full_archive_excluded_paths(&extra_tasks, install_path, expected_files.as_ref())
+        } else {
+            Arc::new(BTreeSet::new())
+        };
         let mut graph = TaskGraphBuilder::new();
         let mut archive_nodes = Vec::with_capacity(archive_groups.len());
         let mut verify_task_count = 0usize;
@@ -126,7 +134,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
                     password: archive_password.map(str::to_owned),
                     patch_options: patch_options.clone(),
                     expected_files: expected_files.clone(),
-                    excluded_commit_paths: Arc::new(BTreeSet::new()),
+                    excluded_commit_paths: excluded_commit_paths.clone(),
                 },
                 verify_nodes,
             )?);
@@ -138,10 +146,10 @@ pub(super) async fn download_and_extract_archives_from_dir(
             &archive_nodes,
             install_path,
             expected_files.as_ref(),
-            true,
+            !file_tasks_own_archive_paths,
         )?;
         opts.verbose(format!(
-            "VFS/archive ownership: {parallel_vfs} independent task(s), {dependent_vfs} patch-dependent task(s)"
+            "VFS/archive ownership: {parallel_vfs} independent task(s), {dependent_vfs} archive-dependent task(s)"
         ));
 
         let progress = ArchiveProgress::new(&format!("update.{label}.apply"), opts.verbose);
@@ -159,10 +167,20 @@ pub(super) async fn download_and_extract_archives_from_dir(
             patch_lane,
             delete_lane,
         );
+        let destination_verify_count = if file_tasks_own_archive_paths {
+            expected_files
+                .keys()
+                .filter(|path| !excluded_commit_paths.contains(*path))
+                .count()
+        } else {
+            0
+        };
         let task_progress = TaskProgress::new(progress_session.sender())
             .with_verify(
                 verify_lane,
-                verify_task_count.saturating_add(extra_task_count),
+                verify_task_count
+                    .saturating_add(destination_verify_count)
+                    .saturating_add(extra_task_count),
             )
             .with_download(download_lane)
             .with_extract(extract_lane)
@@ -192,7 +210,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
         archive_group_count
     };
     let excluded_commit_paths = if file_tasks_own_archive_paths {
-        owned_archive_paths(&extra_tasks, install_path, expected_files.as_ref())
+        full_archive_excluded_paths(&extra_tasks, install_path, expected_files.as_ref())
     } else {
         Arc::new(BTreeSet::new())
     };
@@ -241,8 +259,9 @@ pub(super) async fn download_and_extract_archives_from_dir(
     );
     let destination_verify_count = if file_tasks_own_archive_paths {
         expected_files
-            .len()
-            .saturating_sub(excluded_commit_paths.len())
+            .keys()
+            .filter(|path| !excluded_commit_paths.contains(*path))
+            .count()
     } else {
         0
     };

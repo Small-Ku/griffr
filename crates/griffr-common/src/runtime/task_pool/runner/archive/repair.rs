@@ -1,18 +1,15 @@
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::download::extractor::{ArchiveIndex, MultiVolumeExtractor};
 use crate::error::{Error, Result};
-use crate::runtime::task_pool::fs_ops::extract::CommitFileJob;
-use crate::runtime::task_pool::fs_ops::{commit_file_job, make_extract_staging_dir};
+use crate::runtime::task_pool::fs_ops::{commit_observed_artifact, create_extract_staging_dir};
 use crate::runtime::task_pool::graph::TaskRun;
 use crate::runtime::task_pool::types::{
     ArchiveFileRepairTask, ArchiveRepairSession, ArchiveWork, PreparedArchiveRepairGroup, Task,
     WorkerEvent,
 };
-use crate::runtime::task_pool::verify::build_issue;
-use crate::runtime::PatchApplyOptions;
+use crate::runtime::{ArtifactExpectation, ArtifactSource, PatchApplyOptions};
 
 use super::install::prepare_remote_archive_range_work;
 
@@ -82,16 +79,11 @@ pub(super) fn finish_archive_repair_index(
         work.invalidate_range_cache();
         return Ok(());
     };
-    let staging_dir = make_extract_staging_dir(
+    let staging_dir = create_extract_staging_dir(
         session.install_root(),
         &format!("repair-{}", work.base_name),
         None,
     )?;
-    std::fs::create_dir_all(&staging_dir).map_err(|source| Error::IoAt {
-        action: "create directory",
-        path: staging_dir.clone(),
-        source,
-    })?;
     let group = PreparedArchiveRepairGroup {
         work: work.clone(),
         archive_index,
@@ -196,7 +188,13 @@ pub(crate) fn run_extract_archive_repair_file(
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskRun {
     let extractor = MultiVolumeExtractor::from_layout(repair.work.layout.clone());
-    let result = extractor.extract_entries_with_progress(
+    let expectation = ArtifactExpectation::new(
+        repair.logical_path.clone(),
+        repair.expected_md5.clone(),
+        Some(repair.expected_size),
+    );
+    let mut committed_proof = None;
+    let result = extractor.extract_entries_with_progress_and_file(
         &repair.staging_dir,
         None,
         &repair.archive_index,
@@ -204,49 +202,35 @@ pub(crate) fn run_extract_archive_repair_file(
         &repair.work.expected_files,
         progress_buffer_bytes,
         |_| {},
+        |source, _normalized, digest| {
+            let digest = digest.as_ref().ok_or_else(|| Error::Message {
+                context: "Extraction error: ",
+                detail: format!(
+                    "Archive repair entry {} has no verified digest",
+                    repair.logical_path
+                ),
+            })?;
+            committed_proof = Some(commit_observed_artifact(
+                source,
+                &repair.dest,
+                &expectation,
+                ArtifactSource::ArchiveRepair,
+                digest,
+            )?);
+            Ok(())
+        },
     );
     if let Err(error) = result {
         repair.work.invalidate_range_cache();
         return direct_fallback(repair, error, event_tx);
     }
-
-    let archive_name = match repair
-        .archive_index
-        .archive
-        .name_for_index(repair.entry_index)
-    {
-        Some(name) => name,
-        None => return direct_fallback(repair, "archive entry name is unavailable", event_tx),
-    };
-    let relative = match crate::download::extractor::safe_relative_archive_path(archive_name) {
-        Ok(path) => path,
-        Err(error) => return direct_fallback(repair, error, event_tx),
-    };
-    let source = repair.staging_dir.join(&relative);
-    let job = CommitFileJob {
-        source: source.clone(),
-        destination: repair.dest.clone(),
-        logical_path: PathBuf::from(&repair.logical_path),
-    };
-    if let Err(error) = commit_file_job(&job) {
-        let _ = std::fs::remove_file(source);
-        return direct_fallback(repair, error, event_tx);
-    }
-    if let Some(issue) = build_issue(
-        &repair.dest,
-        &repair.logical_path,
-        &repair.expected_md5,
-        Some(repair.expected_size),
-    ) {
+    let Some(proof) = committed_proof else {
         return direct_fallback(
             repair,
-            format!(
-                "committed archive file failed verification: {:?}",
-                issue.kind
-            ),
+            "archive repair extraction did not commit an artifact",
             event_tx,
         );
-    }
+    };
 
     if let Ok(part_path) =
         crate::runtime::task_pool::fs_ops::make_partial_download_path(&repair.dest)
@@ -266,8 +250,8 @@ pub(crate) fn run_extract_archive_repair_file(
         repair.logical_path.clone(),
         repair.source_bytes,
     ));
-    let _ = event_tx.send(WorkerEvent::changed(repair.logical_path.clone()));
-    let _ = event_tx.send(WorkerEvent::verified(repair.logical_path, true, None));
+    let _ = event_tx.send(WorkerEvent::changed(repair.logical_path));
+    let _ = event_tx.send(WorkerEvent::committed(proof));
     TaskRun::succeeded()
 }
 

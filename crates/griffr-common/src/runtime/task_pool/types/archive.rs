@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use crate::runtime::task_pool::fs_ops::CommitFileBatch;
 use crate::runtime::task_pool::graph::TaskDependencyToken;
 use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 
@@ -179,52 +178,10 @@ fn directory_size_sync(path: &Path) -> Result<u64> {
     Ok(total)
 }
 
-#[doc(hidden)]
-#[derive(Debug)]
-pub struct ArchiveCommitWork {
-    pub(crate) archive: Arc<ArchiveWork>,
-    pub(crate) staging_dir: PathBuf,
-    pub(crate) batches: Vec<CommitFileBatch>,
-    finished_files: AtomicUsize,
-    total_files: usize,
-}
-
-impl ArchiveCommitWork {
-    pub(crate) fn new(
-        archive: Arc<ArchiveWork>,
-        staging_dir: PathBuf,
-        batches: Vec<CommitFileBatch>,
-    ) -> Arc<Self> {
-        let total_files = batches.iter().map(|batch| batch.jobs.len()).sum();
-        Arc::new(Self {
-            archive,
-            staging_dir,
-            batches,
-            finished_files: AtomicUsize::new(0),
-            total_files,
-        })
-    }
-
-    pub(crate) fn batch(&self, index: usize) -> Option<&CommitFileBatch> {
-        self.batches.get(index)
-    }
-
-    pub(crate) fn batch_count(&self) -> usize {
-        self.batches.len()
-    }
-
-    pub(crate) fn finish_file(&self) -> usize {
-        self.finished_files.fetch_add(1, Ordering::AcqRel) + 1
-    }
-
-    pub(crate) fn total_files(&self) -> usize {
-        self.total_files
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedArchive {
     pub(crate) staging_dir: PathBuf,
+    pub(crate) deferred_commit_paths: Vec<PathBuf>,
     pub(crate) patch_plan: Option<(PatchPlan, PatchCheckReport)>,
 }
 
@@ -750,6 +707,30 @@ impl Drop for ArchiveWork {
 
 #[doc(hidden)]
 #[derive(Debug)]
+pub(crate) struct ArchiveDirectCommitState {
+    finished_files: AtomicUsize,
+    total_files: usize,
+}
+
+impl ArchiveDirectCommitState {
+    pub(crate) fn new(total_files: usize) -> Arc<Self> {
+        Arc::new(Self {
+            finished_files: AtomicUsize::new(0),
+            total_files,
+        })
+    }
+
+    pub(crate) fn finish_file(&self) -> usize {
+        self.finished_files.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub(crate) fn total_files(&self) -> usize {
+        self.total_files
+    }
+}
+
+#[doc(hidden)]
+#[derive(Debug)]
 pub struct ArchiveShardRunState {
     active: AtomicUsize,
     failed: AtomicBool,
@@ -840,7 +821,9 @@ pub struct ArchiveShardTask {
     pub(crate) entries: Vec<usize>,
     pub(crate) volume_indices: Vec<usize>,
     pub(crate) estimated_cost: u64,
+    pub(crate) total_extract_bytes: u64,
     pub(crate) run_state: Arc<ArchiveShardRunState>,
+    pub(crate) direct_commit: Option<Arc<ArchiveDirectCommitState>>,
     pub(crate) range_release: Option<(Arc<ArchiveRangeReleaseState>, usize)>,
 }
 

@@ -323,7 +323,7 @@ mod tests {
         assert!(!work.layout.range_is_available(&(0..bytes.len() as u64)));
         let requests = work
             .layout
-            .missing_range_requests([0..bytes.len() as u64])
+            .missing_range_requests(Some(0..bytes.len() as u64))
             .unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(

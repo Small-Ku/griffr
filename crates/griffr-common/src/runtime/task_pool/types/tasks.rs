@@ -1,16 +1,16 @@
 use crate::api::types::GameFileEntry;
 use crate::download::extractor::{ArchiveDirectory, ArchiveIndex, ArchiveRangeRequest};
 use crate::error::{Error, Result};
-use crate::runtime::PatchApplyOptions;
+use crate::runtime::{ArtifactExpectation, PatchApplyOptions};
 use md5::Md5;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::archive::{
-    ArchiveCommitWork, ArchiveFileRepairTask, ArchiveRepairSession, ArchiveShardTask, ArchiveWork,
-    PatchApplyWork, PatchCheckWork,
+    ArchiveFileRepairTask, ArchiveRepairSession, ArchiveShardTask, ArchiveWork, PatchApplyWork,
+    PatchCheckWork,
 };
 
 /// Selects the download throttle. Local verification and reuse never use the
@@ -63,6 +63,39 @@ impl std::fmt::Debug for DownloadResumeState {
             .debug_struct("DownloadResumeState")
             .field("offset", &self.offset)
             .finish_non_exhaustive()
+    }
+}
+
+/// Borrowed canonical view of a task that reads or writes one final file.
+/// Source-specific task variants keep their scheduler data, while integrity,
+/// ownership, and frontend code use this shared view.
+#[derive(Debug, Clone, Copy)]
+pub struct FinalFileRef<'a> {
+    target: &'a Path,
+    logical_path: &'a str,
+    expected_md5: &'a str,
+    expected_size: Option<u64>,
+}
+
+impl<'a> FinalFileRef<'a> {
+    pub fn target(self) -> &'a Path {
+        self.target
+    }
+
+    pub fn logical_path(self) -> &'a str {
+        self.logical_path
+    }
+
+    pub fn expected_md5(self) -> &'a str {
+        self.expected_md5
+    }
+
+    pub fn expected_size(self) -> Option<u64> {
+        self.expected_size
+    }
+
+    pub fn expectation(self) -> ArtifactExpectation {
+        ArtifactExpectation::new(self.logical_path, self.expected_md5, self.expected_size)
     }
 }
 
@@ -437,15 +470,6 @@ pub enum Task {
         work: Arc<ArchiveWork>,
     },
     #[doc(hidden)]
-    CommitArchiveBatch {
-        commit: Arc<ArchiveCommitWork>,
-        batch_index: usize,
-    },
-    #[doc(hidden)]
-    FinishArchiveCommit {
-        commit: Arc<ArchiveCommitWork>,
-    },
-    #[doc(hidden)]
     PreparePatchApply {
         patch: Arc<PatchApplyWork>,
     },
@@ -489,29 +513,79 @@ pub enum Task {
 }
 
 impl Task {
+    /// Returns one canonical final-file view for task variants that inspect or
+    /// replace a concrete destination. Composite archive and patch tasks expose
+    /// their final files through their dynamic child outcomes instead.
+    pub fn final_file(&self) -> Option<FinalFileRef<'_>> {
+        let (target, logical_path, expected_md5, expected_size) = match self {
+            Self::Download {
+                dest,
+                logical_path,
+                expected_md5,
+                expected_size,
+                ..
+            } => (
+                dest.as_path(),
+                logical_path.as_str(),
+                expected_md5.as_str(),
+                *expected_size,
+            ),
+            Self::Verify {
+                path,
+                logical_path,
+                expected_md5,
+                expected_size,
+                ..
+            } => (
+                path.as_path(),
+                logical_path.as_str(),
+                expected_md5.as_str(),
+                *expected_size,
+            ),
+            Self::RepairFile {
+                dest,
+                logical_path,
+                expected_md5,
+                expected_size,
+                ..
+            }
+            | Self::ReuseFile {
+                dest,
+                logical_path,
+                expected_md5,
+                expected_size,
+                ..
+            } => (
+                dest.as_path(),
+                logical_path.as_str(),
+                expected_md5.as_str(),
+                Some(*expected_size),
+            ),
+            _ => return None,
+        };
+        Some(FinalFileRef {
+            target,
+            logical_path,
+            expected_md5,
+            expected_size,
+        })
+    }
+
     /// Returns the concrete destination inspected or changed by a file task.
     /// Composite archive tasks intentionally return `None`; callers must use
     /// their archive manifest when assigning path ownership.
-    pub fn target_path(&self) -> Option<&std::path::Path> {
-        match self {
-            Self::Download { dest, .. }
-            | Self::RepairFile { dest, .. }
-            | Self::ReuseFile { dest, .. } => Some(dest.as_path()),
-            Self::Verify { path, .. } => Some(path.as_path()),
-            _ => None,
-        }
+    pub fn target_path(&self) -> Option<&Path> {
+        self.final_file().map(|file| file.target())
     }
 
     /// Returns the user-facing logical path for a file task.
     pub fn logical_path(&self) -> Option<&str> {
-        match self {
-            Self::Download { logical_path, .. }
-            | Self::Verify { logical_path, .. }
-            | Self::RepairFile { logical_path, .. }
-            | Self::VerifyReuseVolume { logical_path, .. }
-            | Self::ReuseFile { logical_path, .. } => Some(logical_path.as_str()),
-            _ => None,
-        }
+        self.final_file()
+            .map(|file| file.logical_path())
+            .or(match self {
+                Self::VerifyReuseVolume { logical_path, .. } => Some(logical_path.as_str()),
+                _ => None,
+            })
     }
 
     /// Builds a CPU-first verify/repair graph. Explicit relink mode probes reuse

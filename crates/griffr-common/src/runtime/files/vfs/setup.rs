@@ -416,6 +416,9 @@ pub async fn setup_persistent_vfs(
                     outcomes.record_reused(&logical_path, PathReuseMethod::Copy);
                 }
             }
+            TaskOutcome::Committed { proof } => {
+                outcomes.record_verified(proof.logical_path(), true);
+            }
             TaskOutcome::Verified { path, ok, .. } => {
                 outcomes.record_verified(&path, ok);
             }

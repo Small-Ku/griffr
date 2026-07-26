@@ -6,7 +6,6 @@ mod patch;
 mod repair;
 mod save_volumes;
 
-pub(super) use commit::*;
 pub(super) use extract::*;
 pub(super) use fetch::*;
 pub(super) use install::*;

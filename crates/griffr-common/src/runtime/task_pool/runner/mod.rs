@@ -95,7 +95,9 @@ pub(crate) fn run_blocking_task(
             work,
             archive_index,
             patch_check,
-        } => archive::run_save_patch_plan(work, archive_index, patch_check, event_tx),
+        } => {
+            archive::run_save_patch_plan(work, archive_index, patch_check, extract_shards, event_tx)
+        }
         Task::ExtractArchiveShard { shard } => {
             archive::run_extract_archive_shard(shard, extraction_progress_buffer_bytes, event_tx)
         }
@@ -103,18 +105,13 @@ pub(crate) fn run_blocking_task(
             archive::run_retain_archive_volume(work, volume_index, event_tx)
         }
         Task::CommitArchive { work } => archive::run_commit_archive(work, event_tx),
-        Task::CommitArchiveBatch {
-            commit,
-            batch_index,
-        } => archive::run_commit_archive_batch(commit, batch_index, event_tx),
-        Task::FinishArchiveCommit { commit } => archive::run_finish_archive_commit(commit),
         Task::PreparePatchApply { patch } => archive::run_prepare_patch_apply(patch, event_tx),
         Task::ApplyPatchEntry { patch, entry_index } => {
             archive::run_apply_patch_entry(patch, entry_index, event_tx)
         }
         Task::ReleasePatchBase { patch, base } => archive::run_release_patch_base(patch, base),
         Task::ApplyPatchDeletes { patch } => archive::run_apply_patch_deletes(patch, event_tx),
-        Task::CommitPatchDeferred { patch } => archive::run_commit_patch_deferred(patch),
+        Task::CommitPatchDeferred { patch } => archive::run_commit_patch_deferred(patch, event_tx),
         Task::CleanPatchApply {
             patch,
             archive: archive_work,
@@ -226,9 +223,6 @@ fn run_apply_patch_manifest(
             ));
         };
         let mut on_patch = |path: &str, finished: usize, total: usize| {
-            if finished > 0 {
-                let _ = event_tx.send(WorkerEvent::changed(path.replace('\\', "/")));
-            }
             let _ = event_tx.send(WorkerEvent::progress(
                 crate::runtime::ProgressPhase::Patch,
                 path.to_string(),
@@ -258,9 +252,6 @@ fn run_apply_patch_manifest(
         )
     } else {
         let mut on_progress = |path: &str, finished: usize, total: usize| {
-            if finished > 0 {
-                let _ = event_tx.send(WorkerEvent::changed(path.replace('\\', "/")));
-            }
             let _ = event_tx.send(WorkerEvent::progress(
                 crate::runtime::ProgressPhase::Patch,
                 path.to_string(),
@@ -273,8 +264,19 @@ fn run_apply_patch_manifest(
     };
 
     match result {
-        Ok(()) if !has_patch_plan => TaskRun::then(Task::ApplyDeleteManifest { install_root }),
-        Ok(()) => TaskRun::succeeded(),
+        Ok(proofs) => {
+            for proof in proofs {
+                if proof.source() != crate::runtime::ArtifactSource::Existing {
+                    let _ = event_tx.send(WorkerEvent::changed(proof.logical_path().to_string()));
+                }
+                let _ = event_tx.send(WorkerEvent::committed(proof));
+            }
+            if has_patch_plan {
+                TaskRun::succeeded()
+            } else {
+                TaskRun::then(Task::ApplyDeleteManifest { install_root })
+            }
+        }
         Err(error) => TaskRun::failed(error.to_string()),
     }
 }

@@ -83,6 +83,10 @@ pub fn print_patch_check(report: &griffr_common::runtime::PatchCheckReport) {
                 format_bytes(report.archive_uncompressed_bytes),
             ),
             (
+                "planned extract".to_string(),
+                format_bytes(report.planned_extract_bytes),
+            ),
+            (
                 "final growth".to_string(),
                 format_bytes(report.estimated_final_growth_bytes),
             ),

@@ -14,15 +14,45 @@ use windows_sys::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
-pub(crate) fn make_extract_staging_dir(
+pub(crate) fn create_extract_staging_dir(
     dest: &Path,
     base_name: &str,
     work_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     static EXTRACT_STAGING_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let counter = EXTRACT_STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
     let parent = work_dir.unwrap_or_else(|| dest.parent().unwrap_or(dest));
-    Ok(parent.join(format!(".griffr.extract.{}.{}", base_name, counter)))
+    std::fs::create_dir_all(parent).map_err(|source| Error::IoAt {
+        action: "create directory",
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    for _ in 0..1024 {
+        let counter = EXTRACT_STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(
+            ".griffr.extract.{}.{}.{}",
+            base_name,
+            std::process::id(),
+            counter
+        ));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(Error::IoAt {
+                    action: "create directory",
+                    path,
+                    source,
+                });
+            }
+        }
+    }
+    Err(Error::Message {
+        context: "Task pool error: ",
+        detail: format!(
+            "Could not allocate a unique extraction directory under {}",
+            parent.display()
+        ),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -31,16 +61,6 @@ pub(crate) struct CommitFileJob {
     pub destination: PathBuf,
     pub logical_path: PathBuf,
 }
-
-#[derive(Debug, Clone)]
-pub(crate) struct CommitFileBatch {
-    pub jobs: Vec<CommitFileJob>,
-    pub estimated_bytes: u64,
-    pub cross_volume: bool,
-}
-
-const CROSS_VOLUME_COMMIT_BATCH_BYTES: u64 = 384 * 1024 * 1024;
-const MAX_COMMIT_BATCH_FILES: usize = 1024;
 
 pub(crate) fn collect_staged_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
@@ -117,107 +137,20 @@ pub(crate) fn commit_file_jobs(
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) fn collect_commit_jobs(
+pub(crate) fn commit_staged_paths(
     staging_root: &Path,
     dest_root: &Path,
-) -> Result<Vec<CommitFileJob>> {
-    collect_commit_jobs_excluding(staging_root, dest_root, &std::collections::BTreeSet::new())
-}
-
-pub(crate) fn collect_commit_jobs_excluding(
-    staging_root: &Path,
-    dest_root: &Path,
-    excluded_paths: &std::collections::BTreeSet<String>,
-) -> Result<Vec<CommitFileJob>> {
-    collect_staged_files(staging_root)?
-        .into_iter()
-        .filter_map(|source| {
-            let logical_path = match source.strip_prefix(staging_root) {
-                Ok(path) => path.to_path_buf(),
-                Err(error) => return Some(Err(error.into())),
-            };
-            let normalized = logical_path
-                .to_string_lossy()
-                .replace('\\', "/")
-                .to_ascii_lowercase();
-            if excluded_paths.contains(&normalized) {
-                return None;
-            }
-            Some(Ok(CommitFileJob {
-                destination: dest_root.join(&logical_path),
-                source,
-                logical_path,
-            }))
-        })
-        .collect()
-}
-
-pub(crate) fn build_commit_batches(jobs: Vec<CommitFileJob>) -> Result<Vec<CommitFileBatch>> {
-    use std::collections::BTreeMap;
-
-    let mut groups = BTreeMap::<(String, String, PathBuf), Vec<(CommitFileJob, u64)>>::new();
-    for job in jobs {
-        let bytes = std::fs::metadata(&job.source)
-            .map_err(|source| Error::IoAt {
-                action: "query file metadata for",
-                path: job.source.clone(),
-                source,
-            })?
-            .len();
-        let source_volume = super::reuse::storage_volume_group_key(&job.source);
-        let destination_volume = super::reuse::storage_volume_group_key(&job.destination);
-        let parent = job
-            .destination
-            .parent()
-            .unwrap_or(job.destination.as_path())
-            .to_path_buf();
-        groups
-            .entry((source_volume, destination_volume, parent))
-            .or_default()
-            .push((job, bytes));
-    }
-
-    let mut batches = Vec::new();
-    for ((source_volume, destination_volume, _), group) in groups {
-        let cross_volume = source_volume != destination_volume;
-        let mut current = Vec::new();
-        let mut current_bytes = 0u64;
-        for (job, bytes) in group {
-            let exceeds_bytes = cross_volume
-                && !current.is_empty()
-                && current_bytes.saturating_add(bytes) > CROSS_VOLUME_COMMIT_BATCH_BYTES;
-            let exceeds_files = current.len() >= MAX_COMMIT_BATCH_FILES;
-            if exceeds_bytes || exceeds_files {
-                batches.push(CommitFileBatch {
-                    jobs: std::mem::take(&mut current),
-                    estimated_bytes: current_bytes,
-                    cross_volume,
-                });
-                current_bytes = 0;
-            }
-            current_bytes = current_bytes.saturating_add(bytes);
-            current.push(job);
-        }
-        if !current.is_empty() {
-            batches.push(CommitFileBatch {
-                jobs: current,
-                estimated_bytes: current_bytes,
-                cross_volume,
-            });
-        }
-    }
-    Ok(batches)
-}
-
-#[cfg(test)]
-pub(crate) fn commit_staged_extract(
-    staging_root: &Path,
-    dest_root: &Path,
-    progress_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
+    logical_paths: &[PathBuf],
 ) -> Result<()> {
-    let jobs = collect_commit_jobs(staging_root, dest_root)?;
-    commit_file_jobs(&jobs, progress_callback)?;
+    let jobs = logical_paths
+        .iter()
+        .map(|logical_path| CommitFileJob {
+            source: staging_root.join(logical_path),
+            destination: dest_root.join(logical_path),
+            logical_path: logical_path.clone(),
+        })
+        .collect::<Vec<_>>();
+    commit_file_jobs(&jobs, None)?;
     std::fs::remove_dir_all(staging_root).map_err(|source| Error::IoAt {
         action: "remove file or directory",
         path: staging_root.to_path_buf(),
@@ -226,6 +159,13 @@ pub(crate) fn commit_staged_extract(
 }
 
 pub(crate) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| Error::IoAt {
+            action: "create directory",
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
     #[cfg(windows)]
     {
         let mut src_wide: Vec<u16> = src.as_os_str().encode_wide().collect();
@@ -403,70 +343,31 @@ pub(crate) fn move_path_replace_cross_volume(src: &Path, dest: &Path) -> Result<
 mod tests {
     use std::path::Path;
 
-    use super::{
-        build_commit_batches, collect_commit_jobs, collect_commit_jobs_excluding,
-        commit_staged_extract,
-    };
+    use super::commit_staged_paths;
     use crate::runtime::DELETE_FILES_MANIFEST_NAME;
 
     #[test]
-    fn commit_job_collection_omits_paths_owned_by_other_branches() {
-        let temp = tempfile::tempdir().unwrap();
-        let staging_root = temp.path().join("staging");
-        let dest_root = temp.path().join("install");
-        std::fs::create_dir_all(staging_root.join("Data/VFS")).unwrap();
-        std::fs::write(staging_root.join("Data/VFS/a.bin"), b"vfs").unwrap();
-        std::fs::write(staging_root.join("game.bin"), b"game").unwrap();
-        let excluded = std::collections::BTreeSet::from(["data/vfs/a.bin".to_string()]);
-
-        let jobs = collect_commit_jobs_excluding(&staging_root, &dest_root, &excluded).unwrap();
-
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].logical_path, Path::new("game.bin"));
-    }
-
-    #[test]
-    fn commit_staged_extract_keeps_delete_manifest_for_follow_up_task() {
+    fn deferred_archive_files_commit_after_payload_shards_finish() {
         let temp = tempfile::tempdir().unwrap();
         let dest_root = temp.path().join("install");
         let staging_root = temp.path().join("staging");
         std::fs::create_dir_all(&staging_root).unwrap();
-        std::fs::write(staging_root.join("payload.txt"), b"updated payload").unwrap();
         std::fs::write(
             staging_root.join(DELETE_FILES_MANIFEST_NAME),
             "Endfield_Data/Plugins/x86_64/libHAPI.dll\n",
         )
         .unwrap();
+        std::fs::write(staging_root.join("unexpected.bin"), b"not a control file").unwrap();
 
-        let mut progress = Vec::new();
-        let mut on_progress = |path: &Path, finished: usize, total: usize| {
-            progress.push((path.to_path_buf(), finished, total));
-        };
-        commit_staged_extract(&staging_root, &dest_root, Some(&mut on_progress)).unwrap();
+        commit_staged_paths(
+            &staging_root,
+            &dest_root,
+            &[Path::new(DELETE_FILES_MANIFEST_NAME).to_path_buf()],
+        )
+        .unwrap();
 
-        assert_eq!(progress.first().map(|item| (item.1, item.2)), Some((0, 2)));
-        assert_eq!(progress.last().map(|item| (item.1, item.2)), Some((2, 2)));
-        assert_eq!(
-            std::fs::read_to_string(dest_root.join("payload.txt")).unwrap(),
-            "updated payload"
-        );
         assert!(dest_root.join(DELETE_FILES_MANIFEST_NAME).exists());
-    }
-    #[test]
-    fn commit_batches_keep_parent_directory_locality() {
-        let temp = tempfile::tempdir().unwrap();
-        let staging_root = temp.path().join("staging");
-        let dest_root = temp.path().join("install");
-        let first = staging_root.join("a").join("one.bin");
-        let second = staging_root.join("b").join("two.bin");
-        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
-        std::fs::write(&first, b"one").unwrap();
-        std::fs::write(&second, b"two").unwrap();
-
-        let jobs = collect_commit_jobs(&staging_root, &dest_root).unwrap();
-        let batches = build_commit_batches(jobs).unwrap();
-        assert_eq!(batches.len(), 2);
-        assert!(batches.iter().all(|batch| batch.jobs.len() == 1));
+        assert!(!dest_root.join("unexpected.bin").exists());
+        assert!(!staging_root.exists());
     }
 }

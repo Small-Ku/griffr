@@ -6,6 +6,7 @@ use crate::runtime::patch_apply::{
     read_patch_plan, write_patch_plan, PatchCheckReport, PatchPlan, PlannedPatchSource,
 };
 use crate::runtime::task_pool::verify::VerifiedArtifactCache;
+use crate::runtime::ArtifactProof;
 
 mod filesystem;
 mod steps;
@@ -34,7 +35,7 @@ pub(crate) fn apply_patch_entry(
     plan: &PatchPlan,
     entry_index: usize,
     verification_cache: &VerifiedArtifactCache,
-) -> Result<()> {
+) -> Result<ArtifactProof> {
     let entry = plan
         .entries
         .get(entry_index)
@@ -83,7 +84,7 @@ pub(crate) fn run_patch_apply(
     mut patch_callback: Option<&mut dyn FnMut(&str, usize, usize)>,
     delete_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
     verification_cache: &VerifiedArtifactCache,
-) -> Result<()> {
+) -> Result<Vec<ArtifactProof>> {
     prepare_patch_apply(plan, commit_callback)?;
 
     let delete_set = plan.delete_paths.iter().cloned().collect::<BTreeSet<_>>();
@@ -102,14 +103,16 @@ pub(crate) fn run_patch_apply(
         }
     }
     let mut finished = 0usize;
+    let mut proofs = Vec::with_capacity(total);
     for wave in waves {
         for entry in &wave {
-            apply_planned_entry(plan, entry, verification_cache).map_err(|error| {
+            let proof = apply_planned_entry(plan, entry, verification_cache).map_err(|error| {
                 Error::Message {
                     context: "",
                     detail: format!("Failed to apply patch entry {}: {}", entry.name, error),
                 }
             })?;
+            proofs.push(proof);
             if let PlannedPatchSource::Hdiff { base, .. } = &entry.source {
                 release_base_if_unused(plan, base, &mut remaining, &delete_set, &outputs)?;
             }
@@ -127,7 +130,8 @@ pub(crate) fn run_patch_apply(
     apply_remaining_deletes(plan, delete_callback)?;
     commit_deferred_files(plan)?;
     cleanup_staging(plan)?;
-    remove_patch_work_dir(plan)
+    remove_patch_work_dir(plan)?;
+    Ok(proofs)
 }
 
 pub(crate) fn resume_patch_apply(
@@ -135,7 +139,7 @@ pub(crate) fn resume_patch_apply(
     commit_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
     patch_callback: Option<&mut dyn FnMut(&str, usize, usize)>,
     delete_callback: Option<&mut dyn FnMut(&Path, usize, usize)>,
-) -> Result<()> {
+) -> Result<Vec<ArtifactProof>> {
     let plan = read_patch_plan(install_root)?;
     let verification_cache = VerifiedArtifactCache::default();
     run_patch_apply(

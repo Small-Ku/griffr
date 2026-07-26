@@ -1,4 +1,5 @@
 pub mod admin;
+mod artifact;
 mod compat_fs;
 mod file_allocation;
 pub mod files;
@@ -14,6 +15,8 @@ pub mod task_pool;
 mod update_plan;
 
 pub use admin::{ensure_admin, is_running_as_admin, restart_as_admin};
+pub(crate) use artifact::ArtifactDigest;
+pub use artifact::{ArtifactExpectation, ArtifactProof, ArtifactSource};
 pub use compat_fs::{
     collect_files_recursive, copy_dir_recursive, dir_size, directory_has_entries,
     list_files_with_extension, path_is_dir, path_is_dir_or_err, path_is_file, read_link,
@@ -39,15 +42,16 @@ pub use local_install::{
     LocalInstall, ParsedConfigIni,
 };
 pub use patch_apply::{
-    available_space, check_patch_archives, get_patch_recovery_state, read_patch_storage_layout,
-    read_predownload_stage_metadata, write_predownload_stage_metadata, PatchApplyOptions,
-    PatchCheckReport, PatchPlan, PatchRecoveryState, PatchStorageLayout, PlannedPatchEntry,
-    PlannedPatchSource, PredownloadStageMetadata, StagedArchivePart, PATCH_DEFERRED_DIR,
-    PATCH_PLAN_NAME, PATCH_STORAGE_METADATA_NAME, PATCH_WORK_DIR, PREDOWNLOAD_STAGE_METADATA_NAME,
+    available_space, check_patch_archives, discard_incomplete_patch_apply,
+    get_patch_recovery_state, read_patch_storage_layout, read_predownload_stage_metadata,
+    write_predownload_stage_metadata, PatchApplyOptions, PatchCheckReport, PatchPlan,
+    PatchRecoveryState, PatchStorageLayout, PlannedPatchEntry, PlannedPatchSource,
+    PredownloadStageMetadata, StagedArchivePart, PATCH_DEFERRED_DIR, PATCH_PLAN_NAME,
+    PATCH_STORAGE_METADATA_NAME, PATCH_WORK_DIR, PREDOWNLOAD_STAGE_METADATA_NAME,
 };
 pub(crate) use patch_apply::{
     build_patch_plan_with_probe_cache, entry_dependency_indices, entry_wave_indices,
-    plan_patch_probes, PatchArtifactProbe, PatchProbePlan,
+    plan_patch_probes, write_patch_plan, PatchArtifactProbe, PatchProbePlan,
 };
 pub use paths::{
     build_cdn_file_url, files_base_url, is_launcher_metadata_path, launcher_metadata_url,

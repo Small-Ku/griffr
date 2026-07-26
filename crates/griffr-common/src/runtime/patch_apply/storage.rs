@@ -59,13 +59,6 @@ pub(crate) fn write_patch_storage_layout(
 ) -> Result<()> {
     storage_layout.validate()?;
     let path = install_root.join(PATCH_STORAGE_METADATA_NAME);
-    let temp = install_root.join(format!("{PATCH_STORAGE_METADATA_NAME}.tmp"));
-    std::fs::write(&temp, serde_json::to_vec_pretty(storage_layout)?).map_err(|source| {
-        Error::IoAt {
-            action: "open file",
-            path: temp.clone(),
-            source,
-        }
-    })?;
-    crate::runtime::task_pool::fs_ops::extract::move_path_replace(&temp, &path)
+    let payload = serde_json::to_vec_pretty(storage_layout)?;
+    crate::runtime::task_pool::fs_ops::write_atomic_bytes(&path, &payload)
 }

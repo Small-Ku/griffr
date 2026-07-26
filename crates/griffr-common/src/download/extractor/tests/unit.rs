@@ -1,5 +1,7 @@
 use super::super::*;
-use super::helpers::{extract_to_with_progress, split_archive};
+use super::helpers::{
+    extract_to_with_progress, extraction_shards, extraction_shards_with_source_limit, split_archive,
+};
 use crate::api::types::GameFileEntry;
 use crate::error::{Error, Result};
 use md5::{Digest, Md5};
@@ -74,7 +76,7 @@ fn directory_discovery_only_opens_tail_range() -> Result<()> {
 
     let archive_index = extractor.read_archive_index(&directory)?;
     std::fs::write(first, first_bytes)?;
-    let shards = MultiVolumeExtractor::extraction_shards(&archive_index, 4);
+    let shards = extraction_shards(&archive_index, 4);
     assert_eq!(shards.len(), 1);
     assert_eq!(shards[0].volume_indices.first(), Some(&0));
     assert!(shards[0].volume_indices.len() > 1);
@@ -133,7 +135,7 @@ fn extraction_shard_does_not_open_unrelated_volumes() -> Result<()> {
     let volumes = split_archive(&zip_path, 24_000)?;
     let extractor = MultiVolumeExtractor::new(volumes.clone())?;
     let archive_index = extractor.read_patch_payload(None)?;
-    let shard = MultiVolumeExtractor::extraction_shards(&archive_index, 4)
+    let shard = extraction_shards(&archive_index, 4)
         .into_iter()
         .find(|shard| (0..volumes.len()).any(|index| !shard.volume_indices.contains(&index)))
         .ok_or_else(|| Error::Message {
@@ -189,8 +191,7 @@ fn extraction_shards_preserve_release_frontiers_when_budget_allows() -> Result<(
         .collect::<std::collections::BTreeSet<_>>();
     assert!(expected_frontiers.len() > 1);
 
-    let shards =
-        MultiVolumeExtractor::extraction_shards(&archive_index, archive_index.entry_sizes.len());
+    let shards = extraction_shards(&archive_index, archive_index.entry_sizes.len());
     let mut actual_frontiers = std::collections::BTreeSet::new();
     for shard in shards {
         let frontiers = shard
@@ -232,8 +233,7 @@ fn extraction_shards_bound_compressed_source_chunks() -> Result<()> {
     let extractor = MultiVolumeExtractor::new(vec![zip_path])?;
     let archive_index = extractor.read_patch_payload(None)?;
     let source_limit = 70_000;
-    let shards =
-        MultiVolumeExtractor::extraction_shards_with_source_limit(&archive_index, 1, source_limit);
+    let shards = extraction_shards_with_source_limit(&archive_index, 1, source_limit);
     assert!(
         shards.len() > 1,
         "one release frontier remained one large range barrier"
@@ -279,7 +279,7 @@ fn extraction_shards_never_merge_distinct_release_frontiers() -> Result<()> {
         .collect::<std::collections::BTreeSet<_>>();
     assert!(expected_frontiers.len() > 2);
 
-    let shards = MultiVolumeExtractor::extraction_shards(&archive_index, 2);
+    let shards = extraction_shards(&archive_index, 2);
     let actual_frontiers = shards
         .iter()
         .map(|shard| {
@@ -338,7 +338,7 @@ fn extraction_shard_cost_accounts_for_compression_method() -> Result<()> {
     let archive_index = extractor.read_patch_payload(None)?;
     assert_eq!(archive_index.entry_compression_methods, vec![0, 8]);
 
-    let shards = MultiVolumeExtractor::extraction_shards(&archive_index, 2);
+    let shards = extraction_shards(&archive_index, 2);
     assert_eq!(shards.len(), 2);
     assert_eq!(shards[0].entries, vec![0]);
     assert_eq!(shards[1].entries, vec![1]);
@@ -365,7 +365,7 @@ fn extraction_shards_cap_small_file_metadata_batches() -> Result<()> {
 
     let extractor = MultiVolumeExtractor::new(vec![zip_path])?;
     let archive_index = extractor.read_patch_payload(None)?;
-    let shards = MultiVolumeExtractor::extraction_shards(&archive_index, 1);
+    let shards = extraction_shards(&archive_index, 1);
     assert_eq!(shards.len(), 3);
     assert!(shards.iter().all(|shard| shard.entries.len() <= 512));
     assert_eq!(
@@ -462,6 +462,116 @@ fn extraction_checks_manifest_md5_and_removes_bad_output() -> Result<()> {
         .unwrap_err();
     assert!(error.to_string().contains("failed target verification"));
     assert!(!invalid_output.join("Data/Payload.bin").exists());
+    Ok(())
+}
+
+#[test]
+fn extraction_shards_can_omit_entries_owned_by_other_writers() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let zip_path = temp_dir.path().join("owned-paths.zip");
+    let file = std::fs::File::create(&zip_path)?;
+    let mut zip = zip::ZipWriter::new(file);
+    zip.start_file("archive.bin", zip::write::FileOptions::<()>::default())?;
+    zip.write_all(b"archive")?;
+    zip.start_file("task-owned.bin", zip::write::FileOptions::<()>::default())?;
+    zip.write_all(b"task")?;
+    zip.finish()?;
+
+    let extractor = MultiVolumeExtractor::new(vec![zip_path])?;
+    let archive_index = extractor.read_patch_payload(None)?;
+    let archive_index_only = *archive_index
+        .entry_indices
+        .get("archive.bin")
+        .expect("archive entry index");
+    let task_owned_index = *archive_index
+        .entry_indices
+        .get("task-owned.bin")
+        .expect("task-owned entry index");
+
+    let shards = MultiVolumeExtractor::extraction_shards_for_indices(
+        &archive_index,
+        vec![archive_index_only],
+        4,
+    );
+    let selected = shards
+        .iter()
+        .flat_map(|shard| shard.entries.iter().copied())
+        .collect::<Vec<_>>();
+
+    assert_eq!(selected, vec![archive_index_only]);
+    assert!(!selected.contains(&task_owned_index));
+    Ok(())
+}
+
+#[test]
+fn verified_file_callback_can_commit_before_a_later_entry_fails() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let zip_path = temp_dir.path().join("forward.zip");
+    let file = std::fs::File::create(&zip_path)?;
+    let mut zip = zip::ZipWriter::new(file);
+    zip.start_file("first.bin", zip::write::FileOptions::<()>::default())?;
+    zip.write_all(b"first")?;
+    zip.start_file("second.bin", zip::write::FileOptions::<()>::default())?;
+    zip.write_all(b"second")?;
+    zip.finish()?;
+
+    let extractor = MultiVolumeExtractor::new(vec![zip_path])?;
+    let archive_index = extractor.read_patch_payload(None)?;
+    let entries = (0..archive_index.archive.len()).collect::<Vec<_>>();
+    let expected = std::collections::BTreeMap::from([
+        (
+            "first.bin".to_string(),
+            GameFileEntry {
+                path: "first.bin".to_string(),
+                md5: crate::to_hex(&Md5::digest(b"first")),
+                size: 5,
+            },
+        ),
+        (
+            "second.bin".to_string(),
+            GameFileEntry {
+                path: "second.bin".to_string(),
+                md5: crate::to_hex(&Md5::digest(b"second")),
+                size: 6,
+            },
+        ),
+    ]);
+    let staging = temp_dir.path().join("staging");
+    let destination = temp_dir.path().join("destination");
+    std::fs::create_dir_all(&staging)?;
+    std::fs::create_dir_all(&destination)?;
+
+    let error = extractor
+        .extract_entries_with_progress_and_file(
+            &staging,
+            None,
+            &archive_index,
+            &entries,
+            &expected,
+            64 * 1024,
+            |_| {},
+            |source, normalized, _digest| {
+                if normalized == "second.bin" {
+                    return Err(Error::Message {
+                        context: "Extraction error: ",
+                        detail: "stop after the first commit".to_string(),
+                    });
+                }
+                let target = destination.join(normalized);
+                std::fs::rename(source, &target).map_err(|source| Error::IoAt {
+                    action: "rename file",
+                    path: target,
+                    source,
+                })?;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("stop after the first commit"));
+    assert_eq!(std::fs::read(destination.join("first.bin"))?, b"first");
+    assert!(!staging.join("first.bin").exists());
+    assert_eq!(std::fs::read(staging.join("second.bin"))?, b"second");
     Ok(())
 }
 

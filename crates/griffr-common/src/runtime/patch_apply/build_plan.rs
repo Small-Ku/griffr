@@ -55,6 +55,40 @@ fn is_patch_archive_control_path(path: &Path) -> bool {
         || path.starts_with(PATCH_STAGE_DIR)
 }
 
+fn planned_patch_extract_bytes(
+    plan: &PatchPlan,
+    archive_entries: &std::collections::BTreeMap<String, u64>,
+) -> u64 {
+    let selected_payloads = plan
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.source {
+            PlannedPatchSource::Local { payload } | PlannedPatchSource::Hdiff { payload, .. } => {
+                Some(normalized_archive_path(payload).to_ascii_lowercase())
+            }
+            PlannedPatchSource::AlreadyPresent => None,
+        })
+        .collect::<BTreeSet<_>>();
+
+    archive_entries
+        .iter()
+        .filter_map(|(name, size)| {
+            let relative = Path::new(name);
+            if relative == Path::new(PATCH_MANIFEST_NAME)
+                || relative == Path::new(DELETE_FILES_MANIFEST_NAME)
+            {
+                return None;
+            }
+            if relative.starts_with(PATCH_STAGE_DIR)
+                && !selected_payloads.contains(&name.to_ascii_lowercase())
+            {
+                return None;
+            }
+            Some(*size)
+        })
+        .sum()
+}
+
 fn metadata_len(path: &Path) -> u64 {
     std::fs::metadata(path)
         .ok()
@@ -533,10 +567,11 @@ pub(crate) fn build_patch_plan_with_probe_cache(
         deferred_paths,
     };
     plan.validate()?;
+    let planned_extract_bytes = planned_patch_extract_bytes(&plan, archive_entries);
     let peaks = simulate_space_peaks(
         &plan,
         archive_entries,
-        archive_index.total_uncompressed_bytes,
+        planned_extract_bytes,
         relocating_vfs_bytes,
     )?;
     let install_peak = peaks.install;
@@ -575,6 +610,7 @@ pub(crate) fn build_patch_plan_with_probe_cache(
 
     let report = PatchCheckReport {
         archive_uncompressed_bytes: archive_index.total_uncompressed_bytes,
+        planned_extract_bytes,
         estimated_final_growth_bytes: final_growth,
         estimated_install_peak_bytes: install_peak,
         estimated_vfs_peak_bytes: vfs_peak,
@@ -586,4 +622,67 @@ pub(crate) fn build_patch_plan_with_probe_cache(
         delete_entries: plan.delete_paths.len(),
     };
     Ok((plan, report))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn planned_extract_bytes_excludes_controls_and_unused_patch_payloads() {
+        let root = PathBuf::from("/install");
+        let plan = PatchPlan {
+            schema_version: PatchPlan::SCHEMA_VERSION,
+            install_root: root.clone(),
+            stage_root: PathBuf::from("/stage"),
+            vfs_base_path: PathBuf::from("VFS"),
+            vfs_destination: root.join("VFS"),
+            work_dir: None,
+            entries: vec![
+                PlannedPatchEntry {
+                    name: "ready.bin".to_string(),
+                    destination: root.join("VFS/ready.bin"),
+                    expected_md5: "ready".to_string(),
+                    expected_size: 1,
+                    source: PlannedPatchSource::AlreadyPresent,
+                },
+                PlannedPatchEntry {
+                    name: "local.bin".to_string(),
+                    destination: root.join("VFS/local.bin"),
+                    expected_md5: "local".to_string(),
+                    expected_size: 4,
+                    source: PlannedPatchSource::Local {
+                        payload: PathBuf::from("vfs_files/files/local.bin"),
+                    },
+                },
+                PlannedPatchEntry {
+                    name: "diff.bin".to_string(),
+                    destination: root.join("VFS/diff.bin"),
+                    expected_md5: "diff".to_string(),
+                    expected_size: 5,
+                    source: PlannedPatchSource::Hdiff {
+                        base: root.join("VFS/base.bin"),
+                        payload: PathBuf::from("vfs_files/vfs_patch/diff.patch"),
+                        base_md5: "base".to_string(),
+                        base_size: 1,
+                    },
+                },
+            ],
+            delete_paths: Vec::new(),
+            deferred_paths: vec![PathBuf::from("config.ini")],
+        };
+        let archive = BTreeMap::from([
+            ("top-level.bin".to_string(), 10),
+            ("config.ini".to_string(), 1),
+            (PATCH_MANIFEST_NAME.to_string(), 2),
+            (DELETE_FILES_MANIFEST_NAME.to_string(), 3),
+            ("vfs_files/files/local.bin".to_string(), 4),
+            ("vfs_files/files/unused.bin".to_string(), 100),
+            ("vfs_files/vfs_patch/diff.patch".to_string(), 5),
+            ("vfs_files/vfs_patch/unused.patch".to_string(), 200),
+        ]);
+
+        assert_eq!(planned_patch_extract_bytes(&plan, &archive), 20);
+    }
 }

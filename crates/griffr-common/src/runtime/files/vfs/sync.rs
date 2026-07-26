@@ -181,6 +181,9 @@ pub async fn download_vfs_resources(
             TaskOutcome::Downloaded { path, bytes } => {
                 outcomes.record_downloaded(&path, bytes);
             }
+            TaskOutcome::Committed { proof } => {
+                outcomes.record_verified(proof.logical_path(), true);
+            }
             TaskOutcome::Verified { path, ok, .. } => {
                 outcomes.record_verified(&path, ok);
             }

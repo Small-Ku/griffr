@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::super::graph::TaskGraphSummary;
 use crate::runtime::issues::FileIssue;
-use crate::runtime::{PatchCheckReport, ProgressPhase};
+use crate::runtime::{ArtifactProof, PatchCheckReport, ProgressPhase};
 
 /// Transient worker communication. Durable facts are carried only by
 /// `Outcome`; progress and retries are never retained in task history.
@@ -53,6 +53,10 @@ impl WorkerEvent {
         Self::Outcome(TaskOutcome::Changed { path })
     }
 
+    pub(crate) fn committed(proof: ArtifactProof) -> Self {
+        Self::Outcome(TaskOutcome::Committed { proof })
+    }
+
     pub(crate) fn archive_check(path: String, report: PatchCheckReport) -> Self {
         Self::Outcome(TaskOutcome::ArchiveCheck { path, report })
     }
@@ -87,6 +91,9 @@ pub enum TaskOutcome {
     },
     Changed {
         path: String,
+    },
+    Committed {
+        proof: ArtifactProof,
     },
     Hardlinked {
         path: PathBuf,

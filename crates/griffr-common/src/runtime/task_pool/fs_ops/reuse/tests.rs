@@ -71,12 +71,18 @@ async fn async_copy_hashes_while_writing_and_commits_verified_bytes() {
         .unwrap();
     let expected_md5 = crate::to_hex(&<Md5 as md5::Digest>::digest(payload));
 
-    let method =
-        copy_verified_file_async(&source, &destination, &expected_md5, payload.len() as u64)
-            .await
-            .unwrap();
+    let proof = copy_verified_file_async(
+        &source,
+        &destination,
+        "destination.bin",
+        &expected_md5,
+        payload.len() as u64,
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(method, crate::runtime::PathReuseMethod::Copy);
+    assert_eq!(proof.source(), crate::runtime::ArtifactSource::ReuseCopy);
+    assert_eq!(proof.logical_path(), "destination.bin");
     assert_eq!(compio::fs::read(&destination).await.unwrap(), payload);
 }
 
@@ -94,10 +100,15 @@ async fn async_copy_mismatch_keeps_existing_destination() {
         .0
         .unwrap();
 
-    let error =
-        copy_verified_file_async(&source, &destination, "00000000000000000000000000000000", 8)
-            .await
-            .unwrap_err();
+    let error = copy_verified_file_async(
+        &source,
+        &destination,
+        "destination.bin",
+        "00000000000000000000000000000000",
+        8,
+    )
+    .await
+    .unwrap_err();
 
     assert!(error.to_string().contains("Copy verification failed"));
     assert_eq!(compio::fs::read(&destination).await.unwrap(), b"old-data");

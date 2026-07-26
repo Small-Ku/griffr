@@ -7,7 +7,7 @@ use super::super::fs_ops::{
 };
 use super::super::graph::{GraphExpansion, TaskRun};
 use super::super::types::{destination_or_repair_tasks, ReuseCandidateGroup, Task, WorkerEvent};
-use crate::runtime::PathReuseMethod;
+use crate::runtime::{ArtifactExpectation, ArtifactProof, ArtifactSource, PathReuseMethod};
 
 pub(super) fn run_prepare_download(
     task: Task,
@@ -29,10 +29,15 @@ pub(super) fn run_prepare_download(
         unreachable!("download preparation requires an unprepared download task");
     };
 
-    match super::super::download::prepare_download(&dest, &expected_md5, expected_size) {
-        Ok(super::super::download::DownloadPreparation::Done(bytes)) => {
-            let _ = event_tx.send(WorkerEvent::downloaded(logical_path.clone(), bytes));
-            let _ = event_tx.send(WorkerEvent::verified(logical_path, true, None));
+    match super::super::download::prepare_download(
+        &dest,
+        &logical_path,
+        &expected_md5,
+        expected_size,
+    ) {
+        Ok(super::super::download::DownloadPreparation::Done(proof)) => {
+            let _ = event_tx.send(WorkerEvent::downloaded(logical_path, proof.observed_size()));
+            let _ = event_tx.send(WorkerEvent::committed(proof));
             TaskRun::succeeded()
         }
         Ok(super::super::download::DownloadPreparation::Resume(resume)) => {
@@ -125,6 +130,7 @@ pub(super) async fn run_transfer_download(
         user_agent,
         &url,
         &dest,
+        &logical_path,
         &expected_md5,
         expected_size,
         resume,
@@ -152,9 +158,9 @@ pub(super) async fn run_transfer_download(
     )
     .await;
     match result {
-        Ok(bytes) => {
-            let _ = event_tx.send(WorkerEvent::downloaded(logical_path.clone(), bytes));
-            let _ = event_tx.send(WorkerEvent::verified(logical_path, true, None));
+        Ok(proof) => {
+            let _ = event_tx.send(WorkerEvent::downloaded(logical_path, proof.observed_size()));
+            let _ = event_tx.send(WorkerEvent::committed(proof));
             TaskRun::succeeded()
         }
         Err(error) => retry_or_fail_download(
@@ -364,15 +370,21 @@ pub(super) async fn run_hardlink_reuse_file(
         source,
         copy_only,
         dest,
+        logical_path,
+        expected_md5,
+        expected_size,
         ..
     } = &task
     else {
         unreachable!("hardlink reuse runner requires a reuse task");
     };
     assert!(!copy_only, "copy reuse routed to hardlink runner");
-    let result = create_hardlink_async(source, dest)
-        .await
-        .map(|()| PathReuseMethod::Hardlink);
+    let result = create_hardlink_async(source, dest).await.and_then(|()| {
+        let expectation =
+            ArtifactExpectation::new(logical_path, expected_md5, Some(*expected_size));
+        super::super::fs_ops::verify_artifact(dest, &expectation, ArtifactSource::ReuseHardlink)
+            .map(|proof| (PathReuseMethod::Hardlink, proof))
+    });
     finish_reuse_file(task, result, event_tx)
 }
 
@@ -384,6 +396,7 @@ pub(super) async fn run_copy_reuse_file(
         source,
         copy_only,
         dest,
+        logical_path,
         expected_md5,
         expected_size,
         ..
@@ -392,13 +405,15 @@ pub(super) async fn run_copy_reuse_file(
         unreachable!("copy reuse runner requires a reuse task");
     };
     assert!(*copy_only, "hardlink reuse routed to copy runner");
-    let result = copy_verified_file_async(source, dest, expected_md5, *expected_size).await;
+    let result = copy_verified_file_async(source, dest, logical_path, expected_md5, *expected_size)
+        .await
+        .map(|proof| (PathReuseMethod::Copy, proof));
     finish_reuse_file(task, result, event_tx)
 }
 
 fn finish_reuse_file(
     task: Task,
-    result: crate::error::Result<PathReuseMethod>,
+    result: crate::error::Result<(PathReuseMethod, ArtifactProof)>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskRun {
     let Task::ReuseFile {
@@ -420,14 +435,14 @@ fn finish_reuse_file(
         unreachable!("reuse finish requires a reuse task");
     };
     match result {
-        Ok(PathReuseMethod::Hardlink) => {
+        Ok((PathReuseMethod::Hardlink, proof)) => {
             let _ = event_tx.send(WorkerEvent::hardlinked(dest));
-            let _ = event_tx.send(WorkerEvent::verified(logical_path, true, None));
+            let _ = event_tx.send(WorkerEvent::committed(proof));
             TaskRun::succeeded()
         }
-        Ok(PathReuseMethod::Copy) => {
+        Ok((PathReuseMethod::Copy, proof)) => {
             let _ = event_tx.send(WorkerEvent::copied(dest));
-            let _ = event_tx.send(WorkerEvent::verified(logical_path, true, None));
+            let _ = event_tx.send(WorkerEvent::committed(proof));
             TaskRun::succeeded()
         }
         Err(error) if !copy_only && allow_copy_fallback => {

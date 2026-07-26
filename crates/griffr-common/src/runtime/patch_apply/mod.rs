@@ -22,7 +22,7 @@ pub use plan::{
     PatchApplyOptions, PatchCheckReport, PatchPlan, PlannedPatchEntry, PlannedPatchSource,
 };
 pub(crate) use plan_file::{read_patch_plan, write_patch_plan};
-pub use recovery::{get_patch_recovery_state, PatchRecoveryState};
+pub use recovery::{discard_incomplete_patch_apply, get_patch_recovery_state, PatchRecoveryState};
 pub use space::available_space;
 pub(crate) use storage::write_patch_storage_layout;
 pub use storage::{read_patch_storage_layout, PatchStorageLayout};

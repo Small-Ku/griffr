@@ -7,16 +7,29 @@ use crate::runtime::patch_apply::{
     PATCH_WORK_DIR,
 };
 use crate::runtime::task_pool::verify::VerifiedArtifactCache;
+use crate::runtime::{ArtifactExpectation, ArtifactProof, ArtifactSource};
 
-use super::super::super::extract::move_path_replace_cross_volume;
-use super::super::apply::{apply_hdiff_patch, verify_patch_output};
+use super::super::super::artifact::{
+    commit_unchecked_artifact, commit_verified_artifact, verify_artifact,
+};
+use super::super::apply::apply_hdiff_patch;
 use super::filesystem::remove_path_if_exists;
 
 pub(super) fn apply_planned_entry(
     plan: &PatchPlan,
     entry: &PlannedPatchEntry,
     verification_cache: &VerifiedArtifactCache,
-) -> Result<()> {
+) -> Result<ArtifactProof> {
+    let logical_path = plan
+        .vfs_base_path
+        .join(&entry.name)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let expectation = ArtifactExpectation::new(
+        &logical_path,
+        &entry.expected_md5,
+        Some(entry.expected_size),
+    );
     if verification_cache
         .build_issue(
             &entry.destination,
@@ -26,7 +39,7 @@ pub(super) fn apply_planned_entry(
         )
         .is_none()
     {
-        return Ok(());
+        return verify_artifact(&entry.destination, &expectation, ArtifactSource::Existing);
     }
     match &entry.source {
         PlannedPatchSource::AlreadyPresent => Err(Error::Message {
@@ -48,19 +61,11 @@ pub(super) fn apply_planned_entry(
                     ),
                 });
             }
-            if let Some(parent) = entry.destination.parent() {
-                std::fs::create_dir_all(parent).map_err(|source_error| Error::IoAt {
-                    action: "create directory",
-                    path: parent.to_path_buf(),
-                    source: source_error,
-                })?;
-            }
-            move_path_replace_cross_volume(&source, &entry.destination)?;
-            verify_patch_output(
+            commit_verified_artifact(
+                &source,
                 &entry.destination,
-                &entry.name,
-                &entry.expected_md5,
-                entry.expected_size,
+                &expectation,
+                ArtifactSource::LocalPatch,
             )
         }
         PlannedPatchSource::Hdiff {
@@ -97,16 +102,17 @@ pub(super) fn apply_planned_entry(
                     ),
                 });
             }
-            apply_hdiff_patch(
+            let proof = apply_hdiff_patch(
                 base,
                 &payload_path,
                 &entry.destination,
-                &entry.name,
+                &logical_path,
                 &entry.expected_md5,
                 entry.expected_size,
                 plan.work_dir.as_deref(),
             )?;
-            remove_path_if_exists(&payload_path)
+            remove_path_if_exists(&payload_path)?;
+            Ok(proof)
         }
     }
 }
@@ -230,7 +236,13 @@ pub(super) fn commit_deferred_files(plan: &PatchPlan) -> Result<()> {
     for relative in &plan.deferred_paths {
         let source = deferred_root.join(relative);
         if !source.is_file() {
-            continue;
+            return Err(Error::Message {
+                context: "VFS error: ",
+                detail: format!(
+                    "Missing deferred patch file {} before final commit",
+                    source.display()
+                ),
+            });
         }
         let target = plan.install_root.join(relative);
         if let Some(parent) = target.parent() {
@@ -240,7 +252,7 @@ pub(super) fn commit_deferred_files(plan: &PatchPlan) -> Result<()> {
                 source: source_error,
             })?;
         }
-        move_path_replace_cross_volume(&source, &target)?;
+        commit_unchecked_artifact(&source, &target)?;
     }
     Ok(())
 }

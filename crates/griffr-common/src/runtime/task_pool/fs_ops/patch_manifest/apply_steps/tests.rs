@@ -1,6 +1,7 @@
 use super::*;
 use crate::runtime::task_pool::verify::{file_md5, VerifiedArtifactCache};
 use crate::runtime::{PlannedPatchEntry, PlannedPatchSource, PATCH_WORK_DIR};
+use md5::Digest;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
@@ -51,7 +52,7 @@ fn patch_apply_defers_version_marker_and_preserves_final_output() {
         vec![PathBuf::from("config.ini")],
     );
 
-    run_patch_apply(
+    let proofs = run_patch_apply(
         &plan,
         None,
         None,
@@ -61,6 +62,12 @@ fn patch_apply_defers_version_marker_and_preserves_final_output() {
     )
     .unwrap();
 
+    assert_eq!(proofs.len(), 1);
+    assert_eq!(
+        proofs[0].logical_path(),
+        "Game_Data/StreamingAssets/VFS/final.bin"
+    );
+    assert_eq!(proofs[0].source(), crate::runtime::ArtifactSource::Existing);
     assert_eq!(std::fs::read(&output).unwrap(), b"final");
     assert_eq!(
         std::fs::read(install_root.join("top-level.bin")).unwrap(),
@@ -197,4 +204,60 @@ fn dependency_order_uses_logical_path_for_external_vfs() {
     let order = ordered_entries(&plan).unwrap();
     assert_eq!(order[0].name, "final.bin");
     assert_eq!(order[1].name, "intermediate.bin");
+}
+
+#[test]
+fn corrupt_local_payload_does_not_replace_existing_destination() {
+    let temp = tempdir().unwrap();
+    let install_root = temp.path().join("install");
+    let stage_root = temp.path().join("stage");
+    let destination = install_root.join("Game_Data/StreamingAssets/VFS/output.bin");
+    let payload = stage_root.join("vfs_files/files/output.bin");
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
+    std::fs::write(&destination, b"old output").unwrap();
+    std::fs::write(&payload, b"corrupt payload").unwrap();
+
+    let entry = PlannedPatchEntry {
+        name: "output.bin".to_string(),
+        destination: destination.clone(),
+        expected_md5: crate::to_hex(&md5::Md5::digest(b"expected payload")),
+        expected_size: 16,
+        source: PlannedPatchSource::Local {
+            payload: PathBuf::from("vfs_files/files/output.bin"),
+        },
+    };
+    let plan = plan(
+        &install_root,
+        &stage_root,
+        vec![entry.clone()],
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let error = apply_planned_entry(&plan, &entry, &VerifiedArtifactCache::default()).unwrap_err();
+
+    assert!(error.to_string().contains("failed verification"));
+    assert_eq!(std::fs::read(&destination).unwrap(), b"old output");
+    assert!(payload.exists());
+}
+
+#[test]
+fn missing_deferred_marker_blocks_final_commit() {
+    let temp = tempdir().unwrap();
+    let install_root = temp.path().join("install");
+    let stage_root = temp.path().join("stage");
+    std::fs::create_dir_all(&stage_root).unwrap();
+    let plan = plan(
+        &install_root,
+        &stage_root,
+        Vec::new(),
+        Vec::new(),
+        vec![PathBuf::from("config.ini")],
+    );
+
+    let error = commit_deferred_files(&plan).unwrap_err();
+
+    assert!(error.to_string().contains("Missing deferred patch file"));
+    assert!(!install_root.join("config.ini").exists());
 }

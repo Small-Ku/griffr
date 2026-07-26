@@ -50,17 +50,10 @@ impl TaskProgressReducer {
     pub(super) fn handle(&mut self, event: &WorkerEvent) {
         match event {
             WorkerEvent::Outcome(super::super::types::TaskOutcome::Verified { path, .. }) => {
-                if let Some((lane, total)) = self.config.verify {
-                    if self.verified_paths.insert(path.clone()) {
-                        self.verify_finished = self.verify_finished.saturating_add(1).min(total);
-                        self.config.sender.emit(ProgressUpdate::Advanced {
-                            lane,
-                            finished: self.verify_finished,
-                            total: Some(total),
-                            item: Some(path.clone()),
-                        });
-                    }
-                }
+                self.record_verified_path(path);
+            }
+            WorkerEvent::Outcome(super::super::types::TaskOutcome::Committed { proof }) => {
+                self.record_verified_path(proof.logical_path());
             }
             WorkerEvent::Outcome(super::super::types::TaskOutcome::Downloaded { path, bytes }) => {
                 let Some(lane) = self.config.download else {
@@ -223,6 +216,21 @@ impl TaskProgressReducer {
             total: Some(total),
             item: Some(item.to_string()),
         });
+    }
+
+    fn record_verified_path(&mut self, path: &str) {
+        let Some((lane, total)) = self.config.verify else {
+            return;
+        };
+        if self.verified_paths.insert(path.to_string()) {
+            self.verify_finished = self.verify_finished.saturating_add(1).min(total);
+            self.config.sender.emit(ProgressUpdate::Advanced {
+                lane,
+                finished: self.verify_finished,
+                total: Some(total),
+                item: Some(path.to_string()),
+            });
+        }
     }
 
     pub(super) fn finish(&self) {

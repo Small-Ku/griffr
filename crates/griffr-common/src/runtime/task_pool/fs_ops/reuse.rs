@@ -7,7 +7,9 @@ use compio::buf::BufResult;
 use compio::io::{AsyncReadAt, AsyncWriteAtExt};
 
 use crate::error::{Error, Result};
-use crate::runtime::{preallocate_file, PathReuseMethod};
+use crate::runtime::{
+    preallocate_file, ArtifactDigest, ArtifactExpectation, ArtifactProof, ArtifactSource,
+};
 use md5::Md5;
 
 pub(crate) fn make_partial_download_path(path: &Path) -> Result<PathBuf> {
@@ -96,54 +98,6 @@ pub(crate) fn commit_partial_download(part_path: &Path, dest_path: &Path) -> Res
     super::extract::move_path_replace(part_path, dest_path)
 }
 
-pub(crate) async fn commit_partial_download_async(
-    part_path: &Path,
-    dest_path: &Path,
-) -> Result<()> {
-    match compio::fs::metadata(part_path).await {
-        Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => {
-            return Err(Error::Message {
-                context: "Download error: ",
-                detail: format!(
-                    "Partial download path is not a file: {}",
-                    part_path.display()
-                ),
-            })
-        }
-        Err(source) if source.kind() == ErrorKind::NotFound => {
-            return Err(Error::Message {
-                context: "Download error: ",
-                detail: format!("Missing partial download file {}", part_path.display()),
-            })
-        }
-        Err(source) => {
-            return Err(Error::IoAt {
-                action: "query file metadata/stat for",
-                path: part_path.to_path_buf(),
-                source,
-            })
-        }
-    }
-    if let Some(parent) = dest_path.parent() {
-        compio::fs::create_dir_all(parent)
-            .await
-            .map_err(|source| Error::IoAt {
-                action: "create directory",
-                path: parent.to_path_buf(),
-                source,
-            })?;
-    }
-    compio::fs::rename(part_path, dest_path)
-        .await
-        .map_err(|source| Error::IoBetween {
-            action: "rename file",
-            src: part_path.to_path_buf(),
-            dest: dest_path.to_path_buf(),
-            source,
-        })
-}
-
 pub(crate) async fn create_hardlink_async(src: &Path, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         compio::fs::create_dir_all(parent)
@@ -178,14 +132,9 @@ pub(crate) async fn create_hardlink_async(src: &Path, dest: &Path) -> Result<()>
             ),
         });
     }
-    if let Err(source) = compio::fs::rename(&temp_path, dest).await {
+    if let Err(error) = super::extract::move_path_replace(&temp_path, dest) {
         let _ = compio::fs::remove_file(&temp_path).await;
-        return Err(Error::IoBetween {
-            action: "rename file",
-            src: temp_path,
-            dest: dest.to_path_buf(),
-            source,
-        });
+        return Err(error);
     }
     Ok(())
 }
@@ -297,9 +246,10 @@ pub(crate) fn classify_reuse_mode(
 pub(crate) async fn copy_verified_file_async(
     src: &Path,
     dest: &Path,
+    logical_path: &str,
     expected_md5: &str,
     expected_size: u64,
-) -> Result<PathReuseMethod> {
+) -> Result<ArtifactProof> {
     const COPY_BUFFER_BYTES: usize = 1024 * 1024;
 
     if let Some(parent) = dest.parent() {
@@ -403,7 +353,7 @@ pub(crate) async fn copy_verified_file_async(
             // and must not invalidate an otherwise verified byte-for-byte copy.
             let _ = compio::fs::set_permissions(&temp, permissions).await;
         }
-        Ok(())
+        Ok(ArtifactDigest::new(copied, actual_md5))
     }
     .await;
 
@@ -415,25 +365,26 @@ pub(crate) async fn copy_verified_file_async(
         path: temp.clone(),
         source,
     });
-    if let Err(error) = copy_result {
-        let _ = close_result;
-        let _ = compio::fs::remove_file(&temp).await;
-        return Err(error);
-    }
+    let digest = match copy_result {
+        Ok(digest) => digest,
+        Err(error) => {
+            let _ = close_result;
+            let _ = compio::fs::remove_file(&temp).await;
+            return Err(error);
+        }
+    };
     if let Err(error) = close_result {
         let _ = compio::fs::remove_file(&temp).await;
         return Err(error);
     }
-    if let Err(source) = compio::fs::rename(&temp, dest).await {
-        let _ = compio::fs::remove_file(&temp).await;
-        return Err(Error::IoBetween {
-            action: "rename file",
-            src: temp,
-            dest: dest.to_path_buf(),
-            source,
-        });
-    }
-    Ok(PathReuseMethod::Copy)
+    let expectation = ArtifactExpectation::new(logical_path, expected_md5, Some(expected_size));
+    super::artifact::commit_observed_artifact(
+        &temp,
+        dest,
+        &expectation,
+        ArtifactSource::ReuseCopy,
+        &digest,
+    )
 }
 
 pub(crate) fn make_temp_write_path(path: &Path) -> Result<PathBuf> {
@@ -450,7 +401,12 @@ pub(crate) fn make_temp_write_path(path: &Path) -> Result<PathBuf> {
         })?
         .to_string_lossy();
     let counter = TEMP_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    Ok(parent.join(format!(".{}.griffr.tmp.{}", file_name, counter)))
+    Ok(parent.join(format!(
+        ".{}.griffr.tmp.{}.{}",
+        file_name,
+        std::process::id(),
+        counter
+    )))
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use griffr_common::api::types::GameFileEntry;
 use griffr_common::runtime::task_pool::{NodeId, Task, TaskGraphBuilder};
+use griffr_common::runtime::{CONFIG_INI_NAME, GAME_FILES_NAME, PACKAGE_FILES_NAME};
 
 fn normalize_relative_path(path: &Path) -> String {
     path.to_string_lossy()
@@ -26,9 +27,9 @@ fn archive_task_path(
         .then_some(normalized)
 }
 
-/// Returns archive destinations whose final writer is a separate file task.
-/// Full-package archive commits omit these staged files so VFS work can run in
-/// parallel without a second writer racing the same destination.
+/// Returns archive destinations whose writer is a separate file task.
+/// Full-package planning omits these entries so VFS work can run in parallel
+/// without a second writer racing the same destination.
 pub(crate) fn owned_archive_paths(
     tasks: &[Task],
     install_path: &Path,
@@ -42,9 +43,29 @@ pub(crate) fn owned_archive_paths(
     )
 }
 
+/// Full-package extraction commits ordinary game files immediately. Entries
+/// owned by independent file tasks or launcher metadata are omitted from the
+/// archive range and extraction plan. Metadata sync runs only after the final
+/// game-file check, so `config.ini` remains the finish marker.
+pub(crate) fn full_archive_excluded_paths(
+    tasks: &[Task],
+    install_path: &Path,
+    expected_files: &BTreeMap<String, GameFileEntry>,
+) -> Arc<BTreeSet<String>> {
+    let mut excluded = owned_archive_paths(tasks, install_path, expected_files)
+        .as_ref()
+        .clone();
+    excluded.extend([
+        CONFIG_INI_NAME.to_string(),
+        GAME_FILES_NAME.to_string(),
+        PACKAGE_FILES_NAME.to_string(),
+    ]);
+    Arc::new(excluded)
+}
+
 /// Adds file tasks to an archive command graph using explicit path ownership.
-/// Full-package callers pass `false` after excluding owned paths from archive
-/// commit. Patch callers pass `true`, because patch entry and delete semantics
+/// Full-package callers pass `false` after omitting owned archive entries.
+/// Patch callers pass `true`, because patch entry and delete semantics
 /// must finish before a task may replace an overlapping output.
 pub(crate) fn add_file_tasks(
     graph: &mut TaskGraphBuilder,
@@ -119,6 +140,25 @@ mod tests {
         assert_eq!(
             owned.as_ref(),
             &BTreeSet::from(["data/vfs/a.bin".to_string()])
+        );
+    }
+
+    #[test]
+    fn full_package_omits_owned_paths_and_launcher_metadata() {
+        let root = Path::new("game");
+        let expected = expected();
+        let file_task = verify_task(&root.join("Data/VFS/a.bin"), "a.bin");
+
+        let excluded = full_archive_excluded_paths(&[file_task], root, &expected);
+
+        assert_eq!(
+            excluded.as_ref(),
+            &BTreeSet::from([
+                "config.ini".to_string(),
+                "data/vfs/a.bin".to_string(),
+                "game_files".to_string(),
+                "package_files".to_string(),
+            ])
         );
     }
 

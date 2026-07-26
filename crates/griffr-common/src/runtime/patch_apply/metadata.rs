@@ -123,15 +123,8 @@ pub fn write_predownload_stage_metadata(
         source,
     })?;
     let path = stage_dir.join(PREDOWNLOAD_STAGE_METADATA_NAME);
-    let temp = stage_dir.join(format!("{PREDOWNLOAD_STAGE_METADATA_NAME}.tmp"));
     let payload = serde_json::to_vec_pretty(metadata)?;
-    std::fs::write(&temp, payload).map_err(|source| Error::IoAt {
-        action: "open file",
-        path: temp.clone(),
-        source,
-    })?;
-    crate::runtime::task_pool::fs_ops::extract::move_path_replace(&temp, &path)?;
-    Ok(())
+    crate::runtime::task_pool::fs_ops::write_atomic_bytes(&path, &payload)
 }
 
 #[cfg(test)]

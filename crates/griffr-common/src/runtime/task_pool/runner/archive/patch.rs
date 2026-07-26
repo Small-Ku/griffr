@@ -9,7 +9,9 @@ use crate::runtime::task_pool::fs_ops::{
 };
 use crate::runtime::task_pool::graph::{GraphExpansion, TaskRun};
 use crate::runtime::task_pool::types::{ArchiveWork, PatchApplyWork, Task, WorkerEvent};
-use crate::runtime::{entry_dependency_indices, entry_wave_indices, PlannedPatchSource};
+use crate::runtime::{
+    entry_dependency_indices, entry_wave_indices, ArtifactSource, PlannedPatchSource,
+};
 
 pub(crate) fn schedule_patch_apply(
     archive: Arc<ArchiveWork>,
@@ -98,20 +100,11 @@ pub(crate) fn run_prepare_patch_apply(
             false,
         ));
     }
-    let mut on_commit = |path: &std::path::Path, finished: usize, total: usize| {
-        let normalized = path.to_string_lossy().replace('\\', "/");
-        if finished > 0 {
-            let _ = event_tx.send(WorkerEvent::changed(normalized.clone()));
-        }
-        let _ = event_tx.send(WorkerEvent::progress(
-            crate::runtime::ProgressPhase::Commit,
-            normalized,
-            finished as u64,
-            total as u64,
-            false,
-        ));
-    };
-    match prepare_patch_apply(patch.plan(), Some(&mut on_commit)) {
+    // Source-directed extraction already committed ordinary top-level files
+    // and reported their commit progress. Patch preparation only relocates
+    // deferred staged inputs into the private recovery area; do not reset the
+    // public commit lane with a second 0..N sequence here.
+    match prepare_patch_apply(patch.plan(), None) {
         Ok(()) => TaskRun::succeeded(),
         Err(error) => TaskRun::failed(error.to_string()),
     }
@@ -126,11 +119,14 @@ pub(crate) fn run_apply_patch_entry(
         return TaskRun::failed(format!("patch entry index {entry_index} is out of range"));
     };
     match apply_patch_entry(patch.plan(), entry_index, patch.verification_cache()) {
-        Ok(()) => {
+        Ok(proof) => {
             let finished = patch.finish_entry();
             let logical = patch.plan().vfs_base_path.join(&entry.name);
             let path = logical.to_string_lossy().replace('\\', "/");
-            let _ = event_tx.send(WorkerEvent::changed(path.clone()));
+            if proof.source() != ArtifactSource::Existing {
+                let _ = event_tx.send(WorkerEvent::changed(path.clone()));
+            }
+            let _ = event_tx.send(WorkerEvent::committed(proof));
             let _ = event_tx.send(WorkerEvent::progress(
                 crate::runtime::ProgressPhase::Patch,
                 path,
@@ -174,9 +170,22 @@ pub(crate) fn run_apply_patch_deletes(
     }
 }
 
-pub(crate) fn run_commit_patch_deferred(patch: Arc<PatchApplyWork>) -> TaskRun {
+pub(crate) fn run_commit_patch_deferred(
+    patch: Arc<PatchApplyWork>,
+    event_tx: &flume::Sender<WorkerEvent>,
+) -> TaskRun {
     match commit_deferred_patch_files(patch.plan()) {
-        Ok(()) => TaskRun::succeeded(),
+        Ok(()) => {
+            // Deferred files become visible only here, after every patch output
+            // and delete has succeeded. Report their changes at the actual
+            // commit point rather than during private staging preparation.
+            for path in &patch.plan().deferred_paths {
+                let _ = event_tx.send(WorkerEvent::changed(
+                    path.to_string_lossy().replace('\\', "/"),
+                ));
+            }
+            TaskRun::succeeded()
+        }
         Err(error) => TaskRun::failed(error.to_string()),
     }
 }

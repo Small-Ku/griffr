@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use md5::{Digest, Md5};
 
 use crate::api::types::GameFileEntry;
 use crate::error::{Error, Result};
-use crate::runtime::preallocate_file;
+use crate::runtime::{preallocate_file, ArtifactDigest};
 
 use super::super::archive_index::*;
 use super::index::MultiVolumeExtractor;
@@ -16,30 +16,33 @@ const MAX_STREAMING_SHARD_ENTRIES: usize = 512;
 const ENTRY_METADATA_COST: u64 = 256 * 1024;
 
 impl MultiVolumeExtractor {
-    pub(crate) fn extraction_shards(
+    pub(crate) fn extraction_shards_for_indices(
         archive_index: &ArchiveIndex,
+        entries: Vec<usize>,
         target_shards: usize,
     ) -> Vec<ArchiveExtractionShardPlan> {
-        Self::extraction_shards_with_source_limit(
+        Self::extraction_shards_for_indices_with_source_limit(
             archive_index,
+            entries,
             target_shards,
             MAX_STREAMING_SHARD_SOURCE_BYTES,
         )
     }
 
-    pub(crate) fn extraction_shards_with_source_limit(
+    pub(crate) fn extraction_shards_for_indices_with_source_limit(
         archive_index: &ArchiveIndex,
+        entries: Vec<usize>,
         target_shards: usize,
         max_source_bytes: u64,
     ) -> Vec<ArchiveExtractionShardPlan> {
-        let entry_count = archive_index.entry_sizes.len();
+        let entry_count = entries.len();
         if entry_count == 0 {
             return Vec::new();
         }
         let shard_budget = target_shards.max(1).min(entry_count);
 
         let mut buckets = BTreeMap::<usize, Vec<usize>>::new();
-        for index in 0..entry_count {
+        for index in entries {
             let release_volume = archive_index.entry_sources[index]
                 .volume_indices
                 .last()
@@ -213,7 +216,37 @@ impl MultiVolumeExtractor {
         entries: &[usize],
         expected_files: &BTreeMap<String, GameFileEntry>,
         progress_buffer_bytes: usize,
+        progress_callback: impl FnMut(u64),
+    ) -> Result<()> {
+        self.extract_entries_with_progress_and_file(
+            target_dir,
+            password,
+            archive_index,
+            entries,
+            expected_files,
+            progress_buffer_bytes,
+            progress_callback,
+            |_file_path, _normalized, _digest| Ok(()),
+        )
+    }
+
+    /// Extracts each file to `target_dir`, verifies its final size and MD5 when
+    /// the target manifest contains the path, closes the output, and only then
+    /// calls `on_verified_file`. Full-package installs use the callback to
+    /// atomically commit each file immediately. Patch archives keep the no-op
+    /// callback because their payload paths must stay staged until the patch
+    /// dependency graph is ready.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn extract_entries_with_progress_and_file(
+        &self,
+        target_dir: &Path,
+        password: Option<&str>,
+        archive_index: &ArchiveIndex,
+        entries: &[usize],
+        expected_files: &BTreeMap<String, GameFileEntry>,
+        progress_buffer_bytes: usize,
         mut progress_callback: impl FnMut(u64),
+        mut on_verified_file: impl FnMut(&Path, &str, Option<ArtifactDigest>) -> Result<()>,
     ) -> Result<()> {
         let mut archive = archive_index.archive.clone();
         let mut buffer = vec![0u8; progress_buffer_bytes.max(4 * 1024)];
@@ -238,45 +271,75 @@ impl MultiVolumeExtractor {
             }
             let normalized = normalized_archive_name(file.name())?;
             let expected = expected_files.get(&normalized.to_ascii_lowercase());
-            let mut output = std::fs::File::create(&file_path).map_err(|source| Error::IoAt {
-                action: "open file",
-                path: file_path.clone(),
-                source,
-            })?;
-            preallocate_file(&output, &file_path, file.size())?;
-            let mut hasher = expected.map(|_| Md5::new());
-            let mut written = 0u64;
-            loop {
-                let read = file.read(&mut buffer)?;
-                if read == 0 {
-                    break;
+            let extraction_result = (|| -> Result<Option<ArtifactDigest>> {
+                let mut output =
+                    std::fs::File::create(&file_path).map_err(|source| Error::IoAt {
+                        action: "open file",
+                        path: file_path.clone(),
+                        source,
+                    })?;
+                preallocate_file(&output, &file_path, file.size())?;
+                let mut hasher = expected.map(|_| Md5::new());
+                let mut written = 0u64;
+                loop {
+                    let read = file.read(&mut buffer)?;
+                    if read == 0 {
+                        break;
+                    }
+                    output.write_all(&buffer[..read])?;
+                    if let Some(hasher) = hasher.as_mut() {
+                        hasher.update(&buffer[..read]);
+                    }
+                    written = written.saturating_add(read as u64);
+                    pending_progress = pending_progress.saturating_add(read as u64);
+                    if pending_progress >= progress_buffer_bytes as u64 {
+                        progress_callback(pending_progress);
+                        pending_progress = 0;
+                    }
                 }
-                std::io::Write::write_all(&mut output, &buffer[..read])?;
-                if let Some(hasher) = hasher.as_mut() {
-                    hasher.update(&buffer[..read]);
-                }
-                written = written.saturating_add(read as u64);
-                pending_progress = pending_progress.saturating_add(read as u64);
-                if pending_progress >= progress_buffer_bytes as u64 {
-                    progress_callback(pending_progress);
-                    pending_progress = 0;
-                }
-            }
-            if let Some(expected) = expected {
-                let actual_md5 =
-                    crate::to_hex(&hasher.expect("expected file has a hasher").finalize());
-                if written != expected.size || actual_md5 != expected.md5.to_ascii_lowercase() {
-                    let _ = std::fs::remove_file(&file_path);
+                output.flush().map_err(|source| Error::IoAt {
+                    action: "flush file",
+                    path: file_path.clone(),
+                    source,
+                })?;
+                drop(output);
+
+                if written != file.size() {
                     return Err(Error::Message {
                         context: "Extraction error: ",
                         detail: format!(
-                        "Archive entry {normalized} failed target verification: expected size {} \
-                         md5 {}, got size {written} md5 {actual_md5}",
-                        expected.size, expected.md5
-                    ),
+                            "Archive entry {normalized} has size {written}, expected ZIP size {}",
+                            file.size()
+                        ),
                     });
                 }
-            }
+                let digest = if let Some(expected) = expected {
+                    let actual_md5 =
+                        crate::to_hex(&hasher.expect("expected file has a hasher").finalize());
+                    if written != expected.size || actual_md5 != expected.md5.to_ascii_lowercase() {
+                        return Err(Error::Message {
+                            context: "Extraction error: ",
+                            detail: format!(
+                                "Archive entry {normalized} failed target verification: expected size {} \
+                             md5 {}, got size {written} md5 {actual_md5}",
+                                expected.size, expected.md5
+                            ),
+                        });
+                    }
+                    Some(ArtifactDigest::new(written, actual_md5))
+                } else {
+                    None
+                };
+                Ok(digest)
+            })();
+            let digest = match extraction_result {
+                Ok(digest) => digest,
+                Err(error) => {
+                    let _ = std::fs::remove_file(&file_path);
+                    return Err(error);
+                }
+            };
+            on_verified_file(&file_path, &normalized, digest)?;
         }
         if pending_progress > 0 {
             progress_callback(pending_progress);

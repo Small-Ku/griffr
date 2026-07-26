@@ -6,11 +6,15 @@ use crate::error::{Error, Result};
 use crate::api::types::ResourcePatchEntry;
 use crate::runtime::task_pool::verify::build_issue;
 
-use super::super::extract::{copy_file_with_md5, move_path_replace};
+use super::super::artifact::{commit_observed_artifact, commit_verified_artifact, verify_artifact};
+use super::super::extract::copy_file_with_md5;
 use super::super::path_safety::parse_safe_relative_path;
 use super::super::reuse::make_temp_write_path;
 use super::resolve_patch_stage_path;
-use crate::runtime::{PATCH_DIFF_STAGE_DIR, PATCH_FILES_STAGE_DIR};
+use crate::runtime::{
+    ArtifactDigest, ArtifactExpectation, ArtifactProof, ArtifactSource, PATCH_DIFF_STAGE_DIR,
+    PATCH_FILES_STAGE_DIR,
+};
 
 fn manifest_path<'a>(alternate: Option<&'a str>, primary: &'a str) -> &'a str {
     alternate
@@ -19,33 +23,14 @@ fn manifest_path<'a>(alternate: Option<&'a str>, primary: &'a str) -> &'a str {
         .unwrap_or(primary)
 }
 
-pub(super) fn verify_patch_output(
-    path: &Path,
-    logical_path: &str,
-    expected_md5: &str,
-    expected_size: u64,
-) -> Result<()> {
-    if let Some(issue) = build_issue(path, logical_path, expected_md5, Some(expected_size)) {
-        return Err(Error::Message { context: "VFS error: ", detail: format!(
-            "Patch output {} failed verification: kind={:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
-            logical_path,
-            issue.kind,
-            issue.expected_size,
-            issue.actual_size,
-            issue.expected_md5,
-            issue.actual_md5
-        ) });
-    }
-    Ok(())
-}
-
 fn apply_local_patch_entry(
     install_root: &Path,
     stage_root: &Path,
     dest_root: &Path,
+    logical_root: &Path,
     entry: &ResourcePatchEntry,
     local_path: &str,
-) -> Result<()> {
+) -> Result<ArtifactProof> {
     let source_path = resolve_patch_stage_path(
         install_root,
         stage_root,
@@ -55,7 +40,10 @@ fn apply_local_patch_entry(
     )?;
     let dest_relative = parse_safe_relative_path("patch.json file name", &entry.name)?;
     let dest_path = dest_root.join(&dest_relative);
-    let logical_path = dest_relative.to_string_lossy().replace('\\', "/");
+    let logical_path = logical_root
+        .join(&dest_relative)
+        .to_string_lossy()
+        .replace('\\', "/");
 
     if !source_path.is_file() {
         return Err(Error::Message {
@@ -67,22 +55,13 @@ fn apply_local_patch_entry(
             ),
         });
     }
-    if let Some(parent) = dest_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| Error::IoAt {
-            action: "create directory",
-            path: parent.to_path_buf(),
-            source: e,
-        })?;
-    }
-    move_path_replace(&source_path, &dest_path).map_err(|e| Error::Message {
-        context: "",
-        detail: format!(
-            "Failed to apply local patch payload {} -> {}: {e}",
-            source_path.display(),
-            dest_path.display()
-        ),
-    })?;
-    verify_patch_output(&dest_path, &logical_path, &entry.md5, entry.size)
+    let expectation = ArtifactExpectation::new(&logical_path, &entry.md5, Some(entry.size));
+    commit_verified_artifact(
+        &source_path,
+        &dest_path,
+        &expectation,
+        ArtifactSource::LocalPatch,
+    )
 }
 
 fn make_patch_work_path(work_dir: &Path, destination: &Path) -> Result<PathBuf> {
@@ -108,7 +87,7 @@ pub(super) fn apply_hdiff_patch(
     expected_md5: &str,
     expected_size: u64,
     work_dir: Option<&Path>,
-) -> Result<()> {
+) -> Result<ArtifactProof> {
     if let Some(parent) = dest_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| Error::IoAt {
             action: "create directory",
@@ -148,53 +127,53 @@ pub(super) fn apply_hdiff_patch(
                 return Err(error);
             }
         };
-        if copied.bytes != expected_size || copied.md5 != expected_md5.to_ascii_lowercase() {
+        let expectation = ArtifactExpectation::new(logical_path, expected_md5, Some(expected_size));
+        let digest = ArtifactDigest::new(copied.bytes, copied.md5);
+        let proof = match commit_observed_artifact(
+            &local_temp,
+            dest_path,
+            &expectation,
+            ArtifactSource::HdiffPatch,
+            &digest,
+        ) {
+            Ok(proof) => proof,
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp_path);
+                let _ = std::fs::remove_file(&local_temp);
+                return Err(error);
+            }
+        };
+        let _ = std::fs::remove_file(&temp_path);
+        return Ok(proof);
+    }
+    let expectation = ArtifactExpectation::new(logical_path, expected_md5, Some(expected_size));
+    match commit_verified_artifact(
+        &temp_path,
+        dest_path,
+        &expectation,
+        ArtifactSource::HdiffPatch,
+    ) {
+        Ok(proof) => Ok(proof),
+        Err(error) => {
             let _ = std::fs::remove_file(&temp_path);
-            let _ = std::fs::remove_file(&local_temp);
-            return Err(Error::Message { context: "VFS error: ", detail: format!(
-                "Patch output {} failed inline copy verification: expected size/md5 {}/{}, got {}/{}",
-                logical_path,
-                expected_size,
-                expected_md5,
-                copied.bytes,
-                copied.md5
-            ) });
+            Err(error)
         }
-        if let Err(error) = move_path_replace(&local_temp, dest_path) {
-            let _ = std::fs::remove_file(&temp_path);
-            let _ = std::fs::remove_file(&local_temp);
-            return Err(error);
-        }
-        let _ = std::fs::remove_file(&temp_path);
-        return Ok(());
     }
-    if let Err(err) = verify_patch_output(&temp_path, logical_path, expected_md5, expected_size) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(err);
-    }
-    if let Err(error) = move_path_replace(&temp_path, dest_path) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(Error::Message {
-            context: "",
-            detail: format!(
-                "Failed to replace patched file {} -> {}: {error}",
-                temp_path.display(),
-                dest_path.display()
-            ),
-        });
-    }
-    Ok(())
 }
 
 fn apply_patch_entry(
     install_root: &Path,
     stage_root: &Path,
     dest_root: &Path,
+    logical_root: &Path,
     entry: &ResourcePatchEntry,
-) -> Result<()> {
+) -> Result<ArtifactProof> {
     let dest_relative = parse_safe_relative_path("patch.json file name", &entry.name)?;
     let dest_path = dest_root.join(&dest_relative);
-    let logical_path = dest_relative.to_string_lossy().replace('\\', "/");
+    let logical_path = logical_root
+        .join(&dest_relative)
+        .to_string_lossy()
+        .replace('\\', "/");
     let mut candidate_failures = Vec::new();
 
     for diff in &entry.patch {
@@ -273,13 +252,18 @@ pub(super) fn apply_vfs_patch_entry(
     install_root: &Path,
     stage_root: &Path,
     dest_root: &Path,
+    logical_root: &Path,
     entry: &ResourcePatchEntry,
-) -> Result<()> {
+) -> Result<ArtifactProof> {
     let dest_relative = parse_safe_relative_path("patch.json file name", &entry.name)?;
     let dest_path = dest_root.join(&dest_relative);
-    let logical_path = dest_relative.to_string_lossy().replace('\\', "/");
+    let logical_path = logical_root
+        .join(&dest_relative)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let expectation = ArtifactExpectation::new(&logical_path, &entry.md5, Some(entry.size));
     if build_issue(&dest_path, &logical_path, &entry.md5, Some(entry.size)).is_none() {
-        return Ok(());
+        return verify_artifact(&dest_path, &expectation, ArtifactSource::Existing);
     }
 
     if let Some(local_path) = entry
@@ -288,9 +272,16 @@ pub(super) fn apply_vfs_patch_entry(
         .map(str::trim)
         .filter(|path| !path.is_empty())
     {
-        return apply_local_patch_entry(install_root, stage_root, dest_root, entry, local_path);
+        return apply_local_patch_entry(
+            install_root,
+            stage_root,
+            dest_root,
+            logical_root,
+            entry,
+            local_path,
+        );
     }
-    apply_patch_entry(install_root, stage_root, dest_root, entry)
+    apply_patch_entry(install_root, stage_root, dest_root, logical_root, entry)
 }
 
 #[cfg(test)]

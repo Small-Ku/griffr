@@ -112,6 +112,39 @@ fn reducer_emits_scoped_updates_without_regressing_retry_bytes() {
 }
 
 #[test]
+fn committed_artifact_advances_verify_lane_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("a.bin");
+    std::fs::write(&path, b"data").unwrap();
+    let proof = crate::runtime::ArtifactProof::from_verified_path(
+        &path,
+        crate::runtime::ArtifactExpectation::new("a.bin", "unused", Some(4)),
+        crate::runtime::ArtifactSource::Download,
+    )
+    .unwrap();
+    let lane = ProgressLane::INTEGRITY_VERIFY;
+    let (sender, receiver) = ProgressSender::channel();
+    let mut reducer = TaskProgressReducer::new(TaskProgress::new(sender).with_verify(lane, 1));
+
+    reducer.handle(&WorkerEvent::committed(proof));
+    reducer.handle(&WorkerEvent::verified("a.bin".to_string(), true, None));
+
+    let advanced = std::iter::from_fn(|| receiver.try_recv())
+        .filter(|update| {
+            matches!(
+                update,
+                ProgressUpdate::Advanced {
+                    lane: update_lane,
+                    finished: 1,
+                    ..
+                } if *update_lane == lane
+            )
+        })
+        .count();
+    assert_eq!(advanced, 1);
+}
+
+#[test]
 fn reducer_accepts_explicit_download_reset_after_restart() {
     let lane = ProgressLane::INTEGRITY_DOWNLOAD;
     let (sender, receiver) = ProgressSender::channel();

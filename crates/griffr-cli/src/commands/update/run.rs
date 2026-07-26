@@ -5,7 +5,7 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::runtime::task_pool::{archive_expected_files, TaskPoolRunner};
 use griffr_common::runtime::{
     plan_vfs_tasks, resolve_staged_patch_recovery_dir, select_update_package,
-    streaming_assets_path, UpdatePackageKind, VfsFilePlanOptions,
+    streaming_assets_path, IntegritySelection, UpdatePackageKind, VfsFilePlanOptions,
 };
 
 use super::*;
@@ -41,17 +41,25 @@ pub(super) async fn update_internal(
             resumed_pending_patch = true;
         }
         griffr_common::runtime::PatchRecoveryState::ExtractedMissing { missing } => {
-            if !require_staged_predownload {
-                anyhow::bail!(
-                    "Pending patch apply under {} is missing required data: {}. Replay its staged archives with `predownload apply --output-dir`.",
-                    local.install_path.display(),
+            if require_staged_predownload {
+                ui::print_info(format!(
+                    "Pending extracted patch state is missing required data; replaying staged archives: {}",
                     missing.join(", ")
-                );
+                ));
+            } else {
+                ui::print_info(format!(
+                    "Incomplete patch extraction will be rebuilt from the current update archives: {}",
+                    missing.join(", ")
+                ));
+                if opts.is_dry_run() {
+                    opts.dry_run(format!(
+                        "Would discard private incomplete patch state under {} before rebuilding it",
+                        local.install_path.display()
+                    ));
+                } else {
+                    griffr_common::runtime::discard_incomplete_patch_apply(&local.install_path)?;
+                }
             }
-            ui::print_info(format!(
-                "Pending extracted patch state is missing required data; replaying staged archives: {}",
-                missing.join(", ")
-            ));
         }
         griffr_common::runtime::PatchRecoveryState::Inconsistent { reasons } => {
             if !require_staged_predownload {
@@ -361,6 +369,16 @@ pub(super) async fn update_internal(
         }
     }
 
+    let verification_selection =
+        if reuse_paths.is_empty() && package_kind == UpdatePackageKind::Full {
+            // Full-package extraction verifies and commits every archive entry as it
+            // is written. The manifest closure still checks paths that were absent
+            // from the archive or owned by independent file tasks, while cached
+            // verified paths avoid a second read of freshly committed files.
+            IntegritySelection::GameFiles
+        } else {
+            IntegritySelection::Paths(archive_result.modified_paths)
+        };
     verify_updated_install(
         &api_client,
         &local.install_path,
@@ -368,7 +386,7 @@ pub(super) async fn update_internal(
         &version_info.version,
         opts.skip_verify,
         extra_tasks,
-        archive_result.modified_paths,
+        verification_selection,
         archive_result.verified_paths,
         &opts,
         &mut task_pool_runner,

@@ -166,6 +166,9 @@ pub async fn ensure_game_files_with_pool(
     let mut outcomes = PathOutcomeTracker::new();
     for event in result.outcomes {
         match event {
+            crate::runtime::task_pool::TaskOutcome::Committed { proof } => {
+                outcomes.record_verified(proof.logical_path(), true);
+            }
             crate::runtime::task_pool::TaskOutcome::Verified { path, ok, issue } => {
                 outcomes.record_verified(&path, ok);
                 if !ok {

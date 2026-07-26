@@ -91,6 +91,33 @@ fn entry_is_recoverable(
     Ok(false)
 }
 
+/// Removes an incomplete source-directed extraction so the current update can
+/// rebuild its plan and replay archive ranges. Files already committed to the
+/// install remain in place and will be recognized as valid by the next plan.
+pub fn discard_incomplete_patch_apply(install_root: &Path) -> Result<()> {
+    let plan_path = install_root.join(PATCH_WORK_DIR).join(PATCH_PLAN_NAME);
+    if !plan_path.is_file() {
+        return Ok(());
+    }
+    let plan = read_patch_plan(install_root)?;
+    if plan.stage_root.exists() {
+        std::fs::remove_dir_all(&plan.stage_root).map_err(|source| Error::IoAt {
+            action: "remove file or directory",
+            path: plan.stage_root.clone(),
+            source,
+        })?;
+    }
+    let patch_root = install_root.join(PATCH_WORK_DIR);
+    if patch_root.exists() {
+        std::fs::remove_dir_all(&patch_root).map_err(|source| Error::IoAt {
+            action: "remove file or directory",
+            path: patch_root,
+            source,
+        })?;
+    }
+    Ok(())
+}
+
 pub fn get_patch_recovery_state(
     install_root: &Path,
     stage_dir: Option<&Path>,
@@ -103,8 +130,14 @@ pub fn get_patch_recovery_state(
     let plan_path = install_root.join(PATCH_WORK_DIR).join(PATCH_PLAN_NAME);
     if plan_path.is_file() {
         let plan = read_patch_plan(install_root)?;
-        let missing_stage = plan.entries.iter().any(|entry| match &entry.source {
-            PlannedPatchSource::AlreadyPresent => false,
+        let missing_entry_source = plan.entries.iter().any(|entry| match &entry.source {
+            PlannedPatchSource::AlreadyPresent => build_issue(
+                &entry.destination,
+                &entry.name,
+                &entry.expected_md5,
+                Some(entry.expected_size),
+            )
+            .is_some(),
             PlannedPatchSource::Local { payload } => {
                 !plan.stage_root.join(payload).is_file()
                     && build_issue(
@@ -133,6 +166,12 @@ pub fn get_patch_recovery_state(
                         || build_issue(base, &entry.name, base_md5, Some(*base_size)).is_some())
             }
         });
+        let private_deferred_root = install_root.join(PATCH_WORK_DIR).join(PATCH_DEFERRED_DIR);
+        let missing_deferred = plan.deferred_paths.iter().any(|relative| {
+            !plan.stage_root.join(relative).is_file()
+                && !private_deferred_root.join(relative).is_file()
+        });
+        let missing_stage = missing_entry_source || missing_deferred;
         return if missing_stage {
             Ok(PatchRecoveryState::ExtractedMissing {
                 missing: vec![format!(
@@ -206,4 +245,105 @@ pub fn get_patch_recovery_state(
         }
     }
     Ok(PatchRecoveryState::Idle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::patch_apply::write_patch_plan;
+    use crate::runtime::{PatchPlan, PlannedPatchEntry, PlannedPatchSource};
+
+    #[test]
+    fn missing_deferred_marker_requires_plan_rebuild() {
+        let temp = tempfile::tempdir().unwrap();
+        let install_root = temp.path().join("install");
+        let stage_root = temp.path().join("stage");
+        std::fs::create_dir_all(&stage_root).unwrap();
+        let plan = PatchPlan {
+            schema_version: PatchPlan::SCHEMA_VERSION,
+            install_root: install_root.clone(),
+            stage_root,
+            vfs_base_path: PathBuf::from("VFS"),
+            vfs_destination: install_root.join("VFS"),
+            work_dir: None,
+            entries: Vec::new(),
+            delete_paths: Vec::new(),
+            deferred_paths: vec![PathBuf::from("config.ini")],
+        };
+        write_patch_plan(&plan).unwrap();
+
+        assert!(matches!(
+            get_patch_recovery_state(&install_root, None).unwrap(),
+            PatchRecoveryState::ExtractedMissing { .. }
+        ));
+    }
+
+    #[test]
+    fn invalid_already_present_output_requires_plan_rebuild() {
+        let temp = tempfile::tempdir().unwrap();
+        let install_root = temp.path().join("install");
+        let stage_root = temp.path().join("stage");
+        std::fs::create_dir_all(&stage_root).unwrap();
+        let destination = install_root.join("VFS/missing.bin");
+        let plan = PatchPlan {
+            schema_version: PatchPlan::SCHEMA_VERSION,
+            install_root: install_root.clone(),
+            stage_root,
+            vfs_base_path: PathBuf::from("VFS"),
+            vfs_destination: install_root.join("VFS"),
+            work_dir: None,
+            entries: vec![PlannedPatchEntry {
+                name: "missing.bin".to_string(),
+                destination,
+                expected_md5: "00000000000000000000000000000000".to_string(),
+                expected_size: 1,
+                source: PlannedPatchSource::AlreadyPresent,
+            }],
+            delete_paths: Vec::new(),
+            deferred_paths: Vec::new(),
+        };
+        write_patch_plan(&plan).unwrap();
+
+        assert!(matches!(
+            get_patch_recovery_state(&install_root, None).unwrap(),
+            PatchRecoveryState::ExtractedMissing { .. }
+        ));
+    }
+
+    #[test]
+    fn discard_incomplete_patch_apply_removes_only_private_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let install_root = temp.path().join("install");
+        let stage_root = temp.path().join("stage");
+        let destination = install_root.join("VFS/ready.bin");
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&stage_root).unwrap();
+        std::fs::write(&destination, b"committed").unwrap();
+        std::fs::write(stage_root.join("partial.patch"), b"partial").unwrap();
+
+        let plan = PatchPlan {
+            schema_version: PatchPlan::SCHEMA_VERSION,
+            install_root: install_root.clone(),
+            stage_root: stage_root.clone(),
+            vfs_base_path: PathBuf::from("VFS"),
+            vfs_destination: install_root.join("VFS"),
+            work_dir: None,
+            entries: vec![PlannedPatchEntry {
+                name: "ready.bin".to_string(),
+                destination: destination.clone(),
+                expected_md5: "00000000000000000000000000000000".to_string(),
+                expected_size: 9,
+                source: PlannedPatchSource::AlreadyPresent,
+            }],
+            delete_paths: Vec::new(),
+            deferred_paths: Vec::new(),
+        };
+        write_patch_plan(&plan).unwrap();
+
+        discard_incomplete_patch_apply(&install_root).unwrap();
+
+        assert_eq!(std::fs::read(destination).unwrap(), b"committed");
+        assert!(!stage_root.exists());
+        assert!(!install_root.join(PATCH_WORK_DIR).exists());
+    }
 }

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::runtime::{PATCH_MANIFEST_NAME, PATCH_STAGE_DIR};
+use crate::runtime::{ArtifactProof, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR};
 
 use crate::api::types::ResourcePatch;
 
@@ -36,11 +36,11 @@ fn resolve_patch_stage_path(
 pub(crate) fn apply_extracted_vfs_patch_manifest(
     install_root: &Path,
     mut progress_callback: Option<&mut dyn FnMut(&str, usize, usize)>,
-) -> Result<()> {
+) -> Result<Vec<ArtifactProof>> {
     let manifest_path = install_root.join(PATCH_MANIFEST_NAME);
     let stage_root = install_root.join(PATCH_STAGE_DIR);
     if !manifest_path.exists() && !stage_root.exists() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     if !manifest_path.is_file() {
         return Err(Error::Message {
@@ -69,13 +69,20 @@ pub(crate) fn apply_extracted_vfs_patch_manifest(
             cb("", 0, total_entries);
         }
     }
+    let mut proofs = Vec::with_capacity(total_entries);
     for (index, entry) in manifest.files.iter().enumerate() {
-        apply::apply_vfs_patch_entry(install_root, &stage_root, &dest_root, entry).map_err(
-            |e| Error::Message {
-                context: "",
-                detail: format!("Failed to apply patch entry {}: {e}", entry.name),
-            },
-        )?;
+        let proof = apply::apply_vfs_patch_entry(
+            install_root,
+            &stage_root,
+            &dest_root,
+            &vfs_base_path,
+            entry,
+        )
+        .map_err(|e| Error::Message {
+            context: "",
+            detail: format!("Failed to apply patch entry {}: {e}", entry.name),
+        })?;
+        proofs.push(proof);
         if let Some(cb) = progress_callback.as_deref_mut() {
             let logical_path = vfs_base_path.join(&entry.name);
             cb(
@@ -98,13 +105,52 @@ pub(crate) fn apply_extracted_vfs_patch_manifest(
             source: e,
         })?;
     }
-    Ok(())
+    Ok(proofs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::apply_extracted_vfs_patch_manifest;
     use crate::runtime::{PATCH_MANIFEST_NAME, PATCH_STAGE_DIR};
+
+    #[test]
+    fn corrupt_local_payload_does_not_replace_existing_vfs_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let install_root = temp.path().join("install");
+        let destination =
+            install_root.join("Arknights_Data/StreamingAssets/AB/Windows/ui/direct.ab");
+        let staged_file = install_root
+            .join(PATCH_STAGE_DIR)
+            .join("files")
+            .join("ui")
+            .join("direct.ab");
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(staged_file.parent().unwrap()).unwrap();
+        std::fs::write(&destination, b"old usable bytes").unwrap();
+        std::fs::write(&staged_file, b"corrupt bytes").unwrap();
+        std::fs::write(
+            install_root.join(PATCH_MANIFEST_NAME),
+            r#"{
+  "version": "75.0.0",
+  "vfs_base_path": "Arknights_Data/StreamingAssets/AB/Windows",
+  "files": [
+    {
+      "name": "ui/direct.ab",
+      "md5": "75c4e133155014e946c3ef39652b0ba8",
+      "size": 13,
+      "local_path": "files/ui/direct.ab",
+      "diffType": 0,
+      "patch": []
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        assert!(apply_extracted_vfs_patch_manifest(&install_root, None).is_err());
+        assert_eq!(std::fs::read(destination).unwrap(), b"old usable bytes");
+        assert!(staged_file.exists());
+    }
 
     #[test]
     fn apply_extracted_vfs_patch_manifest_moves_local_files_and_cleans_staging() {
@@ -140,8 +186,18 @@ mod tests {
         let mut on_progress = |path: &str, finished: usize, total: usize| {
             progress.push((path.to_string(), finished, total));
         };
-        apply_extracted_vfs_patch_manifest(&install_root, Some(&mut on_progress)).unwrap();
+        let proofs =
+            apply_extracted_vfs_patch_manifest(&install_root, Some(&mut on_progress)).unwrap();
 
+        assert_eq!(proofs.len(), 1);
+        assert_eq!(
+            proofs[0].logical_path(),
+            "Arknights_Data/StreamingAssets/AB/Windows/ui/direct.ab"
+        );
+        assert_eq!(
+            proofs[0].source(),
+            crate::runtime::ArtifactSource::LocalPatch
+        );
         assert_eq!(
             progress,
             vec![

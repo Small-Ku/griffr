@@ -13,13 +13,8 @@ pub(crate) fn write_patch_plan(plan: &PatchPlan) -> Result<()> {
         source,
     })?;
     let path = patch_dir.join(PATCH_PLAN_NAME);
-    let temp = patch_dir.join(format!("{PATCH_PLAN_NAME}.tmp"));
-    std::fs::write(&temp, serde_json::to_vec_pretty(plan)?).map_err(|source| Error::IoAt {
-        action: "open file",
-        path: temp.clone(),
-        source,
-    })?;
-    crate::runtime::task_pool::fs_ops::extract::move_path_replace(&temp, &path)
+    let payload = serde_json::to_vec_pretty(plan)?;
+    crate::runtime::task_pool::fs_ops::write_atomic_bytes(&path, &payload)
 }
 
 pub(crate) fn read_patch_plan(install_root: &Path) -> Result<PatchPlan> {

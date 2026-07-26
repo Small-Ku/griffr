@@ -61,15 +61,13 @@ fn ensure_file_can_relink_verified_target_when_prefer_reuse_enabled() {
         "expected hardlink event when prefer_reuse is enabled"
     );
     assert!(
-        result.outcomes.iter().any(|e| matches!(
-            e,
-            TaskOutcome::Verified {
-                ok: true,
-                issue: None,
-                ..
-            }
+        result.outcomes.iter().any(|event| matches!(
+            event,
+            TaskOutcome::Committed { proof }
+                if proof.logical_path() == "target.bin"
+                    && proof.source() == crate::runtime::ArtifactSource::ReuseHardlink
         )),
-        "expected verify success after relink"
+        "expected committed artifact proof after relink"
     );
 }
 
@@ -152,24 +150,27 @@ fn do_download(
         do_prepared_download, prepare_download, DownloadPreparation,
     };
 
-    match prepare_download(dest, expected_md5, expected_size)? {
-        DownloadPreparation::Done(bytes) => Ok(bytes),
+    match prepare_download(dest, "test.bin", expected_md5, expected_size)? {
+        DownloadPreparation::Done(proof) => Ok(proof.observed_size()),
         DownloadPreparation::Resume(resume) => {
             let runtime =
                 compio::runtime::Runtime::new().map_err(|error| crate::error::Error::Message {
                     context: "Task pool error: ",
                     detail: format!("failed to create async download test runtime: {error}"),
                 })?;
-            runtime.block_on(do_prepared_download(
-                user_agent,
-                url,
-                dest,
-                expected_md5,
-                expected_size,
-                resume,
-                progress_buffer_bytes,
-                on_progress,
-            ))
+            runtime
+                .block_on(do_prepared_download(
+                    user_agent,
+                    url,
+                    dest,
+                    "test.bin",
+                    expected_md5,
+                    expected_size,
+                    resume,
+                    progress_buffer_bytes,
+                    on_progress,
+                ))
+                .map(|proof| proof.observed_size())
         }
     }
 }

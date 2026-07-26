@@ -10,8 +10,8 @@ use crate::runtime::task_pool::{
     TaskOutcome, TaskPoolConfig, TaskPoolRunner, TaskProgress, TransferClass,
 };
 use crate::runtime::{
-    build_cdn_file_url, files_base_url, normalize_logical_path, FileIssue, PathOutcomeTracker,
-    PathReuseMethod, ProgressLane, ProgressSender,
+    build_cdn_file_url, files_base_url, is_launcher_metadata_path, normalize_logical_path,
+    ArtifactProof, FileIssue, PathOutcomeTracker, PathReuseMethod, ProgressLane, ProgressSender,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -27,6 +27,9 @@ pub struct IntegrityRunSummary {
 #[derive(Debug, Clone)]
 pub enum IntegritySelection {
     Full,
+    /// Checks every game payload file but leaves launcher-owned metadata for
+    /// the final metadata sync step. This keeps `config.ini` as a finish marker.
+    GameFiles,
     Paths(Vec<String>),
 }
 
@@ -40,53 +43,26 @@ fn task_target_path(task: &Task) -> Option<&Path> {
     task.target_path()
 }
 
-fn task_expected_artifact(task: &Task) -> Option<(&Path, &str, Option<u64>)> {
-    match task {
-        Task::Download {
-            dest,
-            expected_md5,
-            expected_size,
-            ..
-        } => Some((dest, expected_md5, *expected_size)),
-        Task::RepairFile {
-            dest,
-            expected_md5,
-            expected_size,
-            ..
-        }
-        | Task::ReuseFile {
-            dest,
-            expected_md5,
-            expected_size,
-            ..
-        } => Some((dest, expected_md5, Some(*expected_size))),
-        Task::Verify {
-            path,
-            expected_md5,
-            expected_size,
-            ..
-        } => Some((path, expected_md5, *expected_size)),
-        _ => None,
-    }
-}
-
 fn deduplicate_target_tasks(tasks: Vec<Task>) -> Result<Vec<Task>> {
     let mut targets = HashMap::<String, (String, Option<u64>)>::default();
     let mut unique = Vec::with_capacity(tasks.len());
     for task in tasks {
-        let Some((path, expected_md5, expected_size)) = task_expected_artifact(&task) else {
+        let Some(file) = task.final_file() else {
             unique.push(task);
             continue;
         };
-        let target = normalize_target_path(path);
-        let expected = (expected_md5.to_ascii_lowercase(), expected_size);
+        let target = normalize_target_path(file.target());
+        let expected = (
+            file.expected_md5().to_ascii_lowercase(),
+            file.expected_size(),
+        );
         if let Some(previous) = targets.get(&target) {
             if previous != &expected {
                 return Err(Error::Message {
                     context: "Integrity error: ",
                     detail: format!(
                         "conflicting integrity tasks target {} with different expected content",
-                        path.display()
+                        file.target().display()
                     ),
                 });
             }
@@ -98,14 +74,29 @@ fn deduplicate_target_tasks(tasks: Vec<Task>) -> Result<Vec<Task>> {
     Ok(unique)
 }
 
+fn remove_launcher_metadata_entries(entries: &mut Vec<crate::api::types::GameFileEntry>) {
+    entries.retain(|entry| !is_launcher_metadata_path(&entry.path));
+}
+
 fn remove_already_verified_entries(
     entries: &mut Vec<crate::api::types::GameFileEntry>,
-    already_verified_paths: &HashSet<String>,
+    install_root: &Path,
+    proofs: &[ArtifactProof],
 ) {
-    if already_verified_paths.is_empty() {
+    if proofs.is_empty() {
         return;
     }
-    entries.retain(|entry| !already_verified_paths.contains(&normalize_logical_path(&entry.path)));
+    let current_proofs = proofs
+        .iter()
+        .filter(|proof| proof.is_current())
+        .map(|proof| (normalize_logical_path(proof.logical_path()), proof))
+        .collect::<HashMap<_, _>>();
+    entries.retain(
+        |entry| match current_proofs.get(&normalize_logical_path(&entry.path)) {
+            Some(proof) => !proof.matches_game_file(install_root, entry),
+            None => true,
+        },
+    );
 }
 
 fn remove_entries_owned_by_extra_tasks(
@@ -133,7 +124,7 @@ pub async fn run_integrity_pool(
     install_target: &InstallTarget,
     version: Option<&str>,
     selection: IntegritySelection,
-    already_verified_paths: &[String],
+    verified_artifacts: &[ArtifactProof],
     repair: bool,
     source_roots: &[PathBuf],
     allow_copy_fallback: bool,
@@ -148,22 +139,20 @@ pub async fn run_integrity_pool(
         .filter_map(task_target_path)
         .map(normalize_target_path)
         .collect::<HashSet<_>>();
-    let selected_paths = match selection {
-        IntegritySelection::Full => None,
-        IntegritySelection::Paths(paths) => Some(
-            paths
-                .into_iter()
-                .map(|path| normalize_logical_path(&path))
-                .filter(|path| !path.is_empty() && path != ".")
-                .collect::<HashSet<_>>(),
+    let (selected_paths, skip_launcher_metadata) = match selection {
+        IntegritySelection::Full => (None, false),
+        IntegritySelection::GameFiles => (None, true),
+        IntegritySelection::Paths(paths) => (
+            Some(
+                paths
+                    .into_iter()
+                    .map(|path| normalize_logical_path(&path))
+                    .filter(|path| !path.is_empty() && path != ".")
+                    .collect::<HashSet<_>>(),
+            ),
+            false,
         ),
     };
-
-    let already_verified_paths = already_verified_paths
-        .iter()
-        .map(|path| normalize_logical_path(path))
-        .filter(|path| !path.is_empty() && path != ".")
-        .collect::<HashSet<_>>();
 
     let (entries, files_url_base, archive_groups) = if selected_paths
         .as_ref()
@@ -181,10 +170,13 @@ pub async fn run_integrity_pool(
         let mut entries = api_client
             .fetch_game_files(&pkg.file_path, pkg.game_files_md5.as_deref())
             .await?;
+        if skip_launcher_metadata {
+            remove_launcher_metadata_entries(&mut entries);
+        }
         if let Some(paths) = selected_paths.as_ref() {
             entries.retain(|entry| paths.contains(&normalize_logical_path(&entry.path)));
         }
-        remove_already_verified_entries(&mut entries, &already_verified_paths);
+        remove_already_verified_entries(&mut entries, install_path, verified_artifacts);
         remove_entries_owned_by_extra_tasks(&mut entries, install_path, &extra_target_paths);
         let archive_groups = (repair && !pkg.packs.is_empty())
             .then(|| plan_archive_groups(&pkg.packs, &install_path.join("downloads")))
@@ -314,6 +306,17 @@ pub async fn run_integrity_pool(
                     }
                 }
             }
+            TaskOutcome::Committed { proof } => {
+                let path = proof.logical_path().to_string();
+                if !tracked_paths.contains(&path) && !extra_tracked_paths.contains(&path) {
+                    continue;
+                }
+                finished_paths.insert(path.clone());
+                outcomes.record_verified(&path, true);
+                if tracked_paths.contains(&path) {
+                    issues_by_path.remove(&path);
+                }
+            }
             TaskOutcome::Downloaded { path, bytes }
                 if tracked_paths.contains(&path) || extra_tracked_paths.contains(&path) =>
             {
@@ -405,12 +408,62 @@ mod tests {
     }
 
     #[test]
-    fn already_verified_manifest_entry_is_removed() {
+    fn game_file_scope_omits_launcher_metadata() {
         let mut entries = vec![
+            GameFileEntry {
+                path: "config.ini".to_string(),
+                md5: "config".to_string(),
+                size: 1,
+            },
+            GameFileEntry {
+                path: "game_files".to_string(),
+                md5: "manifest".to_string(),
+                size: 2,
+            },
+            GameFileEntry {
+                path: "package_files".to_string(),
+                md5: "package".to_string(),
+                size: 3,
+            },
             GameFileEntry {
                 path: "Data/game.bin".to_string(),
                 md5: "game".to_string(),
                 size: 8,
+            },
+        ];
+
+        remove_launcher_metadata_entries(&mut entries);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "Data/game.bin");
+    }
+
+    #[test]
+    fn current_matching_artifact_proof_removes_manifest_entry() {
+        use md5::{Digest, Md5};
+
+        let temp = tempfile::tempdir().unwrap();
+        let install_root = temp.path().join("install");
+        let payload = b"game-bin";
+        let md5 = crate::to_hex(&Md5::digest(payload));
+        let path = install_root.join("Data/game.bin");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, payload).unwrap();
+        let proof = crate::runtime::ArtifactProof::from_verified_path(
+            &path,
+            crate::runtime::ArtifactExpectation::new(
+                "Data/game.bin",
+                &md5,
+                Some(payload.len() as u64),
+            ),
+            crate::runtime::ArtifactSource::Archive,
+        )
+        .unwrap();
+        let mut entries = vec![
+            GameFileEntry {
+                path: "Data/game.bin".to_string(),
+                md5,
+                size: payload.len() as u64,
             },
             GameFileEntry {
                 path: "Data/other.bin".to_string(),
@@ -418,12 +471,45 @@ mod tests {
                 size: 4,
             },
         ];
-        let verified = HashSet::from_iter(["data/game.bin".to_string()]);
 
-        remove_already_verified_entries(&mut entries, &verified);
+        remove_already_verified_entries(&mut entries, &install_root, &[proof]);
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, "Data/other.bin");
+    }
+
+    #[test]
+    fn stale_artifact_proof_does_not_remove_manifest_entry() {
+        use md5::{Digest, Md5};
+
+        let temp = tempfile::tempdir().unwrap();
+        let install_root = temp.path().join("install");
+        let payload = b"game-bin";
+        let md5 = crate::to_hex(&Md5::digest(payload));
+        let path = install_root.join("Data/game.bin");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, payload).unwrap();
+        let proof = crate::runtime::ArtifactProof::from_verified_path(
+            &path,
+            crate::runtime::ArtifactExpectation::new(
+                "Data/game.bin",
+                &md5,
+                Some(payload.len() as u64),
+            ),
+            crate::runtime::ArtifactSource::Archive,
+        )
+        .unwrap();
+        std::fs::write(&path, b"externally changed bytes").unwrap();
+        let mut entries = vec![GameFileEntry {
+            path: "Data/game.bin".to_string(),
+            md5,
+            size: payload.len() as u64,
+        }];
+
+        remove_already_verified_entries(&mut entries, &install_root, &[proof]);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "Data/game.bin");
     }
 
     #[test]

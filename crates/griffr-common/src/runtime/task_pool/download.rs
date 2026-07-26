@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 
 use crate::api::protocol::{byte_range_from, RANGE_HEADER, USER_AGENT_HEADER};
 use crate::error::{Error, Result};
-use crate::runtime::preallocate_file;
+use crate::runtime::{
+    preallocate_file, ArtifactDigest, ArtifactExpectation, ArtifactProof, ArtifactSource,
+};
 use compio::buf::BufResult;
 use compio::bytes::Bytes;
 use compio::io::AsyncWriteAtExt;
@@ -28,7 +30,7 @@ fn duration_from_env_secs(var: &str, default_secs: u64) -> std::time::Duration {
 }
 
 pub(crate) enum DownloadPreparation {
-    Done(u64),
+    Done(ArtifactProof),
     Resume(DownloadResumeState),
 }
 
@@ -42,6 +44,7 @@ pub(crate) enum DownloadProgress {
 /// CPU admission before the async transfer task is submitted to Dispatcher.
 pub(crate) fn prepare_download(
     dest: &Path,
+    logical_path: &str,
     expected_md5: &str,
     expected_size: Option<u64>,
 ) -> Result<DownloadPreparation> {
@@ -88,8 +91,17 @@ pub(crate) fn prepare_download(
         if partial_len == expected_size {
             let actual_md5 = super::verify::file_md5(&part_path)?;
             if actual_md5 == expected_md5.to_ascii_lowercase() {
-                super::fs_ops::commit_partial_download(&part_path, dest)?;
-                return Ok(DownloadPreparation::Done(partial_len));
+                let expectation =
+                    ArtifactExpectation::new(logical_path, expected_md5, Some(expected_size));
+                let digest = ArtifactDigest::new(partial_len, actual_md5);
+                let proof = super::fs_ops::commit_observed_artifact(
+                    &part_path,
+                    dest,
+                    &expectation,
+                    ArtifactSource::Download,
+                    &digest,
+                )?;
+                return Ok(DownloadPreparation::Done(proof));
             }
             std::fs::remove_file(&part_path).map_err(|source| Error::IoAt {
                 action: "remove file or directory",
@@ -115,12 +127,13 @@ pub(crate) async fn do_prepared_download(
     user_agent: &str,
     url: &str,
     dest: &Path,
+    logical_path: &str,
     expected_md5: &str,
     expected_size: Option<u64>,
     resume: DownloadResumeState,
     progress_buffer_bytes: usize,
     on_progress: Option<impl Fn(DownloadProgress) + Send + 'static>,
-) -> Result<u64> {
+) -> Result<ArtifactProof> {
     let send_timeout = duration_from_env_secs(
         "GRIFFR_DOWNLOAD_SEND_TIMEOUT_SECS",
         DEFAULT_DOWNLOAD_SEND_TIMEOUT_SECS,
@@ -340,20 +353,13 @@ pub(crate) async fn do_prepared_download(
         });
     }
 
-    super::fs_ops::commit_partial_download_async(&part_path, dest).await?;
-    let metadata = compio::fs::metadata(dest)
-        .await
-        .map_err(|source| Error::IoAt {
-            action: "query file metadata/stat for",
-            path: dest.to_path_buf(),
-            source,
-        })?;
-    let len = metadata.len();
-    if len != written {
-        debug!(
-            "download committed with metadata size {} differing from streamed size {} for {}",
-            len, written, url
-        );
-    }
-    Ok(len)
+    let expectation = ArtifactExpectation::new(logical_path, expected_md5, expected_size);
+    let digest = ArtifactDigest::new(written, actual_md5);
+    super::fs_ops::commit_observed_artifact(
+        &part_path,
+        dest,
+        &expectation,
+        ArtifactSource::Download,
+        &digest,
+    )
 }

@@ -293,6 +293,7 @@ impl PatchPlan {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PatchCheckReport {
     pub archive_uncompressed_bytes: u64,
+    pub planned_extract_bytes: u64,
     pub estimated_final_growth_bytes: u64,
     pub estimated_install_peak_bytes: u64,
     pub estimated_vfs_peak_bytes: u64,
