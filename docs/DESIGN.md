@@ -31,16 +31,52 @@ The workload separates asynchronous I/O and synchronous CPU tasks to prevent sch
 
 ### 2. Patch Apply Rules
 
-Griffr implements a **forward-only patch model** with no backward rollback capability:
+Griffr implements a forward-only update model with no rollback capability:
 
-1.  **Check:** Scan the destination, build dependencies, select sources, verify hashes, and estimate disk use.
-2.  **Persisted Plan:** Save plan state to `.griffr-patch/plan.json` before starting mutations.
-3.  **Entry DAG Processing:** Process changes as exact entry DAG nodes. Writers depend on consumers of the paths they replace; base files are released after their last consumer node finishes.
-4.  **Deferred Markers:** Write configuration changes (`config.ini`) only after all VFS and staging directories are successfully processed and cleaned up.
+1.  **Check:** Scan the destination, verify inputs, and probe sources. Patch archives extract only selected payloads and estimate per-volume peak space before writing.
+2.  **Persisted Patch Plan:** Save patch state to `.griffr/patch/plan.json` before file mutations start. Extract only selected payloads. Full archives recover directly from target manifests and range caches.
+3.  **Verified Per-File Commit:** Write replacements to temporary paths, verify size and MD5, close handles, and replace target files atomically.
+4.  **Dependency Release:** Release patch base files only after their last consumer node finishes.
+5.  **Deferred Markers:** Write launcher metadata (`config.ini`, `game_files`, `package_files`) atomically after game-file verification and VFS/delete follow-up. Commit `config.ini` last.
 
-### 3. File Allocation & Storage
+### 3. Private Install State and Change Marker
 
-On Windows, all output files with a known length reserve physical disk clusters via `FILE_ALLOCATION_INFO` before writing:
+Griffr owns the `.griffr/` private directory inside each install:
+
+```text
+.griffr/
+├─ state.json
+├─ archives/
+├─ patch/ (plan.json, deferred/)
+└─ predownload/<from>-<to>/
+```
+
+`archives/` holds active package parts, `patch/` holds delta-patch recovery state, and `predownload/` holds future package sets.
+
+Griffr writes `.griffr/state.json` before any file write starts. The marker records change type, game/channel identity, source/target versions, payload digests, VFS scope, and start time. Resume commands read `.griffr/state.json` to resume interrupted work or advance to a new release manifest.
+
+Griffr removes `.griffr/state.json` after final integrity checks, VFS follow-up, and `config.ini` commit succeed. An unfinished marker blocks `launch`.
+
+Archive extraction, manifest loading, and delete plans reject paths inside `.griffr/`.
+
+### 4. Unified Final-File Lifecycle
+
+All write paths (archive extraction, patch apply, VFS, reuse, repair) follow one final-file contract:
+
+```text
+resolve source -> create temp output -> verify size & MD5 -> atomic replace -> emit ArtifactProof
+```
+
+- `ArtifactExpectation`: Target file path, size, and MD5.
+- `ArtifactSource`: Byte origin (archive, CDN, patch, reuse, etc.).
+- `ArtifactProof`: Destination path, size, source, and post-commit metadata stamp.
+- `TaskOutcome::Committed { proof }`: Output returned by all successful file writers. Read-only checks return `TaskOutcome::Verified`.
+
+Final integrity checks use `ArtifactProof` to skip re-verifying unmodified files written during the operation.
+
+### 5. File Allocation & Storage
+
+On Windows, output files reserve physical disk clusters with `FILE_ALLOCATION_INFO` before streaming:
 *   Prevents fragmentation and repeated file system allocation updates.
-*   Triggers "out of disk space" errors at the start of the write sequence, rather than hours into a large stream.
-*   Does not alter logical EOF, preserving standard atomic replace behaviors.
+*   Fails early on insufficient disk space before streaming large payloads.
+*   Preserves logical EOF and atomic replacement semantics.

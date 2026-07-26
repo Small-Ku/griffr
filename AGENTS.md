@@ -43,6 +43,7 @@ Every domain fact should have one authoritative representation.
 - Do not introduce parallel structs that describe the same game, target, server, profile, catalog entry, channel, or installation identity without a demonstrated semantic difference.
 - Derive views and serialization formats from the canonical model.
 - Remove obsolete storage keys, serialized keys, configuration objects, and compatibility fields when no longer used.
+- If code or helper functions are only used in unit tests, move them to test scope (`#[cfg(test)]` or test modules) rather than keeping them in production code with `#[allow(dead_code)]`.
 - Do not copy canonical constants into CLI or GUI code. Re-export or consume them from their owning module.
 - When two values look similar, find out if they are different concepts before you keep separate types.
 

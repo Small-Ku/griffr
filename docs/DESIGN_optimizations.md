@@ -23,13 +23,15 @@ This design uses six code stages followed by packaging metadata.
 - `--keep-pack-archives` uses one re-entrant retention node per volume: after the last extraction reader, it fetches uncovered gaps at background priority, resumes itself, reconstructs the part, verifies package MD5, and promotes it.
 - For lazy range archive DAG run details, see [`DESIGN_task_pool.md#7-lazy-range-archive-dag`](DESIGN_task_pool.md#7-lazy-range-archive-dag).
 
-## 4. Peak-Space Model & Commit Batching
+## 4. Peak Space and Forward Commit
 
-- A signed per-physical-volume ledger models extraction, parallel DAG outputs, cross-volume copies, external-work overlap, safe early deletes, consumed payload removal, and last-consumer base release.
-- Normal commits use bounded batches (cross-volume up to 384 MiB, same-volume metadata serially per volume); each batch verifies final destinations inline before the commit node continues.
-- The fallback integrity pass receives successful destination checks to skip re-verifying manifest entries.
-- For task pool DAG commitment and VFS integration, see [`DESIGN_task_pool.md`](DESIGN_task_pool.md).
-- For patch apply steps and entry DAG base release, see [`DESIGN_patch_steps.md`](DESIGN_patch_steps.md).
+- Patch plans calculate per-volume peak space for selected local and HDiff payloads before extraction starts.
+- Full archives omit VFS and launcher metadata paths from extraction plans, ensuring single-writer ownership.
+- Extraction shards verify and commit files inline, releasing staging space immediately without holding a full second installation.
+- Deferred controls (`delete_files.txt`) remain private until all payload shards succeed, when `FinishArchive` publishes them.
+- Successful destination checks pass to fallback integrity passes to skip re-verifying proven manifest entries.
+- For task pool details, see [`DESIGN_task_pool.md`](DESIGN_task_pool.md).
+- For patch apply details, see [`DESIGN_patch_steps.md`](DESIGN_patch_steps.md).
 
 ## 5. Cost-Aware Extraction Sharding
 
@@ -38,14 +40,13 @@ This design uses six code stages followed by packaging metadata.
 - Scheduler CPU ordering uses the same estimated cost that formed the shards.
 - For shard run details, see [`DESIGN_task_pool.md#7-lazy-range-archive-dag`](DESIGN_task_pool.md#7-lazy-range-archive-dag).
 
-## 6. Windows Allocation Reservation
+## 6. Windows Allocation and Scheduler Reservation
 
-- Known-size download partials, ZIP entry outputs, cross-volume commits, and
-  reuse copies reserve storage with `FILE_ALLOCATION_INFO` before streaming.
-- Reservation preserves logical EOF and temporary-file atomicity.
-- Failed copy paths remove their partial temporary output.
-- `hdiffpatch-rs` owns creation of its first-pass codec output; griffr
-  preallocates the destination-local verified copy when a work volume is used.
+- Download partials, archive ranges, ZIP entry outputs, cross-volume commits, and reuse copies reserve storage with `FILE_ALLOCATION_INFO` before streaming.
+- The task scheduler tracks peak additional allocation per physical volume for each active writer, admitting new writers only when live free space covers active reservations.
+- First writers use physical preallocation as the authoritative error point, allowing resume tasks to run on nearly full volumes.
+- Read-only, verify, delete, base-release, hardlink, and metadata-only tasks do not consume byte reservations.
+- Failed copy paths remove partial temporary outputs immediately.
 
 ## Validation
 

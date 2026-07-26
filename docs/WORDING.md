@@ -69,7 +69,7 @@ Keep documentation, comments, and messages short, simple, and concise. Break lon
 
 | Avoid (Passive / Wordy) | Prefer (Short / Direct Active Voice) |
 |---|---|
-| `CollectCommitJobs` is performed by the `CommitArchive` task. | The `CommitArchive` task collects commit jobs. |
+| `CollectCommitJobs` is performed by the `FinishArchive` task. | The `FinishArchive` task collects commit jobs. |
 | Successful checks are carried into the integrity pass. | The integrity pass receives successful checks. |
 | This implementation is split into six code stages. | Six code stages make up this design. |
 | Task runs are wrapped with `catch_unwind` in order to handle panics. | The runner wraps task runs with `catch_unwind` to handle panics. |

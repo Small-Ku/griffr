@@ -67,7 +67,7 @@ Stable dependency tokens let a later expansion depend on a node installed by an 
 Dynamic nodes are now reserved for work that is truly parallel or has external token dependencies:
 
 - reuse probing fans out across source volumes;
-- archive planning creates patch probes, range fetches, extraction shards, retention work, and commit batches;
+- archive planning creates patch probes, range fetches, extraction shards, retention work, and a final archive node;
 - patch apply creates an entry DAG with base-consumer ordering;
 - cleanup waits for package-part tokens installed by earlier expansions.
 
@@ -102,7 +102,8 @@ struct ResourceRequest {
     write_volumes: Vec<VolumeId>,
     metadata_volumes: Vec<VolumeId>,
     extract: bool,
-    mutation_root: Option<PathId>,
+    mutation_paths: Vec<PathId>,
+    storage_reservations: Vec<(VolumeId, Path, Bytes)>,
     estimated_bytes: u64,
     reuse_probe: bool,
     reuse_commit: bool,
@@ -142,7 +143,11 @@ Reads, writes, and metadata steps are keyed by stable physical-volume identity. 
 - `streaming_pressure_limit`;
 - `streaming_mode`: `Mixed` or `Exclusive`.
 
-Install-root mutation additionally uses a path permit, so commit, patch, delete, hardlink, and cleanup tasks cannot mutate the same target concurrently.
+Install-root mutation additionally uses path permits, so commit, patch, delete, hardlink, and cleanup tasks cannot mutate the same target concurrently.
+
+Known-size writers also declare their peak additional allocation per physical volume. The first writer on a volume is always admitted: its own `FILE_ALLOCATION_INFO` preallocation remains the authoritative space check, so the scheduler never recreates an install-wide size estimate. While that writer is active, later writers are admitted only when the current free space can cover the active reservation plus the new task's declared peak. If the platform cannot provide a live free-space value, admission fails open and the writer's normal allocation/write error remains authoritative. This prevents several large outputs from starting against the same free bytes while allowing verify, delete, base release, and metadata-only work to proceed.
+
+Reservations cover download remainders, range-cache files, reuse copies, extraction outputs, retained archive parts, patch preparation relocation, cross-volume commits, and local/HDiff patch outputs. Composite tasks declare the total output that can coexist during that task. Reservations are released when the task finishes; persistent output usage is observed through the next live free-space query. The queue takes one free-space snapshot per relevant volume for each scheduling pass, rather than querying once per candidate task.
 
 The graph does not encode these capacity constraints as edges. Doing so would make the graph machine-specific and would serialize work unnecessarily. The graph expresses correctness ordering; admission expresses current hardware capacity.
 
@@ -222,21 +227,23 @@ OpenArchive(Remote | Local)
      |- patch probes / relocation measurement
      |- extraction-critical range fetches
      `- SavePatchPlan when required
-        `-> ExtractArchiveShard * N
 
-  -> Ephemeral:
-       extraction shards -> CommitArchive
-  -> KeepFullVolumes:
-       last reader of each volume -> RetainArchiveVolume(N)
-          -> [background gap fetches]
-          -> reconstruct + package MD5 verify + promote
-       all retained volumes ---------------------> CommitArchive
-
-  -> CommitArchive
-       -> CommitArchiveBatch * B
-          (commit each file + verify final destination)
-       -> FinishArchiveCommit
+  -> ordinary full archive:
+       ExtractArchiveShard * N
+         -> ordinary entry temp file
+         -> ZIP CRC + size/MD5 verification
+         -> atomic destination replace immediately
+       ExtractArchiveShard(control) -> private staging only
+       [RetainArchiveVolume(N) after each volume's last reader]
+       -> FinishArchive (commit deferred controls only)
        -> VFS/delete follow-up
+       -> CleanupArchive
+
+  -> patch archive:
+       ExtractArchiveShard * N -> staged patch/control payloads
+       [RetainArchiveVolume(N) after each volume's last reader]
+       -> FinishArchive
+       -> persisted patch entry DAG
        -> CleanupArchive
 ```
 
@@ -246,8 +253,8 @@ The structural node reduction, excluding actual transfer and extraction work, is
 
 - every linear `then` transition adds zero nodes instead of one;
 - full-volume retention uses `N` nodes instead of `2N + 1` (`fill`, `save`, and one global ready barrier);
-- normal commit adds `B` batch nodes instead of `2B + 1` (`batch`, separate verification, and finish);
-- the zero-shard and nonzero-shard planners use the same retention/commit builder.
+- ordinary full archives add no commit-batch nodes: the extraction shard is already the verified writer, and `FinishArchive` only joins the finished shards/retention nodes before follow-up;
+- the zero-shard and nonzero-shard planners use the same retention/finish builder.
 
 `MultiVolumeLayout` maps one logical ZIP address space onto remote package volumes, retained local parts, and small cached range files. `MultiVolumeStream` implements `Read + Seek` over whichever backing segment contains the requested offset. The same EOCD, ZIP64, central-directory, and extraction code therefore serves retained local archives, production HTTP Range installs, and the ignored official sample test.
 
@@ -266,44 +273,42 @@ Extraction shards preserve release frontiers and carry explicit entry lists. The
 
 ```text
 Fetch range 001:A ----|
-Fetch range 002:B ----+-> Extract shard A --|
-                                            |
-Fetch range 017:C ------> Extract shard B --+-> CommitArchive
-                                            |
-Fetch range 038:D ----|                     |
-Fetch range 039:E ----+-> Extract shard C --|
+Fetch range 002:B ----+-> Extract shard A -> verify/commit entries --|
+                                                               |
+Fetch range 017:C ------> Extract shard B -> verify/commit entries --+-> FinishArchive
+                                                               |
+Fetch range 038:D ----|                                        |
+Fetch range 039:E ----+-> Extract shard C -> verify/commit entries --|
 ```
 
-Each regular entry in the target `game_files` manifest is verified while written to staging:
+Each regular full-package entry extracts to temporary storage, verifies size and MD5, and atomically replaces its target destination. Controls such as `delete_files.txt` extract to private staging; `FinishArchive` commits controls after all payload shards succeed, removes private staging, and releases archive resources.
 
-1. Decompression finishes and the ZIP CRC check passes;
-2. Written size matches the manifest size;
-3. Written MD5 matches the target file MD5;
-4. Mismatching staged files are deleted and the archive range cache is invalidated;
-5. Invalid cache data is removed after all graph references release the archive work.
+Full packages use a path-ownership set: paths assigned to VFS or launcher metadata tasks are omitted from the extraction plan so VFS or metadata tasks remain sole writers. Launcher metadata (`config.ini`, `game_files`, `package_files`) syncs only after final game-file verification, with `config.ini` committed last. Patch packages cannot omit entries; overlapping VFS tasks depend on patch archive roots.
 
-Patch/control payloads not appearing in `game_files` are validated by ZIP CRC, patch step verification, and the command-level integrity DAG.
+### Final-file outcomes
 
-Patch archive commit expands into dynamic entry DAG tasks after extraction. For exact entry-level dependency graphs, base consumer releases, and forward-only recovery rules, see [`DESIGN_patch_steps.md`](DESIGN_patch_steps.md).
+All file writers use artifact commit helpers in `runtime/task_pool/fs_ops/artifact.rs`:
 
-A normal archive commit expands after staging. `CommitArchive` collects jobs and groups them by source volume, destination volume, and destination parent. Cross-volume batches target about 384 MiB; same-volume moves stay metadata-oriented and split only by file-count bounds. Each `CommitArchiveBatch` commits and immediately re-reads each final destination against `game_files`; a mismatch fails the batch before later follow-up. After all batches finish, `ExpandThen` resumes the original commit node as `FinishArchiveCommit`. The scheduler admits at most one same-volume metadata batch or three cross-volume copy batches per destination volume.
+- `commit_observed_artifact`: Inline writers pass write-time digests without re-reading source files.
+- `commit_verified_artifact`: Staged payloads and HDiff outputs validate private sources before replacement and validate final paths after cross-volume copies.
+- `TaskOutcome::Committed { proof }`: Carries `ArtifactProof` for written files. `TaskOutcome::Verified` is for read-only checks.
 
-Install and update build one command graph for archive and VFS file work. Full packages use an explicit path-ownership set: paths assigned to VFS tasks still extract to private staging, but are omitted from archive commit, so VFS is the only final writer and runs as an independent root. Patch packages cannot omit an entry without changing patch/delete semantics; overlapping VFS tasks therefore depend on every patch archive root, while VFS-only paths run immediately. The fallback integrity planner receives successful commit-batch verification outcomes and removes already-verified manifest entries instead of reading them again.
+Final integrity passes use `ArtifactProof` to skip re-verifying unmodified target files.
 
-Mutation barriers remain strict during network/extraction overlap:
+Mutation barriers remain strict:
 
-1. Patch and delete controls are parsed before staging work starts;
-2. Patch output/base MD5 probes and relocation-size measurement run as independent check nodes while extraction-critical range fetches may start in parallel;
-3. `SavePatchPlan` joins those probes, replays the full planning rules through the batch-local verification cache, and remains a dependency of every extraction shard;
-4. Every extraction shard must succeed before archive commit;
-5. Ephemeral retention releases cached ranges after their final dependent shard finishes;
-6. Full-volume retention gives each volume one `RetainArchiveVolume(N)` node after only the extraction shards that read that volume;
-7. That node fetches uncovered intervals at background archive priority, resumes itself, reconstructs the part, verifies package MD5, and atomically promotes the `.zip.NNN` file;
-8. One retention writer per physical volume may run at a time, and a saved volume releases only its own cached ranges while unfinished volumes remain protected;
-9. `CommitArchive` depends directly on every required retention node; no all-volume ready barrier is needed;
-10. Each commit batch verifies its final destinations before the original commit node resumes for follow-up;
-11. VFS/delete follow-up and cache cleanup remain downstream of commit;
-12. The command-level integrity DAG verifies the final installation.
+1. Parse patch and delete controls before extraction starts;
+2. Run patch base MD5 probes and size checks in parallel with range fetches;
+3. `SavePatchPlan` joins probes and runs before patch extraction shards;
+4. Extraction shards own target paths to prevent concurrent writes;
+5. Files replace target destinations only after size and MD5 verification succeeds;
+6. Every shard finishes before archive finish and follow-up work;
+7. Ephemeral retention releases range data after dependent shards finish;
+8. Full-volume retention gives each volume a `RetainArchiveVolume(N)` node after its last extraction shard;
+9. Volume retention nodes fetch missing ranges, verify package MD5, and promote `.zip.NNN` files;
+10. Limit physical volume retention writes to one per volume at a time;
+11. `FinishArchive` waits for all shards and volume retention nodes before publishing controls;
+12. Run VFS/delete follow-up downstream of `FinishArchive`, syncing launcher metadata after game-file verification and committing `config.ini` last.
 
 `ArchiveRetention` is the single policy switch across full-volume and range downloads:
 
@@ -387,7 +392,7 @@ DAG nodes represent meaningful restartable work:
 - one archive volume;
 - one file check, repair, or write;
 - one extraction shard;
-- one archive commit or manifest mutation.
+- one archive finish node or manifest mutation.
 
 Network chunks, read buffers, and individual hashing blocks are intentionally not nodes. Fine-grained byte processing stays inside one runner to avoid millions of scheduler entries.
 
