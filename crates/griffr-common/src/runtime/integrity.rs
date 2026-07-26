@@ -10,9 +10,9 @@ use crate::runtime::task_pool::{
     TaskOutcome, TaskPoolConfig, TaskPoolRunner, TaskProgress, TransferClass,
 };
 use crate::runtime::{
-    build_cdn_file_url, files_base_url, is_install_change_path, is_launcher_metadata_path,
-    normalize_logical_path, ArtifactProof, FileIssue, PathOutcomeTracker, ProgressLane,
-    ProgressSender,
+    build_cdn_file_url, files_base_url, griffr_archives_path, is_griffr_private_path,
+    is_launcher_metadata_path, normalize_logical_path, ArtifactProof, FileIssue,
+    PathOutcomeTracker, ProgressLane, ProgressSender,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -173,12 +173,12 @@ pub async fn run_integrity_pool(
             .await?;
         if let Some(entry) = entries
             .iter()
-            .find(|entry| is_install_change_path(Path::new(&entry.path)))
+            .find(|entry| is_griffr_private_path(Path::new(&entry.path)))
         {
             return Err(Error::Message {
                 context: "Integrity error: ",
                 detail: format!(
-                    "Target manifest cannot own private install change path {}",
+                    "Target manifest cannot own private Griffr path {}",
                     entry.path
                 ),
             });
@@ -192,7 +192,7 @@ pub async fn run_integrity_pool(
         remove_already_verified_entries(&mut entries, install_path, verified_artifacts);
         remove_entries_owned_by_extra_tasks(&mut entries, install_path, &extra_target_paths);
         let archive_groups = (repair && !pkg.packs.is_empty())
-            .then(|| plan_archive_groups(&pkg.packs, &install_path.join("downloads")))
+            .then(|| plan_archive_groups(&pkg.packs, &griffr_archives_path(install_path)))
             .transpose()?
             .filter(|groups| !groups.is_empty());
         (

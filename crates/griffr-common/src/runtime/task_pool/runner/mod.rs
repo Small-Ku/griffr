@@ -197,9 +197,8 @@ fn run_apply_patch_manifest(
     install_root: std::path::PathBuf,
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskRun {
-    let plan_path = install_root
-        .join(crate::runtime::PATCH_WORK_DIR)
-        .join(crate::runtime::PATCH_PLAN_NAME);
+    let plan_path =
+        crate::runtime::griffr_patch_path(&install_root).join(crate::runtime::PATCH_PLAN_NAME);
     let has_patch_plan = plan_path.is_file();
     let result = if has_patch_plan {
         let mut on_commit = |path: &std::path::Path, finished: usize, total: usize| {

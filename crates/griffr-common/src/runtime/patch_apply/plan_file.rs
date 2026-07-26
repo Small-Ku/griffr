@@ -2,11 +2,12 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 
-use super::{PatchPlan, PATCH_PLAN_NAME, PATCH_WORK_DIR};
+use super::{PatchPlan, PATCH_PLAN_NAME};
+use crate::runtime::griffr_patch_path;
 
 pub(crate) fn write_patch_plan(plan: &PatchPlan) -> Result<()> {
     plan.validate()?;
-    let patch_dir = plan.install_root.join(PATCH_WORK_DIR);
+    let patch_dir = griffr_patch_path(&plan.install_root);
     std::fs::create_dir_all(&patch_dir).map_err(|source| Error::IoAt {
         action: "create directory",
         path: patch_dir.clone(),
@@ -18,7 +19,7 @@ pub(crate) fn write_patch_plan(plan: &PatchPlan) -> Result<()> {
 }
 
 pub(crate) fn read_patch_plan(install_root: &Path) -> Result<PatchPlan> {
-    let path = install_root.join(PATCH_WORK_DIR).join(PATCH_PLAN_NAME);
+    let path = griffr_patch_path(install_root).join(PATCH_PLAN_NAME);
     let plan: PatchPlan =
         serde_json::from_slice(&std::fs::read(&path).map_err(|source| Error::IoAt {
             action: "open file",

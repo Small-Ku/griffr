@@ -5,13 +5,13 @@ use crate::error::{Error, Result};
 use crate::runtime::task_pool::fs_ops::path_safety::parse_safe_relative_path;
 use crate::runtime::task_pool::verify::build_issue;
 use crate::runtime::{
-    DELETE_FILES_MANIFEST_NAME, PATCH_DIFF_STAGE_DIR, PATCH_FILES_STAGE_DIR, PATCH_MANIFEST_NAME,
-    PATCH_STAGE_DIR,
+    griffr_patch_path, DELETE_FILES_MANIFEST_NAME, PATCH_DIFF_STAGE_DIR, PATCH_FILES_STAGE_DIR,
+    PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
 };
 
 use super::{
     read_patch_plan, read_predownload_stage_metadata, PlannedPatchSource, PATCH_DEFERRED_DIR,
-    PATCH_PLAN_NAME, PATCH_WORK_DIR, PREDOWNLOAD_STAGE_METADATA_NAME,
+    PATCH_PLAN_NAME, PREDOWNLOAD_STAGE_METADATA_NAME,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +95,7 @@ fn entry_is_recoverable(
 /// rebuild its plan and replay archive ranges. Files already committed to the
 /// install remain in place and will be recognized as valid by the next plan.
 pub fn discard_incomplete_patch_apply(install_root: &Path) -> Result<()> {
-    let plan_path = install_root.join(PATCH_WORK_DIR).join(PATCH_PLAN_NAME);
+    let plan_path = griffr_patch_path(install_root).join(PATCH_PLAN_NAME);
     if !plan_path.is_file() {
         return Ok(());
     }
@@ -107,7 +107,7 @@ pub fn discard_incomplete_patch_apply(install_root: &Path) -> Result<()> {
             source,
         })?;
     }
-    let patch_root = install_root.join(PATCH_WORK_DIR);
+    let patch_root = griffr_patch_path(install_root);
     if patch_root.exists() {
         std::fs::remove_dir_all(&patch_root).map_err(|source| Error::IoAt {
             action: "remove file or directory",
@@ -125,9 +125,9 @@ pub fn get_patch_recovery_state(
     let manifest_path = install_root.join(PATCH_MANIFEST_NAME);
     let stage_root = install_root.join(PATCH_STAGE_DIR);
     let delete_manifest = install_root.join(DELETE_FILES_MANIFEST_NAME);
-    let deferred = install_root.join(PATCH_WORK_DIR).join(PATCH_DEFERRED_DIR);
+    let deferred = griffr_patch_path(install_root).join(PATCH_DEFERRED_DIR);
 
-    let plan_path = install_root.join(PATCH_WORK_DIR).join(PATCH_PLAN_NAME);
+    let plan_path = griffr_patch_path(install_root).join(PATCH_PLAN_NAME);
     if plan_path.is_file() {
         let plan = read_patch_plan(install_root)?;
         let missing_entry_source = plan.entries.iter().any(|entry| match &entry.source {
@@ -166,7 +166,7 @@ pub fn get_patch_recovery_state(
                         || build_issue(base, &entry.name, base_md5, Some(*base_size)).is_some())
             }
         });
-        let private_deferred_root = install_root.join(PATCH_WORK_DIR).join(PATCH_DEFERRED_DIR);
+        let private_deferred_root = griffr_patch_path(install_root).join(PATCH_DEFERRED_DIR);
         let missing_deferred = plan.deferred_paths.iter().any(|relative| {
             !plan.stage_root.join(relative).is_file()
                 && !private_deferred_root.join(relative).is_file()
@@ -320,6 +320,9 @@ mod tests {
         std::fs::create_dir_all(&stage_root).unwrap();
         std::fs::write(&destination, b"committed").unwrap();
         std::fs::write(stage_root.join("partial.patch"), b"partial").unwrap();
+        let predownload = crate::runtime::griffr_predownload_path(&install_root).join("1.0-1.1");
+        std::fs::create_dir_all(&predownload).unwrap();
+        std::fs::write(predownload.join("part.zip.001"), b"cached").unwrap();
 
         let plan = PatchPlan {
             schema_version: PatchPlan::SCHEMA_VERSION,
@@ -344,6 +347,10 @@ mod tests {
 
         assert_eq!(std::fs::read(destination).unwrap(), b"committed");
         assert!(!stage_root.exists());
-        assert!(!install_root.join(PATCH_WORK_DIR).exists());
+        assert!(!griffr_patch_path(&install_root).exists());
+        assert_eq!(
+            std::fs::read(predownload.join("part.zip.001")).unwrap(),
+            b"cached"
+        );
     }
 }

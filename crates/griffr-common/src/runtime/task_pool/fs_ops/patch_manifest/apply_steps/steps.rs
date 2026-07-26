@@ -4,10 +4,9 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 use crate::runtime::patch_apply::{
     entry_wave_indices, PatchPlan, PlannedPatchEntry, PlannedPatchSource, PATCH_DEFERRED_DIR,
-    PATCH_WORK_DIR,
 };
 use crate::runtime::task_pool::verify::VerifiedArtifactCache;
-use crate::runtime::{ArtifactExpectation, ArtifactProof, ArtifactSource};
+use crate::runtime::{griffr_patch_path, ArtifactExpectation, ArtifactProof, ArtifactSource};
 
 use super::super::super::artifact::{
     commit_unchecked_artifact, commit_verified_artifact, verify_artifact,
@@ -229,10 +228,7 @@ pub(super) fn apply_remaining_deletes(
 }
 
 pub(super) fn commit_deferred_files(plan: &PatchPlan) -> Result<()> {
-    let deferred_root = plan
-        .install_root
-        .join(PATCH_WORK_DIR)
-        .join(PATCH_DEFERRED_DIR);
+    let deferred_root = griffr_patch_path(&plan.install_root).join(PATCH_DEFERRED_DIR);
     for relative in &plan.deferred_paths {
         let source = deferred_root.join(relative);
         if !source.is_file() {
@@ -268,8 +264,8 @@ pub(super) fn cleanup_staging(plan: &PatchPlan) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn remove_patch_work_dir(plan: &PatchPlan) -> Result<()> {
-    let patch_root = plan.install_root.join(PATCH_WORK_DIR);
+pub(super) fn remove_patch_state_dir(plan: &PatchPlan) -> Result<()> {
+    let patch_root = griffr_patch_path(&plan.install_root);
     if patch_root.exists() {
         std::fs::remove_dir_all(&patch_root).map_err(|source| Error::IoAt {
             action: "remove file or directory",

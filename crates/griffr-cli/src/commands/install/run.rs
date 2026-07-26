@@ -9,10 +9,11 @@ use griffr_common::runtime::task_pool::{
     TaskGraphBuilder, TaskOutcome, TaskPoolRunner, TaskProgress,
 };
 use griffr_common::runtime::{
-    directory_has_entries, ensure_game_files_with_pool, finish_install_change, plan_vfs_tasks,
-    read_install_change, resolve_file_reuse_sources, run_integrity_pool, start_install_change,
-    streaming_assets_path, sync_launcher_metadata, FileReuseConfig, InstallChangeKind,
-    InstallChangeSource, InstallChangeStart, InstallChangeState, ProgressLane, VfsFilePlanOptions,
+    directory_has_entries, ensure_game_files_with_pool, finish_install_change,
+    griffr_archives_path, plan_vfs_tasks, read_install_change, resolve_file_reuse_sources,
+    run_integrity_pool, start_install_change, streaming_assets_path, sync_launcher_metadata,
+    FileReuseConfig, InstallChangeKind, InstallChangeSource, InstallChangeStart,
+    InstallChangeState, ProgressLane, VfsFilePlanOptions,
 };
 
 use crate::commands::archive_graph::{add_file_tasks, full_archive_excluded_paths};
@@ -267,7 +268,7 @@ pub async fn install(
     let mut already_verified_paths = Vec::new();
     if reuse_paths.is_empty() {
         ui::print_phase("Downloading and extracting archives");
-        let download_dir = install_path.join("downloads");
+        let download_dir = griffr_archives_path(&install_path);
         compio::fs::create_dir_all(&download_dir)
             .await
             .with_context(|| format!("Failed to create {}", download_dir.display()))?;

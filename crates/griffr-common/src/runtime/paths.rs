@@ -2,6 +2,11 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 
+pub const GRIFFR_DIR: &str = ".griffr";
+pub const GRIFFR_ARCHIVES_DIR: &str = "archives";
+pub const GRIFFR_PATCH_DIR: &str = "patch";
+pub const GRIFFR_PREDOWNLOAD_DIR: &str = "predownload";
+
 pub const CONFIG_INI_NAME: &str = "config.ini";
 pub const GAME_FILES_NAME: &str = "game_files";
 pub const PACKAGE_FILES_NAME: &str = "package_files";
@@ -31,6 +36,33 @@ impl ResourceManifestKind {
             Self::Pref => "pref",
         }
     }
+}
+
+pub fn griffr_path(install_root: &Path) -> std::path::PathBuf {
+    install_root.join(GRIFFR_DIR)
+}
+
+pub fn griffr_archives_path(install_root: &Path) -> std::path::PathBuf {
+    griffr_path(install_root).join(GRIFFR_ARCHIVES_DIR)
+}
+
+pub fn griffr_patch_path(install_root: &Path) -> std::path::PathBuf {
+    griffr_path(install_root).join(GRIFFR_PATCH_DIR)
+}
+
+pub fn griffr_predownload_path(install_root: &Path) -> std::path::PathBuf {
+    griffr_path(install_root).join(GRIFFR_PREDOWNLOAD_DIR)
+}
+
+/// Return whether a relative path belongs to Griffr's private install
+/// namespace. Comparison is separator- and ASCII-case-insensitive so Windows
+/// paths cannot bypass the guard with alternate spelling.
+pub fn is_griffr_private_path(path: &Path) -> bool {
+    let normalized = normalize_logical_path(&path.to_string_lossy());
+    normalized == GRIFFR_DIR
+        || normalized
+            .strip_prefix(GRIFFR_DIR)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 pub fn resource_manifest_filename(kind: ResourceManifestKind, resource_name: &str) -> String {
@@ -139,9 +171,12 @@ fn nibble_to_hex(nibble: u8) -> char {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
-        build_cdn_file_url, files_base_url, is_launcher_metadata_path, launcher_metadata_url,
-        normalize_logical_path, GAME_FILES_NAME,
+        build_cdn_file_url, files_base_url, griffr_archives_path, griffr_patch_path, griffr_path,
+        griffr_predownload_path, is_griffr_private_path, is_launcher_metadata_path,
+        launcher_metadata_url, normalize_logical_path, GAME_FILES_NAME,
     };
 
     #[test]
@@ -151,6 +186,38 @@ mod tests {
             "endfield_data/streamingassets/foo"
         );
         assert_eq!(normalize_logical_path("/VFS/bar"), "vfs/bar");
+    }
+
+    #[test]
+    fn griffr_paths_share_one_private_root() {
+        let install = Path::new("game");
+        assert_eq!(griffr_path(install), install.join(".griffr"));
+        assert_eq!(
+            griffr_archives_path(install),
+            install.join(".griffr/archives")
+        );
+        assert_eq!(griffr_patch_path(install), install.join(".griffr/patch"));
+        assert_eq!(
+            griffr_predownload_path(install),
+            install.join(".griffr/predownload")
+        );
+    }
+
+    #[test]
+    fn private_namespace_match_is_case_and_separator_insensitive() {
+        assert!(is_griffr_private_path(Path::new(
+            ".GRIFFR\\PATCH\\PLAN.JSON"
+        )));
+        assert!(is_griffr_private_path(Path::new(
+            "./.griffr/predownload/1.0-1.1"
+        )));
+        assert!(is_griffr_private_path(Path::new(".griffr")));
+        assert!(!is_griffr_private_path(Path::new(
+            "data/.griffr/state.json"
+        )));
+        assert!(!is_griffr_private_path(Path::new(
+            ".griffr-other/state.json"
+        )));
     }
 
     #[test]

@@ -38,9 +38,9 @@ pub use files::vfs::{
     PersistentVfsResult, VfsFilePlanOptions, VfsTaskPlan, VfsUpdateResult,
 };
 pub use install_change::{
-    ensure_install_ready, finish_install_change, is_install_change_path, read_install_change,
-    start_install_change, InstallChangeKind, InstallChangeSource, InstallChangeStart,
-    InstallChangeState, INSTALL_CHANGE_DIR, INSTALL_CHANGE_STATE_NAME,
+    ensure_install_ready, finish_install_change, read_install_change, start_install_change,
+    InstallChangeKind, InstallChangeSource, InstallChangeStart, InstallChangeState,
+    INSTALL_CHANGE_STATE_NAME,
 };
 pub use integrity::{run_integrity_pool, IntegrityRunSummary, IntegritySelection};
 pub use issues::{FileIssue, FileIssueKind};
@@ -56,17 +56,19 @@ pub use patch_apply::{
     write_predownload_stage_metadata, PatchApplyOptions, PatchCheckReport, PatchPlan,
     PatchRecoveryState, PatchStorageLayout, PlannedPatchEntry, PlannedPatchSource,
     PredownloadStageMetadata, StagedArchivePart, PATCH_DEFERRED_DIR, PATCH_PLAN_NAME,
-    PATCH_STORAGE_METADATA_NAME, PATCH_WORK_DIR, PREDOWNLOAD_STAGE_METADATA_NAME,
+    PATCH_STORAGE_METADATA_NAME, PREDOWNLOAD_STAGE_METADATA_NAME,
 };
 pub(crate) use patch_apply::{
     build_patch_plan_with_probe_cache, entry_dependency_indices, entry_wave_indices,
     plan_patch_probes, write_patch_plan, PatchArtifactProbe, PatchProbePlan,
 };
 pub use paths::{
-    build_cdn_file_url, files_base_url, is_launcher_metadata_path, launcher_metadata_url,
-    normalize_logical_path, persistent_path, resource_manifest_filename, resource_manifest_url,
-    streaming_assets_path, vfs_path, ResourceManifestKind, CDN_FILES_DIR, CONFIG_INI_NAME,
-    DELETE_FILES_MANIFEST_NAME, GAME_FILES_NAME, PACKAGE_FILES_NAME, PATCH_DIFF_STAGE_DIR,
+    build_cdn_file_url, files_base_url, griffr_archives_path, griffr_patch_path, griffr_path,
+    griffr_predownload_path, is_griffr_private_path, is_launcher_metadata_path,
+    launcher_metadata_url, normalize_logical_path, persistent_path, resource_manifest_filename,
+    resource_manifest_url, streaming_assets_path, vfs_path, ResourceManifestKind, CDN_FILES_DIR,
+    CONFIG_INI_NAME, DELETE_FILES_MANIFEST_NAME, GAME_FILES_NAME, GRIFFR_ARCHIVES_DIR, GRIFFR_DIR,
+    GRIFFR_PATCH_DIR, GRIFFR_PREDOWNLOAD_DIR, PACKAGE_FILES_NAME, PATCH_DIFF_STAGE_DIR,
     PATCH_FILES_STAGE_DIR, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR, PERSISTENT_DIR,
     RESOURCE_GROUP_BASE, RESOURCE_GROUP_MAIN, STREAMING_ASSETS_DIR, VFS_DIR,
 };

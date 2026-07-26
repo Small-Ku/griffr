@@ -9,7 +9,7 @@ use crate::api::types::GameFileEntry;
 use crate::api::ApiClient;
 use crate::runtime::task_pool::{FileEnsureTask, Task, TransferClass};
 use crate::runtime::{
-    build_cdn_file_url, files_base_url, is_install_change_path, is_launcher_metadata_path,
+    build_cdn_file_url, files_base_url, is_griffr_private_path, is_launcher_metadata_path,
     path_is_file, PathOutcomeTracker, ProgressLane, ProgressSender,
 };
 
@@ -33,12 +33,12 @@ pub async fn ensure_game_files_with_pool(
         })?;
     if let Some(entry) = manifest
         .iter()
-        .find(|entry| is_install_change_path(Path::new(&entry.path)))
+        .find(|entry| is_griffr_private_path(Path::new(&entry.path)))
     {
         return Err(Error::Message {
             context: "File reuse planning error: ",
             detail: format!(
-                "Target manifest cannot own private install change path {}",
+                "Target manifest cannot own private Griffr path {}",
                 entry.path
             ),
         });

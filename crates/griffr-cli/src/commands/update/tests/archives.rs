@@ -93,7 +93,7 @@ fn start_test_http_channel(
 async fn download_and_extract_archives_recovers_partial_part_on_rerun() {
     let tmp = tempdir().unwrap();
     let install_path = tmp.path().join("install");
-    let download_dir = install_path.join("downloads");
+    let download_dir = griffr_common::runtime::griffr_archives_path(&install_path);
     std::fs::create_dir_all(&download_dir).unwrap();
     std::fs::create_dir_all(&install_path).unwrap();
 

@@ -9,7 +9,9 @@ use crate::runtime::task_pool::types::{
     ArchiveFileRepairTask, ArchiveRepairSession, ArchiveWork, PreparedArchiveRepairGroup, Task,
     WorkerEvent,
 };
-use crate::runtime::{ArtifactExpectation, ArtifactSource, PatchApplyOptions};
+use crate::runtime::{
+    griffr_archives_path, ArtifactExpectation, ArtifactSource, PatchApplyOptions,
+};
 
 use super::install::prepare_remote_archive_range_work;
 
@@ -18,7 +20,7 @@ pub(crate) fn start_archive_repair_index(session: Arc<ArchiveRepairSession>) -> 
         return Vec::new();
     }
 
-    let download_dir = session.install_root().join("downloads");
+    let download_dir = griffr_archives_path(session.install_root());
     if let Err(error) = std::fs::create_dir_all(&download_dir) {
         for group_index in 0..session.group_specs().len() {
             session.set_group_failed(group_index);
@@ -260,6 +262,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
+    use crate::runtime::griffr_archives_path;
     use crate::runtime::task_pool::types::{
         ArchivePart, ArchiveRepairGroupSpec, ArchiveRepairSession, Task,
     };
@@ -276,7 +279,7 @@ mod tests {
                 parts: vec![ArchivePart {
                     sequence: 1,
                     url: "https://example.invalid/bundle.zip.001".to_string(),
-                    dest: install_root.join("downloads/bundle.zip.001"),
+                    dest: griffr_archives_path(&install_root).join("bundle.zip.001"),
                     logical_path: "bundle.zip.001".to_string(),
                     expected_md5: "00".repeat(16),
                     expected_size: 16,

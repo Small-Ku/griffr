@@ -5,9 +5,10 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::{GetLatestGameResponse, PackFile, PrePatchInfo};
 use griffr_common::runtime::task_pool::{Task, TaskOutcome, TaskPoolRunner, TaskProgress};
 use griffr_common::runtime::{
-    get_patch_recovery_state, read_install_change, write_predownload_stage_metadata,
-    InstallChangeKind, PatchRecoveryState, PredownloadStageMetadata, ProgressLane,
-    StagedArchivePart, DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
+    get_patch_recovery_state, griffr_predownload_path, read_install_change,
+    write_predownload_stage_metadata, InstallChangeKind, PatchRecoveryState,
+    PredownloadStageMetadata, ProgressLane, StagedArchivePart, DELETE_FILES_MANIFEST_NAME,
+    PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
 };
 
 use crate::progress::{ArchiveProgress, CountAndByteProgress};
@@ -20,10 +21,7 @@ pub(crate) fn default_stage_dir(
     request_version: &str,
     target_version: &str,
 ) -> PathBuf {
-    install_path
-        .join("downloads")
-        .join("predownload")
-        .join(format!("{}-{}_file", request_version, target_version))
+    griffr_predownload_path(install_path).join(format!("{}-{}", request_version, target_version))
 }
 
 pub(crate) fn stage_dir_for_request(
@@ -396,4 +394,18 @@ pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
         "Local extracted patch state resumed; run update or verify --repair to finish the target check",
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_stage_dir;
+
+    #[test]
+    fn default_stage_dir_uses_private_predownload_root() {
+        let install = std::path::Path::new("game");
+        assert_eq!(
+            default_stage_dir(install, "1.0", "1.1"),
+            install.join(".griffr/predownload/1.0-1.1")
+        );
+    }
 }

@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn full_archive_commits_verified_entries_and_skips_owned_paths() {
     let tmp = tempdir().unwrap();
-    let source_dir = tmp.path().join("downloads");
+    let source_dir = crate::runtime::griffr_archives_path(tmp.path());
     let install_dir = tmp.path().join("install");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::create_dir_all(&install_dir).unwrap();
@@ -75,7 +75,7 @@ fn full_archive_commits_verified_entries_and_skips_owned_paths() {
 #[test]
 fn full_archive_applies_deferred_delete_after_payload_commits() {
     let tmp = tempdir().unwrap();
-    let source_dir = tmp.path().join("downloads");
+    let source_dir = crate::runtime::griffr_archives_path(tmp.path());
     let install_dir = tmp.path().join("install");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::create_dir_all(&install_dir).unwrap();
@@ -125,7 +125,7 @@ fn full_archive_applies_deferred_delete_after_payload_commits() {
 #[test]
 fn full_archive_keeps_earlier_commits_when_a_later_entry_fails() {
     let tmp = tempdir().unwrap();
-    let source_dir = tmp.path().join("downloads");
+    let source_dir = crate::runtime::griffr_archives_path(tmp.path());
     let install_dir = tmp.path().join("install");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::create_dir_all(&install_dir).unwrap();
@@ -200,7 +200,7 @@ fn full_archive_keeps_earlier_commits_when_a_later_entry_fails() {
 #[test]
 fn extract_task_spawns_vfs_patch_and_delete_manifest_follow_up_tasks() {
     let tmp = tempdir().unwrap();
-    let source_dir = tmp.path().join("downloads");
+    let source_dir = crate::runtime::griffr_archives_path(tmp.path());
     let install_dir = tmp.path().join("install");
     std::fs::create_dir_all(&source_dir).unwrap();
     std::fs::create_dir_all(install_dir.join("Endfield_Data/Plugins/x86_64")).unwrap();
@@ -324,7 +324,7 @@ fn extract_task_spawns_vfs_patch_and_delete_manifest_follow_up_tasks() {
 #[test]
 fn patch_archive_extracts_only_selected_payloads_and_direct_entries() {
     let tmp = tempdir().unwrap();
-    let source_dir = tmp.path().join("downloads");
+    let source_dir = crate::runtime::griffr_archives_path(tmp.path());
     let install_dir = tmp.path().join("install");
     let existing_vfs = install_dir.join("Arknights_Data/StreamingAssets/AB/Windows/ui/already.ab");
     std::fs::create_dir_all(existing_vfs.parent().unwrap()).unwrap();

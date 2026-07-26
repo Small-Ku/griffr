@@ -87,7 +87,7 @@ mod tests {
                 pack("https://cdn.example/other.zip"),
                 pack("https://cdn.example/game.zip.2"),
             ],
-            Path::new("downloads"),
+            Path::new(".griffr/archives"),
         )
         .unwrap();
 

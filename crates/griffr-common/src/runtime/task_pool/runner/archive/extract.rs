@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::download::extractor::{ArchiveExtractionShardPlan, ArchiveIndex, MultiVolumeExtractor};
 use crate::error::{Error, Result};
 use crate::runtime::{
-    build_patch_plan_with_probe_cache, is_install_change_path, plan_patch_probes, write_patch_plan,
+    build_patch_plan_with_probe_cache, is_griffr_private_path, plan_patch_probes, write_patch_plan,
     ArtifactExpectation, ArtifactSource, PatchPlan, PlannedPatchSource, DELETE_FILES_MANIFEST_NAME,
     PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
 };
@@ -137,12 +137,10 @@ fn full_archive_entry_groups(
             continue;
         }
         let normalized = crate::download::extractor::normalized_archive_name(name)?;
-        if is_install_change_path(Path::new(&normalized)) {
+        if is_griffr_private_path(Path::new(&normalized)) {
             return Err(Error::Message {
                 context: "Extraction error: ",
-                detail: format!(
-                    "Archive entry {normalized} uses the private install change namespace"
-                ),
+                detail: format!("Archive entry {normalized} uses the private Griffr namespace"),
             });
         }
         if !work
@@ -220,12 +218,10 @@ fn patch_archive_entry_groups(
             continue;
         }
         let normalized = crate::download::extractor::normalized_archive_name(name)?;
-        if is_install_change_path(Path::new(&normalized)) {
+        if is_griffr_private_path(Path::new(&normalized)) {
             return Err(Error::Message {
                 context: "Extraction error: ",
-                detail: format!(
-                    "Archive entry {normalized} uses the private install change namespace"
-                ),
+                detail: format!("Archive entry {normalized} uses the private Griffr namespace"),
             });
         }
         let lookup = normalized.to_ascii_lowercase();

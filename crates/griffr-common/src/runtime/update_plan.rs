@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use crate::api::types::GetLatestGameResponse;
 use crate::error::{Error, Result};
-use crate::runtime::{read_predownload_stage_metadata, PREDOWNLOAD_STAGE_METADATA_NAME};
+use crate::runtime::{
+    griffr_predownload_path, read_predownload_stage_metadata, PREDOWNLOAD_STAGE_METADATA_NAME,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdatePackageKind {
@@ -59,7 +61,7 @@ pub fn resolve_staged_patch_recovery_dir(
         return Ok((stage_dir.to_path_buf(), request_version));
     }
 
-    let root = install_path.join("downloads").join("predownload");
+    let root = griffr_predownload_path(install_path);
     let entries = std::fs::read_dir(&root).map_err(|source| Error::IoAt {
         action: "read directory",
         path: root.clone(),
@@ -261,7 +263,7 @@ mod tests {
     #[test]
     fn discovers_unique_staged_transition() {
         let temp = tempdir().unwrap();
-        let root = temp.path().join("downloads").join("predownload");
+        let root = griffr_predownload_path(temp.path());
         write_stage_metadata(&root.join("first"), "1.3.3", "1.4.4");
         write_stage_metadata(&root.join("second"), "1.4.4", "1.5.0");
 

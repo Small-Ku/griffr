@@ -17,7 +17,7 @@ use steps::ordered_entries;
 use steps::{
     apply_planned_entry, apply_remaining_deletes, cleanup_staging, commit_deferred_files,
     delete_unreferenced_paths_before_patch, entry_waves, final_output_paths,
-    release_base_if_unused, remove_patch_work_dir,
+    release_base_if_unused, remove_patch_state_dir,
 };
 
 pub(crate) fn prepare_patch_apply(
@@ -74,7 +74,7 @@ pub(crate) fn commit_deferred_patch_files(plan: &PatchPlan) -> Result<()> {
 
 pub(crate) fn clean_patch_apply(plan: &PatchPlan) -> Result<()> {
     cleanup_staging(plan)?;
-    remove_patch_work_dir(plan)
+    remove_patch_state_dir(plan)
 }
 
 pub(crate) fn run_patch_apply(
@@ -130,7 +130,7 @@ pub(crate) fn run_patch_apply(
     apply_remaining_deletes(plan, delete_callback)?;
     commit_deferred_files(plan)?;
     cleanup_staging(plan)?;
-    remove_patch_work_dir(plan)?;
+    remove_patch_state_dir(plan)?;
     Ok(proofs)
 }
 

@@ -1,6 +1,6 @@
 use super::*;
 use crate::runtime::task_pool::verify::{file_md5, VerifiedArtifactCache};
-use crate::runtime::{PlannedPatchEntry, PlannedPatchSource, PATCH_WORK_DIR};
+use crate::runtime::{griffr_patch_path, PlannedPatchEntry, PlannedPatchSource};
 use md5::Digest;
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
@@ -78,7 +78,7 @@ fn patch_apply_defers_version_marker_and_preserves_final_output() {
         b"version=2"
     );
     assert!(!stage_root.exists());
-    assert!(!install_root.join(PATCH_WORK_DIR).exists());
+    assert!(!griffr_patch_path(&install_root).exists());
 }
 
 #[test]

@@ -4,10 +4,12 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 use crate::runtime::patch_apply::{
-    write_patch_storage_layout, PatchPlan, PatchStorageLayout, PATCH_DEFERRED_DIR, PATCH_WORK_DIR,
+    write_patch_storage_layout, PatchPlan, PatchStorageLayout, PATCH_DEFERRED_DIR,
 };
 use crate::runtime::task_pool::verify::file_md5;
-use crate::runtime::{DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR};
+use crate::runtime::{
+    griffr_patch_path, DELETE_FILES_MANIFEST_NAME, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR,
+};
 
 use super::super::super::extract::{
     collect_staged_files, commit_file_jobs, move_path_replace_cross_volume, CommitFileJob,
@@ -233,8 +235,7 @@ pub(super) fn commit_top_level_files(
         .into_iter()
         .map(|(source, relative)| {
             let destination = if deferred.contains(&relative) {
-                plan.install_root
-                    .join(PATCH_WORK_DIR)
+                griffr_patch_path(&plan.install_root)
                     .join(PATCH_DEFERRED_DIR)
                     .join(&relative)
             } else {

@@ -9,7 +9,9 @@ use super::*;
 use crate::runtime::task_pool::fs_ops::{
     commit_observed_artifact, verify_artifact, write_atomic_bytes,
 };
-use crate::runtime::{ArtifactDigest, ArtifactExpectation, ArtifactSource};
+use crate::runtime::{
+    griffr_predownload_path, ArtifactDigest, ArtifactExpectation, ArtifactSource,
+};
 
 fn state(
     kind: InstallChangeKind,
@@ -30,23 +32,6 @@ fn state(
         vec!["fedcba9876543210fedcba9876543210".to_string()],
         true,
     )
-}
-
-#[test]
-fn private_namespace_match_is_case_and_separator_insensitive() {
-    assert!(is_install_change_path(Path::new(
-        ".GRIFFR-CHANGE\\STATE.JSON"
-    )));
-    assert!(is_install_change_path(Path::new(
-        "./.griffr-change/cache.bin"
-    )));
-    assert!(is_install_change_path(Path::new(".griffr-change")));
-    assert!(!is_install_change_path(Path::new(
-        "data/.griffr-change/state.json"
-    )));
-    assert!(!is_install_change_path(Path::new(
-        ".griffr-change-other/state.json"
-    )));
 }
 
 #[test]
@@ -354,11 +339,34 @@ fn atomic_marker_write_leaves_only_the_state_file() {
     );
     start_install_change(temp.path(), &requested).unwrap();
 
-    let entries = std::fs::read_dir(temp.path().join(INSTALL_CHANGE_DIR))
+    let entries = std::fs::read_dir(griffr_path(temp.path()))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     assert_eq!(entries, vec![INSTALL_CHANGE_STATE_NAME.to_string()]);
+}
+
+#[test]
+fn finish_removes_only_state_and_keeps_other_private_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let requested = state(
+        InstallChangeKind::Install,
+        InstallChangeSource::FullArchive,
+        None,
+        "1.1",
+    );
+    start_install_change(temp.path(), &requested).unwrap();
+    let predownload = griffr_predownload_path(temp.path()).join("1.0-1.1");
+    std::fs::create_dir_all(&predownload).unwrap();
+    std::fs::write(predownload.join("part.zip.001"), b"cached").unwrap();
+
+    finish_install_change(temp.path(), &requested).unwrap();
+
+    assert!(!InstallChangeState::state_path(temp.path()).exists());
+    assert_eq!(
+        std::fs::read(predownload.join("part.zip.001")).unwrap(),
+        b"cached"
+    );
 }
 
 const PROCESS_KILL_SCENARIO_ENV: &str = "GRIFFR_TEST_PROCESS_KILL_SCENARIO";
@@ -450,7 +458,7 @@ fn process_kill_during_first_marker_write_leaves_install_unmarked() {
         InstallChangeStart::New
     );
     finish_install_change(temp.path(), &requested).unwrap();
-    assert!(!temp.path().join(INSTALL_CHANGE_DIR).exists());
+    assert!(!griffr_path(temp.path()).exists());
 }
 
 #[test]
@@ -482,7 +490,7 @@ fn process_kill_during_marker_replace_keeps_previous_state() {
         Some(next.clone())
     );
     finish_install_change(temp.path(), &next).unwrap();
-    assert!(!temp.path().join(INSTALL_CHANGE_DIR).exists());
+    assert!(!griffr_path(temp.path()).exists());
 }
 
 #[test]

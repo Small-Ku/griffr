@@ -438,9 +438,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
         Task::CommitPatchDeferred { patch } => {
             let plan = patch.plan();
             let mut destination_totals = BTreeMap::<String, (PathBuf, u64)>::new();
-            let deferred_root = plan
-                .install_root
-                .join(crate::runtime::PATCH_WORK_DIR)
+            let deferred_root = crate::runtime::griffr_patch_path(&plan.install_root)
                 .join(crate::runtime::PATCH_DEFERRED_DIR);
             for relative in &plan.deferred_paths {
                 let source = deferred_root.join(relative);
@@ -465,7 +463,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
         }
         Task::CleanPatchApply { patch, archive: _ } => {
             let plan = patch.plan();
-            let patch_root = plan.install_root.join(crate::runtime::PATCH_WORK_DIR);
+            let patch_root = crate::runtime::griffr_patch_path(&plan.install_root);
             request.metadata_volumes.push(volume_key(&plan.stage_root));
             request.metadata_volumes.push(volume_key(&patch_root));
             request.mutation_paths.push(path_key(&plan.stage_root));
@@ -570,8 +568,7 @@ fn patch_prepare_commit_files(plan: &crate::runtime::PatchPlan) -> Vec<(PathBuf,
                 continue;
             }
             let destination = if deferred.contains(relative) {
-                plan.install_root
-                    .join(crate::runtime::PATCH_WORK_DIR)
+                crate::runtime::griffr_patch_path(&plan.install_root)
                     .join(crate::runtime::PATCH_DEFERRED_DIR)
                     .join(relative)
             } else {
@@ -896,7 +893,7 @@ mod tests {
     use crate::download::extractor::ArchiveRangeRequest;
     use crate::runtime::task_pool::types::{ArchiveRepairSession, DownloadResumeState};
     use crate::runtime::task_pool::{Task, TransferClass};
-    use crate::runtime::{PatchPlan, PATCH_DEFERRED_DIR, PATCH_STAGE_DIR, PATCH_WORK_DIR};
+    use crate::runtime::{griffr_patch_path, PatchPlan, PATCH_DEFERRED_DIR, PATCH_STAGE_DIR};
     use md5::{Digest, Md5};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -1082,8 +1079,7 @@ mod tests {
         assert_eq!(files.get(&install_root.join("top.bin")), Some(&4));
         assert_eq!(
             files.get(
-                &install_root
-                    .join(PATCH_WORK_DIR)
+                &griffr_patch_path(&install_root)
                     .join(PATCH_DEFERRED_DIR)
                     .join("config.ini")
             ),

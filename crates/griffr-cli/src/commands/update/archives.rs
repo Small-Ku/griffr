@@ -9,7 +9,9 @@ use griffr_common::runtime::task_pool::{
     plan_archive_groups, ArchiveRetention, ArchiveSource, Task, TaskGraphBuilder, TaskOutcome,
     TaskPoolRunner, TaskProgress,
 };
-use griffr_common::runtime::{ArtifactProof, PatchApplyOptions, ProgressLane};
+use griffr_common::runtime::{
+    griffr_archives_path, ArtifactProof, PatchApplyOptions, ProgressLane,
+};
 
 use super::*;
 use crate::commands::archive_graph::{
@@ -309,7 +311,7 @@ pub(super) async fn download_and_extract_archives(
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<ArchiveRunResult> {
-    let download_dir = install_path.join("downloads");
+    let download_dir = griffr_archives_path(install_path);
     download_and_extract_archives_from_dir(
         archives,
         &download_dir,

@@ -5,26 +5,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::runtime::paths::griffr_path;
 use crate::runtime::task_pool::fs_ops::write_atomic_bytes;
 
-pub const INSTALL_CHANGE_DIR: &str = ".griffr-change";
 pub const INSTALL_CHANGE_STATE_NAME: &str = "state.json";
-
-/// Return whether a relative path belongs to Griffr's private install-change
-/// namespace. Comparison is separator- and ASCII-case-insensitive so Windows
-/// paths cannot bypass the guard with alternate spelling.
-pub fn is_install_change_path(path: &Path) -> bool {
-    let normalized = path
-        .to_string_lossy()
-        .replace('\\', "/")
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .to_ascii_lowercase();
-    normalized == INSTALL_CHANGE_DIR
-        || normalized
-            .strip_prefix(INSTALL_CHANGE_DIR)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -123,9 +107,7 @@ impl InstallChangeState {
     }
 
     pub fn state_path(install_root: &Path) -> PathBuf {
-        install_root
-            .join(INSTALL_CHANGE_DIR)
-            .join(INSTALL_CHANGE_STATE_NAME)
+        griffr_path(install_root).join(INSTALL_CHANGE_STATE_NAME)
     }
 
     pub fn validate(&self) -> Result<()> {

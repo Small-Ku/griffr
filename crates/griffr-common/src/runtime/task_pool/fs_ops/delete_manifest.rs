@@ -2,7 +2,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-use crate::runtime::{is_install_change_path, DELETE_FILES_MANIFEST_NAME};
+use crate::runtime::{is_griffr_private_path, DELETE_FILES_MANIFEST_NAME};
 
 use super::path_safety::parse_safe_relative_path;
 
@@ -13,11 +13,11 @@ fn parse_delete_files_entry(line: &str) -> Result<Option<PathBuf>> {
     }
 
     let relative = parse_safe_relative_path(DELETE_FILES_MANIFEST_NAME, trimmed)?;
-    if is_install_change_path(&relative) {
+    if is_griffr_private_path(&relative) {
         return Err(Error::Message {
             context: "Configuration error: ",
             detail: format!(
-                "{} cannot delete private install change state {}",
+                "{} cannot delete private Griffr namespace {}",
                 DELETE_FILES_MANIFEST_NAME,
                 relative.display()
             ),
@@ -152,15 +152,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_delete_files_entry_rejects_install_change_state() {
-        let err = parse_delete_files_entry(".griffr-change/state.json").unwrap_err();
-        assert!(err.to_string().contains("private install change state"));
+    fn parse_delete_files_entry_rejects_griffr_state() {
+        let err = parse_delete_files_entry(".griffr/state.json").unwrap_err();
+        assert!(err.to_string().contains("private Griffr namespace"));
     }
 
     #[test]
     fn parse_delete_files_entry_rejects_case_changed_private_state() {
-        let err = parse_delete_files_entry(".GRIFFR-CHANGE\\STATE.JSON").unwrap_err();
-        assert!(err.to_string().contains("private install change state"));
+        let err = parse_delete_files_entry(".GRIFFR\\PATCH\\PLAN.JSON").unwrap_err();
+        assert!(err.to_string().contains("private Griffr namespace"));
     }
 
     #[compio::test]
