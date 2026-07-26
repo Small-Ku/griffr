@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use griffr_common::api::types::GetLatestGameResponse;
-use griffr_common::runtime::{selected_archive_plan, UpdatePackageKind};
+use griffr_common::runtime::{selected_archive_download, UpdatePackageKind};
 
 use crate::ui;
 
@@ -81,7 +81,7 @@ pub(super) fn build_update_dry_run_plan(
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
-    } else if let Some(plan) = selected_archive_plan(version_info, package_kind) {
+    } else if let Some(plan) = selected_archive_download(version_info, package_kind) {
         lines.push(format!(
             "Would process {} archive parts: {} declared parts ({})",
             plan.label,

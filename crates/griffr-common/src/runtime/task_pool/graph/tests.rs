@@ -27,9 +27,8 @@ impl GraphExpansion {
 }
 
 fn task(name: &str) -> Task {
-    Task::Hardlink {
-        src: PathBuf::from(format!("{name}.src")),
-        dest: PathBuf::from(name),
+    Task::ApplyDeleteManifest {
+        install_root: PathBuf::from(name),
     }
 }
 

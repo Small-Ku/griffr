@@ -161,8 +161,6 @@ impl TaskProgressReducer {
             WorkerEvent::Outcome(
                 super::super::types::TaskOutcome::ArchiveCheck { .. }
                 | super::super::types::TaskOutcome::Changed { .. }
-                | super::super::types::TaskOutcome::Hardlinked { .. }
-                | super::super::types::TaskOutcome::Copied { .. }
                 | super::super::types::TaskOutcome::Failed { .. },
             ) => {}
         }

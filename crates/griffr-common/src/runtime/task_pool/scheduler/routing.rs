@@ -347,7 +347,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                 }
             }
         }
-        Task::CommitArchive { work } => {
+        Task::FinishArchive { work } => {
             if let Some(prepared) = work
                 .prepared
                 .lock()
@@ -482,10 +482,6 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
         Task::ApplyDeleteManifest { install_root } => {
             request.metadata_volumes.push(volume_key(install_root));
             request.mutation_paths.push(path_key(install_root));
-        }
-        Task::Hardlink { dest, .. } => {
-            request.metadata_volumes.push(volume_key(dest));
-            request.mutation_paths.push(path_key(dest));
         }
         Task::RepairFile { .. } => {}
     }
@@ -722,7 +718,7 @@ fn task_estimated_bytes(task: &Task) -> u64 {
         | Task::ReadArchiveControls { .. }
         | Task::MeasurePatchRelocation { .. }
         | Task::SavePatchPlan { .. }
-        | Task::CommitArchive { .. }
+        | Task::FinishArchive { .. }
         | Task::PreparePatchApply { .. }
         | Task::ReleasePatchBase { .. }
         | Task::ApplyPatchDeletes { .. }
@@ -730,8 +726,7 @@ fn task_estimated_bytes(task: &Task) -> u64 {
         | Task::CleanPatchApply { .. }
         | Task::CleanupArchive { .. }
         | Task::ApplyExtractedVfsPatchManifest { .. }
-        | Task::ApplyDeleteManifest { .. }
-        | Task::Hardlink { .. } => 0,
+        | Task::ApplyDeleteManifest { .. } => 0,
     }
 }
 
@@ -746,7 +741,6 @@ fn run_class(task: &Task) -> RunClass {
         }
         Task::FetchArchiveRepairFile { .. }
         | Task::FetchArchiveRange { .. }
-        | Task::Hardlink { .. }
         | Task::ReuseFile { .. }
         | Task::ApplyDeleteManifest { .. } => RunClass::AsyncIo,
         Task::Verify { .. }
@@ -770,7 +764,7 @@ fn run_class(task: &Task) -> RunClass {
         | Task::SavePatchPlan { .. }
         | Task::ExtractArchiveShard { .. }
         | Task::RetainArchiveVolume { .. }
-        | Task::CommitArchive { .. }
+        | Task::FinishArchive { .. }
         | Task::PreparePatchApply { .. }
         | Task::ReleasePatchBase { .. }
         | Task::ApplyPatchDeletes { .. }
@@ -864,7 +858,7 @@ pub(super) fn task_path(task: &Task) -> String {
         | Task::ReadArchiveControls { work, .. }
         | Task::SavePatchPlan { work, .. }
         | Task::RetainArchiveVolume { work, .. }
-        | Task::CommitArchive { work }
+        | Task::FinishArchive { work }
         | Task::CleanupArchive { work } => work.base_name.clone(),
         Task::ExtractArchiveShard { shard } => shard.work.base_name.clone(),
         Task::FetchArchiveRange { work, request, .. } => format!(
@@ -890,7 +884,6 @@ pub(super) fn task_path(task: &Task) -> String {
         Task::CleanPatchApply { patch, .. } => patch.plan().stage_root.display().to_string(),
         Task::ApplyExtractedVfsPatchManifest { install_root }
         | Task::ApplyDeleteManifest { install_root } => install_root.display().to_string(),
-        Task::Hardlink { dest, .. } => dest.display().to_string(),
     }
 }
 
@@ -959,15 +952,9 @@ mod tests {
     }
 
     #[test]
-    fn hardlink_mutations_use_async_dispatcher_runtime() {
+    fn reuse_hardlink_uses_async_dispatcher_runtime() {
         let reuse = task_resources(&reuse_task(false));
         assert_eq!(reuse.run, RunClass::AsyncIo);
-
-        let hardlink = task_resources(&Task::Hardlink {
-            src: PathBuf::from("source.bin"),
-            dest: PathBuf::from("dest.bin"),
-        });
-        assert_eq!(hardlink.run, RunClass::AsyncIo);
     }
 
     #[test]

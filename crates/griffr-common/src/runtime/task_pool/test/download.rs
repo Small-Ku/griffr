@@ -54,13 +54,6 @@ fn ensure_file_can_relink_verified_target_when_prefer_reuse_enabled() {
 
     let result = run_tasks(tasks, TaskPoolConfig::default()).unwrap();
     assert!(
-        result
-            .outcomes
-            .iter()
-            .any(|e| matches!(e, TaskOutcome::Hardlinked { .. })),
-        "expected hardlink event when prefer_reuse is enabled"
-    );
-    assert!(
         result.outcomes.iter().any(|event| matches!(
             event,
             TaskOutcome::Committed { proof }

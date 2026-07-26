@@ -2,6 +2,8 @@ use std::fmt;
 
 use rapidhash::RapidHashMap as HashMap;
 
+use super::artifact::{ArtifactProof, ArtifactSource};
+
 /// Stable work family used to group frontend-neutral progress lanes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProgressScope {
@@ -192,6 +194,19 @@ impl PathOutcomeTracker {
     pub fn record_reused(&mut self, path: &str, method: PathReuseMethod) {
         self.outcomes
             .insert(path.to_string(), PathOutcome::VerifiedReused { method });
+    }
+
+    pub fn record_committed(&mut self, proof: &ArtifactProof) {
+        match proof.source() {
+            ArtifactSource::ReuseHardlink => {
+                self.record_reused(proof.logical_path(), PathReuseMethod::Hardlink);
+            }
+            ArtifactSource::ReuseCopy => {
+                self.record_reused(proof.logical_path(), PathReuseMethod::Copy);
+            }
+            _ => {}
+        }
+        self.record_verified(proof.logical_path(), true);
     }
 
     pub fn record_verified(&mut self, path: &str, ok: bool) {
@@ -404,5 +419,29 @@ mod tests {
             tracker.outcome("foo"),
             PathOutcome::VerifiedDownloaded { bytes: 7 }
         );
+    }
+
+    #[test]
+    fn committed_reuse_proof_records_reuse_and_verification_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("file.bin");
+        std::fs::write(&path, b"data").unwrap();
+        let proof = crate::runtime::ArtifactProof::from_verified_path(
+            &path,
+            crate::runtime::ArtifactExpectation::new("file.bin", "unused", Some(4)),
+            crate::runtime::ArtifactSource::ReuseCopy,
+        )
+        .unwrap();
+        let mut tracker = PathOutcomeTracker::new();
+
+        tracker.record_committed(&proof);
+
+        assert_eq!(
+            tracker.outcome("file.bin"),
+            PathOutcome::VerifiedReused {
+                method: PathReuseMethod::Copy
+            }
+        );
+        assert_eq!(tracker.summary().reused_files, 1);
     }
 }

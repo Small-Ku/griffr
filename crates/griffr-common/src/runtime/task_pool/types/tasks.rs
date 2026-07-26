@@ -466,7 +466,7 @@ pub enum Task {
         volume_index: usize,
     },
     #[doc(hidden)]
-    CommitArchive {
+    FinishArchive {
         work: Arc<ArchiveWork>,
     },
     #[doc(hidden)]
@@ -505,10 +505,6 @@ pub enum Task {
     },
     ApplyDeleteManifest {
         install_root: PathBuf,
-    },
-    Hardlink {
-        src: PathBuf,
-        dest: PathBuf,
     },
 }
 

@@ -11,8 +11,8 @@ use crate::runtime::task_pool::{
 };
 use crate::runtime::{
     build_cdn_file_url, files_base_url, is_install_change_path, is_launcher_metadata_path,
-    normalize_logical_path, ArtifactProof, FileIssue, PathOutcomeTracker, PathReuseMethod,
-    ProgressLane, ProgressSender,
+    normalize_logical_path, ArtifactProof, FileIssue, PathOutcomeTracker, ProgressLane,
+    ProgressSender,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -227,20 +227,6 @@ pub async fn run_integrity_pool(
         .filter_map(task_progress_path)
         .map(str::to_owned)
         .collect::<HashSet<_>>();
-    let mut target_logical_paths = HashMap::default();
-    for entry in &entries {
-        target_logical_paths.insert(
-            normalize_target_path(&install_path.join(&entry.path)),
-            entry.path.clone(),
-        );
-    }
-    for task in &extra_tasks {
-        if let (Some(target), Some(logical_path)) =
-            (task_target_path(task), task_progress_path(task))
-        {
-            target_logical_paths.insert(normalize_target_path(target), logical_path.to_string());
-        }
-    }
 
     let mut tasks = entries
         .iter()
@@ -324,8 +310,8 @@ pub async fn run_integrity_pool(
                 if !tracked_paths.contains(&path) && !extra_tracked_paths.contains(&path) {
                     continue;
                 }
+                outcomes.record_committed(&proof);
                 finished_paths.insert(path.clone());
-                outcomes.record_verified(&path, true);
                 if tracked_paths.contains(&path) {
                     issues_by_path.remove(&path);
                 }
@@ -334,18 +320,6 @@ pub async fn run_integrity_pool(
                 if tracked_paths.contains(&path) || extra_tracked_paths.contains(&path) =>
             {
                 outcomes.record_downloaded(&path, bytes);
-            }
-            TaskOutcome::Hardlinked { path } => {
-                if let Some(logical_path) = target_logical_paths.get(&normalize_target_path(&path))
-                {
-                    outcomes.record_reused(logical_path, PathReuseMethod::Hardlink);
-                }
-            }
-            TaskOutcome::Copied { path } => {
-                if let Some(logical_path) = target_logical_paths.get(&normalize_target_path(&path))
-                {
-                    outcomes.record_reused(logical_path, PathReuseMethod::Copy);
-                }
             }
             TaskOutcome::Failed { path, reason } => {
                 tracing::warn!("integrity task failed for {}: {}", path, reason);

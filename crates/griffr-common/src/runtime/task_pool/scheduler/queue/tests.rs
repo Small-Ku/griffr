@@ -6,10 +6,9 @@ use crate::runtime::task_pool::{
 };
 use std::path::PathBuf;
 
-fn hardlink(name: &str) -> Task {
-    Task::Hardlink {
-        src: PathBuf::from(format!("{name}.src")),
-        dest: PathBuf::from(name),
+fn task(name: &str) -> Task {
+    Task::ApplyDeleteManifest {
+        install_root: PathBuf::from(name),
     }
 }
 
@@ -51,7 +50,7 @@ fn unavailable_blocking_pool_does_not_stall_async_admission() {
     let config = TaskPoolConfig::default();
     queue.push(
         NodeId::from_index(0),
-        hardlink("blocking"),
+        task("blocking"),
         ResourceRequest {
             run: RunClass::Blocking,
             ..ResourceRequest::default()
@@ -60,7 +59,7 @@ fn unavailable_blocking_pool_does_not_stall_async_admission() {
     );
     queue.push(
         NodeId::from_index(1),
-        hardlink("async"),
+        task("async"),
         ResourceRequest {
             run: RunClass::AsyncIo,
             ..ResourceRequest::default()
@@ -71,7 +70,7 @@ fn unavailable_blocking_pool_does_not_stall_async_admission() {
     let selected = queue.pop_next(&config, false).unwrap();
     assert!(matches!(
         selected.task,
-        Task::Hardlink { ref dest, .. } if dest == &PathBuf::from("async")
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("async")
     ));
     queue.release(&selected.resources);
     assert!(queue.pop_next(&config, false).is_none());
@@ -79,7 +78,7 @@ fn unavailable_blocking_pool_does_not_stall_async_admission() {
     let selected = queue.pop_next(&config, true).unwrap();
     assert!(matches!(
         selected.task,
-        Task::Hardlink { ref dest, .. } if dest == &PathBuf::from("blocking")
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("blocking")
     ));
     queue.release(&selected.resources);
 }
@@ -90,13 +89,13 @@ fn volume_writer_blocks_only_the_same_volume() {
     let config = TaskPoolConfig::default();
     queue.push(
         NodeId::from_index(0),
-        hardlink("a"),
+        task("a"),
         resources("volume-a"),
         TaskPriority::Bulk,
     );
     queue.push(
         NodeId::from_index(1),
-        hardlink("b"),
+        task("b"),
         resources("volume-b"),
         TaskPriority::Bulk,
     );
@@ -262,13 +261,13 @@ fn runnable_tasks_prefer_smaller_work_on_the_same_backlogged_volume() {
     small.estimated_bytes = 1;
     queue.push(
         NodeId::from_index(0),
-        hardlink("large"),
+        task("large"),
         large,
         TaskPriority::Bulk,
     );
     queue.push(
         NodeId::from_index(1),
-        hardlink("small"),
+        task("small"),
         small,
         TaskPriority::Bulk,
     );
@@ -276,7 +275,7 @@ fn runnable_tasks_prefer_smaller_work_on_the_same_backlogged_volume() {
     let selected = queue.pop_next(&config, true).unwrap();
     assert!(matches!(
         selected.task,
-        Task::Hardlink { ref dest, .. } if dest == &PathBuf::from("small")
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("small")
     ));
     queue.release(&selected.resources);
 }

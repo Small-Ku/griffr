@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::runtime::task_pool::fs_ops::commit_staged_paths;
+use crate::runtime::task_pool::fs_ops::commit_deferred_paths;
 use crate::runtime::task_pool::graph::{GraphExpansion, TaskRun};
 use crate::runtime::task_pool::types::{ArchiveWork, Task};
 
@@ -16,7 +16,7 @@ pub(crate) fn finish_archive(
     // deferred control files, such as delete_files.txt, may remain here. Commit
     // them after every payload shard succeeds so a failed archive cannot leave
     // an actionable control marker in the install root.
-    if let Err(error) = commit_staged_paths(&staging_dir, &archive.dest, &deferred_commit_paths) {
+    if let Err(error) = commit_deferred_paths(&staging_dir, &archive.dest, &deferred_commit_paths) {
         return TaskRun::failed(error.to_string());
     }
     archive.prepared.lock().unwrap().take();

@@ -11,7 +11,7 @@ pub enum UpdatePackageKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ArchivePlanSummary {
+pub struct ArchiveDownloadSummary {
     pub label: &'static str,
     pub part_count: usize,
     pub total_size: u64,
@@ -131,17 +131,22 @@ pub fn select_update_package(
     })
 }
 
-pub fn selected_archive_plan(
+pub fn selected_archive_download(
     version_info: &GetLatestGameResponse,
     package_kind: UpdatePackageKind,
-) -> Option<ArchivePlanSummary> {
+) -> Option<ArchiveDownloadSummary> {
     match package_kind {
-        UpdatePackageKind::Patch => version_info.patch.as_ref().map(|patch| ArchivePlanSummary {
-            label: "patch",
-            part_count: patch.patches.len(),
-            total_size: patch.patches.iter().map(|part| part.size()).sum(),
-        }),
-        UpdatePackageKind::Full => version_info.pkg.as_ref().map(|pkg| ArchivePlanSummary {
+        UpdatePackageKind::Patch => {
+            version_info
+                .patch
+                .as_ref()
+                .map(|patch| ArchiveDownloadSummary {
+                    label: "patch",
+                    part_count: patch.patches.len(),
+                    total_size: patch.patches.iter().map(|part| part.size()).sum(),
+                })
+        }
+        UpdatePackageKind::Full => version_info.pkg.as_ref().map(|pkg| ArchiveDownloadSummary {
             label: "full",
             part_count: pkg.packs.len(),
             total_size: pkg.packs.iter().map(|part| part.size()).sum(),
@@ -294,7 +299,8 @@ mod tests {
 
     #[test]
     fn summarizes_selected_patch_archives() {
-        let plan = selected_archive_plan(&response(false, true), UpdatePackageKind::Patch).unwrap();
+        let plan =
+            selected_archive_download(&response(false, true), UpdatePackageKind::Patch).unwrap();
         assert_eq!(plan.label, "patch");
         assert_eq!(plan.part_count, 2);
         assert_eq!(plan.total_size, 7);

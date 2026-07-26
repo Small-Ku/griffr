@@ -190,18 +190,19 @@ pub fn check_patch_archives(
     Ok(report)
 }
 
-pub(crate) fn build_patch_plan(
+fn build_patch_plan(
     install_root: &Path,
     stage_root: &Path,
     archive_index: &ArchiveIndex,
     options: &PatchApplyOptions,
 ) -> Result<(PatchPlan, PatchCheckReport)> {
-    build_patch_plan_with_cache(
+    build_patch_plan_with_probe_cache(
         install_root,
         stage_root,
         archive_index,
         options,
         &VerifiedArtifactCache::default(),
+        None,
     )
 }
 
@@ -274,23 +275,6 @@ pub(crate) fn plan_patch_probes(
         artifacts: artifacts.into_iter().collect(),
         relocation_root,
     })
-}
-
-pub(crate) fn build_patch_plan_with_cache(
-    install_root: &Path,
-    stage_root: &Path,
-    archive_index: &ArchiveIndex,
-    options: &PatchApplyOptions,
-    verification_cache: &VerifiedArtifactCache,
-) -> Result<(PatchPlan, PatchCheckReport)> {
-    build_patch_plan_with_probe_cache(
-        install_root,
-        stage_root,
-        archive_index,
-        options,
-        verification_cache,
-        None,
-    )
 }
 
 pub(crate) fn build_patch_plan_with_probe_cache(

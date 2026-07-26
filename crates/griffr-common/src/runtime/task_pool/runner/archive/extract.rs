@@ -380,7 +380,7 @@ fn build_archive_extraction_expansion(
         shard_nodes
     };
     expansion.add_task_with_tokens(
-        Task::CommitArchive { work: work.clone() },
+        Task::FinishArchive { work: work.clone() },
         commit_dependencies,
         commit_tokens,
     )?;
@@ -614,14 +614,11 @@ pub(crate) fn run_extract_archive_shard(
     }
 }
 
-pub(crate) fn run_commit_archive(
-    work: std::sync::Arc<ArchiveWork>,
-    _event_tx: &flume::Sender<WorkerEvent>,
-) -> TaskRun {
+pub(crate) fn run_finish_archive(work: std::sync::Arc<ArchiveWork>) -> TaskRun {
     let prepared = match work.prepared.lock().unwrap().clone() {
         Some(prepared) => prepared,
         None => {
-            return TaskRun::failed("archive commit started without prepared state");
+            return TaskRun::failed("archive finish started without prepared state");
         }
     };
     if let Some((plan, _report)) = prepared.patch_plan {

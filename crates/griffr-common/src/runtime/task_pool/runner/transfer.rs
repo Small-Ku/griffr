@@ -7,7 +7,7 @@ use super::super::fs_ops::{
 };
 use super::super::graph::{GraphExpansion, TaskRun};
 use super::super::types::{destination_or_repair_tasks, ReuseCandidateGroup, Task, WorkerEvent};
-use crate::runtime::{ArtifactExpectation, ArtifactProof, ArtifactSource, PathReuseMethod};
+use crate::runtime::{ArtifactExpectation, ArtifactProof, ArtifactSource};
 
 pub(super) fn run_prepare_download(
     task: Task,
@@ -383,7 +383,6 @@ pub(super) async fn run_hardlink_reuse_file(
         let expectation =
             ArtifactExpectation::new(logical_path, expected_md5, Some(*expected_size));
         super::super::fs_ops::verify_artifact(dest, &expectation, ArtifactSource::ReuseHardlink)
-            .map(|proof| (PathReuseMethod::Hardlink, proof))
     });
     finish_reuse_file(task, result, event_tx)
 }
@@ -405,15 +404,14 @@ pub(super) async fn run_copy_reuse_file(
         unreachable!("copy reuse runner requires a reuse task");
     };
     assert!(*copy_only, "hardlink reuse routed to copy runner");
-    let result = copy_verified_file_async(source, dest, logical_path, expected_md5, *expected_size)
-        .await
-        .map(|proof| (PathReuseMethod::Copy, proof));
+    let result =
+        copy_verified_file_async(source, dest, logical_path, expected_md5, *expected_size).await;
     finish_reuse_file(task, result, event_tx)
 }
 
 fn finish_reuse_file(
     task: Task,
-    result: crate::error::Result<(PathReuseMethod, ArtifactProof)>,
+    result: crate::error::Result<ArtifactProof>,
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskRun {
     let Task::ReuseFile {
@@ -435,13 +433,7 @@ fn finish_reuse_file(
         unreachable!("reuse finish requires a reuse task");
     };
     match result {
-        Ok((PathReuseMethod::Hardlink, proof)) => {
-            let _ = event_tx.send(WorkerEvent::hardlinked(dest));
-            let _ = event_tx.send(WorkerEvent::committed(proof));
-            TaskRun::succeeded()
-        }
-        Ok((PathReuseMethod::Copy, proof)) => {
-            let _ = event_tx.send(WorkerEvent::copied(dest));
+        Ok(proof) => {
             let _ = event_tx.send(WorkerEvent::committed(proof));
             TaskRun::succeeded()
         }

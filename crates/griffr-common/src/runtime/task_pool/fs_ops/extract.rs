@@ -137,7 +137,7 @@ pub(crate) fn commit_file_jobs(
     Ok(())
 }
 
-pub(crate) fn commit_staged_paths(
+pub(crate) fn commit_deferred_paths(
     staging_root: &Path,
     dest_root: &Path,
     logical_paths: &[PathBuf],
@@ -343,7 +343,7 @@ pub(crate) fn move_path_replace_cross_volume(src: &Path, dest: &Path) -> Result<
 mod tests {
     use std::path::Path;
 
-    use super::commit_staged_paths;
+    use super::commit_deferred_paths;
     use crate::runtime::DELETE_FILES_MANIFEST_NAME;
 
     #[test]
@@ -359,7 +359,7 @@ mod tests {
         .unwrap();
         std::fs::write(staging_root.join("unexpected.bin"), b"not a control file").unwrap();
 
-        commit_staged_paths(
+        commit_deferred_paths(
             &staging_root,
             &dest_root,
             &[Path::new(DELETE_FILES_MANIFEST_NAME).to_path_buf()],

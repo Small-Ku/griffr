@@ -1,6 +1,5 @@
 use super::fs_ops::{
-    apply_delete_files_manifest_async, apply_extracted_vfs_patch_manifest, create_hardlink_async,
-    resume_patch_apply,
+    apply_delete_files_manifest_async, apply_extracted_vfs_patch_manifest, resume_patch_apply,
 };
 use super::graph::TaskRun;
 use super::types::{Task, WorkerEvent};
@@ -104,7 +103,7 @@ pub(crate) fn run_blocking_task(
         Task::RetainArchiveVolume { work, volume_index } => {
             archive::run_retain_archive_volume(work, volume_index, event_tx)
         }
-        Task::CommitArchive { work } => archive::run_commit_archive(work, event_tx),
+        Task::FinishArchive { work } => archive::run_finish_archive(work),
         Task::PreparePatchApply { patch } => archive::run_prepare_patch_apply(patch, event_tx),
         Task::ApplyPatchEntry { patch, entry_index } => {
             archive::run_apply_patch_entry(patch, entry_index, event_tx)
@@ -126,8 +125,9 @@ pub(crate) fn run_blocking_task(
         | Task::FetchArchiveRepairFile { .. }
         | Task::FetchArchiveRange { .. }
         | Task::ReuseFile { .. }
-        | Task::ApplyDeleteManifest { .. }
-        | Task::Hardlink { .. } => unreachable!("async I/O task routed to blocking runner"),
+        | Task::ApplyDeleteManifest { .. } => {
+            unreachable!("async I/O task routed to blocking runner")
+        }
     }
 }
 
@@ -189,13 +189,6 @@ pub(crate) async fn run_async_task(
         Task::ApplyDeleteManifest { install_root } => {
             run_apply_delete_manifest(install_root, event_tx).await
         }
-        Task::Hardlink { src, dest } => match create_hardlink_async(&src, &dest).await {
-            Ok(()) => {
-                let _ = event_tx.send(WorkerEvent::hardlinked(dest));
-                TaskRun::succeeded()
-            }
-            Err(error) => TaskRun::failed(error.to_string()),
-        },
         _ => unreachable!("blocking task routed to async I/O runner"),
     }
 }

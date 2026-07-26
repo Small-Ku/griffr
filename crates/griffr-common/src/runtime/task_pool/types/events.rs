@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use super::super::graph::TaskGraphSummary;
@@ -61,14 +60,6 @@ impl WorkerEvent {
         Self::Outcome(TaskOutcome::ArchiveCheck { path, report })
     }
 
-    pub(crate) fn hardlinked(path: PathBuf) -> Self {
-        Self::Outcome(TaskOutcome::Hardlinked { path })
-    }
-
-    pub(crate) fn copied(path: PathBuf) -> Self {
-        Self::Outcome(TaskOutcome::Copied { path })
-    }
-
     pub(crate) fn failed(path: String, reason: String) -> Self {
         Self::Outcome(TaskOutcome::Failed { path, reason })
     }
@@ -94,12 +85,6 @@ pub enum TaskOutcome {
     },
     Committed {
         proof: ArtifactProof,
-    },
-    Hardlinked {
-        path: PathBuf,
-    },
-    Copied {
-        path: PathBuf,
     },
     Failed {
         path: String,

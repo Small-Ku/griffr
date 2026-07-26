@@ -11,7 +11,7 @@ pub(crate) use artifact::{
 };
 pub(crate) use delete_manifest::{apply_delete_files_manifest_async, parse_delete_files_manifest};
 pub(crate) use extract::{
-    commit_file_job, commit_staged_paths, create_extract_staging_dir, CommitFileJob,
+    commit_deferred_paths, commit_file_job, create_extract_staging_dir, CommitFileJob,
 };
 pub(crate) use patch_manifest::{
     apply_extracted_vfs_patch_manifest, apply_patch_deletes, apply_patch_entry, clean_patch_apply,

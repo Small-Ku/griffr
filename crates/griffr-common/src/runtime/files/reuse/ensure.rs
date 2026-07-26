@@ -10,8 +10,7 @@ use crate::api::ApiClient;
 use crate::runtime::task_pool::{FileEnsureTask, Task, TransferClass};
 use crate::runtime::{
     build_cdn_file_url, files_base_url, is_install_change_path, is_launcher_metadata_path,
-    logical_path_from_root, path_is_file, PathOutcomeTracker, PathReuseMethod, ProgressLane,
-    ProgressSender,
+    path_is_file, PathOutcomeTracker, ProgressLane, ProgressSender,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -180,7 +179,7 @@ pub async fn ensure_game_files_with_pool(
     for event in result.outcomes {
         match event {
             crate::runtime::task_pool::TaskOutcome::Committed { proof } => {
-                outcomes.record_verified(proof.logical_path(), true);
+                outcomes.record_committed(&proof);
             }
             crate::runtime::task_pool::TaskOutcome::Verified { path, ok, issue } => {
                 outcomes.record_verified(&path, ok);
@@ -188,16 +187,6 @@ pub async fn ensure_game_files_with_pool(
                     if let Some(issue) = issue {
                         issues.push(issue);
                     }
-                }
-            }
-            crate::runtime::task_pool::TaskOutcome::Hardlinked { path } => {
-                if let Some(rel) = logical_path_from_root(install_path, &path) {
-                    outcomes.record_reused(&rel, PathReuseMethod::Hardlink);
-                }
-            }
-            crate::runtime::task_pool::TaskOutcome::Copied { path } => {
-                if let Some(rel) = logical_path_from_root(install_path, &path) {
-                    outcomes.record_reused(&rel, PathReuseMethod::Copy);
                 }
             }
             crate::runtime::task_pool::TaskOutcome::Downloaded { path, bytes } => {

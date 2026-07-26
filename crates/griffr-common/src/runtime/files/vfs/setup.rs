@@ -10,10 +10,10 @@ use crate::runtime::task_pool::{
     FileEnsureTask, Task, TaskOutcome, TaskPoolRunner, TaskProgress, TransferClass,
 };
 use crate::runtime::{
-    collect_files_recursive, logical_path_from_root, normalize_logical_path, path_is_dir,
-    path_is_file, remove_empty_dirs_recursive, resource_manifest_filename, resource_manifest_url,
-    vfs_path, PathOutcomeTracker, PathReuseMethod, ProgressLane, ProgressSender,
-    ResourceManifestKind, RESOURCE_GROUP_BASE, RESOURCE_GROUP_MAIN,
+    collect_files_recursive, normalize_logical_path, path_is_dir, path_is_file,
+    remove_empty_dirs_recursive, resource_manifest_filename, resource_manifest_url, vfs_path,
+    PathOutcomeTracker, ProgressLane, ProgressSender, ResourceManifestKind, RESOURCE_GROUP_BASE,
+    RESOURCE_GROUP_MAIN,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -406,19 +406,7 @@ pub async fn setup_persistent_vfs(
             TaskOutcome::Downloaded { path, bytes } => {
                 outcomes.record_downloaded(&path, bytes);
             }
-            TaskOutcome::Hardlinked { path } => {
-                if let Some(logical_path) = logical_path_from_root(persistent_root, &path) {
-                    outcomes.record_reused(&logical_path, PathReuseMethod::Hardlink);
-                }
-            }
-            TaskOutcome::Copied { path } => {
-                if let Some(logical_path) = logical_path_from_root(persistent_root, &path) {
-                    outcomes.record_reused(&logical_path, PathReuseMethod::Copy);
-                }
-            }
-            TaskOutcome::Committed { proof } => {
-                outcomes.record_verified(proof.logical_path(), true);
-            }
+            TaskOutcome::Committed { proof } => outcomes.record_committed(&proof),
             TaskOutcome::Verified { path, ok, .. } => {
                 outcomes.record_verified(&path, ok);
             }
