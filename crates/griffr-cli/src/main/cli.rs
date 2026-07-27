@@ -112,6 +112,13 @@ pub(crate) struct PathArg {
 }
 
 #[derive(Args)]
+pub(crate) struct TargetPathsArg {
+    /// Install root or config.ini path; repeat --path to process a batch
+    #[arg(long = "path", required = true)]
+    pub(crate) paths: Vec<std::path::PathBuf>,
+}
+
+#[derive(Args)]
 pub(crate) struct ReuseSourcesArg {
     /// Reuse matching files from other local install paths
     #[arg(long = "reuse-from")]
@@ -296,10 +303,10 @@ pub(crate) enum Commands {
         yes: bool,
     },
 
-    /// Update an existing install identified by its encrypted config.ini
+    /// Update one or more existing installs identified by encrypted config.ini files
     Update {
         #[command(flatten)]
-        path: PathArg,
+        paths: TargetPathsArg,
 
         #[command(flatten)]
         overrides: InstallTargetOverrideArgs,
@@ -353,10 +360,10 @@ pub(crate) enum Commands {
         force: bool,
     },
 
-    /// Verify a local install against the latest game_files manifest
+    /// Verify one or more local installs against their game_files manifests
     Verify {
         #[command(flatten)]
-        path: PathArg,
+        paths: TargetPathsArg,
 
         #[command(flatten)]
         remote: GameRegionChannelArgs,
@@ -371,8 +378,8 @@ pub(crate) enum Commands {
         #[command(flatten)]
         reuse: ReuseSourcesArg,
 
-        /// Prefer relinking from reuse sources even when local files already verify
-        #[arg(long, requires = "repair", requires = "reuse_from")]
+        /// Prefer relinking from explicit sources or same-game batch peers
+        #[arg(long, requires = "repair")]
         relink_reuse: bool,
 
         /// Skip VFS resource sync during repair

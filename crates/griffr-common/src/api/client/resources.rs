@@ -8,6 +8,24 @@ use super::requests::ApiClient;
 use crate::api::crypto;
 use crate::api::types::{GameFileEntry, ResIndex, ResourcePatch};
 use crate::runtime::{launcher_metadata_url, GAME_FILES_NAME};
+
+pub(crate) fn parse_game_files(encrypted_data: &[u8]) -> Result<Vec<GameFileEntry>> {
+    let decrypted = crypto::decrypt_game_files(encrypted_data)?;
+    let mut entries = Vec::new();
+    for line in decrypted.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let entry: GameFileEntry = serde_json::from_str(line).map_err(|e| Error::Message {
+            context: "API client wrapper error: ",
+            detail: format!("Failed to parse game_files entry: {e}"),
+        })?;
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
 impl ApiClient {
     pub async fn fetch_game_files(
         &self,
@@ -58,24 +76,7 @@ impl ApiClient {
             }
         }
 
-        // Decrypt
-        let decrypted = crypto::decrypt_game_files(&encrypted_data)?;
-
-        // Parse JSON Lines
-        let mut entries = Vec::new();
-        for line in decrypted.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let entry: GameFileEntry = serde_json::from_str(line).map_err(|e| Error::Message {
-                context: "API client wrapper error: ",
-                detail: format!("Failed to parse game_files entry: {e}"),
-            })?;
-            entries.push(entry);
-        }
-
-        Ok(entries)
+        parse_game_files(&encrypted_data)
     }
 
     /// Fetch and decrypt a resource index file (index_main.json / index_initial.json)

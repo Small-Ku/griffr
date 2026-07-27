@@ -112,7 +112,7 @@ pub(crate) async fn run() -> Result<()> {
         }
 
         Commands::Update {
-            path,
+            paths,
             overrides,
             reuse,
             skip_verify,
@@ -123,7 +123,7 @@ pub(crate) async fn run() -> Result<()> {
             work_dir,
             external_vfs_root,
         } => {
-            let PathArg { path } = path;
+            let TargetPathsArg { paths } = paths;
             let ReuseSourcesArg {
                 reuse_from,
                 force_copy,
@@ -136,11 +136,11 @@ pub(crate) async fn run() -> Result<()> {
                 ..opts
             };
             opts.verbose(format!(
-                "Update path: {:?}, reuse_from={:?}, force_copy={}, use_predownload={}",
-                path, reuse_from, force_copy, use_predownload
+                "Update paths: {:?}, reuse_from={:?}, force_copy={}, use_predownload={}",
+                paths, reuse_from, force_copy, use_predownload
             ));
             commands::update(
-                path,
+                paths,
                 overrides,
                 reuse_from,
                 force_copy,
@@ -214,7 +214,7 @@ pub(crate) async fn run() -> Result<()> {
         }
 
         Commands::Verify {
-            path,
+            paths,
             remote,
             overrides,
             repair,
@@ -223,7 +223,7 @@ pub(crate) async fn run() -> Result<()> {
             skip_vfs,
             skip_local_detect,
         } => {
-            let PathArg { path } = path;
+            let TargetPathsArg { paths } = paths;
             let ReuseSourcesArg {
                 reuse_from,
                 force_copy,
@@ -243,11 +243,11 @@ pub(crate) async fn run() -> Result<()> {
                 .map(|region| ChannelPair::parse(region, channel, sub_channel))
                 .transpose()?;
             opts.verbose(format!(
-                "Verify path: {:?}, game={:?}, region={:?}, channel={:?}, repair={}, reuse_from={:?}, force_copy={}, relink_reuse={}, skip_vfs={}, skip_local_detect={}",
-                path, game, region, channel, repair, reuse_from, force_copy, relink_reuse, skip_vfs, skip_local_detect
+                "Verify paths: {:?}, game={:?}, region={:?}, channel={:?}, repair={}, reuse_from={:?}, force_copy={}, relink_reuse={}, skip_vfs={}, skip_local_detect={}",
+                paths, game, region, channel, repair, reuse_from, force_copy, relink_reuse, skip_vfs, skip_local_detect
             ));
             commands::verify(
-                path,
+                paths,
                 game,
                 region,
                 channel,

@@ -64,7 +64,7 @@ Shared APIs must expose domain semantics, not frontend mechanics.
 2. `download_vfs_resources` must use the caller's runner; do not create a hidden internal pool.
 3. Represent dependent work as one DAG batch where practical, including VFS work through `extra_tasks`.
 4. Avoid duplicated runner branches. Build conditional task lists, then run the shared runner once.
-5. `verify --repair --relink-reuse` requires `--reuse-from`.
+5. `verify --repair --relink-reuse` requires an effective reuse source. This can be an explicit `--reuse-from` path or another compatible `--path` in the same batch.
 6. `verify` must retain `--skip-vfs` parity with install and update flows.
 7. Reuse policy:
    - the normal install/update game-file ensure flow and VFS sync use `prefer_reuse = false`;

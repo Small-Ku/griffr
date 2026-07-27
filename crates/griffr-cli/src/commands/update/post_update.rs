@@ -1,9 +1,9 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::InstallTarget;
-use griffr_common::runtime::task_pool::{Task, TaskPoolRunner, TaskProgress};
+use griffr_common::runtime::task_pool::{Task, TaskOutcome, TaskPoolRunner, TaskProgress};
 use griffr_common::runtime::{
     is_launcher_metadata_path, run_integrity_pool, sync_launcher_metadata, IntegritySelection,
     ProgressLane,
@@ -28,6 +28,8 @@ pub(super) async fn verify_updated_install(
     extra_tasks: Vec<Task>,
     selection: IntegritySelection,
     verified_artifacts: Vec<griffr_common::runtime::ArtifactProof>,
+    reuse_roots: &[PathBuf],
+    allow_copy_fallback: bool,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
 ) -> Result<PostUpdateCompletion> {
@@ -73,8 +75,8 @@ pub(super) async fn verify_updated_install(
         selection,
         &verified_artifacts,
         true,
-        &[],
-        false,
+        reuse_roots,
+        allow_copy_fallback,
         false,
         extra_tasks,
         Some(task_pool_runner),
@@ -138,10 +140,36 @@ fn run_extra_tasks_without_integrity(
     let task_progress = TaskProgress::new(progress_session.sender())
         .with_verify(verify_lane, extra_tasks.len())
         .with_download(download_lane);
-    let _ = task_pool_runner
+    let result = task_pool_runner
         .run_batch(extra_tasks, task_progress)
         .context("Failed to run extra DAG tasks during skip-verify")?;
     progress_session.finish();
     progress.finish();
+
+    let mut failures = result
+        .outcomes
+        .into_iter()
+        .filter_map(|outcome| match outcome {
+            TaskOutcome::Failed { path, reason } => Some(format!("{path}: {reason}")),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let failed_graph_nodes = result
+        .metrics
+        .graph
+        .failed_nodes
+        .saturating_add(result.metrics.graph.cancelled_nodes);
+    if failed_graph_nodes > failures.len() {
+        failures.push(format!(
+            "{} additional failed or cancelled graph node(s)",
+            failed_graph_nodes - failures.len()
+        ));
+    }
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "Extra update tasks failed while post-update verification was skipped: {}",
+            failures.join("; ")
+        );
+    }
     Ok(())
 }

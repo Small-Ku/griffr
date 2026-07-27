@@ -24,13 +24,15 @@ pub(crate) use compat_fs::dir_size_sync;
 pub use compat_fs::{
     collect_files_recursive, copy_dir_recursive, dir_size, directory_has_entries,
     list_files_with_extension, path_is_dir, path_is_dir_or_err, path_is_file, read_link,
-    remove_dir_all, remove_empty_dirs_recursive, CopyStats,
+    remove_dir_all, remove_empty_dir, remove_empty_dirs_recursive, CopyStats,
 };
 pub(crate) use file_allocation::preallocate_file;
 
 pub use files::reuse::{
-    ensure_game_files_with_pool, inspect_reuse_installations, resolve_file_reuse_sources,
-    FileEnsureSummary, FileReuseConfig, SourceInstallInput,
+    ensure_game_files_from_manifest_with_pool, ensure_game_files_with_pool,
+    inspect_reuse_installations, read_local_game_files, remove_blocking_obsolete_game_files,
+    remove_obsolete_game_files, resolve_file_reuse_roots, FileEnsureSummary, FileReuseConfig,
+    ObsoleteFileCleanupSummary,
 };
 pub use files::vfs::{
     download_vfs_resources, get_vfs_resource_info, plan_persistent_vfs_tasks, plan_vfs_tasks,

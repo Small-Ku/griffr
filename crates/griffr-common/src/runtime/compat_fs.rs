@@ -207,6 +207,67 @@ pub async fn remove_empty_dirs_recursive(path: impl Into<PathBuf>) -> Result<()>
     .await
 }
 
+/// Remove one directory only when it is empty. Missing paths and non-directory
+/// paths are left unchanged. A non-empty directory is reported instead of
+/// deleting files that are not owned by the caller.
+pub async fn remove_empty_dir(path: impl Into<PathBuf>) -> Result<()> {
+    let path = path.into();
+    run_blocking("empty directory removal", move || {
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(Error::IoAt {
+                    action: "query file metadata/stat for",
+                    path,
+                    source,
+                })
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(Error::Message {
+                context: "Directory conflict: ",
+                detail: format!(
+                    "Cannot replace symbolic link or junction {} with a target file",
+                    path.display()
+                ),
+            });
+        }
+        if !metadata.is_dir() {
+            return Ok(());
+        }
+        let mut entries = std::fs::read_dir(&path).map_err(|source| Error::IoAt {
+            action: "read directory",
+            path: path.clone(),
+            source,
+        })?;
+        let has_entries = entries
+            .next()
+            .transpose()
+            .map_err(|source| Error::IoAt {
+                action: "read directory",
+                path: path.clone(),
+                source,
+            })?
+            .is_some();
+        if has_entries {
+            return Err(Error::Message {
+                context: "Directory conflict: ",
+                detail: format!(
+                    "Cannot replace non-empty directory {} with a target file",
+                    path.display()
+                ),
+            });
+        }
+        std::fs::remove_dir(&path).map_err(|source| Error::IoAt {
+            action: "remove empty directory",
+            path,
+            source,
+        })
+    })
+    .await
+}
+
 async fn copy_file_async(source: &Path, target: &Path, expected_bytes: u64) -> Result<()> {
     if let Some(parent) = target.parent() {
         compio::fs::create_dir_all(parent)
@@ -457,7 +518,18 @@ fn collect_files_recursive_sync(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn remove_empty_dirs_recursive_sync(root: &Path) -> Result<()> {
-    if !root.is_dir() {
+    let root_type = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata.file_type(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(Error::IoAt {
+                action: "query file metadata/stat for",
+                path: root.to_path_buf(),
+                source,
+            })
+        }
+    };
+    if !root_type.is_dir() {
         return Ok(());
     }
     let mut dirs = Vec::new();
@@ -474,9 +546,13 @@ fn remove_empty_dirs_recursive_sync(root: &Path) -> Result<()> {
                 path: dir.clone(),
                 source: e,
             })?;
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
+            let file_type = entry.file_type().map_err(|e| Error::IoAt {
+                action: "query file metadata/stat for",
+                path: entry.path(),
+                source: e,
+            })?;
+            if file_type.is_dir() {
+                stack.push(entry.path());
             }
         }
     }
@@ -502,7 +578,7 @@ fn remove_empty_dirs_recursive_sync(root: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::dir_size_sync;
+    use super::{dir_size_sync, remove_empty_dir};
 
     #[test]
     fn directory_size_counts_nested_files_and_accepts_missing_roots() {
@@ -514,6 +590,41 @@ mod tests {
 
         assert_eq!(dir_size_sync(&root).unwrap(), 13);
         assert_eq!(dir_size_sync(&temp.path().join("missing")).unwrap(), 0);
+    }
+
+    #[compio::test]
+    async fn remove_empty_dir_removes_only_empty_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let empty = temp.path().join("empty");
+        let non_empty = temp.path().join("non-empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(&non_empty).unwrap();
+        std::fs::write(non_empty.join("owned.bin"), b"data").unwrap();
+
+        remove_empty_dir(empty.clone()).await.unwrap();
+        assert!(!empty.exists());
+
+        let error = remove_empty_dir(non_empty.clone()).await.unwrap_err();
+        assert!(error.to_string().contains("non-empty directory"));
+        assert!(non_empty.join("owned.bin").exists());
+    }
+
+    #[cfg(unix)]
+    #[compio::test]
+    async fn remove_empty_dir_preserves_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        let linked = temp.path().join("linked");
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, &linked).unwrap();
+
+        let error = remove_empty_dir(linked.clone()).await.unwrap_err();
+
+        assert!(error.to_string().contains("symbolic link or junction"));
+        assert!(linked.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(outside.exists());
     }
 
     #[cfg(unix)]

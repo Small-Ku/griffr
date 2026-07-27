@@ -10,7 +10,7 @@ use griffr_common::runtime::task_pool::{
 };
 use griffr_common::runtime::{
     directory_has_entries, ensure_game_files_with_pool, finish_install_change,
-    griffr_archives_path, plan_vfs_tasks, read_install_change, resolve_file_reuse_sources,
+    griffr_archives_path, plan_vfs_tasks, read_install_change, resolve_file_reuse_roots,
     run_integrity_pool, start_install_change, streaming_assets_path, sync_launcher_metadata,
     FileReuseConfig, InstallChangeKind, InstallChangeSource, InstallChangeStart,
     InstallChangeState, ProgressLane, VfsFilePlanOptions,
@@ -212,11 +212,7 @@ pub async fn install(
     // any final path still cannot be repaired.
     if change_start == InstallChangeStart::Resume {
         ui::print_phase("Resuming install from the target manifest");
-        let source_roots = resolve_file_reuse_sources(&game_id, &install_path, &reuse_paths)
-            .await?
-            .into_iter()
-            .map(|source| source.install_path)
-            .collect::<Vec<_>>();
+        let source_roots = resolve_file_reuse_roots(&game_id, &install_path, &reuse_paths).await?;
         let progress = CountAndByteProgress::new(
             "install.resume.verify",
             "install.resume.download",
@@ -385,8 +381,7 @@ pub async fn install(
         }
     } else {
         ui::print_phase("Ensuring files from reuse sources");
-        let source_installs =
-            resolve_file_reuse_sources(&game_id, &install_path, &reuse_paths).await?;
+        let source_roots = resolve_file_reuse_roots(&game_id, &install_path, &reuse_paths).await?;
         let ensure_progress = CountAndByteProgress::new(
             "install.ensure_files",
             "install.ensure_files.download",
@@ -398,14 +393,13 @@ pub async fn install(
         );
         let ensured = ensure_game_files_with_pool(
             &api_client,
-            game_id,
             &install_path,
             &pkg.file_path,
             pkg.game_files_md5.as_deref(),
             &FileReuseConfig {
                 allow_copy_fallback: force_copy,
                 dry_run: false,
-                source_installs,
+                source_roots,
             },
             Some(&mut task_pool),
             ensure_session.sender(),

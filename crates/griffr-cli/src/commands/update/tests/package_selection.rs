@@ -1,5 +1,6 @@
 use super::*;
 use griffr_common::runtime::UpdatePackageKind;
+use std::path::PathBuf;
 
 fn response_with_full_and_patch() -> GetLatestGameResponse {
     GetLatestGameResponse {
@@ -78,6 +79,7 @@ fn dry_run_plan_includes_archive_verify_and_vfs_steps() {
         &response,
         UpdatePackageKind::Full,
         &[],
+        &[],
         false,
         None,
         false,
@@ -95,4 +97,71 @@ fn dry_run_plan_includes_archive_verify_and_vfs_steps() {
     assert!(lines
         .iter()
         .any(|line| line.contains("Would probe the target's launcher resource-index API")));
+}
+
+#[test]
+fn dry_run_plan_reports_manifest_reuse_without_archive_selection() {
+    let response = response_with_full_and_patch();
+    let lines = build_update_dry_run_plan(
+        Path::new(r"C:\Games\Endfield"),
+        "1.0.13",
+        &response,
+        UpdatePackageKind::Patch,
+        &[PathBuf::from(r"C:\Games\Endfield-Source")],
+        &[],
+        false,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    assert!(lines
+        .iter()
+        .any(|line| line.contains("manifest-driven local file reuse")));
+    assert!(!lines.iter().any(|line| line.contains("archive parts")));
+    assert!(lines
+        .iter()
+        .any(|line| line.contains("previous-manifest-owned files")));
+}
+
+#[test]
+fn dry_run_plan_keeps_old_peers_as_archive_fallbacks() {
+    let response = response_with_full_and_patch();
+    let lines = build_update_dry_run_plan(
+        Path::new(r"C:\Games\Endfield"),
+        "1.0.13",
+        &response,
+        UpdatePackageKind::Patch,
+        &[],
+        &[PathBuf::from(r"C:\Games\Endfield-Peer")],
+        false,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+
+    assert!(lines
+        .iter()
+        .any(|line| line.contains("patch archive parts")));
+    assert!(lines
+        .iter()
+        .any(|line| line.contains("post-update repair fallbacks")));
+}
+
+#[test]
+fn reuse_update_policy_requires_intent_and_local_ownership_metadata() {
+    assert!(should_use_reuse_update(true, true, false, false, false));
+    assert!(!should_use_reuse_update(false, true, false, false, false));
+    assert!(!should_use_reuse_update(true, false, false, false, false));
+}
+
+#[test]
+fn archive_and_staged_options_override_reuse_update() {
+    assert!(!should_use_reuse_update(true, true, false, true, false));
+    assert!(!should_use_reuse_update(true, true, true, false, false));
+    assert!(!should_use_reuse_update(true, true, false, false, true));
 }

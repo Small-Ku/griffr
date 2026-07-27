@@ -125,3 +125,49 @@ fn clap_volume_policy_defaults_match_common_nvme_parameters() {
     );
     assert_eq!(cli.volume_streaming_mode, VolumeStreamingModeArg::Mixed);
 }
+
+#[test]
+fn update_accepts_repeated_target_paths() {
+    let cli = Cli::try_parse_from([
+        "griffr",
+        "update",
+        "--path",
+        r"C:\Games\Endfield-CN",
+        "--path",
+        r"C:\Games\Endfield-OS",
+    ])
+    .unwrap();
+    let Commands::Update { paths, .. } = cli.command else {
+        panic!("expected update command");
+    };
+
+    assert_eq!(paths.paths.len(), 2);
+}
+
+#[test]
+fn verify_batch_peers_can_satisfy_relink_parse_requirements() {
+    let cli = Cli::try_parse_from([
+        "griffr",
+        "verify",
+        "--path",
+        r"C:\Games\Endfield-CN",
+        "--path",
+        r"C:\Games\Endfield-OS",
+        "--repair",
+        "--relink-reuse",
+    ])
+    .unwrap();
+    let Commands::Verify {
+        paths,
+        repair,
+        relink_reuse,
+        ..
+    } = cli.command
+    else {
+        panic!("expected verify command");
+    };
+
+    assert_eq!(paths.paths.len(), 2);
+    assert!(repair);
+    assert!(relink_reuse);
+}

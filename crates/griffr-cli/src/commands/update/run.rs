@@ -6,10 +6,10 @@ use griffr_common::api::types::GetLatestGameResponse;
 use griffr_common::config::InstallTarget;
 use griffr_common::runtime::task_pool::{archive_expected_files, Task, TaskPoolRunner};
 use griffr_common::runtime::{
-    finish_install_change, plan_vfs_tasks, read_install_change, resolve_staged_patch_recovery_dir,
-    select_update_package, start_install_change, streaming_assets_path, InstallChangeKind,
-    InstallChangeSource, InstallChangeStart, InstallChangeState, IntegritySelection,
-    UpdatePackageKind, VfsFilePlanOptions,
+    finish_install_change, plan_vfs_tasks, read_install_change, read_local_game_files,
+    resolve_staged_patch_recovery_dir, select_update_package, start_install_change,
+    streaming_assets_path, InstallChangeKind, InstallChangeSource, InstallChangeStart,
+    InstallChangeState, IntegritySelection, UpdatePackageKind, VfsFilePlanOptions,
 };
 
 use super::*;
@@ -18,9 +18,12 @@ use crate::GlobalOptions;
 use griffr_common::runtime::detect_local_install;
 
 pub(super) async fn update_internal(
+    api_client: &ApiClient,
+    task_pool_runner: &mut TaskPoolRunner,
     path: PathBuf,
     overrides: crate::InstallTargetOverrideArgs,
-    reuse_paths: Vec<PathBuf>,
+    explicit_reuse_paths: Vec<PathBuf>,
+    peer_reuse_paths: Vec<PathBuf>,
     force_copy: bool,
     use_predownload: bool,
     patch_options: griffr_common::runtime::PatchApplyOptions,
@@ -128,10 +131,6 @@ pub(super) async fn update_internal(
         &channel_id,
         &overrides.clone().into(),
     )?;
-    let api_client = ApiClient::new()?;
-    let task_pool_cfg = opts.task_pool_config();
-    let mut task_pool_runner = TaskPoolRunner::new(task_pool_cfg)?;
-
     let mut version_info = api_client
         .get_latest_game(&install_target.api, Some(&current_version))
         .await?;
@@ -184,6 +183,17 @@ pub(super) async fn update_internal(
         recovery_stage_dir = Some(stage_dir);
     }
 
+    let reuse_roots = merge_reuse_paths(&explicit_reuse_paths, &peer_reuse_paths);
+    let mut target_version_peer_roots = Vec::new();
+    for source_path in &peer_reuse_paths {
+        let source = detect_local_install(source_path)
+            .await
+            .with_context(|| format!("Failed to refresh reuse peer {}", source_path.display()))?;
+        if install_can_source_target(&source, &version_info.version) {
+            target_version_peer_roots.push(source.install_path);
+        }
+    }
+
     ui::print_phase(format!(
         "Updating {} (region={}, channel={}, sub-channel={}) at {}",
         game_id,
@@ -223,17 +233,17 @@ pub(super) async fn update_internal(
             state.kind, state.target_version
         ));
         let extra_tasks = plan_update_vfs_tasks(
-            &api_client,
+            api_client,
             &install_target,
             &version_info,
             &local.install_path,
-            &reuse_paths,
+            &reuse_roots,
             force_copy,
             !state.sync_vfs,
         )
         .await?;
         let completion = verify_updated_install(
-            &api_client,
+            api_client,
             &local.install_path,
             &install_target,
             &state.target_version,
@@ -241,8 +251,10 @@ pub(super) async fn update_internal(
             extra_tasks,
             IntegritySelection::GameFiles,
             Vec::new(),
+            &reuse_roots,
+            force_copy,
             &opts,
-            &mut task_pool_runner,
+            task_pool_runner,
         )
         .await?;
         debug_assert_eq!(completion, PostUpdateCompletion::Verified);
@@ -279,7 +291,7 @@ pub(super) async fn update_internal(
     });
     if force_full_for_mixed_recovery {
         ui::print_warning(format!(
-            "Unfinished target {} was superseded by {} while config.ini still reports {}. Use the full package so mixed forward progress does not depend on obsolete patch bases.",
+            "Unfinished target {} was superseded by {} while config.ini still reports {}. Use the full package or manifest-driven reuse so progress does not depend on obsolete patch bases.",
             pending_change
                 .as_ref()
                 .map(|state| state.target_version.as_str())
@@ -293,29 +305,82 @@ pub(super) async fn update_internal(
     } else {
         select_update_package(&version_info, Some(&package_request_version))?
     };
-    let predownload_stage_dir = if use_predownload && package_kind == UpdatePackageKind::Patch {
-        Some(
-            recovery_stage_dir
-                .or(predownload_dir_override)
-                .unwrap_or_else(|| {
-                    crate::commands::predownload::stage_dir_for_request(
-                        &local.install_path,
-                        &version_info,
-                        &package_request_version,
-                        &version_info.version,
-                    )
-                }),
-        )
+    let reuse_update_requested =
+        !explicit_reuse_paths.is_empty() || !target_version_peer_roots.is_empty();
+    let current_reuse_manifest = if reuse_update_requested {
+        match read_local_game_files(&local.install_path).await {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                if opts.output != crate::OutputFormat::Json {
+                    ui::print_warning(format!(
+                        "Local game_files metadata cannot be used for safe reuse cleanup ({error}); falling back to the selected archive update."
+                    ));
+                }
+                None
+            }
+        }
     } else {
         None
     };
+    let staged_patch_requested = use_predownload && package_kind == UpdatePackageKind::Patch;
+    let use_reuse_update = should_use_reuse_update(
+        reuse_update_requested,
+        current_reuse_manifest.is_some(),
+        require_staged_predownload,
+        opts.force_full_package,
+        staged_patch_requested,
+    );
+    let reuse_update_roots = if use_reuse_update {
+        reuse_roots.clone()
+    } else {
+        Vec::new()
+    };
+    if !reuse_roots.is_empty() && !use_reuse_update && opts.output != crate::OutputFormat::Json {
+        let reason = if opts.force_full_package
+            || (force_full_for_mixed_recovery && !reuse_update_requested)
+        {
+            "The full package is required"
+        } else if staged_patch_requested || require_staged_predownload {
+            "Staged predownload archives were requested"
+        } else if reuse_update_requested && current_reuse_manifest.is_none() {
+            "The current launcher game_files manifest is unavailable for safe obsolete-file cleanup"
+        } else {
+            "No automatic peer is already at the target version"
+        };
+        ui::print_info(format!(
+            "{reason}; keep the selected archive update and use reuse sources only for VFS and repair fallbacks."
+        ));
+    }
+    let predownload_stage_dir =
+        if !use_reuse_update && use_predownload && package_kind == UpdatePackageKind::Patch {
+            Some(
+                recovery_stage_dir
+                    .or(predownload_dir_override)
+                    .unwrap_or_else(|| {
+                        crate::commands::predownload::stage_dir_for_request(
+                            &local.install_path,
+                            &version_info,
+                            &package_request_version,
+                            &version_info.version,
+                        )
+                    }),
+            )
+        } else {
+            None
+        };
 
-    ui::print_info(describe_update_package_selection(
-        &version_info,
-        Some(&package_request_version),
-        package_kind,
-        opts.force_full_package || force_full_for_mixed_recovery,
-    ));
+    if use_reuse_update {
+        ui::print_info(
+            "Using manifest-driven local file reuse; archive package selection is bypassed.",
+        );
+    } else {
+        ui::print_info(describe_update_package_selection(
+            &version_info,
+            Some(&package_request_version),
+            package_kind,
+            opts.force_full_package || force_full_for_mixed_recovery,
+        ));
+    }
     if require_staged_predownload && package_kind != UpdatePackageKind::Patch {
         anyhow::bail!(
             "Predownload apply requires a live patch update for the installed version; got {:?}",
@@ -342,7 +407,8 @@ pub(super) async fn update_internal(
             &package_request_version,
             &version_info,
             package_kind,
-            &reuse_paths,
+            &reuse_update_roots,
+            &reuse_roots,
             use_predownload,
             predownload_stage_dir.as_deref(),
             opts.skip_verify,
@@ -358,7 +424,7 @@ pub(super) async fn update_internal(
         return Ok(());
     }
 
-    let selected_parts = if !reuse_paths.is_empty() {
+    let selected_parts = if use_reuse_update {
         Vec::new()
     } else {
         match package_kind {
@@ -382,7 +448,7 @@ pub(super) async fn update_internal(
     };
     let change_state = InstallChangeState::new(
         InstallChangeKind::Update,
-        if !reuse_paths.is_empty() {
+        if use_reuse_update {
             InstallChangeSource::Reuse
         } else if package_kind == UpdatePackageKind::Patch {
             InstallChangeSource::PatchArchive
@@ -402,7 +468,7 @@ pub(super) async fn update_internal(
         selected_parts,
         !opts.skip_vfs,
     );
-    let expected_archive_files = if reuse_paths.is_empty() {
+    let expected_archive_files = if !use_reuse_update {
         if let Some(pkg) = version_info.pkg.as_ref() {
             archive_expected_files(
                 api_client
@@ -418,17 +484,17 @@ pub(super) async fn update_internal(
     };
 
     let mut extra_tasks = plan_update_vfs_tasks(
-        &api_client,
+        api_client,
         &install_target,
         &version_info,
         &local.install_path,
-        &reuse_paths,
+        &reuse_roots,
         force_copy,
         opts.skip_vfs,
     )
     .await?;
 
-    if reuse_paths.is_empty() && package_kind == UpdatePackageKind::Patch {
+    if !use_reuse_update && package_kind == UpdatePackageKind::Patch {
         validate_patch_target(&install_target.exe_name, &local.install_path).await?;
     }
 
@@ -447,21 +513,24 @@ pub(super) async fn update_internal(
     }
 
     let mut archive_result = ArchiveRunResult::default();
-    if !reuse_paths.is_empty() {
+    if use_reuse_update {
         ui::print_phase("Applying update via local file reuse");
         update_via_reuse(
-            &api_client,
+            api_client,
             &local,
             &version_info,
-            &reuse_paths,
+            &reuse_update_roots,
+            current_reuse_manifest
+                .as_deref()
+                .expect("reuse update requires a local manifest"),
             force_copy,
             &opts,
-            &mut task_pool_runner,
+            task_pool_runner,
         )
         .await?;
     }
 
-    if reuse_paths.is_empty() {
+    if !use_reuse_update {
         match package_kind {
             UpdatePackageKind::Patch => {
                 let patch = version_info
@@ -487,7 +556,7 @@ pub(super) async fn update_internal(
                         std::mem::take(&mut extra_tasks),
                         false,
                         &opts,
-                        &mut task_pool_runner,
+                        task_pool_runner,
                     )
                     .await?;
                 } else {
@@ -502,7 +571,7 @@ pub(super) async fn update_internal(
                         std::mem::take(&mut extra_tasks),
                         false,
                         &opts,
-                        &mut task_pool_runner,
+                        task_pool_runner,
                     )
                     .await?;
                 }
@@ -523,25 +592,24 @@ pub(super) async fn update_internal(
                     std::mem::take(&mut extra_tasks),
                     true,
                     &opts,
-                    &mut task_pool_runner,
+                    task_pool_runner,
                 )
                 .await?;
             }
         }
     }
 
-    let verification_selection =
-        if reuse_paths.is_empty() && package_kind == UpdatePackageKind::Full {
-            // Full-package extraction verifies and commits every archive entry as it
-            // is written. The manifest closure still checks paths that were absent
-            // from the archive or owned by independent file tasks, while cached
-            // verified paths avoid a second read of freshly committed files.
-            IntegritySelection::GameFiles
-        } else {
-            IntegritySelection::Paths(archive_result.modified_paths)
-        };
+    let verification_selection = if !use_reuse_update && package_kind == UpdatePackageKind::Full {
+        // Full-package extraction verifies and commits every archive entry as it
+        // is written. The manifest closure still checks paths that were absent
+        // from the archive or owned by independent file tasks, while cached
+        // verified paths avoid a second read of freshly committed files.
+        IntegritySelection::GameFiles
+    } else {
+        IntegritySelection::Paths(archive_result.modified_paths)
+    };
     let completion = verify_updated_install(
-        &api_client,
+        api_client,
         &local.install_path,
         &install_target,
         &version_info.version,
@@ -549,8 +617,10 @@ pub(super) async fn update_internal(
         extra_tasks,
         verification_selection,
         archive_result.verified_paths,
+        &reuse_roots,
+        force_copy,
         &opts,
-        &mut task_pool_runner,
+        task_pool_runner,
     )
     .await?;
     if completion == PostUpdateCompletion::Verified {
@@ -564,6 +634,27 @@ pub(super) async fn update_internal(
         ));
     }
     Ok(())
+}
+
+fn merge_reuse_paths(explicit: &[PathBuf], peers: &[PathBuf]) -> Vec<PathBuf> {
+    let mut paths = Vec::with_capacity(explicit.len() + peers.len());
+    for path in explicit.iter().chain(peers) {
+        if !paths.iter().any(|existing| existing == path) {
+            paths.push(path.clone());
+        }
+    }
+    paths
+}
+
+fn install_can_source_target(
+    source: &griffr_common::runtime::LocalInstall,
+    target_version: &str,
+) -> bool {
+    source.require_config_ini_version().ok() == Some(target_version)
+        || read_install_change(&source.install_path)
+            .ok()
+            .flatten()
+            .is_some_and(|state| state.target_version == target_version)
 }
 
 async fn plan_update_vfs_tasks(
@@ -610,7 +701,7 @@ async fn plan_update_vfs_tasks(
 }
 
 pub async fn update(
-    path: PathBuf,
+    paths: Vec<PathBuf>,
     overrides: crate::InstallTargetOverrideArgs,
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
@@ -618,18 +709,42 @@ pub async fn update(
     patch_options: griffr_common::runtime::PatchApplyOptions,
     opts: GlobalOptions,
 ) -> Result<()> {
-    update_internal(
-        path,
-        overrides,
-        reuse_paths,
-        force_copy,
-        use_predownload,
-        patch_options,
-        None,
-        false,
-        opts,
-    )
-    .await
+    let installs = crate::commands::batch::inspect_unique_installations(&paths).await?;
+    let explicit_sources =
+        crate::commands::batch::inspect_unique_reuse_sources(&reuse_paths).await?;
+    let target_games = installs
+        .iter()
+        .map(|install| install.require_known_game())
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::commands::batch::validate_reuse_source_games(&explicit_sources, &target_games)?;
+    let api_client = ApiClient::new()?;
+    let mut task_pool_runner = TaskPoolRunner::new(opts.task_pool_config())?;
+
+    for (index, install) in installs.iter().enumerate() {
+        let target_reuse_paths = crate::commands::batch::reuse_paths_for_target(
+            &explicit_sources,
+            &installs,
+            &target_games,
+            index,
+        );
+        update_internal(
+            &api_client,
+            &mut task_pool_runner,
+            install.install_path.clone(),
+            overrides.clone(),
+            target_reuse_paths.explicit,
+            target_reuse_paths.peers,
+            force_copy,
+            use_predownload,
+            patch_options.clone(),
+            None,
+            false,
+            opts,
+        )
+        .await
+        .with_context(|| format!("Update failed for {}", install.install_path.display()))?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn apply_staged_predownload(
@@ -639,9 +754,14 @@ pub(crate) async fn apply_staged_predownload(
     patch_options: griffr_common::runtime::PatchApplyOptions,
     opts: GlobalOptions,
 ) -> Result<()> {
+    let api_client = ApiClient::new()?;
+    let mut task_pool_runner = TaskPoolRunner::new(opts.task_pool_config())?;
     update_internal(
+        &api_client,
+        &mut task_pool_runner,
         path,
         overrides,
+        Vec::new(),
         Vec::new(),
         false,
         true,

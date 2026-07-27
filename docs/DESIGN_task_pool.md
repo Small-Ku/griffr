@@ -209,6 +209,14 @@ The first failed `RepairFile` claims metadata preparation once and expands the n
 
 Archive repair is deliberately simple in this phase: it uses the archive only when the currently missing exact entry bytes are strictly smaller than the prepared individual download remainder. It unions only overlapping or exactly adjacent ranges and never downloads a gap merely to reduce the request count. Repair ranges use an isolated ephemeral cache below the package identity, so cleanup cannot remove install or update resume data. Archive metadata failure, range failure, extraction failure, or final verification failure continues the same graph node through the individual-file fallback. Range download and per-entry extraction are separate continuation tasks, so one ready entry can decompress while other archive ranges are still downloading.
 
+### Batch Execution and Peer Reuse
+
+- **Batch Execution**: `update` and `verify` process repeated `--path` targets sequentially in input order using a single command-scoped `TaskPoolRunner`. Execution is fail-fast across targets.
+- **Reuse Provenance**: Selected same-game targets act as automatic peer sources for later batch targets. Explicit `--reuse-from` enables manifest-driven updates without archive extraction. Automatic peers bypass archives only when target-version matched; otherwise, they serve as VFS/repair sources.
+- **Candidate Validation**: Reused files are verified against the target manifest's size and MD5 before commit. Cross-game reuse is rejected.
+- **Hardlink Safety**: Hardlink reuse uses atomic replacement to maintain copy-on-write isolation for Griffr mutations. `--force-copy` forces copy fallback.
+- **Manifest Cleanup**: File ensure removes only verified old-manifest files blocking target transitions or remaining obsolete post-ensure. Modified files, unowned content, symlinks, and junctions are retained. Cleanup paths are canonicalized inside the install root.
+
 ---
 
 ## 7. Lazy Range Archive DAG

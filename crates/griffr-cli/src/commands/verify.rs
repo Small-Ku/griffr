@@ -3,10 +3,9 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::TaskPoolRunner;
 use griffr_common::runtime::{
-    finish_install_change, inspect_reuse_installations, is_launcher_metadata_path,
-    read_install_change, run_integrity_pool, start_install_change, sync_launcher_metadata,
-    InstallChangeKind, InstallChangeSource, InstallChangeStart, InstallChangeState,
-    IntegritySelection, ProgressLane, ProgressSender,
+    finish_install_change, is_launcher_metadata_path, read_install_change, run_integrity_pool,
+    start_install_change, sync_launcher_metadata, InstallChangeKind, InstallChangeSource,
+    InstallChangeStart, InstallChangeState, IntegritySelection, ProgressLane, ProgressSender,
 };
 use griffr_common::runtime::{plan_vfs_tasks, streaming_assets_path, VfsFilePlanOptions};
 use serde_json::json;
@@ -15,10 +14,11 @@ use std::path::PathBuf;
 use crate::progress::CountAndByteProgress;
 use crate::ui;
 use crate::{GlobalOptions, OutputFormat};
-use griffr_common::runtime::detect_local_install;
 
-pub async fn verify(
-    path: PathBuf,
+async fn verify_one(
+    api_client: &ApiClient,
+    pool_runner: &mut TaskPoolRunner,
+    local: griffr_common::runtime::LocalInstall,
     game_override: Option<GameId>,
     region_override: Option<RegionId>,
     channel_override: Option<ChannelPair>,
@@ -30,35 +30,24 @@ pub async fn verify(
     relink_reuse: bool,
     skip_vfs: bool,
     opts: GlobalOptions,
-) -> Result<()> {
-    if relink_reuse && !repair {
-        anyhow::bail!("--relink-reuse requires --repair");
-    }
-    if relink_reuse && reuse_paths.is_empty() {
-        anyhow::bail!("--relink-reuse requires at least one --reuse-from source");
-    }
-    if skip_local_detect && (game_override.is_none() || region_override.is_none()) {
-        anyhow::bail!("--skip-local-detect requires both --game and --region");
-    }
-
-    let local = detect_local_install(&path).await?;
+) -> Result<serde_json::Value> {
     let detected_game = local.game_id.as_ref();
     let detected_region = local.region_id;
     let detected_channel = local.channel_id.as_ref();
-    let game_id = if skip_local_detect {
-        game_override.expect("validated above")
-    } else {
-        game_override.unwrap_or(local.require_known_game()?)
+    let game_id = match game_override {
+        Some(game_id) => game_id,
+        None if !skip_local_detect => local.require_known_game()?,
+        None => unreachable!("--skip-local-detect validation requires --game"),
     };
-    let region_id = if skip_local_detect {
-        region_override.expect("validated above")
-    } else {
-        region_override.unwrap_or(local.require_known_region()?)
+    let region_id = match region_override {
+        Some(region_id) => region_id,
+        None if !skip_local_detect => local.require_known_region()?,
+        None => unreachable!("--skip-local-detect validation requires --region"),
     };
-    let channel_id = if skip_local_detect {
-        channel_override.expect("validated above")
-    } else {
-        channel_override.unwrap_or(local.require_known_channel()?)
+    let channel_id = match channel_override {
+        Some(channel_id) => channel_id,
+        None if !skip_local_detect => local.require_known_channel()?,
+        None => unreachable!("--region always resolves a channel pair"),
     };
     let installed_version = local.require_config_ini_version()?.to_string();
     let pending_change = read_install_change(&local.install_path)?;
@@ -96,8 +85,6 @@ pub async fn verify(
         &channel_id,
         &overrides.clone().into(),
     )?;
-    let api_client = ApiClient::new()?;
-
     if let Some(state) = active_change.clone() {
         let release = api_client
             .get_latest_game(&install_target.api, Some(&state.target_version))
@@ -214,15 +201,7 @@ pub async fn verify(
         .map(|session| session.sender())
         .unwrap_or_else(ProgressSender::disabled);
 
-    let source_roots = if repair {
-        inspect_reuse_installations(&game_id, &local.install_path, &reuse_paths)
-            .await?
-            .into_iter()
-            .map(|source| source.install_path)
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let source_roots = if repair { reuse_paths } else { Vec::new() };
 
     let sync_vfs = active_change
         .as_ref()
@@ -254,7 +233,7 @@ pub async fn verify(
                 .map(|path| streaming_assets_path(&path.join(install_target.data_root.clone())))
                 .collect::<Vec<_>>();
             plan_vfs_tasks(
-                &api_client,
+                api_client,
                 &install_target.api,
                 &version_info.version,
                 &rand_str,
@@ -292,7 +271,6 @@ pub async fn verify(
             pool_cfg.network_slots
         ));
     }
-    let mut pool_runner = TaskPoolRunner::new(pool_cfg)?;
     let repair_change = if repair {
         if let Some(state) = active_change.as_ref() {
             Some(state.clone())
@@ -326,7 +304,7 @@ pub async fn verify(
         None
     };
     let summary = run_integrity_pool(
-        &api_client,
+        api_client,
         &local.install_path,
         &install_target,
         Some(&checked_version),
@@ -337,7 +315,7 @@ pub async fn verify(
         force_copy,
         relink_reuse,
         extra_tasks,
-        Some(&mut pool_runner),
+        Some(pool_runner),
         progress_sender,
     )
     .await
@@ -349,43 +327,42 @@ pub async fn verify(
         progress.finish();
     }
 
-    if opts.output == OutputFormat::Json {
-        let issue_list = summary
-            .issues
-            .iter()
-            .map(|issue| {
-                json!({
-                    "path": issue.path,
-                    "kind": format!("{:?}", issue.kind),
-                    "expected_size": issue.expected_size,
-                    "actual_size": issue.actual_size,
-                    "expected_md5": issue.expected_md5,
-                    "actual_md5": issue.actual_md5,
-                    "is_metadata": is_launcher_metadata_path(&issue.path),
-                })
+    let issue_list = summary
+        .issues
+        .iter()
+        .map(|issue| {
+            json!({
+                "path": issue.path,
+                "kind": format!("{:?}", issue.kind),
+                "expected_size": issue.expected_size,
+                "actual_size": issue.actual_size,
+                "expected_md5": issue.expected_md5,
+                "actual_md5": issue.actual_md5,
+                "is_metadata": is_launcher_metadata_path(&issue.path),
             })
-            .collect::<Vec<_>>();
-        ui::emit_json(&json!({
-            "path": local.install_path.display().to_string(),
-            "game": game_id.to_string(),
-            "region": region_id.to_string(),
-            "channel": channel_id.channel().to_string(),
-            "sub_channel": channel_id.sub_channel().to_string(),
-            "version": checked_version.as_str(),
-            "config_version": installed_version.as_str(),
-            "pending_change": active_change.as_ref().map(|state| json!({
-                "kind": state.kind.to_string(),
-                "source": state.source.to_string(),
-                "from_version": state.from_version.as_deref(),
-                "target_version": state.target_version.as_str(),
-                "sync_vfs": state.sync_vfs,
-            })),
-            "repair": repair,
-            "issues": issue_list,
-            "downloaded_files": summary.downloaded_files,
-            "reused_files": summary.reused_files,
-        }))?;
-    } else {
+        })
+        .collect::<Vec<_>>();
+    let report = json!({
+        "path": local.install_path.display().to_string(),
+        "game": game_id.to_string(),
+        "region": region_id.to_string(),
+        "channel": channel_id.channel().to_string(),
+        "sub_channel": channel_id.sub_channel().to_string(),
+        "version": checked_version.as_str(),
+        "config_version": installed_version.as_str(),
+        "pending_change": active_change.as_ref().map(|state| json!({
+            "kind": state.kind.to_string(),
+            "source": state.source.to_string(),
+            "from_version": state.from_version.as_deref(),
+            "target_version": state.target_version.as_str(),
+            "sync_vfs": state.sync_vfs,
+        })),
+        "repair": repair,
+        "issues": issue_list,
+        "downloaded_files": summary.downloaded_files,
+        "reused_files": summary.reused_files,
+    });
+    if opts.output != OutputFormat::Json {
         ui::print_info(format!("Integrity issues found: {}", summary.issues.len()));
         if repair {
             ui::print_info(format!(
@@ -398,7 +375,7 @@ pub async fn verify(
     if summary.issues.is_empty() {
         if repair {
             sync_launcher_metadata(
-                &api_client,
+                api_client,
                 &local.install_path,
                 &install_target,
                 Some(&checked_version),
@@ -417,19 +394,21 @@ pub async fn verify(
                 ));
             }
         }
-        return Ok(());
+        return Ok(report);
     }
 
-    for issue in &summary.issues {
-        ui::print_warning(format!(
-            "{} {:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
-            issue.path,
-            issue.kind,
-            issue.expected_size,
-            issue.actual_size,
-            issue.expected_md5,
-            issue.actual_md5
-        ));
+    if opts.output != OutputFormat::Json {
+        for issue in &summary.issues {
+            ui::print_warning(format!(
+                "{} {:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
+                issue.path,
+                issue.kind,
+                issue.expected_size,
+                issue.actual_size,
+                issue.expected_md5,
+                issue.actual_md5
+            ));
+        }
     }
 
     if repair {
@@ -462,7 +441,7 @@ pub async fn verify(
             ui::print_phase("Syncing launcher metadata");
         }
         sync_launcher_metadata(
-            &api_client,
+            api_client,
             &local.install_path,
             &install_target,
             Some(&checked_version),
@@ -484,6 +463,116 @@ pub async fn verify(
         } else {
             "Verify finished"
         });
+    }
+    Ok(report)
+}
+
+pub async fn verify(
+    paths: Vec<PathBuf>,
+    game_override: Option<GameId>,
+    region_override: Option<RegionId>,
+    channel_override: Option<ChannelPair>,
+    overrides: crate::InstallTargetOverrideArgs,
+    skip_local_detect: bool,
+    repair: bool,
+    reuse_paths: Vec<PathBuf>,
+    force_copy: bool,
+    relink_reuse: bool,
+    skip_vfs: bool,
+    opts: GlobalOptions,
+) -> Result<()> {
+    if relink_reuse && !repair {
+        anyhow::bail!("--relink-reuse requires --repair");
+    }
+    if skip_local_detect
+        && (game_override.is_none() || region_override.is_none() || channel_override.is_none())
+    {
+        anyhow::bail!("--skip-local-detect requires both --game and --region");
+    }
+
+    let installs = crate::commands::batch::inspect_unique_installations(&paths).await?;
+    let explicit_sources = if repair {
+        crate::commands::batch::inspect_unique_reuse_sources(&reuse_paths).await?
+    } else {
+        Vec::new()
+    };
+    let target_games = installs
+        .iter()
+        .map(|install| {
+            if skip_local_detect {
+                Ok(game_override.clone().expect("validated above"))
+            } else {
+                game_override
+                    .clone()
+                    .or_else(|| install.game_id.clone())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Could not determine the game for {}",
+                            install.install_path.display()
+                        )
+                    })
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    crate::commands::batch::validate_reuse_source_games(&explicit_sources, &target_games)?;
+    let reuse_by_target = installs
+        .iter()
+        .enumerate()
+        .map(|(index, install)| {
+            let paths = if repair {
+                crate::commands::batch::reuse_paths_for_target(
+                    &explicit_sources,
+                    &installs,
+                    &target_games,
+                    index,
+                )
+                .all()
+            } else {
+                Vec::new()
+            };
+            if relink_reuse && paths.is_empty() {
+                anyhow::bail!(
+                    "--relink-reuse requires a compatible --reuse-from or another same-game --path for {}",
+                    install.install_path.display()
+                );
+            }
+            Ok(paths)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let api_client = ApiClient::new()?;
+    let mut pool_runner = TaskPoolRunner::new(opts.task_pool_config())?;
+    let mut reports = Vec::with_capacity(installs.len());
+
+    for (install, target_reuse_paths) in installs.iter().zip(reuse_by_target) {
+        reports.push(
+            verify_one(
+                &api_client,
+                &mut pool_runner,
+                install.clone(),
+                game_override.clone(),
+                region_override,
+                channel_override.clone(),
+                overrides.clone(),
+                skip_local_detect,
+                repair,
+                target_reuse_paths,
+                force_copy,
+                relink_reuse,
+                skip_vfs,
+                opts,
+            )
+            .await
+            .with_context(|| format!("Verify failed for {}", install.install_path.display()))?,
+        );
+    }
+
+    if opts.output == OutputFormat::Json {
+        if reports.len() == 1 {
+            ui::emit_json(&reports[0])?;
+        } else {
+            ui::emit_json(&json!({ "results": reports }))?;
+        }
     }
     Ok(())
 }
