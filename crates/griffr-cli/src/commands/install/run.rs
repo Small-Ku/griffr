@@ -9,11 +9,12 @@ use griffr_common::runtime::task_pool::{
     TaskGraphBuilder, TaskOutcome, TaskPoolRunner, TaskProgress,
 };
 use griffr_common::runtime::{
-    directory_has_entries, ensure_game_files_with_pool, finish_install_change,
-    griffr_archives_path, plan_vfs_tasks, read_install_change, resolve_file_reuse_roots,
-    run_integrity_pool, start_install_change, streaming_assets_path, sync_launcher_metadata,
-    FileReuseConfig, InstallChangeKind, InstallChangeSource, InstallChangeStart,
-    InstallChangeState, ProgressLane, VfsFilePlanOptions,
+    directory_has_entries, ensure_game_files_from_manifest_with_pool, finish_install_change,
+    finish_vfs_plan, griffr_archives_path, plan_vfs_tasks, read_install_change,
+    resolve_file_reuse_roots, run_integrity_pool, start_install_change, streaming_assets_path,
+    sync_launcher_metadata, ContentPlan, FileReuseConfig, GameManifestSnapshot, InstallChangeKind,
+    InstallChangeSource, InstallChangeStart, InstallChangeState, ProgressLane, VfsFilePlanOptions,
+    VfsTaskPlan,
 };
 
 use crate::commands::archive_graph::{add_file_tasks, full_archive_excluded_paths};
@@ -104,6 +105,9 @@ pub async fn install(
         .pkg
         .as_ref()
         .context("No package information available")?;
+    let manifest_snapshot = GameManifestSnapshot::fetch(&api_client, &version_info)
+        .await
+        .context("Failed to fetch the install manifest snapshot")?;
     let total_size: u64 = pkg.packs.iter().map(|p| p.size()).sum();
 
     ui::print_phase(format!(
@@ -124,7 +128,7 @@ pub async fn install(
         ui::print_info(format!("Reuse sources: {}", reuse_paths.len()));
     }
 
-    let change_state = InstallChangeState::new(
+    let mut change_state = InstallChangeState::new(
         InstallChangeKind::Install,
         if reuse_paths.is_empty() {
             InstallChangeSource::FullArchive
@@ -143,12 +147,12 @@ pub async fn install(
         } else {
             Vec::new()
         },
-        !opts.skip_vfs,
+        opts.resource_policy.uses_resource_index(),
     );
     let task_pool_cfg = opts.task_pool_config();
     let mut task_pool = TaskPoolRunner::new(task_pool_cfg)?;
 
-    let mut extra_tasks = if !opts.skip_vfs {
+    let mut vfs_plan = if opts.resource_policy.uses_resource_index() {
         ui::print_phase("Planning VFS resources for the install DAG");
         ui::print_info(
             "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
@@ -177,16 +181,24 @@ pub async fn install(
         .await
         .context("Failed to plan VFS tasks")?
         {
-            Some(plan) => plan.tasks,
+            Some(plan) => plan,
             None => {
                 ui::print_info("The selected target does not provide the launcher resource-index API. Skip VFS sync.");
-                Vec::new()
+                VfsTaskPlan::default()
             }
         }
     } else {
         ui::print_phase("Verifying install integrity");
-        Vec::new()
+        VfsTaskPlan::default()
     };
+
+    change_state = change_state
+        .with_game_files_path(manifest_snapshot.release.file_path.clone())
+        .with_resource_identity(vfs_plan.identity.clone());
+
+    let mut content_plan =
+        ContentPlan::from_snapshot(&install_path, manifest_snapshot.clone(), &vfs_plan.claims)
+            .context("Failed to build the install content plan")?;
 
     let change_start = start_install_change(&install_path, &change_state)?;
     match change_start {
@@ -222,18 +234,19 @@ pub async fn install(
             ProgressLane::INTEGRITY_VERIFY,
             ProgressLane::INTEGRITY_DOWNLOAD,
         );
+        content_plan
+            .refresh_delivery(&api_client, &install_target.api)
+            .await
+            .context("Failed to refresh install delivery URLs")?;
         let summary = run_integrity_pool(
-            &api_client,
-            &install_path,
-            &install_target,
-            Some(&change_state.target_version),
+            &content_plan,
             griffr_common::runtime::IntegritySelection::GameFiles,
             &[],
             true,
             &source_roots,
             force_copy,
             !source_roots.is_empty(),
-            extra_tasks,
+            std::mem::take(&mut vfs_plan.tasks),
             Some(&mut task_pool),
             session.sender(),
         )
@@ -247,14 +260,16 @@ pub async fn install(
                 summary.issues.len()
             );
         }
-        sync_launcher_metadata(
-            &api_client,
-            &install_path,
-            &install_target,
-            Some(&change_state.target_version),
-        )
-        .await
-        .context("Failed to sync launcher metadata after resumed install verification")?;
+        finish_vfs_plan(&install_path, &vfs_plan, true)
+            .await
+            .context("Failed to finish the resource baseline after resumed install verification")?;
+        content_plan
+            .refresh_delivery(&api_client, &install_target.api)
+            .await
+            .context("Failed to refresh launcher metadata URLs")?;
+        sync_launcher_metadata(&api_client, &install_path, content_plan.snapshot())
+            .await
+            .context("Failed to sync launcher metadata after resumed install verification")?;
         finish_install_change(&install_path, &change_state)
             .context("Failed to remove the install change marker")?;
         ui::print_success("Install resume finished");
@@ -270,15 +285,11 @@ pub async fn install(
             .with_context(|| format!("Failed to create {}", download_dir.display()))?;
 
         let archive_groups = plan_archive_groups(&pkg.packs, &download_dir)?;
-        let expected_archive_files = archive_expected_files(
-            api_client
-                .fetch_game_files(&pkg.file_path, pkg.game_files_md5.as_deref())
-                .await
-                .context("Failed to fetch game_files before archive streaming")?,
-        );
+        let expected_archive_files = archive_expected_files(manifest_snapshot.entries.clone());
         let archive_group_count = archive_groups.len();
         let excluded_commit_paths = full_archive_excluded_paths(
-            &extra_tasks,
+            &vfs_plan.tasks,
+            &vfs_plan.claims,
             &install_path,
             expected_archive_files.as_ref(),
         );
@@ -301,10 +312,10 @@ pub async fn install(
                 excluded_commit_paths: excluded_commit_paths.clone(),
             }));
         }
-        let archive_vfs_task_count = extra_tasks.len();
+        let archive_vfs_task_count = vfs_plan.tasks.len();
         let (parallel_vfs, dependent_vfs) = add_file_tasks(
             &mut graph,
-            std::mem::take(&mut extra_tasks),
+            std::mem::take(&mut vfs_plan.tasks),
             &archive_nodes,
             &install_path,
             expected_archive_files.as_ref(),
@@ -356,6 +367,11 @@ pub async fn install(
             }
         }
 
+        let failed_graph_nodes = result
+            .metrics
+            .graph
+            .failed_nodes
+            .saturating_add(result.metrics.graph.cancelled_nodes);
         let mut failures = Vec::new();
         for event in result.outcomes {
             match event {
@@ -372,10 +388,11 @@ pub async fn install(
                 _ => {}
             }
         }
-        if !failures.is_empty() {
+        if failed_graph_nodes > 0 || !failures.is_empty() {
             anyhow::bail!(
-                "Install archive work failed for {} item(s): {}",
+                "Install archive work failed for {} reported item(s) and {} failed or cancelled graph node(s): {}",
                 failures.len(),
+                failed_graph_nodes,
                 failures.join(", ")
             );
         }
@@ -391,11 +408,16 @@ pub async fn install(
             ProgressLane::FILE_ENSURE_VERIFY,
             ProgressLane::FILE_ENSURE_DOWNLOAD,
         );
-        let ensured = ensure_game_files_with_pool(
-            &api_client,
+        content_plan
+            .refresh_delivery(&api_client, &install_target.api)
+            .await
+            .context("Failed to refresh install delivery URLs before file ensure")?;
+        let core_game_entries = content_plan.core_game_entries();
+        let files_path = content_plan.snapshot().package.file_path.clone();
+        let ensured = ensure_game_files_from_manifest_with_pool(
             &install_path,
-            &pkg.file_path,
-            pkg.game_files_md5.as_deref(),
+            &files_path,
+            &core_game_entries,
             &FileReuseConfig {
                 allow_copy_fallback: force_copy,
                 dry_run: false,
@@ -426,18 +448,19 @@ pub async fn install(
         ProgressLane::INTEGRITY_VERIFY,
         ProgressLane::INTEGRITY_DOWNLOAD,
     );
+    content_plan
+        .refresh_delivery(&api_client, &install_target.api)
+        .await
+        .context("Failed to refresh final install delivery URLs")?;
     let summary = run_integrity_pool(
-        &api_client,
-        &install_path,
-        &install_target,
-        Some(&version_info.version),
+        &content_plan,
         griffr_common::runtime::IntegritySelection::GameFiles,
         &already_verified_paths,
         true,
         &[],
         false,
         false,
-        extra_tasks,
+        std::mem::take(&mut vfs_plan.tasks),
         Some(&mut task_pool),
         verify_session.sender(),
     )
@@ -462,14 +485,16 @@ pub async fn install(
         );
     }
 
-    sync_launcher_metadata(
-        &api_client,
-        &install_path,
-        &install_target,
-        Some(&version_info.version),
-    )
-    .await
-    .context("Failed to sync launcher metadata after final install verification")?;
+    finish_vfs_plan(&install_path, &vfs_plan, true)
+        .await
+        .context("Failed to finish the resource baseline after final install verification")?;
+    content_plan
+        .refresh_delivery(&api_client, &install_target.api)
+        .await
+        .context("Failed to refresh launcher metadata URLs")?;
+    sync_launcher_metadata(&api_client, &install_path, content_plan.snapshot())
+        .await
+        .context("Failed to sync launcher metadata after final install verification")?;
     finish_install_change(&install_path, &change_state)
         .context("Failed to remove the install change marker")?;
 

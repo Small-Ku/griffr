@@ -1,6 +1,11 @@
 use crate::error::{Error, Result};
+use md5::Digest;
+use std::collections::BTreeMap;
+
 use rapidhash::RapidHashSet as HashSet;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
 use crate::api::client::ApiClient;
 use crate::api::crypto::RES_INDEX_KEY;
@@ -10,10 +15,9 @@ use crate::runtime::task_pool::{
     FileEnsureTask, Task, TaskOutcome, TaskPoolRunner, TaskProgress, TransferClass,
 };
 use crate::runtime::{
-    collect_files_recursive, normalize_logical_path, path_is_dir, path_is_file,
-    remove_empty_dirs_recursive, resource_manifest_filename, resource_manifest_url, vfs_path,
-    PathOutcomeTracker, ProgressLane, ProgressSender, ResourceManifestKind, RESOURCE_GROUP_BASE,
-    RESOURCE_GROUP_MAIN,
+    build_cdn_file_url, normalize_logical_path, path_is_file, remove_empty_dirs_recursive,
+    resource_manifest_filename, resource_manifest_url, vfs_path, PathOutcomeTracker, ProgressLane,
+    ProgressSender, ResourceManifestKind, RESOURCE_GROUP_BASE, RESOURCE_GROUP_MAIN,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -22,9 +26,9 @@ pub struct VfsFilePlanOptions {
     pub source_streaming_assets: Vec<std::path::PathBuf>,
     /// Allow invalid destinations to be repaired by reuse or download.
     pub allow_repair: bool,
-    /// Allow copy fallback when hardlinking from source installs fails.
+    /// Allow copying from source installs when reuse is available.
     pub allow_copy_fallback: bool,
-    /// Prefer relinking from reuse sources even when local files already verify.
+    /// Prefer copying from reuse sources even when local files already verify.
     pub prefer_reuse: bool,
 }
 
@@ -44,11 +48,60 @@ pub struct VfsUpdateResult {
 }
 
 #[derive(Debug, Clone)]
+pub struct VfsManifestCommit {
+    pub dest: std::path::PathBuf,
+    pub logical_path: String,
+    pub encrypted_bytes: Vec<u8>,
+    pub expected_md5: String,
+}
+
+impl VfsManifestCommit {
+    pub fn claim(&self) -> crate::runtime::ArtifactClaim {
+        crate::runtime::ArtifactClaim::new(
+            self.dest.clone(),
+            crate::runtime::ArtifactExpectation::new(
+                &self.logical_path,
+                &self.expected_md5,
+                Some(self.encrypted_bytes.len() as u64),
+            ),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceManifestIdentity {
+    pub logical_path: String,
+    pub md5: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceIdentity {
+    pub res_version: String,
+    pub manifests: Vec<ResourceManifestIdentity>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct VfsTaskPlan {
     pub tasks: Vec<Task>,
+    pub claims: Vec<crate::runtime::ArtifactClaim>,
+    pub manifest_commits: Vec<VfsManifestCommit>,
+    pub managed_files: Vec<super::ManagedResourceFile>,
+    pub streaming_assets_root: PathBuf,
+    pub identity: Option<ResourceIdentity>,
     pub total_files: usize,
     pub total_bytes: u64,
     pub res_version: String,
+}
+
+pub fn commit_vfs_manifests(manifests: &[VfsManifestCommit]) -> Result<()> {
+    for manifest in manifests {
+        crate::runtime::task_pool::fs_ops::write_atomic_bytes(
+            &manifest.dest,
+            &manifest.encrypted_bytes,
+        )?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,29 +154,48 @@ pub struct PersistentVfsConfig {
     pub source_streaming_assets: std::path::PathBuf,
     /// Other StreamingAssets roots that can supply files.
     pub extra_source_streaming_assets: Vec<std::path::PathBuf>,
-    /// Allow copy fallback when hardlinking fails.
-    pub allow_copy_fallback: bool,
-    /// Prefer relinking from source candidates even when destination already verifies.
+    /// Prefer copying from source candidates even when destination already verifies.
     pub prefer_reuse: bool,
     /// Allow downloading missing files from CDN when not found in source roots.
     pub allow_download: bool,
-    /// Remove files under Persistent/VFS that are not in the selected file set.
+    /// Remove previously Griffr-managed files that are no longer selected.
     pub prune_extra_files: bool,
+    /// Griffr private state root for pending and managed-file records.
+    pub state_root: PathBuf,
 }
 
-#[derive(Debug, Clone)]
-pub struct PersistentVfsManifestDownload {
-    pub url: String,
-    pub filename: String,
+const PERSISTENT_VFS_STATE_NAME: &str = "persistent-vfs.json";
+const PERSISTENT_VFS_PENDING_NAME: &str = "persistent-vfs.pending.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistentManagedFile {
+    pub path: String,
+    pub md5: String,
+    pub size: u64,
+}
+
+impl PersistentManagedFile {
+    fn expectation(&self) -> crate::runtime::ArtifactExpectation {
+        crate::runtime::ArtifactExpectation::new(&self.path, &self.md5, Some(self.size))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PersistentVfsState {
+    res_version: String,
+    file_set: String,
+    manifests: Vec<ResourceManifestIdentity>,
+    files: Vec<PersistentManagedFile>,
 }
 
 #[derive(Debug, Clone)]
 pub struct PersistentVfsPlan {
     pub tasks: Vec<Task>,
-    pub manifest_downloads: Vec<PersistentVfsManifestDownload>,
+    pub manifest_commits: Vec<VfsManifestCommit>,
+    pub manifest_identities: Vec<ResourceManifestIdentity>,
+    pub managed_files: Vec<PersistentManagedFile>,
     pub total_files: usize,
     pub total_bytes: u64,
-    pub expected_paths: HashSet<String>,
     pub res_version: String,
     pub file_set: String,
 }
@@ -150,20 +222,21 @@ pub(super) fn file_set_includes_group(file_set: PersistentVfsFileSet, resource_n
     }
 }
 
-async fn read_local_res_index(path: &Path) -> Result<Option<crate::api::types::ResIndex>> {
+async fn read_local_res_index_document(
+    path: &Path,
+) -> Result<Option<crate::api::client::ResIndexDocument>> {
     if !path_is_file(path).await {
         return Ok(None);
     }
-    let encrypted_b64 =
-        String::from_utf8(compio::fs::read(path).await.map_err(|e| Error::IoAt {
-            action: "open file",
-            path: path.to_path_buf(),
-            source: e,
-        })?)
-        .map_err(|e| Error::Message {
-            context: "VFS error: ",
-            detail: format!("{} is not valid UTF-8 text: {e}", path.display()),
-        })?;
+    let encrypted_bytes = compio::fs::read(path).await.map_err(|e| Error::IoAt {
+        action: "open file",
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let encrypted_b64 = std::str::from_utf8(&encrypted_bytes).map_err(|e| Error::Message {
+        context: "VFS error: ",
+        detail: format!("{} is not valid UTF-8 text: {e}", path.display()),
+    })?;
     let decrypted = crate::api::crypto::decrypt_res_index(encrypted_b64.trim(), RES_INDEX_KEY)
         .map_err(|e| Error::Message {
             context: "VFS error: ",
@@ -175,18 +248,23 @@ async fn read_local_res_index(path: &Path) -> Result<Option<crate::api::types::R
             detail: format!("Failed to parse {}: {e}", path.display()),
         }
     })?;
-    Ok(Some(index))
+    let md5 = crate::to_hex(&md5::Md5::digest(&encrypted_bytes));
+    Ok(Some(crate::api::client::ResIndexDocument {
+        index,
+        encrypted_bytes,
+        md5,
+    }))
 }
 
 fn res_index_to_ensure_tasks(
     index: &crate::api::types::ResIndex,
-    source_candidates: &[std::path::PathBuf],
+    source_candidates: &[PathBuf],
     resource_path: &str,
     persistent_root: &Path,
     cfg: &PersistentVfsConfig,
-) -> (Vec<Task>, usize, u64) {
+) -> Result<(Vec<Task>, Vec<PersistentManagedFile>, u64)> {
     let mut tasks = Vec::new();
-    let mut total_files = 0usize;
+    let mut managed_files = Vec::new();
     let mut total_bytes = 0u64;
 
     for file in &index.files {
@@ -198,27 +276,49 @@ fn res_index_to_ensure_tasks(
             .as_deref()
             .or(file.hash.as_deref())
             .unwrap_or("")
-            .to_string();
+            .trim()
+            .to_ascii_lowercase();
         if expected_md5.is_empty() {
             continue;
         }
-        total_files += 1;
+        if expected_md5.len() != 32 || !expected_md5.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(Error::Message {
+                context: "VFS error: ",
+                detail: format!(
+                    "Persistent preference entry {} contains invalid MD5 {:?}",
+                    file.name, expected_md5
+                ),
+            });
+        }
+        let relative = crate::runtime::task_pool::fs_ops::path_safety::parse_safe_relative_path(
+            "resource index path",
+            &file.name,
+        )?;
+        let logical_path = relative.to_string_lossy().replace('\\', "/");
+        managed_files.push(PersistentManagedFile {
+            path: logical_path,
+            md5: expected_md5.clone(),
+            size: file.size,
+        });
         total_bytes = total_bytes.saturating_add(file.size);
         tasks.push(Task::ensure_file(FileEnsureTask {
-            dest: persistent_root.join(&file.name),
+            dest: persistent_root.join(&relative),
             logical_path: file.name.clone(),
             expected_md5,
             expected_size: file.size,
             source_candidates: source_candidates
                 .iter()
-                .map(|root| root.join(&file.name))
+                .map(|root| root.join(&relative))
                 .collect(),
             download_url: if cfg.allow_download {
-                Some(format!("{}/{}", resource_path, file.name))
+                Some(build_cdn_file_url(resource_path, &file.name))
             } else {
                 None
             },
-            allow_copy_fallback: cfg.allow_copy_fallback,
+            // Persistent is game-managed mutable state. Never share an inode
+            // with StreamingAssets or another install.
+            allow_copy_fallback: true,
+            copy_only: true,
             prefer_reuse: cfg.prefer_reuse,
             retry_count: 0,
             transfer_class: TransferClass::Vfs,
@@ -226,7 +326,109 @@ fn res_index_to_ensure_tasks(
         }));
     }
 
-    (tasks, total_files, total_bytes)
+    Ok((tasks, managed_files, total_bytes))
+}
+
+fn persistent_state_path(cfg: &PersistentVfsConfig) -> PathBuf {
+    cfg.state_root.join(PERSISTENT_VFS_STATE_NAME)
+}
+
+fn persistent_pending_path(cfg: &PersistentVfsConfig) -> PathBuf {
+    cfg.state_root.join(PERSISTENT_VFS_PENDING_NAME)
+}
+
+async fn read_persistent_state(path: &Path) -> Result<Option<PersistentVfsState>> {
+    let bytes = match compio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(Error::IoAt {
+                action: "open file",
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|source| Error::Message {
+            context: "VFS state error: ",
+            detail: format!("Failed to parse {}: {source}", path.display()),
+        })
+}
+
+fn write_persistent_state(path: &Path, state: &PersistentVfsState) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(state).map_err(|source| Error::Message {
+        context: "VFS state error: ",
+        detail: format!("Failed to serialize Persistent VFS state: {source}"),
+    })?;
+    crate::runtime::task_pool::fs_ops::write_atomic_bytes(path, &bytes)
+}
+
+async fn remove_pending_state(path: &Path) -> Result<()> {
+    match compio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(Error::IoAt {
+            action: "remove file or directory",
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+async fn prune_previous_managed_files(
+    persistent_root: &Path,
+    previous: Option<&PersistentVfsState>,
+    current_files: &[PersistentManagedFile],
+) -> Result<()> {
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    let current: HashSet<String> = current_files
+        .iter()
+        .map(|file| normalize_logical_path(&file.path))
+        .collect();
+    let vfs_root = vfs_path(persistent_root);
+    let mut removed_any = false;
+
+    for file in &previous.files {
+        if current.contains(&normalize_logical_path(&file.path)) {
+            continue;
+        }
+        let relative = crate::runtime::task_pool::fs_ops::path_safety::parse_safe_relative_path(
+            "Persistent VFS state path",
+            &file.path,
+        )?;
+        let path = persistent_root.join(relative);
+        if !path_is_file(&path).await {
+            continue;
+        }
+        // Delete only files that still match the exact artifact Griffr
+        // previously managed. Preserve game- or user-modified content.
+        if crate::runtime::task_pool::fs_ops::verify_artifact(
+            &path,
+            &file.expectation(),
+            crate::runtime::ArtifactSource::Existing,
+        )
+        .is_err()
+        {
+            continue;
+        }
+        compio::fs::remove_file(&path)
+            .await
+            .map_err(|source| Error::IoAt {
+                action: "remove file or directory",
+                path: path.clone(),
+                source,
+            })?;
+        removed_any = true;
+    }
+
+    if removed_any {
+        remove_empty_dirs_recursive(vfs_root).await?;
+    }
+    Ok(())
 }
 
 pub async fn plan_persistent_vfs_tasks(
@@ -244,16 +446,14 @@ pub async fn plan_persistent_vfs_tasks(
         return Ok(None);
     };
 
-    let mut tasks = Vec::new();
-    let mut manifest_downloads = Vec::new();
-    let mut total_files = 0usize;
-    let mut total_bytes = 0u64;
-    let mut expected_paths = HashSet::default();
+    let mut files_by_path = BTreeMap::<String, (PersistentManagedFile, Task)>::new();
+    let mut manifest_commits = Vec::new();
+    let mut manifest_identities = Vec::new();
     let mut file_set_parts = Vec::new();
 
     let mut source_roots = vec![cfg.source_streaming_assets.clone()];
     for root in &cfg.extra_source_streaming_assets {
-        if !source_roots.iter().any(|r| r == root) {
+        if !source_roots.iter().any(|candidate| candidate == root) {
             source_roots.push(root.clone());
         }
     }
@@ -264,84 +464,140 @@ pub async fn plan_persistent_vfs_tasks(
         }
 
         let pref_filename = resource_manifest_filename(ResourceManifestKind::Pref, &resource.name);
-        let index_filename =
-            resource_manifest_filename(ResourceManifestKind::Index, &resource.name);
+        let pref_path = persistent_root.join(&pref_filename);
         let pref_url =
             resource_manifest_url(&resource.path, ResourceManifestKind::Pref, &resource.name);
-        let index_url =
-            resource_manifest_url(&resource.path, ResourceManifestKind::Index, &resource.name);
 
-        let local_pref = read_local_res_index(&persistent_root.join(&pref_filename))
+        let document = if let Some(document) = read_local_res_index_document(&pref_path)
             .await
             .map_err(|e| Error::Message {
                 context: "VFS error: ",
                 detail: format!("Failed to parse local {pref_filename}: {e}"),
-            })?;
-        let local_index = read_local_res_index(&persistent_root.join(&index_filename))
-            .await
-            .map_err(|e| Error::Message {
-                context: "VFS error: ",
-                detail: format!("Failed to parse local {index_filename}: {e}"),
-            })?;
-
-        let (selected_index, manifest_kind) = if let Some(pref) = local_pref {
-            (pref, "pref-local")
-        } else if let Ok(pref) = api_client.fetch_res_index(&pref_url, RES_INDEX_KEY).await {
-            manifest_downloads.push(PersistentVfsManifestDownload {
-                url: pref_url,
-                filename: pref_filename.clone(),
-            });
-            (pref, "pref-api")
-        } else if let Some(index) = local_index {
-            (index, "index-local-fallback")
+            })? {
+            document
         } else {
-            let index = api_client
-                .fetch_res_index(&index_url, RES_INDEX_KEY)
-                .await
-                .map_err(|e| Error::Message {
-                    context: "VFS error: ",
-                    detail: format!(
-                        "Failed to fetch both pref and index manifests for resource group {}: {e}",
-                        resource.name
-                    ),
-                })?;
-            manifest_downloads.push(PersistentVfsManifestDownload {
-                url: index_url,
-                filename: index_filename.clone(),
+            let document = api_client
+                    .fetch_res_index_document(&pref_url, RES_INDEX_KEY)
+                    .await
+                    .map_err(|e| Error::Message {
+                        context: "VFS error: ",
+                        detail: format!(
+                            "Persistent requires the game-selected {pref_filename} manifest for resource group {}. Start the game and let it select resources, or make the pref manifest available from the resource service. The full index is intentionally not used as a fallback: {e}",
+                            resource.name
+                        ),
+                    })?;
+            manifest_commits.push(VfsManifestCommit {
+                dest: pref_path,
+                logical_path: pref_filename.clone(),
+                encrypted_bytes: document.encrypted_bytes.clone(),
+                expected_md5: document.md5.clone(),
             });
-            (index, "index-api-fallback")
+            document
         };
 
-        let (group_tasks, group_files, group_bytes) = res_index_to_ensure_tasks(
-            &selected_index,
+        if document.index.version != resources.res_version {
+            return Err(Error::Message {
+                context: "VFS error: ",
+                detail: format!(
+                    "Persistent preference manifest {} has resource version {}, expected {}",
+                    pref_filename, document.index.version, resources.res_version
+                ),
+            });
+        }
+
+        manifest_identities.push(ResourceManifestIdentity {
+            logical_path: pref_filename,
+            md5: document.md5,
+            size: document.encrypted_bytes.len() as u64,
+        });
+        let (group_tasks, group_files, _) = res_index_to_ensure_tasks(
+            &document.index,
             &source_roots,
             &resource.path,
             persistent_root,
             cfg,
-        );
-        for task in &group_tasks {
-            let logical_path = match task {
-                Task::Verify { logical_path, .. } | Task::RepairFile { logical_path, .. } => {
-                    Some(logical_path)
+        )?;
+        for (task, file) in group_tasks.into_iter().zip(group_files) {
+            let key = normalize_logical_path(&file.path);
+            if let Some((previous, _)) = files_by_path.get(&key) {
+                if previous.md5 != file.md5 || previous.size != file.size {
+                    return Err(Error::Message {
+                        context: "VFS error: ",
+                        detail: format!(
+                            "Persistent preference manifests claim {} with different expected content",
+                            file.path
+                        ),
+                    });
                 }
-                _ => None,
-            };
-            if let Some(logical_path) = logical_path {
-                expected_paths.insert(normalize_logical_path(logical_path));
+                continue;
             }
+            files_by_path.insert(key, (file, task));
         }
-        tasks.extend(group_tasks);
-        total_files += group_files;
-        total_bytes = total_bytes.saturating_add(group_bytes);
-        file_set_parts.push(format!("{}:{}", resource.name, manifest_kind));
+        file_set_parts.push(resource.name.clone());
     }
+
+    if file_set_parts.is_empty() {
+        return Err(Error::Message {
+            context: "VFS error: ",
+            detail: format!(
+                "Resource response did not contain the selected Persistent file set {}",
+                cfg.file_set
+            ),
+        });
+    }
+
+    let (managed_files, tasks): (Vec<_>, Vec<_>) = files_by_path.into_values().unzip();
+    let total_bytes = managed_files
+        .iter()
+        .map(|file| file.size)
+        .fold(0u64, u64::saturating_add);
+    manifest_identities.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+    for pair in manifest_identities.windows(2) {
+        if normalize_logical_path(&pair[0].logical_path)
+            == normalize_logical_path(&pair[1].logical_path)
+            && (pair[0].md5 != pair[1].md5 || pair[0].size != pair[1].size)
+        {
+            return Err(Error::Message {
+                context: "VFS error: ",
+                detail: format!(
+                    "Persistent preference manifests provide {} with different content",
+                    pair[0].logical_path
+                ),
+            });
+        }
+    }
+    manifest_identities.dedup_by(|left, right| {
+        normalize_logical_path(&left.logical_path) == normalize_logical_path(&right.logical_path)
+    });
+    manifest_commits.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+    for pair in manifest_commits.windows(2) {
+        if normalize_logical_path(&pair[0].logical_path)
+            == normalize_logical_path(&pair[1].logical_path)
+            && (pair[0].expected_md5 != pair[1].expected_md5
+                || pair[0].encrypted_bytes.len() != pair[1].encrypted_bytes.len())
+        {
+            return Err(Error::Message {
+                context: "VFS error: ",
+                detail: format!(
+                    "Persistent preference manifest commits provide {} with different content",
+                    pair[0].logical_path
+                ),
+            });
+        }
+    }
+    manifest_commits.dedup_by(|left, right| {
+        normalize_logical_path(&left.logical_path) == normalize_logical_path(&right.logical_path)
+    });
+    file_set_parts.sort();
+    file_set_parts.dedup();
 
     Ok(Some(PersistentVfsPlan {
         tasks,
-        manifest_downloads,
-        total_files,
+        manifest_commits,
+        manifest_identities,
+        total_files: managed_files.len(),
         total_bytes,
-        expected_paths,
+        managed_files,
         res_version: resources.res_version,
         file_set: file_set_parts.join(","),
     }))
@@ -367,27 +623,50 @@ pub async fn setup_persistent_vfs(
     )
     .await?
     {
-        Some(p) => p,
+        Some(plan) => plan,
         None => return Ok(None),
     };
 
     compio::fs::create_dir_all(persistent_root)
         .await
-        .map_err(|e| Error::IoAt {
+        .map_err(|source| Error::IoAt {
             action: "create directory",
             path: persistent_root.to_path_buf(),
-            source: e,
+            source,
+        })?;
+    compio::fs::create_dir_all(&cfg.state_root)
+        .await
+        .map_err(|source| Error::IoAt {
+            action: "create directory",
+            path: cfg.state_root.clone(),
+            source,
         })?;
 
-    for manifest in &plan.manifest_downloads {
-        let dest = persistent_root.join(&manifest.filename);
-        api_client
-            .download_file(&manifest.url, &dest, false)
-            .await
-            .map_err(|e| Error::Message {
-                context: "API client wrapper error: ",
-                detail: format!("Failed to download {}: {e}", manifest.url),
-            })?;
+    let state_path = persistent_state_path(cfg);
+    let pending_path = persistent_pending_path(cfg);
+    let previous_state = read_persistent_state(&state_path).await?;
+    let next_state = PersistentVfsState {
+        res_version: plan.res_version.clone(),
+        file_set: plan.file_set.clone(),
+        manifests: plan.manifest_identities.clone(),
+        files: plan.managed_files.clone(),
+    };
+    // Persist intent before any payload can change. A failed run leaves this
+    // marker so the next idempotent run can finish the same change. Do not
+    // silently replace it with a different resource selection under the same
+    // command path.
+    if let Some(pending_state) = read_persistent_state(&pending_path).await? {
+        if pending_state != next_state {
+            return Err(Error::Message {
+                context: "VFS state error: ",
+                detail: format!(
+                    "Pending Persistent VFS plan at {} differs from the current resource selection; remove or inspect the pending marker before starting a different change",
+                    pending_path.display()
+                ),
+            });
+        }
+    } else {
+        write_persistent_state(&pending_path, &next_state)?;
     }
 
     let task_progress = TaskProgress::new(progress)
@@ -417,31 +696,37 @@ pub async fn setup_persistent_vfs(
         }
     }
 
-    if cfg.prune_extra_files {
-        let vfs_root = vfs_path(persistent_root);
-        if path_is_dir(&vfs_root).await {
-            let files = collect_files_recursive(vfs_root.clone()).await?;
-            for file in files {
-                let rel = match file.strip_prefix(persistent_root) {
-                    Ok(r) => r.to_path_buf(),
-                    Err(_) => continue,
-                };
-                let rel_norm = normalize_logical_path(&rel.to_string_lossy());
-                if !plan.expected_paths.contains(&rel_norm) {
-                    compio::fs::remove_file(&file)
-                        .await
-                        .map_err(|e| Error::IoAt {
-                            action: "remove file or directory",
-                            path: file.clone(),
-                            source: e,
-                        })?;
-                }
-            }
-            remove_empty_dirs_recursive(vfs_root.clone()).await?;
-        }
+    let summary = outcomes.summary();
+    let failed_graph_nodes = result
+        .metrics
+        .graph
+        .failed_nodes
+        .saturating_add(result.metrics.graph.cancelled_nodes);
+    if summary.failed_files > 0 || failed_graph_nodes > 0 {
+        return Err(Error::Message {
+            context: "VFS error: ",
+            detail: format!(
+                "Persistent VFS payload failed for {} reported file(s) and {} failed or cancelled graph node(s); preference manifests and managed state were not committed",
+                summary.failed_files, failed_graph_nodes
+            ),
+        });
     }
 
-    let summary = outcomes.summary();
+    // Preference manifests describe a usable working set, so publish them
+    // only after every selected payload has verified.
+    commit_vfs_manifests(&plan.manifest_commits)?;
+
+    if cfg.prune_extra_files {
+        prune_previous_managed_files(
+            persistent_root,
+            previous_state.as_ref(),
+            &plan.managed_files,
+        )
+        .await?;
+    }
+
+    write_persistent_state(&state_path, &next_state)?;
+    remove_pending_state(&pending_path).await?;
 
     Ok(Some(PersistentVfsResult {
         total_files: plan.total_files,
@@ -453,4 +738,94 @@ pub async fn setup_persistent_vfs(
         res_version: plan.res_version,
         file_set: plan.file_set,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::types::{ResIndex, ResIndexFile};
+
+    fn persistent_config(root: &Path) -> PersistentVfsConfig {
+        PersistentVfsConfig {
+            file_set: PersistentVfsFileSet::Base,
+            source_streaming_assets: root.join("StreamingAssets"),
+            extra_source_streaming_assets: Vec::new(),
+            prefer_reuse: false,
+            allow_download: false,
+            prune_extra_files: false,
+            state_root: root.join(".griffr"),
+        }
+    }
+
+    #[test]
+    fn persistent_payload_reuse_is_copy_only() {
+        let root = Path::new("game");
+        let index = ResIndex {
+            version: "r1".to_string(),
+            path: String::new(),
+            files: vec![ResIndexFile {
+                index: 0,
+                name: "VFS/file.bin".to_string(),
+                hash: None,
+                size: 4,
+                r#type: 0,
+                md5: Some("00000000000000000000000000000000".to_string()),
+                manifest: 0,
+            }],
+        };
+
+        let (tasks, managed, _) = res_index_to_ensure_tasks(
+            &index,
+            &[root.join("StreamingAssets")],
+            "https://example.invalid/resources",
+            &root.join("Persistent"),
+            &persistent_config(root),
+        )
+        .unwrap();
+
+        assert_eq!(managed.len(), 1);
+        assert!(matches!(
+            tasks.as_slice(),
+            [Task::Verify {
+                on_fail: Some(repair),
+                ..
+            }] if matches!(repair.as_ref(), Task::RepairFile { copy_only: true, .. })
+        ));
+    }
+
+    #[compio::test]
+    async fn prune_removes_only_unchanged_previous_managed_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let persistent = temp.path().join("Persistent");
+        let unchanged = persistent.join("VFS/unchanged.bin");
+        let modified = persistent.join("VFS/modified.bin");
+        std::fs::create_dir_all(unchanged.parent().unwrap()).unwrap();
+        std::fs::write(&unchanged, b"same").unwrap();
+        std::fs::write(&modified, b"user").unwrap();
+        let expected_md5 = crate::to_hex(&md5::Md5::digest(b"same"));
+        let previous = PersistentVfsState {
+            res_version: "r1".to_string(),
+            file_set: "initial".to_string(),
+            manifests: Vec::new(),
+            files: vec![
+                PersistentManagedFile {
+                    path: "VFS/unchanged.bin".to_string(),
+                    md5: expected_md5.clone(),
+                    size: 4,
+                },
+                PersistentManagedFile {
+                    path: "VFS/modified.bin".to_string(),
+                    md5: expected_md5,
+                    size: 4,
+                },
+            ],
+        };
+
+        prune_previous_managed_files(&persistent, Some(&previous), &[])
+            .await
+            .unwrap();
+
+        assert!(!unchanged.exists());
+        assert!(modified.exists());
+    }
 }

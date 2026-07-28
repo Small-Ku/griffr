@@ -9,7 +9,7 @@ pub mod install;
 pub mod launch;
 pub mod news;
 pub mod predownload;
-pub mod setup_vfs;
+pub mod setup_persistent_resources;
 pub mod uninstall;
 pub mod update;
 pub mod verify;
@@ -33,7 +33,7 @@ pub use predownload::{
     apply as predownload_apply, check as predownload_check, fetch as predownload_fetch,
     resume as predownload_resume,
 };
-pub use setup_vfs::setup_vfs;
+pub use setup_persistent_resources::setup_persistent_resources;
 pub use uninstall::uninstall;
 pub use update::update;
 pub use verify::verify;

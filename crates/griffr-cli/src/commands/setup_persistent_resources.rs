@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::runtime::task_pool::TaskPoolRunner;
 use griffr_common::runtime::{
-    inspect_reuse_installations, setup_persistent_vfs, PersistentVfsConfig, PersistentVfsFileSet,
-    ProgressLane,
+    inspect_reuse_installations, setup_persistent_vfs, Launcher, PersistentVfsConfig,
+    PersistentVfsFileSet, ProgressLane,
 };
 
 use crate::progress::CountAndByteProgress;
@@ -13,14 +13,13 @@ use crate::ui;
 use crate::GlobalOptions;
 use griffr_common::runtime::detect_local_install;
 
-pub async fn setup_vfs(
+pub async fn setup_persistent_resources(
     path: PathBuf,
     overrides: crate::InstallTargetOverrideArgs,
     file_set: PersistentVfsFileSet,
     reuse_paths: Vec<PathBuf>,
-    force_copy: bool,
     allow_download: bool,
-    relink_reuse: bool,
+    prefer_reuse: bool,
     prune_extra_files: bool,
     opts: GlobalOptions,
 ) -> Result<()> {
@@ -40,7 +39,14 @@ pub async fn setup_vfs(
     let version_info = api_client
         .get_latest_game(&install_target.api, Some(&installed_version))
         .await
-        .context("Failed to get version data for Persistent VFS setup")?;
+        .context("Failed to get version data for Persistent resource setup")?;
+    if version_info.version != installed_version {
+        anyhow::bail!(
+            "Persistent resources can only be prepared for the installed version {}. The launcher reports target version {}; update the game first",
+            installed_version,
+            version_info.version
+        );
+    }
 
     let rand_str = version_info.rand_str();
     if rand_str.is_empty() {
@@ -78,7 +84,7 @@ pub async fn setup_vfs(
 
     if opts.is_dry_run() {
         opts.dry_run(format!(
-            "Would set up Persistent VFS for {} (region={}, channel={}, sub-channel={}) at {} with file_set={:?}",
+            "Would set up Persistent resources for {} (region={}, channel={}, sub-channel={}) at {} with file_set={:?}",
             game_id,
             region_id,
             channel_id.channel(),
@@ -105,14 +111,27 @@ pub async fn setup_vfs(
             persistent_root.display()
         ));
         opts.dry_run(format!(
-            "allow_download={} relink_reuse={} force_copy={} prune_extra_files={}",
-            allow_download, relink_reuse, force_copy, prune_extra_files
+            "allow_download={} prefer_reuse={} prune_extra_files={} copy_only=true",
+            allow_download, prefer_reuse, prune_extra_files
         ));
         return Ok(());
     }
 
+    let launcher = Launcher::new(
+        game_id.clone(),
+        install_target.clone(),
+        local.install_path.clone(),
+    );
+    if launcher.is_game_running() {
+        anyhow::bail!(
+            "Cannot change Persistent resources while {} is running from {}",
+            game_id,
+            local.install_path.display()
+        );
+    }
+
     ui::print_phase(format!(
-        "Setting up Persistent VFS ({:?}) for {} (region={}, channel={}, sub-channel={})",
+        "Setting up Persistent resources ({:?}) for {} (region={}, channel={}, sub-channel={})",
         file_set,
         game_id,
         region_id,
@@ -129,8 +148,8 @@ pub async fn setup_vfs(
     let mut task_pool_runner = TaskPoolRunner::new(pool_cfg)?;
 
     let progress = CountAndByteProgress::new(
-        "setup-vfs.persistent",
-        "setup-vfs.persistent.download",
+        "setup-persistent-resources.verify",
+        "setup-persistent-resources.download",
         opts.verbose,
     );
     let progress_session = progress.start(ProgressLane::VFS_VERIFY, ProgressLane::VFS_DOWNLOAD);
@@ -144,16 +163,16 @@ pub async fn setup_vfs(
             file_set,
             source_streaming_assets: streaming_assets_root,
             extra_source_streaming_assets,
-            allow_copy_fallback: force_copy,
-            prefer_reuse: relink_reuse,
+            prefer_reuse,
             allow_download,
             prune_extra_files,
+            state_root: griffr_common::runtime::griffr_path(&local.install_path),
         },
         &mut task_pool_runner,
         progress_session.sender(),
     )
     .await
-    .context("Failed to set up Persistent VFS")?;
+    .context("Failed to set up Persistent resources")?;
     progress_session.finish();
     progress.finish();
 
@@ -163,7 +182,7 @@ pub async fn setup_vfs(
             result.file_set, result.res_version
         ));
         ui::print_info(format!(
-            "Persistent VFS: total={} reused={} downloaded={} ({}) skipped={} failed={}",
+            "Persistent resources: total={} reused={} downloaded={} ({}) skipped={} failed={}",
             result.total_files,
             result.reused_files,
             result.downloaded_files,
@@ -173,14 +192,14 @@ pub async fn setup_vfs(
         ));
         if result.failed_files > 0 {
             anyhow::bail!(
-                "Persistent VFS setup failed for {} file(s)",
+                "Persistent resources setup failed for {} file(s)",
                 result.failed_files
             );
         }
-        ui::print_success("Persistent VFS setup finished");
+        ui::print_success("Persistent resources setup finished");
     } else {
         ui::print_info(
-            "Persistent VFS setup was skipped because this target does not support VFS.",
+            "Persistent resources setup was skipped because this target does not support VFS.",
         );
     }
 
