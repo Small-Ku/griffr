@@ -4,12 +4,13 @@ use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::GetLatestGameResponse;
 use griffr_common::config::InstallTarget;
-use griffr_common::runtime::task_pool::{archive_expected_files, Task, TaskPoolRunner};
+use griffr_common::runtime::task_pool::{archive_expected_files, TaskPoolRunner};
 use griffr_common::runtime::{
     finish_install_change, plan_vfs_tasks, read_install_change, read_local_game_files,
     resolve_staged_patch_recovery_dir, select_update_package, start_install_change,
-    streaming_assets_path, InstallChangeKind, InstallChangeSource, InstallChangeStart,
-    InstallChangeState, IntegritySelection, UpdatePackageKind, VfsFilePlanOptions,
+    streaming_assets_path, ContentPlan, GameManifestSnapshot, InstallChangeKind,
+    InstallChangeSource, InstallChangeStart, InstallChangeState, IntegritySelection,
+    UpdatePackageKind, VfsFilePlanOptions, VfsTaskPlan,
 };
 
 use super::*;
@@ -138,11 +139,14 @@ pub(super) async fn update_internal(
         .as_ref()
         .filter(|state| state.target_version == version_info.version)
     {
-        let live_game_files_md5 = version_info
-            .pkg
-            .as_ref()
-            .and_then(|pkg| pkg.game_files_md5.as_deref());
-        if !state.matches_release(&version_info.version, live_game_files_md5) {
+        let live_package = version_info.pkg.as_ref();
+        let live_game_files_path = live_package.map(|pkg| pkg.file_path.as_str());
+        let live_game_files_md5 = live_package.and_then(|pkg| pkg.game_files_md5.as_deref());
+        if !state.matches_release(
+            &version_info.version,
+            live_game_files_path,
+            live_game_files_md5,
+        ) {
             anyhow::bail!(
                 "Unfinished {} target {} no longer matches its saved game_files identity; refusing to continue with changed metadata under the same version",
                 state.kind,
@@ -232,7 +236,7 @@ pub(super) async fn update_internal(
             "Checking unfinished {} target {}",
             state.kind, state.target_version
         ));
-        let extra_tasks = plan_update_vfs_tasks(
+        let vfs_plan = plan_update_vfs_tasks(
             api_client,
             &install_target,
             &version_info,
@@ -242,13 +246,25 @@ pub(super) async fn update_internal(
             !state.sync_vfs,
         )
         .await?;
-        let completion = verify_updated_install(
+        if state.sync_vfs && vfs_plan.identity != state.resource_identity {
+            anyhow::bail!(
+                "Unfinished {} target {} no longer matches its saved resource identity",
+                state.kind,
+                state.target_version
+            );
+        }
+        let manifest_snapshot = GameManifestSnapshot::fetch(api_client, &version_info)
+            .await
+            .context("Failed to fetch the unfinished update manifest snapshot")?;
+        let mut content_plan =
+            ContentPlan::from_snapshot(&local.install_path, manifest_snapshot, &vfs_plan.claims)
+                .context("Failed to build the update content plan")?;
+        let post_update = verify_updated_install(
             api_client,
-            &local.install_path,
-            &install_target,
-            &state.target_version,
+            &install_target.api,
+            &mut content_plan,
             false,
-            extra_tasks,
+            vfs_plan,
             IntegritySelection::GameFiles,
             Vec::new(),
             &reuse_roots,
@@ -257,7 +273,7 @@ pub(super) async fn update_internal(
             task_pool_runner,
         )
         .await?;
-        debug_assert_eq!(completion, PostUpdateCompletion::Verified);
+        debug_assert_eq!(post_update, PostUpdateResult::Verified);
         finish_install_change(&local.install_path, state)
             .context("Failed to remove the install change marker")?;
         ui::print_success(format!("Unfinished {} target verified", state.kind));
@@ -412,7 +428,7 @@ pub(super) async fn update_internal(
             use_predownload,
             predownload_stage_dir.as_deref(),
             opts.skip_verify,
-            opts.skip_vfs,
+            !opts.resource_policy.uses_resource_index(),
             opts.keep_pack_archives,
             opts.force_full_package || force_full_for_mixed_recovery,
         ) {
@@ -446,7 +462,11 @@ pub(super) async fn update_internal(
                 .collect(),
         }
     };
-    let change_state = InstallChangeState::new(
+    let manifest_snapshot = GameManifestSnapshot::fetch(api_client, &version_info)
+        .await
+        .context("Failed to fetch the update manifest snapshot")?;
+
+    let mut change_state = InstallChangeState::new(
         InstallChangeKind::Update,
         if use_reuse_update {
             InstallChangeSource::Reuse
@@ -466,33 +486,36 @@ pub(super) async fn update_internal(
             .as_ref()
             .and_then(|pkg| pkg.game_files_md5.clone()),
         selected_parts,
-        !opts.skip_vfs,
+        opts.resource_policy.uses_resource_index(),
     );
+    let target_manifest = &manifest_snapshot;
     let expected_archive_files = if !use_reuse_update {
-        if let Some(pkg) = version_info.pkg.as_ref() {
-            archive_expected_files(
-                api_client
-                    .fetch_game_files(&pkg.file_path, pkg.game_files_md5.as_deref())
-                    .await
-                    .context("Failed to fetch target game_files before archive streaming")?,
-            )
-        } else {
-            archive_expected_files(Vec::new())
-        }
+        archive_expected_files(target_manifest.entries.clone())
     } else {
         archive_expected_files(Vec::new())
     };
 
-    let mut extra_tasks = plan_update_vfs_tasks(
+    let mut vfs_plan = plan_update_vfs_tasks(
         api_client,
         &install_target,
         &version_info,
         &local.install_path,
         &reuse_roots,
         force_copy,
-        opts.skip_vfs,
+        !opts.resource_policy.uses_resource_index(),
     )
     .await?;
+
+    change_state = change_state
+        .with_game_files_path(manifest_snapshot.release.file_path.clone())
+        .with_resource_identity(vfs_plan.identity.clone());
+
+    let mut content_plan = ContentPlan::from_snapshot(
+        &local.install_path,
+        target_manifest.clone(),
+        &vfs_plan.claims,
+    )
+    .context("Failed to build the update content plan")?;
 
     if !use_reuse_update && package_kind == UpdatePackageKind::Patch {
         validate_patch_target(&install_target.exe_name, &local.install_path).await?;
@@ -516,9 +539,9 @@ pub(super) async fn update_internal(
     if use_reuse_update {
         ui::print_phase("Applying update via local file reuse");
         update_via_reuse(
-            api_client,
             &local,
             &version_info,
+            &content_plan,
             &reuse_update_roots,
             current_reuse_manifest
                 .as_deref()
@@ -553,7 +576,8 @@ pub(super) async fn update_internal(
                         },
                         &patch_options,
                         expected_archive_files.clone(),
-                        std::mem::take(&mut extra_tasks),
+                        std::mem::take(&mut vfs_plan.tasks),
+                        &vfs_plan.claims,
                         false,
                         &opts,
                         task_pool_runner,
@@ -568,7 +592,8 @@ pub(super) async fn update_internal(
                         patch_password,
                         &patch_options,
                         expected_archive_files.clone(),
-                        std::mem::take(&mut extra_tasks),
+                        std::mem::take(&mut vfs_plan.tasks),
+                        &vfs_plan.claims,
                         false,
                         &opts,
                         task_pool_runner,
@@ -589,7 +614,8 @@ pub(super) async fn update_internal(
                     None,
                     &patch_options,
                     expected_archive_files.clone(),
-                    std::mem::take(&mut extra_tasks),
+                    std::mem::take(&mut vfs_plan.tasks),
+                    &vfs_plan.claims,
                     true,
                     &opts,
                     task_pool_runner,
@@ -608,13 +634,12 @@ pub(super) async fn update_internal(
     } else {
         IntegritySelection::Paths(archive_result.modified_paths)
     };
-    let completion = verify_updated_install(
+    let post_update = verify_updated_install(
         api_client,
-        &local.install_path,
-        &install_target,
-        &version_info.version,
+        &install_target.api,
+        &mut content_plan,
         opts.skip_verify,
-        extra_tasks,
+        vfs_plan,
         verification_selection,
         archive_result.verified_paths,
         &reuse_roots,
@@ -623,13 +648,13 @@ pub(super) async fn update_internal(
         task_pool_runner,
     )
     .await?;
-    if completion == PostUpdateCompletion::Verified {
+    if post_update == PostUpdateResult::Verified {
         finish_install_change(&local.install_path, &change_state)
             .context("Failed to remove the install change marker")?;
         ui::print_success("Update finished");
     } else {
         ui::print_warning(format!(
-            "Update payload and metadata finished, but the change marker was kept because verification was skipped. Run `griffr verify --path \"{}\" --repair` before launch.",
+            "Update payload finished, but launcher metadata and the change marker were kept because verification was skipped. Run `griffr verify --path \"{}\" --repair` before launch.",
             local.install_path.display()
         ));
     }
@@ -664,10 +689,10 @@ async fn plan_update_vfs_tasks(
     install_path: &std::path::Path,
     reuse_paths: &[PathBuf],
     force_copy: bool,
-    skip_vfs: bool,
-) -> Result<Vec<Task>> {
-    if skip_vfs {
-        return Ok(Vec::new());
+    package_only: bool,
+) -> Result<VfsTaskPlan> {
+    if package_only {
+        return Ok(VfsTaskPlan::default());
     }
 
     ui::print_phase("Planning VFS resources for the update DAG");
@@ -696,7 +721,6 @@ async fn plan_update_vfs_tasks(
     )
     .await
     .context("Failed to plan VFS tasks")?
-    .map(|plan| plan.tasks)
     .unwrap_or_default())
 }
 

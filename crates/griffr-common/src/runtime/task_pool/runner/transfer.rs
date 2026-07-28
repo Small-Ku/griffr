@@ -223,6 +223,7 @@ pub(super) fn run_repair_file(task: Task) -> TaskRun {
         source_candidates,
         download_url,
         allow_copy_fallback,
+        copy_only: force_copy_only,
         verify_destination_fallback,
         retry_count,
         transfer_class,
@@ -259,10 +260,10 @@ pub(super) fn run_repair_file(task: Task) -> TaskRun {
             continue;
         }
         let source_volume = storage_volume_id(&normalized);
-        let copy_only =
-            classify_reuse_mode(source_volume.as_deref(), destination_volume.as_deref())
+        let copy_only = force_copy_only
+            || classify_reuse_mode(source_volume.as_deref(), destination_volume.as_deref())
                 == ReuseMode::CopyOnly;
-        if copy_only && !allow_copy_fallback {
+        if copy_only && !force_copy_only && !allow_copy_fallback {
             continue;
         }
         all_sources.push(normalized.clone());
@@ -474,6 +475,7 @@ fn finish_reuse_file(
                     source_candidates: remaining_source_candidates,
                     download_url,
                     allow_copy_fallback,
+                    copy_only,
                     verify_destination_fallback,
                     retry_count,
                     transfer_class,

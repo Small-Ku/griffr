@@ -68,7 +68,7 @@ pub(super) fn build_update_dry_run_plan(
     use_predownload: bool,
     predownload_stage_dir: Option<&Path>,
     skip_verify: bool,
-    skip_vfs: bool,
+    package_only: bool,
     keep_pack_archives: bool,
     force_full_package: bool,
 ) -> Vec<String> {
@@ -151,8 +151,8 @@ pub(super) fn build_update_dry_run_plan(
         lines.push("Would run post-update integrity verification.".to_string());
     }
 
-    if skip_vfs {
-        lines.push("Would skip VFS resource sync (--skip-vfs).".to_string());
+    if package_only {
+        lines.push("Would use package-only resource handling and not query the launcher resource-index API.".to_string());
     } else {
         lines.push(
             "Would probe the target's launcher resource-index API and sync VFS resources when available."

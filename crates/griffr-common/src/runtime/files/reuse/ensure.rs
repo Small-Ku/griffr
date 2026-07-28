@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use rapidhash::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 
 use crate::api::types::GameFileEntry;
-use crate::api::ApiClient;
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::{FileEnsureTask, Task, TransferClass};
 use crate::runtime::{
@@ -11,34 +10,6 @@ use crate::runtime::{
     normalize_logical_path, PathOutcomeTracker, ProgressLane, ProgressSender,
 };
 use tracing::{info, warn};
-
-#[allow(clippy::too_many_arguments)]
-pub async fn ensure_game_files_with_pool(
-    api_client: &ApiClient,
-    install_path: &Path,
-    file_path: &str,
-    game_files_md5: Option<&str>,
-    config: &super::types::FileReuseConfig,
-    task_pool_runner: Option<&mut crate::runtime::task_pool::TaskPoolRunner>,
-    progress: ProgressSender,
-) -> Result<super::types::FileEnsureSummary> {
-    let manifest = api_client
-        .fetch_game_files(file_path, game_files_md5)
-        .await
-        .map_err(|error| Error::Message {
-            context: "API client wrapper error: ",
-            detail: format!("Failed to fetch target manifest for reuse planning: {error}"),
-        })?;
-    ensure_game_files_from_manifest_with_pool(
-        install_path,
-        file_path,
-        &manifest,
-        config,
-        task_pool_runner,
-        progress,
-    )
-    .await
-}
 
 pub(super) fn logical_path_is_ancestor(parent: &str, child: &str) -> bool {
     child
@@ -152,6 +123,7 @@ pub async fn ensure_game_files_from_manifest_with_pool(
             source_candidates: candidates,
             download_url: Some(build_cdn_file_url(files_url_base, &entry.path)),
             allow_copy_fallback: config.allow_copy_fallback,
+            copy_only: false,
             prefer_reuse: false,
             retry_count: 0,
             transfer_class: TransferClass::General,

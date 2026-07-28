@@ -35,6 +35,8 @@ Pending / Ready -> Cancelled
 
 `Waiting` means the task body installed a real dynamic subgraph. The original node waits for every terminal leaf. It then either finishes or resumes with a new task payload on the same node. Linear phase changes, retries, and fallbacks use `Running -> Ready` directly and do not allocate child nodes.
 
+The graph describes task execution rather than content ownership. Planners save durable `ArtifactClaim` records in the `ContentPlan` before moving target paths into archive, repair, or VFS subgraphs. Final integrity evaluates these claims instead of remaining task vectors, preventing ownership regressions when tasks complete early.
+
 The graph natively supports:
 
 - fan-out: several nodes depend on one predecessor;

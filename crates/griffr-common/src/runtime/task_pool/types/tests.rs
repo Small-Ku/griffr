@@ -41,6 +41,7 @@ fn normal_file_ensure_starts_with_cpu_verification() {
         source_candidates: vec![PathBuf::from("reuse/file.bin")],
         download_url: Some("https://example.invalid/file.bin".to_string()),
         allow_copy_fallback: true,
+        copy_only: false,
         prefer_reuse: false,
         retry_count: 0,
         transfer_class: TransferClass::General,
@@ -53,6 +54,32 @@ fn normal_file_ensure_starts_with_cpu_verification() {
             on_fail: Some(repair),
             ..
         } if matches!(*repair, Task::RepairFile { .. })
+    ));
+}
+
+#[test]
+fn copy_only_file_ensure_preserves_copy_policy_in_repair_task() {
+    let task = Task::ensure_file(FileEnsureTask {
+        dest: PathBuf::from("game/file.bin"),
+        logical_path: "file.bin".to_string(),
+        expected_md5: "00".repeat(16),
+        expected_size: 4,
+        source_candidates: vec![PathBuf::from("reuse/file.bin")],
+        download_url: None,
+        allow_copy_fallback: true,
+        copy_only: true,
+        prefer_reuse: false,
+        retry_count: 0,
+        transfer_class: TransferClass::Vfs,
+        archive_repair: None,
+    });
+
+    assert!(matches!(
+        task,
+        Task::Verify {
+            on_fail: Some(repair),
+            ..
+        } if matches!(*repair, Task::RepairFile { copy_only: true, .. })
     ));
 }
 
@@ -90,6 +117,7 @@ fn explicit_relink_skips_target_verification() {
         source_candidates: vec![PathBuf::from("reuse/file.bin")],
         download_url: None,
         allow_copy_fallback: false,
+        copy_only: false,
         prefer_reuse: true,
         retry_count: 0,
         transfer_class: TransferClass::Vfs,

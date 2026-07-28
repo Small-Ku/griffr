@@ -1,8 +1,6 @@
 use rapidhash::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::api::ApiClient;
-use crate::config::InstallTarget;
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::types::{ArchiveRepairGroupSpec, ArchiveRepairSession};
 use crate::runtime::task_pool::{
@@ -10,9 +8,9 @@ use crate::runtime::task_pool::{
     TaskOutcome, TaskPoolConfig, TaskPoolRunner, TaskProgress, TransferClass,
 };
 use crate::runtime::{
-    build_cdn_file_url, files_base_url, griffr_archives_path, is_griffr_private_path,
-    is_launcher_metadata_path, normalize_logical_path, ArtifactProof, FileIssue,
-    PathOutcomeTracker, ProgressLane, ProgressSender,
+    build_cdn_file_url, files_base_url, griffr_archives_path, is_launcher_metadata_path,
+    is_resource_baseline_path, normalize_logical_path, ArtifactClaim, ArtifactProof, ContentPlan,
+    FileIssue, PathOutcomeTracker, ProgressLane, ProgressSender,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -31,17 +29,11 @@ pub enum IntegritySelection {
     /// Checks every game payload file but leaves launcher-owned metadata for
     /// the final metadata sync step. This keeps `config.ini` as a finish marker.
     GameFiles,
+    /// Checks game manifest entries outside the launcher resource baseline.
+    Core,
+    /// Checks only launcher resource baseline entries plus planned resource tasks.
+    Resources,
     Paths(Vec<String>),
-}
-
-fn normalize_target_path(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "/")
-        .to_ascii_lowercase()
-}
-
-fn task_target_path(task: &Task) -> Option<&Path> {
-    task.target_path()
 }
 
 fn deduplicate_target_tasks(tasks: Vec<Task>) -> Result<Vec<Task>> {
@@ -52,7 +44,7 @@ fn deduplicate_target_tasks(tasks: Vec<Task>) -> Result<Vec<Task>> {
             unique.push(task);
             continue;
         };
-        let target = normalize_target_path(file.target());
+        let target = crate::runtime::artifact::physical_path_key(file.target());
         let expected = (
             file.expected_md5().to_ascii_lowercase(),
             file.expected_size(),
@@ -90,28 +82,47 @@ fn remove_already_verified_entries(
     let current_proofs = proofs
         .iter()
         .filter(|proof| proof.is_current())
-        .map(|proof| (normalize_logical_path(proof.logical_path()), proof))
-        .collect::<HashMap<_, _>>();
-    entries.retain(
-        |entry| match current_proofs.get(&normalize_logical_path(&entry.path)) {
-            Some(proof) => !proof.matches_game_file(install_root, entry),
-            None => true,
-        },
-    );
+        .collect::<Vec<_>>();
+    entries.retain(|entry| {
+        !current_proofs
+            .iter()
+            .any(|proof| proof.matches_game_file(install_root, entry))
+    });
 }
 
-fn remove_entries_owned_by_extra_tasks(
+fn remove_entries_owned_by_claims(
     entries: &mut Vec<crate::api::types::GameFileEntry>,
     install_path: &Path,
-    extra_target_paths: &HashSet<String>,
-) {
-    if extra_target_paths.is_empty() {
-        return;
+    claims: &[ArtifactClaim],
+) -> Result<()> {
+    if claims.is_empty() {
+        return Ok(());
     }
+
+    let mut conflict = None;
     entries.retain(|entry| {
-        let target = install_path.join(&entry.path);
-        !extra_target_paths.contains(&normalize_target_path(&target))
+        let Some(claim) = claims
+            .iter()
+            .find(|claim| claim.matches_game_file_path(install_path, entry))
+        else {
+            return true;
+        };
+        if !claim.expects_game_file(entry) {
+            conflict = Some(format!(
+                "resource and game manifests claim {} with different expected content",
+                entry.path
+            ));
+        }
+        false
     });
+
+    if let Some(detail) = conflict {
+        return Err(Error::Message {
+            context: "Integrity error: ",
+            detail,
+        });
+    }
+    Ok(())
 }
 
 fn task_progress_path(task: &Task) -> Option<&str> {
@@ -120,10 +131,7 @@ fn task_progress_path(task: &Task) -> Option<&str> {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_integrity_pool(
-    api_client: &ApiClient,
-    install_path: &Path,
-    install_target: &InstallTarget,
-    version: Option<&str>,
+    content_plan: &ContentPlan,
     selection: IntegritySelection,
     verified_artifacts: &[ArtifactProof],
     repair: bool,
@@ -135,14 +143,11 @@ pub async fn run_integrity_pool(
     progress: ProgressSender,
 ) -> Result<IntegrityRunSummary> {
     let extra_tasks = deduplicate_target_tasks(extra_tasks)?;
-    let extra_target_paths = extra_tasks
-        .iter()
-        .filter_map(task_target_path)
-        .map(normalize_target_path)
-        .collect::<HashSet<_>>();
-    let (selected_paths, skip_launcher_metadata) = match selection {
-        IntegritySelection::Full => (None, false),
-        IntegritySelection::GameFiles => (None, true),
+    let (selected_paths, skip_launcher_metadata, resource_filter) = match selection {
+        IntegritySelection::Full => (None, false, None),
+        IntegritySelection::GameFiles => (None, true, None),
+        IntegritySelection::Core => (None, true, Some(false)),
+        IntegritySelection::Resources => (None, false, Some(true)),
         IntegritySelection::Paths(paths) => (
             Some(
                 paths
@@ -152,45 +157,31 @@ pub async fn run_integrity_pool(
                     .collect::<HashSet<_>>(),
             ),
             false,
+            None,
         ),
     };
 
+    let install_path = content_plan.install_root();
+    let snapshot = content_plan.snapshot();
     let (entries, files_url_base, archive_groups) = if selected_paths
         .as_ref()
         .is_some_and(|paths| paths.is_empty())
     {
         (Vec::new(), None, None)
     } else {
-        let version_info = api_client
-            .get_latest_game(&install_target.api, version)
-            .await?;
-        let pkg = version_info.pkg.as_ref().ok_or_else(|| Error::Message {
-            context: "API client wrapper error: ",
-            detail: "No package information available".to_string(),
-        })?;
-        let mut entries = api_client
-            .fetch_game_files(&pkg.file_path, pkg.game_files_md5.as_deref())
-            .await?;
-        if let Some(entry) = entries
-            .iter()
-            .find(|entry| is_griffr_private_path(Path::new(&entry.path)))
-        {
-            return Err(Error::Message {
-                context: "Integrity error: ",
-                detail: format!(
-                    "Target manifest cannot own private Griffr path {}",
-                    entry.path
-                ),
-            });
-        }
+        let pkg = &snapshot.package;
+        let mut entries = snapshot.entries.clone();
         if skip_launcher_metadata {
             remove_launcher_metadata_entries(&mut entries);
+        }
+        if let Some(resources_only) = resource_filter {
+            entries.retain(|entry| is_resource_baseline_path(&entry.path) == resources_only);
         }
         if let Some(paths) = selected_paths.as_ref() {
             entries.retain(|entry| paths.contains(&normalize_logical_path(&entry.path)));
         }
         remove_already_verified_entries(&mut entries, install_path, verified_artifacts);
-        remove_entries_owned_by_extra_tasks(&mut entries, install_path, &extra_target_paths);
+        remove_entries_owned_by_claims(&mut entries, install_path, content_plan.resource_claims())?;
         let archive_groups = (repair && !pkg.packs.is_empty())
             .then(|| plan_archive_groups(&pkg.packs, &griffr_archives_path(install_path)))
             .transpose()?
@@ -246,6 +237,7 @@ pub async fn run_integrity_pool(
                         .as_ref()
                         .map(|base| build_cdn_file_url(base, &entry.path)),
                     allow_copy_fallback,
+                    copy_only: false,
                     prefer_reuse,
                     retry_count: 0,
                     transfer_class: TransferClass::General,
@@ -328,12 +320,18 @@ pub async fn run_integrity_pool(
             _ => {}
         }
     }
-    if !failed_paths.is_empty() {
+    let failed_graph_nodes = result
+        .metrics
+        .graph
+        .failed_nodes
+        .saturating_add(result.metrics.graph.cancelled_nodes);
+    if failed_graph_nodes > 0 || !failed_paths.is_empty() {
         return Err(Error::Message {
             context: "Integrity error: ",
             detail: format!(
-                "{} integrity task(s) failed: {}",
+                "{} integrity task failure(s) and {} failed or cancelled graph node(s): {}",
                 failed_paths.len(),
+                failed_graph_nodes,
                 failed_paths.join("; ")
             ),
         });
@@ -500,10 +498,12 @@ mod tests {
     }
 
     #[test]
-    fn extra_task_owns_overlapping_game_manifest_destination() {
+    fn resource_claim_owns_overlapping_game_manifest_destination() {
         let install_path = Path::new("install");
-        let extra_target_paths =
-            HashSet::from_iter([normalize_target_path(Path::new("install/VFS/file.blc"))]);
+        let claims = vec![ArtifactClaim::new(
+            install_path.join("VFS/file.blc"),
+            crate::runtime::ArtifactExpectation::new("file.blc", "base", Some(4)),
+        )];
         let mut entries = vec![
             GameFileEntry {
                 path: "VFS/file.blc".to_string(),
@@ -517,9 +517,28 @@ mod tests {
             },
         ];
 
-        remove_entries_owned_by_extra_tasks(&mut entries, install_path, &extra_target_paths);
+        remove_entries_owned_by_claims(&mut entries, install_path, &claims).unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, "game.bin");
+    }
+
+    #[test]
+    fn conflicting_resource_claim_is_rejected_before_integrity_tasks() {
+        let install_path = Path::new("install");
+        let claims = vec![ArtifactClaim::new(
+            install_path.join("VFS/file.blc"),
+            crate::runtime::ArtifactExpectation::new("file.blc", "resource", Some(4)),
+        )];
+        let mut entries = vec![GameFileEntry {
+            path: "VFS/file.blc".to_string(),
+            md5: "game".to_string(),
+            size: 4,
+        }];
+
+        let error =
+            remove_entries_owned_by_claims(&mut entries, install_path, &claims).unwrap_err();
+
+        assert!(error.to_string().contains("different expected content"));
     }
 }

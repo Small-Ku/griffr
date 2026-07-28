@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::api::types::GameFileEntry;
@@ -11,6 +11,37 @@ pub struct ArtifactExpectation {
     expected_size: Option<u64>,
 }
 
+/// Declares authoritative expected content for one physical output path.
+/// Claims survive task moves and execution so later integrity closure does not
+/// assign the same path to another manifest provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactClaim {
+    path: PathBuf,
+    expectation: ArtifactExpectation,
+}
+
+impl ArtifactClaim {
+    pub fn new(path: PathBuf, expectation: ArtifactExpectation) -> Self {
+        Self { path, expectation }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn expectation(&self) -> &ArtifactExpectation {
+        &self.expectation
+    }
+
+    pub fn matches_game_file_path(&self, install_root: &Path, entry: &GameFileEntry) -> bool {
+        paths_resolve_to_same_file(&self.path, &install_root.join(&entry.path))
+    }
+
+    pub fn expects_game_file(&self, entry: &GameFileEntry) -> bool {
+        self.expectation.expected_md5 == entry.md5.to_ascii_lowercase()
+            && self.expectation.expected_size == Some(entry.size)
+    }
+}
 impl ArtifactExpectation {
     pub fn new(
         logical_path: impl AsRef<str>,
@@ -154,7 +185,6 @@ impl ArtifactProof {
     pub fn matches_game_file(&self, install_root: &Path, entry: &GameFileEntry) -> bool {
         let manifest_path = install_root.join(&entry.path);
         paths_resolve_to_same_file(&self.path, &manifest_path)
-            && self.expectation.logical_path == entry.path.replace('\\', "/")
             && self.expectation.expected_md5 == entry.md5.to_ascii_lowercase()
             && self.expectation.expected_size == Some(entry.size)
     }
@@ -181,8 +211,59 @@ fn paths_resolve_to_same_file(left: &Path, right: &Path) -> bool {
     }
     match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
         (Ok(left), Ok(right)) => left == right,
-        _ => false,
+        _ => physical_path_key(left) == physical_path_key(right),
     }
+}
+
+pub(crate) fn physical_path_key(path: &Path) -> String {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+
+    // Canonicalize the longest existing ancestor so a not-yet-created file
+    // below a directory symlink compares equal to its concrete external path.
+    let mut ancestor = absolute.as_path();
+    let mut suffix = Vec::new();
+    let canonical_ancestor = loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(path) => break path,
+            Err(_) => {
+                let Some(name) = ancestor.file_name() else {
+                    break ancestor.to_path_buf();
+                };
+                suffix.push(name.to_os_string());
+                let Some(parent) = ancestor.parent() else {
+                    break ancestor.to_path_buf();
+                };
+                ancestor = parent;
+            }
+        }
+    };
+
+    let mut resolved = canonical_ancestor;
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+
+    // Remove lexical `.` and `..` components left below a missing ancestor.
+    let mut normalized = PathBuf::new();
+    for component in resolved.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -208,12 +289,12 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn proof_matches_manifest_path_through_external_vfs_link() {
+    fn proof_matches_manifest_path_through_external_asset_link() {
         use std::os::unix::fs::symlink;
 
         let temp = tempfile::tempdir().unwrap();
         let install_root = temp.path().join("install");
-        let external_root = temp.path().join("external-vfs");
+        let external_root = temp.path().join("external-assets");
         std::fs::create_dir_all(&install_root).unwrap();
         std::fs::create_dir_all(&external_root).unwrap();
         symlink(&external_root, install_root.join("VFS")).unwrap();
@@ -234,6 +315,24 @@ mod tests {
                 size: 4,
             }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_output_below_asset_link_has_one_physical_key() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let install = temp.path().join("install");
+        let external = temp.path().join("external");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::create_dir_all(&external).unwrap();
+        symlink(&external, install.join("Assets")).unwrap();
+
+        assert_eq!(
+            physical_path_key(&install.join("Assets/VFS/new.bin")),
+            physical_path_key(&external.join("VFS/new.bin"))
+        );
     }
 
     #[test]

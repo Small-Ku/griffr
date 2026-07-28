@@ -1,12 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use griffr_common::api::client::ApiClient;
-use griffr_common::config::InstallTarget;
 use griffr_common::runtime::task_pool::{Task, TaskOutcome, TaskPoolRunner, TaskProgress};
 use griffr_common::runtime::{
-    is_launcher_metadata_path, run_integrity_pool, sync_launcher_metadata, IntegritySelection,
-    ProgressLane,
+    finish_vfs_plan, is_launcher_metadata_path, run_integrity_pool, sync_launcher_metadata,
+    ContentPlan, IntegritySelection, ProgressLane, VfsTaskPlan,
 };
 
 use crate::progress::CountAndByteProgress;
@@ -14,37 +13,42 @@ use crate::ui;
 use crate::GlobalOptions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PostUpdateCompletion {
+pub(super) enum PostUpdateResult {
     Verified,
     VerificationDeferred,
 }
 
 pub(super) async fn verify_updated_install(
     api_client: &ApiClient,
-    install_path: &Path,
-    install_target: &InstallTarget,
-    target_version: &str,
+    api_target: &griffr_common::config::ApiTarget,
+    content_plan: &mut ContentPlan,
     skip_verify: bool,
-    extra_tasks: Vec<Task>,
+    mut vfs_plan: VfsTaskPlan,
     selection: IntegritySelection,
     verified_artifacts: Vec<griffr_common::runtime::ArtifactProof>,
     reuse_roots: &[PathBuf],
     allow_copy_fallback: bool,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
-) -> Result<PostUpdateCompletion> {
-    if skip_verify {
-        run_extra_tasks_without_integrity(extra_tasks, opts, task_pool_runner)?;
-        ui::print_info("Skipping post-update integrity verification (--skip-verify)");
-        sync_launcher_metadata(
-            api_client,
-            install_path,
-            install_target,
-            Some(target_version),
-        )
+) -> Result<PostUpdateResult> {
+    content_plan
+        .refresh_delivery(api_client, api_target)
         .await
-        .context("Failed to sync launcher metadata after update")?;
-        return Ok(PostUpdateCompletion::VerificationDeferred);
+        .context("Failed to refresh update delivery URLs")?;
+    let install_path = content_plan.install_root().to_path_buf();
+    if skip_verify {
+        run_extra_tasks_without_integrity(
+            std::mem::take(&mut vfs_plan.tasks),
+            opts,
+            task_pool_runner,
+        )?;
+        finish_vfs_plan(&install_path, &vfs_plan, true)
+            .await
+            .context("Failed to finish the resource baseline after update tasks")?;
+        ui::print_info(
+            "Skipping post-update integrity verification (--skip-verify); launcher metadata remains unchanged until verify --repair closes the saved change",
+        );
+        return Ok(PostUpdateResult::VerificationDeferred);
     }
 
     match &selection {
@@ -53,6 +57,12 @@ pub(super) async fn verify_updated_install(
         }
         IntegritySelection::GameFiles => {
             ui::print_info("Post-update integrity scope: all game files plus planned VFS tasks");
+        }
+        IntegritySelection::Core => {
+            ui::print_info("Post-update integrity scope: core game files");
+        }
+        IntegritySelection::Resources => {
+            ui::print_info("Post-update integrity scope: launcher resource baseline");
         }
         IntegritySelection::Paths(paths) => {
             ui::print_info(format!(
@@ -68,17 +78,14 @@ pub(super) async fn verify_updated_install(
         ProgressLane::INTEGRITY_DOWNLOAD,
     );
     let summary = run_integrity_pool(
-        api_client,
-        install_path,
-        install_target,
-        Some(target_version),
+        content_plan,
         selection,
         &verified_artifacts,
         true,
         reuse_roots,
         allow_copy_fallback,
         false,
-        extra_tasks,
+        std::mem::take(&mut vfs_plan.tasks),
         Some(task_pool_runner),
         verify_session.sender(),
     )
@@ -109,15 +116,17 @@ pub(super) async fn verify_updated_install(
         );
     }
 
-    sync_launcher_metadata(
-        api_client,
-        install_path,
-        install_target,
-        Some(target_version),
-    )
-    .await
-    .context("Failed to sync launcher metadata after update")?;
-    Ok(PostUpdateCompletion::Verified)
+    finish_vfs_plan(&install_path, &vfs_plan, true)
+        .await
+        .context("Failed to finish the resource baseline after update verification")?;
+    content_plan
+        .refresh_delivery(api_client, api_target)
+        .await
+        .context("Failed to refresh launcher metadata URLs")?;
+    sync_launcher_metadata(api_client, &install_path, content_plan.snapshot())
+        .await
+        .context("Failed to sync launcher metadata after update")?;
+    Ok(PostUpdateResult::Verified)
 }
 
 fn run_extra_tasks_without_integrity(

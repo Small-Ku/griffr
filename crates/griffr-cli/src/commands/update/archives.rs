@@ -10,7 +10,7 @@ use griffr_common::runtime::task_pool::{
     TaskPoolRunner, TaskProgress,
 };
 use griffr_common::runtime::{
-    griffr_archives_path, ArtifactProof, PatchApplyOptions, ProgressLane,
+    griffr_archives_path, ArtifactClaim, ArtifactProof, PatchApplyOptions, ProgressLane,
 };
 
 use super::*;
@@ -79,6 +79,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
     patch_options: &PatchApplyOptions,
     expected_files: Arc<BTreeMap<String, GameFileEntry>>,
     extra_tasks: Vec<Task>,
+    extra_claims: &[ArtifactClaim],
     file_tasks_own_archive_paths: bool,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
@@ -101,7 +102,12 @@ pub(super) async fn download_and_extract_archives_from_dir(
 
     if mode == ArchiveAcquireMode::RequireExisting {
         let excluded_commit_paths = if file_tasks_own_archive_paths {
-            full_archive_excluded_paths(&extra_tasks, install_path, expected_files.as_ref())
+            full_archive_excluded_paths(
+                &extra_tasks,
+                extra_claims,
+                install_path,
+                expected_files.as_ref(),
+            )
         } else {
             Arc::new(protected_archive_paths())
         };
@@ -200,6 +206,17 @@ pub(super) async fn download_and_extract_archives_from_dir(
                 ui::print_patch_check(report);
             }
         }
+        let failed_graph_nodes = result
+            .metrics
+            .graph
+            .failed_nodes
+            .saturating_add(result.metrics.graph.cancelled_nodes);
+        if failed_graph_nodes > 0 {
+            anyhow::bail!(
+                "Predownload archive DAG has {} failed or cancelled graph node(s)",
+                failed_graph_nodes
+            );
+        }
         return collect_archive_result(
             result.outcomes,
             expected_files.as_ref(),
@@ -214,7 +231,12 @@ pub(super) async fn download_and_extract_archives_from_dir(
         archive_group_count
     };
     let excluded_commit_paths = if file_tasks_own_archive_paths {
-        full_archive_excluded_paths(&extra_tasks, install_path, expected_files.as_ref())
+        full_archive_excluded_paths(
+            &extra_tasks,
+            extra_claims,
+            install_path,
+            expected_files.as_ref(),
+        )
     } else {
         Arc::new(protected_archive_paths())
     };
@@ -290,6 +312,17 @@ pub(super) async fn download_and_extract_archives_from_dir(
             ui::print_patch_check(report);
         }
     }
+    let failed_graph_nodes = result
+        .metrics
+        .graph
+        .failed_nodes
+        .saturating_add(result.metrics.graph.cancelled_nodes);
+    if failed_graph_nodes > 0 {
+        anyhow::bail!(
+            "Update archive work has {} failed or cancelled graph node(s)",
+            failed_graph_nodes
+        );
+    }
     collect_archive_result(
         result.outcomes,
         expected_files.as_ref(),
@@ -307,6 +340,7 @@ pub(super) async fn download_and_extract_archives(
     patch_options: &PatchApplyOptions,
     expected_files: Arc<BTreeMap<String, GameFileEntry>>,
     extra_tasks: Vec<Task>,
+    extra_claims: &[ArtifactClaim],
     file_tasks_own_archive_paths: bool,
     opts: &GlobalOptions,
     task_pool_runner: &mut TaskPoolRunner,
@@ -323,6 +357,7 @@ pub(super) async fn download_and_extract_archives(
         patch_options,
         expected_files,
         extra_tasks,
+        extra_claims,
         file_tasks_own_archive_paths,
         opts,
         task_pool_runner,
