@@ -107,7 +107,7 @@ pub(super) fn simulate_space_peaks(
     // though direct entries commit as soon as each file verifies.
     ledger.add(&stage_key, planned_extract_bytes);
 
-    // First-time external VFS setup copies each file before deleting its source.
+    // First-time external asset setup copies each file before deleting its source.
     // A move on the same volume only renames the file and needs no more blocks.
     if relocating_vfs_bytes > 0 && install_key != vfs_key {
         ledger.add(&vfs_key, relocating_vfs_bytes);

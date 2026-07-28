@@ -13,7 +13,7 @@ use crate::runtime::{
 };
 
 use super::{
-    available_space, read_patch_storage_layout, space_use::simulate_space_peaks, PatchApplyOptions,
+    available_space, read_asset_storage_layout, space_use::simulate_space_peaks, PatchApplyOptions,
     PatchCheckReport, PatchPlan, PlannedPatchEntry, PlannedPatchSource,
 };
 
@@ -212,17 +212,17 @@ pub(crate) fn plan_patch_probes(
     options: &PatchApplyOptions,
 ) -> Result<PatchProbePlan> {
     let mut options = options.resolved_for_install(install_root)?;
-    if let Some(storage_layout) = read_patch_storage_layout(install_root)? {
-        match options.external_vfs_root.as_ref() {
-            Some(requested) if requested != &storage_layout.external_vfs_root => {
+    if let Some(storage_layout) = read_asset_storage_layout(install_root)? {
+        match options.external_asset_root.as_ref() {
+            Some(requested) if requested != &storage_layout.external_asset_root => {
                 return Err(Error::Message { context: "Configuration error: ", detail: format!(
-                    "Install already manages VFS storage at {}; requested external root {} does not match",
-                    storage_layout.external_vfs_root.display(),
+                    "Install already manages patch asset storage at {}; requested external root {} does not match",
+                    storage_layout.external_asset_root.display(),
                     requested.display()
                 ) });
             }
             Some(_) => {}
-            None => options.external_vfs_root = Some(storage_layout.external_vfs_root),
+            None => options.external_asset_root = Some(storage_layout.external_asset_root),
         }
     }
     let manifest = archive_index
@@ -236,14 +236,14 @@ pub(crate) fn plan_patch_probes(
         parse_safe_relative_path("patch.json vfs_base_path", manifest.vfs_base_path.trim())?;
     let logical_vfs_destination = install_root.join(&vfs_base_path);
     let vfs_destination = options
-        .external_vfs_root
+        .external_asset_root
         .clone()
         .unwrap_or_else(|| logical_vfs_destination.clone());
 
     let mut artifacts = BTreeSet::new();
     for entry in &manifest.files {
         let relative = parse_safe_relative_path("patch.json file name", &entry.name)?;
-        let existing_path = if options.external_vfs_root.is_some() {
+        let existing_path = if options.external_asset_root.is_some() {
             logical_vfs_destination.join(&relative)
         } else {
             vfs_destination.join(&relative)
@@ -268,7 +268,7 @@ pub(crate) fn plan_patch_probes(
         }
     }
 
-    let relocation_root = (options.external_vfs_root.is_some()
+    let relocation_root = (options.external_asset_root.is_some()
         && !same_link_target(&logical_vfs_destination, &vfs_destination))
     .then_some(logical_vfs_destination);
     Ok(PatchProbePlan {
@@ -286,17 +286,17 @@ pub(crate) fn build_patch_plan_with_probe_cache(
     measured_relocation_bytes: Option<u64>,
 ) -> Result<(PatchPlan, PatchCheckReport)> {
     let mut options = options.resolved_for_install(install_root)?;
-    if let Some(storage_layout) = read_patch_storage_layout(install_root)? {
-        match options.external_vfs_root.as_ref() {
-            Some(requested) if requested != &storage_layout.external_vfs_root => {
+    if let Some(storage_layout) = read_asset_storage_layout(install_root)? {
+        match options.external_asset_root.as_ref() {
+            Some(requested) if requested != &storage_layout.external_asset_root => {
                 return Err(Error::Message { context: "Configuration error: ", detail: format!(
-                    "Install already manages VFS storage at {}; requested external root {} does not match",
-                    storage_layout.external_vfs_root.display(),
+                    "Install already manages patch asset storage at {}; requested external root {} does not match",
+                    storage_layout.external_asset_root.display(),
                     requested.display()
                 ) });
             }
             Some(_) => {}
-            None => options.external_vfs_root = Some(storage_layout.external_vfs_root),
+            None => options.external_asset_root = Some(storage_layout.external_asset_root),
         }
     }
     let manifest = archive_index
@@ -310,15 +310,15 @@ pub(crate) fn build_patch_plan_with_probe_cache(
         parse_safe_relative_path("patch.json vfs_base_path", manifest.vfs_base_path.trim())?;
     let logical_vfs_destination = install_root.join(&vfs_base_path);
     let vfs_destination = options
-        .external_vfs_root
+        .external_asset_root
         .clone()
         .unwrap_or_else(|| logical_vfs_destination.clone());
-    if options.external_vfs_root.is_some() {
+    if options.external_asset_root.is_some() {
         if vfs_destination == logical_vfs_destination || vfs_destination.starts_with(install_root) {
             return Err(Error::Message {
                 context: "VFS error: ",
                 detail: format!(
-                    "External VFS root {} must be outside the install root and differ from {}",
+                    "External asset root {} must be outside the install root and differ from {}",
                     vfs_destination.display(),
                     logical_vfs_destination.display()
                 ),
@@ -330,7 +330,7 @@ pub(crate) fn build_patch_plan_with_probe_cache(
             return Err(Error::Message {
                 context: "VFS error: ",
                 detail: format!(
-                    "External VFS root {} is not empty and is not the current target of {}",
+                    "External asset root {} is not empty and is not the current target of {}",
                     vfs_destination.display(),
                     logical_vfs_destination.display()
                 ),
@@ -361,7 +361,7 @@ pub(crate) fn build_patch_plan_with_probe_cache(
         let destination = vfs_destination.join(&relative);
         let logical_destination = logical_vfs_destination.join(&relative);
         let logical = relative.to_string_lossy().replace('\\', "/");
-        let existing_path = if options.external_vfs_root.is_some() {
+        let existing_path = if options.external_asset_root.is_some() {
             &logical_destination
         } else {
             &destination
@@ -481,7 +481,7 @@ pub(crate) fn build_patch_plan_with_probe_cache(
     }
 
     let vfs_growth = final_delta.max(0) as u64;
-    let relocating_vfs_bytes = if options.external_vfs_root.is_some()
+    let relocating_vfs_bytes = if options.external_asset_root.is_some()
         && !same_link_target(&logical_vfs_destination, &vfs_destination)
     {
         measured_relocation_bytes
@@ -522,7 +522,7 @@ pub(crate) fn build_patch_plan_with_probe_cache(
         relocating_vfs_bytes,
     )?;
     let install_peak = peaks.install;
-    let vfs_peak = if options.external_vfs_root.is_some() {
+    let vfs_peak = if options.external_asset_root.is_some() {
         peaks.vfs
     } else {
         install_peak
@@ -533,7 +533,7 @@ pub(crate) fn build_patch_plan_with_probe_cache(
         0
     };
     let available_install_bytes = available_space(install_root)?;
-    let available_vfs_bytes = match options.external_vfs_root.as_deref() {
+    let available_vfs_bytes = match options.external_asset_root.as_deref() {
         Some(path) => available_space(path)?,
         None => available_install_bytes,
     };
@@ -546,7 +546,7 @@ pub(crate) fn build_patch_plan_with_probe_cache(
         install_peak,
         available_install_bytes,
         options
-            .external_vfs_root
+            .external_asset_root
             .as_deref()
             .map(|path| (path, vfs_peak, available_vfs_bytes)),
         options

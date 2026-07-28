@@ -240,7 +240,7 @@ impl RequiredGameRegionChannelArgs {
     }
 }
 
-#[derive(Args)]
+#[derive(Args, Debug)]
 #[command(group(
     ArgGroup::new("target")
         .required(true)
@@ -279,8 +279,12 @@ pub(crate) enum Commands {
         #[command(flatten)]
         reuse: ReuseSourcesArg,
 
-        /// Skip VFS resource download
-        #[arg(long)]
+        /// Choose how launcher resource-index files are sourced
+        #[arg(long, value_enum, conflicts_with = "skip_vfs")]
+        resource_policy: Option<ResourcePolicyArg>,
+
+        /// Skip launcher resource-index sync. Package and game_files resource entries are still installed and verified.
+        #[arg(long, conflicts_with = "resource_policy")]
         skip_vfs: bool,
 
         /// Keep downloaded package archives after successful extraction
@@ -326,8 +330,12 @@ pub(crate) enum Commands {
         #[arg(long)]
         use_predownload: bool,
 
-        /// Skip VFS resource download
-        #[arg(long)]
+        /// Choose how launcher resource-index files are sourced
+        #[arg(long, value_enum, conflicts_with = "skip_vfs")]
+        resource_policy: Option<ResourcePolicyArg>,
+
+        /// Skip launcher resource-index sync. Package and game_files resource entries are still installed and verified.
+        #[arg(long, conflicts_with = "resource_policy")]
         skip_vfs: bool,
 
         /// Keep downloaded package archives after successful extraction
@@ -338,9 +346,9 @@ pub(crate) enum Commands {
         #[arg(long)]
         work_dir: Option<std::path::PathBuf>,
 
-        /// Persist the VFS tree under this directory and link it into the install root
+        /// Persist the patch-managed asset tree under this directory and link it into the install root
         #[arg(long)]
-        external_vfs_root: Option<std::path::PathBuf>,
+        external_asset_root: Option<std::path::PathBuf>,
     },
 
     /// Predownload patch archive calls
@@ -382,16 +390,20 @@ pub(crate) enum Commands {
         #[arg(long, requires = "repair")]
         relink_reuse: bool,
 
-        /// Skip VFS resource sync during repair
-        #[arg(long)]
+        /// Select integrity scope. Without this option, unfinished changes reuse their saved resource policy; other verifies use all files.
+        #[arg(long, value_enum, conflicts_with = "skip_vfs")]
+        scope: Option<VerifyScopeArg>,
+
+        /// Verify core files only and do not query or hash launcher resource-index paths.
+        #[arg(long, conflicts_with = "scope")]
         skip_vfs: bool,
 
         /// Do not read game/region/channel from local install metadata; requires --game and --region
         #[arg(long, requires = "game", requires = "region")]
         skip_local_detect: bool,
     },
-    /// Set up Persistent VFS files from StreamingAssets
-    SetupVfs {
+    /// Set up the game-selected Persistent resource working set
+    SetupPersistentResources {
         #[command(flatten)]
         path: PathArg,
 
@@ -402,20 +414,21 @@ pub(crate) enum Commands {
         #[arg(long, default_value_t = PersistentVfsFileSet::Base)]
         file_set: PersistentVfsFileSet,
 
-        #[command(flatten)]
-        reuse: ReuseSourcesArg,
+        /// Reuse matching files from other local install paths. Persistent copies are never hardlinked.
+        #[arg(long = "reuse-from")]
+        reuse_from: Vec<std::path::PathBuf>,
 
         /// Allow downloading missing files from CDN when not found in source roots
         #[arg(long)]
         allow_download: bool,
 
-        /// Prefer relinking from source roots even when target files already verify
+        /// Prefer copying from reuse sources even when target files already verify
         #[arg(long)]
-        relink_reuse: bool,
+        prefer_reuse: bool,
 
-        /// Keep Persistent/VFS files that are not in the selected file set
+        /// Remove previously Griffr-managed Persistent files no longer in the selected file set
         #[arg(long)]
-        no_prune: bool,
+        prune: bool,
     },
 
     /// Print local metadata from config.ini and optionally the matching remote state
@@ -448,6 +461,41 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: AccountCommands,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum ResourcePolicyArg {
+    /// Use launcher resource indexes when the endpoint supports them.
+    Auto,
+    /// Do not query resource indexes; packages and game_files remain authoritative.
+    PackageOnly,
+}
+
+impl ResourcePolicyArg {
+    pub const fn resolve(value: Option<Self>, skip_vfs: bool) -> Self {
+        if skip_vfs {
+            Self::PackageOnly
+        } else {
+            match value {
+                Some(value) => value,
+                None => Self::Auto,
+            }
+        }
+    }
+
+    pub const fn uses_resource_index(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum VerifyScopeArg {
+    /// Verify core game files and launcher resource-index files.
+    All,
+    /// Verify core game files only; do not query or hash launcher resource-index paths.
+    Core,
+    /// Verify launcher resource-index paths only.
+    Resources,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]

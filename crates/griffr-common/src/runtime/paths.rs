@@ -122,6 +122,16 @@ pub fn normalize_logical_path(path: &str) -> String {
         .to_ascii_lowercase()
 }
 
+pub fn is_resource_baseline_path(path: &str) -> bool {
+    let normalized = normalize_logical_path(path);
+    normalized.starts_with("streamingassets/vfs/")
+        || normalized.contains("/streamingassets/vfs/")
+        || normalized == "streamingassets/index_initial.json"
+        || normalized == "streamingassets/index_main.json"
+        || normalized.ends_with("/streamingassets/index_initial.json")
+        || normalized.ends_with("/streamingassets/index_main.json")
+}
+
 pub fn is_launcher_metadata_path(path: &str) -> bool {
     matches!(
         normalize_logical_path(path).as_str(),
@@ -176,7 +186,7 @@ mod tests {
     use super::{
         build_cdn_file_url, files_base_url, griffr_archives_path, griffr_patch_path, griffr_path,
         griffr_predownload_path, is_griffr_private_path, is_launcher_metadata_path,
-        launcher_metadata_url, normalize_logical_path, GAME_FILES_NAME,
+        is_resource_baseline_path, launcher_metadata_url, normalize_logical_path, GAME_FILES_NAME,
     };
 
     #[test]
@@ -186,6 +196,21 @@ mod tests {
             "endfield_data/streamingassets/foo"
         );
         assert_eq!(normalize_logical_path("/VFS/bar"), "vfs/bar");
+    }
+
+    #[test]
+    fn resource_baseline_scope_matches_streaming_assets_only() {
+        assert!(is_resource_baseline_path(
+            "Endfield_Data/StreamingAssets/VFS/file.bin"
+        ));
+        assert!(is_resource_baseline_path(
+            "Endfield_Data/StreamingAssets/index_initial.json"
+        ));
+        assert!(is_resource_baseline_path("StreamingAssets/index_main.json"));
+        assert!(!is_resource_baseline_path(
+            "Endfield_Data/Persistent/VFS/file.bin"
+        ));
+        assert!(!is_resource_baseline_path("Data/VFS/file.bin"));
     }
 
     #[test]

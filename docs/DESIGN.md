@@ -12,7 +12,8 @@ The primary runtime is optimized for Windows large-file I/O, leveraging `compio`
 |------|----------|
 | [`DESIGN_compio.md`](DESIGN_compio.md) | Runtime analysis and rationale for selecting `compio` over `tokio` (Windows IOCP, zero-copy `IoBuf` streams, and HTTP/3 support). |
 | [`DESIGN_task_pool.md`](DESIGN_task_pool.md) | Architecture of the unified frontend-neutral task pool, task graph compilation, slot groups, and structured progress/outcome reduction. |
-| [`DESIGN_patch_steps.md`](DESIGN_patch_steps.md) | Steps for forward-only patch application, including VFS integration, dependency waves, and archive checks. |
+| [`DESIGN_patch_steps.md`](DESIGN_patch_steps.md) | Steps for forward-only patch application, including asset storage, dependency waves, and archive checks. |
+| [`DESIGN_resources.md`](DESIGN_resources.md) | Resource ownership, release snapshots, StreamingAssets closure, and Persistent working-set rules. |
 | [`WORDING.md`](WORDING.md) | Project terms, direct naming rules, and exceptions for external API names. |
 | [`DESIGN_account_model.md`](DESIGN_account_model.md) | Empirical analysis of the official launcher's LocalLow MMKV session caches and `griffr`'s file-based profile switching semantics. |
 | [`DESIGN_optimizations.md`](DESIGN_optimizations.md) | Detail on optimization stages: resume recovery, cross-volume candidate reuse routing, shared ZIP index parsing, and Windows storage preallocation. |
@@ -46,6 +47,10 @@ Griffr owns the `.griffr/` private directory inside each install:
 ```text
 .griffr/
 ├─ state.json
+├─ resource-baseline.json
+├─ resource-baseline.pending.json
+├─ persistent-vfs.json
+├─ persistent-vfs.pending.json
 ├─ archives/
 ├─ patch/ (plan.json, deferred/)
 └─ predownload/<from>-<to>/
@@ -53,7 +58,7 @@ Griffr owns the `.griffr/` private directory inside each install:
 
 `archives/` holds active package parts, `patch/` holds delta-patch recovery state, and `predownload/` holds future package sets.
 
-Griffr writes `.griffr/state.json` before any file write starts. The marker records change type, game/channel identity, source/target versions, payload digests, VFS scope, and start time. Resume commands read `.griffr/state.json` to resume interrupted work or advance to a new release manifest.
+Griffr writes `.griffr/state.json` before any file write starts. The marker records change type, game/channel identity, source/target versions, payload digests, resource policy, resource identity, release manifest identity, and start time. Resume commands read `.griffr/state.json` to resume interrupted work or advance to a new release manifest.
 
 Griffr removes `.griffr/state.json` after final integrity checks, VFS follow-up, and `config.ini` commit succeed. An unfinished marker blocks `launch`.
 
@@ -61,7 +66,7 @@ Archive extraction, manifest loading, and delete plans reject paths inside `.gri
 
 ### 4. Unified Final-File Lifecycle
 
-All write paths (archive extraction, patch apply, VFS, reuse, repair) follow one final-file contract:
+All write paths (archive extraction, patch apply, resource sync, reuse, repair) follow one final-file contract:
 
 ```text
 resolve source -> create temp output -> verify size & MD5 -> atomic replace -> emit ArtifactProof
@@ -72,7 +77,7 @@ resolve source -> create temp output -> verify size & MD5 -> atomic replace -> e
 - `ArtifactProof`: Destination path, size, source, and post-commit metadata stamp.
 - `TaskOutcome::Committed { proof }`: Output returned by all successful file writers. Read-only checks return `TaskOutcome::Verified`.
 
-Final integrity checks use `ArtifactProof` to skip re-verifying unmodified files written during the operation.
+Final integrity checks use `ArtifactProof` to skip re-verifying unmodified files written during the change. `ArtifactClaim` keeps provider ownership after tasks move into another DAG.
 
 ### 5. File Allocation & Storage
 

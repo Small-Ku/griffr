@@ -75,11 +75,11 @@ PreparePatchApply
 
 ---
 
-## 6. Staging, Work Directory, & VFS Links
+## 6. Staging, Work Directory, and Asset Links
 
 *   **Source-Directed Staging:** Patch archives do not extract the full `vfs_files/` tree. The selected plan determines the exact local and HDiff payload paths needed by the run; all alternatives remain compressed and unfetched when range delivery is used.
 *   **Work Directory:** When using `--work-dir`, selected payload staging and HDiff temporary files are created outside the install root. Outputs are verified in the work directory, copied local to the install volume, verified again, and committed.
-*   **External VFS Root:** `--external-vfs-root` moves the VFS folder to an external target and symlinks it. Details are stored in `.griffr-storage.json`. Verification and repair commands follow the link.
+*   **External Asset Root:** `--external-asset-root` moves the patch-managed asset tree to an external target and links it into the install. Details are stored in `.griffr-storage.json`. Verification and repair resolve the same physical target.
 *   **Codecs:** Patches use `HDIFFSF20` format, applied via `hdiffpatch-rs`.
 
 ---

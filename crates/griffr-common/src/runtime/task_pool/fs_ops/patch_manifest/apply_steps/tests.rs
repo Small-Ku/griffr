@@ -165,7 +165,7 @@ fn application_revalidates_persisted_base_metadata() {
 }
 
 #[test]
-fn dependency_order_uses_logical_path_for_external_vfs() {
+fn dependency_order_uses_logical_path_for_external_assets() {
     let temp = tempdir().unwrap();
     let install_root = temp.path().join("install");
     let stage_root = temp.path().join("stage");

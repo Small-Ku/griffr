@@ -171,3 +171,67 @@ fn verify_batch_peers_can_satisfy_relink_parse_requirements() {
     assert!(repair);
     assert!(relink_reuse);
 }
+
+#[test]
+fn skip_vfs_keeps_install_and_verify_cli_parity() {
+    let install = Cli::try_parse_from([
+        "griffr",
+        "install",
+        "--game",
+        "endfield",
+        "--region",
+        "sg",
+        "--path",
+        r"C:\Games\Endfield",
+        "--skip-vfs",
+    ])
+    .unwrap();
+    let Commands::Install {
+        resource_policy,
+        skip_vfs,
+        ..
+    } = install.command
+    else {
+        panic!("expected install command");
+    };
+    assert!(resource_policy.is_none());
+    assert!(skip_vfs);
+    assert_eq!(
+        ResourcePolicyArg::resolve(resource_policy, skip_vfs),
+        ResourcePolicyArg::PackageOnly
+    );
+
+    let verify = Cli::try_parse_from([
+        "griffr",
+        "verify",
+        "--path",
+        r"C:\Games\Endfield",
+        "--skip-vfs",
+    ])
+    .unwrap();
+    let Commands::Verify {
+        scope, skip_vfs, ..
+    } = verify.command
+    else {
+        panic!("expected verify command");
+    };
+    assert!(scope.is_none());
+    assert!(skip_vfs);
+}
+
+#[test]
+fn explicit_resource_policy_conflicts_with_skip_vfs() {
+    let Err(error) = Cli::try_parse_from([
+        "griffr",
+        "update",
+        "--path",
+        r"C:\Games\Endfield",
+        "--resource-policy",
+        "auto",
+        "--skip-vfs",
+    ]) else {
+        panic!("expected argument conflict error");
+    };
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+}

@@ -3,11 +3,14 @@ use griffr_common::api::client::ApiClient;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::TaskPoolRunner;
 use griffr_common::runtime::{
-    finish_install_change, is_launcher_metadata_path, read_install_change, run_integrity_pool,
-    start_install_change, sync_launcher_metadata, InstallChangeKind, InstallChangeSource,
-    InstallChangeStart, InstallChangeState, IntegritySelection, ProgressLane, ProgressSender,
+    finish_install_change, finish_vfs_plan, is_launcher_metadata_path, read_install_change,
+    run_integrity_pool, start_install_change, sync_launcher_metadata, ContentPlan,
+    GameManifestSnapshot, InstallChangeKind, InstallChangeSource, InstallChangeStart,
+    InstallChangeState, IntegritySelection, ProgressLane, ProgressSender,
 };
-use griffr_common::runtime::{plan_vfs_tasks, streaming_assets_path, VfsFilePlanOptions};
+use griffr_common::runtime::{
+    plan_vfs_tasks, streaming_assets_path, VfsFilePlanOptions, VfsTaskPlan,
+};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -28,7 +31,7 @@ async fn verify_one(
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
     relink_reuse: bool,
-    skip_vfs: bool,
+    scope: Option<crate::VerifyScopeArg>,
     opts: GlobalOptions,
 ) -> Result<serde_json::Value> {
     let detected_game = local.game_id.as_ref();
@@ -85,17 +88,17 @@ async fn verify_one(
         &channel_id,
         &overrides.clone().into(),
     )?;
+    let release_info = api_client
+        .get_latest_game(&install_target.api, Some(&checked_version))
+        .await
+        .context("Failed to resolve the integrity target release")?;
+    let mut advanced_change = None;
     if let Some(state) = active_change.clone() {
-        let release = api_client
-            .get_latest_game(&install_target.api, Some(&state.target_version))
-            .await
-            .context("Failed to resolve the unfinished change target")?;
-        let release_md5 = release
-            .pkg
-            .as_ref()
-            .and_then(|pkg| pkg.game_files_md5.as_deref());
-        if release.version == state.target_version {
-            if !state.matches_release(&release.version, release_md5) {
+        let release_package = release_info.pkg.as_ref();
+        let release_path = release_package.map(|pkg| pkg.file_path.as_str());
+        let release_md5 = release_package.and_then(|pkg| pkg.game_files_md5.as_deref());
+        if release_info.version == state.target_version {
+            if !state.matches_release(&release_info.version, release_path, release_md5) {
                 anyhow::bail!(
                     "Unfinished {} target {} no longer matches its saved game_files identity; refusing to use changed metadata under the same version",
                     state.kind,
@@ -107,7 +110,7 @@ async fn verify_one(
                 "Unfinished {} target {} was superseded by {}. Run verify --repair or update to advance the mixed installation to the current release.",
                 state.kind,
                 state.target_version,
-                release.version
+                release_info.version
             );
         } else {
             let advanced = InstallChangeState::new(
@@ -118,26 +121,20 @@ async fn verify_one(
                 channel_id.channel().to_string(),
                 channel_id.sub_channel().to_string(),
                 Some(state.target_version.clone()),
-                release.version.clone(),
-                release
-                    .pkg
-                    .as_ref()
-                    .and_then(|pkg| pkg.game_files_md5.clone()),
+                release_info.version.clone(),
+                release_package.and_then(|pkg| pkg.game_files_md5.clone()),
                 Vec::new(),
-                !skip_vfs,
+                scope
+                    .map(|scope| scope != crate::VerifyScopeArg::Core)
+                    .unwrap_or(state.sync_vfs),
+            )
+            .with_game_files_path(
+                release_package
+                    .map(|pkg| pkg.file_path.clone())
+                    .unwrap_or_default(),
             );
-            match start_install_change(&local.install_path, &advanced)? {
-                InstallChangeStart::Advance => ui::print_warning(format!(
-                    "Advancing unfinished target {} to current release {} during repair",
-                    state.target_version, advanced.target_version
-                )),
-                InstallChangeStart::Resume => ui::print_info(format!(
-                    "Resuming repair toward current release {}",
-                    advanced.target_version
-                )),
-                InstallChangeStart::New => unreachable!("an active marker was read above"),
-            }
             checked_version = advanced.target_version.clone();
+            advanced_change = Some((state.target_version.clone(), advanced.clone()));
             active_change = Some(advanced);
         }
     }
@@ -188,6 +185,10 @@ async fn verify_one(
         ));
     }
 
+    let manifest_snapshot = GameManifestSnapshot::fetch(api_client, &release_info)
+        .await
+        .context("Failed to fetch the integrity manifest snapshot")?;
+
     let progress = (opts.output != OutputFormat::Json)
         .then(|| CountAndByteProgress::new("verify", "repair.download", opts.verbose));
     let progress_session = progress.as_ref().map(|progress| {
@@ -203,28 +204,38 @@ async fn verify_one(
 
     let source_roots = if repair { reuse_paths } else { Vec::new() };
 
-    let sync_vfs = active_change
-        .as_ref()
-        .map(|state| state.sync_vfs)
-        .unwrap_or(!skip_vfs);
-    if skip_vfs && sync_vfs && opts.output != OutputFormat::Json {
-        ui::print_warning(
-            "Ignoring --skip-vfs because the unfinished change marker requires VFS closure.",
-        );
+    let mut effective_scope = scope.unwrap_or_else(|| {
+        active_change
+            .as_ref()
+            .map(|state| {
+                if state.sync_vfs {
+                    crate::VerifyScopeArg::All
+                } else {
+                    crate::VerifyScopeArg::Core
+                }
+            })
+            .unwrap_or(crate::VerifyScopeArg::All)
+    });
+    if active_change.as_ref().is_some_and(|state| state.sync_vfs)
+        && effective_scope == crate::VerifyScopeArg::Core
+    {
+        effective_scope = crate::VerifyScopeArg::All;
+        if opts.output != OutputFormat::Json {
+            ui::print_warning(
+                "Using --scope all because the unfinished change marker requires resource closure.",
+            );
+        }
     }
-    let extra_tasks = if sync_vfs {
+    let sync_vfs = effective_scope != crate::VerifyScopeArg::Core;
+    let mut vfs_plan = if sync_vfs {
         if opts.output != OutputFormat::Json {
             ui::print_info(
                 "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
             );
         }
-        let version_info = api_client
-            .get_latest_game(&install_target.api, Some(&checked_version))
-            .await
-            .context("Failed to fetch version information for VFS planning")?;
-        let rand_str = version_info.rand_str();
+        let rand_str = release_info.rand_str();
         if rand_str.is_empty() {
-            Vec::new()
+            VfsTaskPlan::default()
         } else {
             let streaming_assets =
                 streaming_assets_path(&local.install_path.join(install_target.data_root.clone()));
@@ -235,7 +246,7 @@ async fn verify_one(
             plan_vfs_tasks(
                 api_client,
                 &install_target.api,
-                &version_info.version,
+                &release_info.version,
                 &rand_str,
                 &streaming_assets,
                 &VfsFilePlanOptions {
@@ -247,12 +258,38 @@ async fn verify_one(
             )
             .await
             .context("Failed to plan VFS tasks for verify+repair")?
-            .map(|plan| plan.tasks)
             .unwrap_or_default()
         }
     } else {
-        Vec::new()
+        VfsTaskPlan::default()
     };
+
+    if let Some((previous_target, advanced)) = advanced_change.take() {
+        let advanced = advanced.with_resource_identity(vfs_plan.identity.clone());
+        match start_install_change(&local.install_path, &advanced)? {
+            InstallChangeStart::Advance => ui::print_warning(format!(
+                "Advancing unfinished target {} to current release {} during repair",
+                previous_target, advanced.target_version
+            )),
+            InstallChangeStart::Resume => ui::print_info(format!(
+                "Resuming repair toward current release {}",
+                advanced.target_version
+            )),
+            InstallChangeStart::New => unreachable!("an active marker was read above"),
+        }
+        active_change = Some(advanced);
+    } else if let Some(state) = active_change.as_ref().filter(|state| state.sync_vfs) {
+        if vfs_plan.identity != state.resource_identity {
+            anyhow::bail!(
+                "Unfinished change target {} no longer matches its saved resource identity",
+                checked_version
+            );
+        }
+    }
+
+    let mut content_plan =
+        ContentPlan::from_snapshot(&local.install_path, manifest_snapshot, &vfs_plan.claims)
+            .context("Failed to build the integrity content plan")?;
 
     let pool_cfg = opts.task_pool_config();
     let volume_policy = pool_cfg.default_volume_policy;
@@ -265,7 +302,7 @@ async fn verify_one(
         volume_policy.streaming_pressure_limit,
         pool_cfg.reuse_queue_limit
     ));
-    if repair && !extra_tasks.is_empty() {
+    if repair && !vfs_plan.tasks.is_empty() {
         opts.verbose(format!(
             "Using {} shared network slots with weighted VFS/archive fairness",
             pool_cfg.network_slots
@@ -274,6 +311,8 @@ async fn verify_one(
     let repair_change = if repair {
         if let Some(state) = active_change.as_ref() {
             Some(state.clone())
+        } else if effective_scope == crate::VerifyScopeArg::Resources {
+            None
         } else {
             let state = InstallChangeState::new(
                 InstallChangeKind::Repair,
@@ -284,10 +323,12 @@ async fn verify_one(
                 channel_id.sub_channel().to_string(),
                 Some(checked_version.clone()),
                 checked_version.clone(),
-                None,
+                content_plan.snapshot().release.game_files_md5.clone(),
                 Vec::new(),
-                !skip_vfs,
-            );
+                effective_scope != crate::VerifyScopeArg::Core,
+            )
+            .with_game_files_path(content_plan.snapshot().release.file_path.clone())
+            .with_resource_identity(vfs_plan.identity.clone());
             match start_install_change(&local.install_path, &state)? {
                 InstallChangeStart::New => {}
                 InstallChangeStart::Resume => {
@@ -304,17 +345,19 @@ async fn verify_one(
         None
     };
     let summary = run_integrity_pool(
-        api_client,
-        &local.install_path,
-        &install_target,
-        Some(&checked_version),
-        IntegritySelection::Full,
+        &content_plan,
+        match (effective_scope, repair) {
+            (crate::VerifyScopeArg::All, true) => IntegritySelection::GameFiles,
+            (crate::VerifyScopeArg::All, false) => IntegritySelection::Full,
+            (crate::VerifyScopeArg::Core, _) => IntegritySelection::Core,
+            (crate::VerifyScopeArg::Resources, _) => IntegritySelection::Resources,
+        },
         &[],
         repair,
         &source_roots,
         force_copy,
         relink_reuse,
-        extra_tasks,
+        std::mem::take(&mut vfs_plan.tasks),
         Some(pool_runner),
         progress_sender,
     )
@@ -358,6 +401,7 @@ async fn verify_one(
             "sync_vfs": state.sync_vfs,
         })),
         "repair": repair,
+        "scope": format!("{:?}", effective_scope).to_ascii_lowercase(),
         "issues": issue_list,
         "downloaded_files": summary.downloaded_files,
         "reused_files": summary.reused_files,
@@ -374,17 +418,23 @@ async fn verify_one(
 
     if summary.issues.is_empty() {
         if repair {
-            sync_launcher_metadata(
-                api_client,
-                &local.install_path,
-                &install_target,
-                Some(&checked_version),
-            )
-            .await
-            .context("Failed to sync launcher metadata")?;
-            if let Some(state) = repair_change.as_ref() {
-                finish_install_change(&local.install_path, state)
-                    .context("Failed to remove the install change marker")?;
+            if effective_scope != crate::VerifyScopeArg::Core {
+                finish_vfs_plan(&local.install_path, &vfs_plan, true)
+                    .await
+                    .context("Failed to finish the resource baseline after repair")?;
+            }
+            if effective_scope != crate::VerifyScopeArg::Resources {
+                content_plan
+                    .refresh_delivery(api_client, &install_target.api)
+                    .await
+                    .context("Failed to refresh launcher metadata URLs")?;
+                sync_launcher_metadata(api_client, &local.install_path, content_plan.snapshot())
+                    .await
+                    .context("Failed to sync launcher metadata")?;
+                if let Some(state) = repair_change.as_ref() {
+                    finish_install_change(&local.install_path, state)
+                        .context("Failed to remove the install change marker")?;
+                }
             }
         } else if let Some(state) = active_change.as_ref() {
             if opts.output != OutputFormat::Json {
@@ -437,23 +487,29 @@ async fn verify_one(
             );
         }
 
-        if opts.output != OutputFormat::Json {
-            ui::print_phase("Syncing launcher metadata");
+        if effective_scope != crate::VerifyScopeArg::Core {
+            finish_vfs_plan(&local.install_path, &vfs_plan, true)
+                .await
+                .context("Failed to finish the resource baseline after repair")?;
         }
-        sync_launcher_metadata(
-            api_client,
-            &local.install_path,
-            &install_target,
-            Some(&checked_version),
-        )
-        .await
-        .context("Failed to sync launcher metadata after repair")?;
-        if let Some(state) = repair_change.as_ref() {
-            finish_install_change(&local.install_path, state)
-                .context("Failed to remove the install change marker")?;
-        }
-        if opts.output != OutputFormat::Json {
-            ui::print_success("Launcher metadata synced");
+        if effective_scope != crate::VerifyScopeArg::Resources {
+            if opts.output != OutputFormat::Json {
+                ui::print_phase("Syncing launcher metadata");
+            }
+            content_plan
+                .refresh_delivery(api_client, &install_target.api)
+                .await
+                .context("Failed to refresh launcher metadata URLs")?;
+            sync_launcher_metadata(api_client, &local.install_path, content_plan.snapshot())
+                .await
+                .context("Failed to sync launcher metadata after repair")?;
+            if let Some(state) = repair_change.as_ref() {
+                finish_install_change(&local.install_path, state)
+                    .context("Failed to remove the install change marker")?;
+            }
+            if opts.output != OutputFormat::Json {
+                ui::print_success("Launcher metadata synced");
+            }
         }
     }
 
@@ -478,7 +534,7 @@ pub async fn verify(
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
     relink_reuse: bool,
-    skip_vfs: bool,
+    scope: Option<crate::VerifyScopeArg>,
     opts: GlobalOptions,
 ) -> Result<()> {
     if relink_reuse && !repair {
@@ -559,7 +615,7 @@ pub async fn verify(
                 target_reuse_paths,
                 force_copy,
                 relink_reuse,
-                skip_vfs,
+                scope,
                 opts,
             )
             .await

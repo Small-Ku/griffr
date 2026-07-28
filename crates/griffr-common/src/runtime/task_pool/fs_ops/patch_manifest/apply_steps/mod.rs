@@ -11,7 +11,7 @@ use crate::runtime::ArtifactProof;
 mod filesystem;
 mod steps;
 
-use filesystem::{commit_top_level_files, prepare_external_vfs_root};
+use filesystem::{commit_top_level_files, prepare_external_asset_root};
 #[cfg(test)]
 use steps::ordered_entries;
 use steps::{
@@ -26,7 +26,7 @@ pub(crate) fn prepare_patch_apply(
 ) -> Result<()> {
     plan.validate()?;
     write_patch_plan(plan)?;
-    prepare_external_vfs_root(plan)?;
+    prepare_external_asset_root(plan)?;
     commit_top_level_files(plan, commit_callback)?;
     delete_unreferenced_paths_before_patch(plan)
 }

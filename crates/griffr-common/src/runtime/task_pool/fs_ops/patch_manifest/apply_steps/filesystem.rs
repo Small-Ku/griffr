@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 use crate::runtime::patch_apply::{
-    write_patch_storage_layout, PatchPlan, PatchStorageLayout, PATCH_DEFERRED_DIR,
+    write_asset_storage_layout, AssetStorageLayout, PatchPlan, PATCH_DEFERRED_DIR,
 };
 use crate::runtime::task_pool::verify::file_md5;
 use crate::runtime::{
@@ -97,7 +97,7 @@ pub(super) fn move_directory_contents(source: &Path, target: &Path) -> Result<()
                     return Err(Error::Message {
                         context: "VFS error: ",
                         detail: format!(
-                            "External VFS relocation conflict at {}",
+                            "External asset relocation conflict at {}",
                             target_path.display()
                         ),
                     });
@@ -119,7 +119,7 @@ pub(super) fn create_directory_link(link: &Path, target: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         std::os::windows::fs::symlink_dir(target, link).map_err(|source| Error::Message { context: "", detail: format!(
-            "Failed to create external VFS directory link {} -> {}: {}. Enable Windows Developer Mode or run with permission to create symbolic links",
+            "Failed to create external asset directory link {} -> {}: {}. Enable Windows Developer Mode or run with permission to create symbolic links",
             link.display(),
             target.display(),
             source
@@ -130,7 +130,7 @@ pub(super) fn create_directory_link(link: &Path, target: &Path) -> Result<()> {
         std::os::unix::fs::symlink(target, link).map_err(|source| Error::Message {
             context: "",
             detail: format!(
-                "Failed to create external VFS directory link {} -> {}: {}",
+                "Failed to create external asset directory link {} -> {}: {}",
                 link.display(),
                 target.display(),
                 source
@@ -142,12 +142,12 @@ pub(super) fn create_directory_link(link: &Path, target: &Path) -> Result<()> {
         let _ = (link, target);
         Err(Error::Message {
             context: "",
-            detail: "External VFS roots are unsupported on this platform".to_string(),
+            detail: "External asset roots are unsupported on this platform".to_string(),
         })
     }
 }
 
-pub(super) fn prepare_external_vfs_root(plan: &PatchPlan) -> Result<()> {
+pub(super) fn prepare_external_asset_root(plan: &PatchPlan) -> Result<()> {
     let logical = plan.install_root.join(&plan.vfs_base_path);
     if logical == plan.vfs_destination {
         return Ok(());
@@ -167,12 +167,12 @@ pub(super) fn prepare_external_vfs_root(plan: &PatchPlan) -> Result<()> {
                 path: plan.vfs_destination.clone(),
                 source,
             })?;
-            return write_patch_storage_layout(
+            return write_asset_storage_layout(
                 &plan.install_root,
-                &PatchStorageLayout {
-                    schema_version: PatchStorageLayout::SCHEMA_VERSION,
-                    vfs_link: plan.vfs_base_path.clone(),
-                    external_vfs_root: plan.vfs_destination.clone(),
+                &AssetStorageLayout {
+                    schema_version: AssetStorageLayout::SCHEMA_VERSION,
+                    asset_link: plan.vfs_base_path.clone(),
+                    external_asset_root: plan.vfs_destination.clone(),
                 },
             );
         }
@@ -202,12 +202,12 @@ pub(super) fn prepare_external_vfs_root(plan: &PatchPlan) -> Result<()> {
         })?;
     }
     create_directory_link(&logical, &plan.vfs_destination)?;
-    write_patch_storage_layout(
+    write_asset_storage_layout(
         &plan.install_root,
-        &PatchStorageLayout {
-            schema_version: PatchStorageLayout::SCHEMA_VERSION,
-            vfs_link: plan.vfs_base_path.clone(),
-            external_vfs_root: plan.vfs_destination.clone(),
+        &AssetStorageLayout {
+            schema_version: AssetStorageLayout::SCHEMA_VERSION,
+            asset_link: plan.vfs_base_path.clone(),
+            external_asset_root: plan.vfs_destination.clone(),
         },
     )
 }

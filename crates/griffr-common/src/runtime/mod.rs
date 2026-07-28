@@ -1,6 +1,7 @@
 pub mod admin;
 mod artifact;
 mod compat_fs;
+mod content_plan;
 mod file_allocation;
 pub mod files;
 mod install_change;
@@ -19,25 +20,29 @@ mod update_plan;
 
 pub use admin::{ensure_admin, is_running_as_admin, restart_as_admin};
 pub(crate) use artifact::ArtifactDigest;
-pub use artifact::{ArtifactExpectation, ArtifactProof, ArtifactSource};
+pub use artifact::{ArtifactClaim, ArtifactExpectation, ArtifactProof, ArtifactSource};
 pub(crate) use compat_fs::dir_size_sync;
 pub use compat_fs::{
     collect_files_recursive, copy_dir_recursive, dir_size, directory_has_entries,
     list_files_with_extension, path_is_dir, path_is_dir_or_err, path_is_file, read_link,
     remove_dir_all, remove_empty_dir, remove_empty_dirs_recursive, CopyStats,
 };
+pub use content_plan::{
+    ContentDomain, ContentPlan, ContentProvider, GameManifestSnapshot, PlannedContent,
+    ReleaseIdentity,
+};
 pub(crate) use file_allocation::preallocate_file;
-
 pub use files::reuse::{
-    ensure_game_files_from_manifest_with_pool, ensure_game_files_with_pool,
-    inspect_reuse_installations, read_local_game_files, remove_blocking_obsolete_game_files,
-    remove_obsolete_game_files, resolve_file_reuse_roots, FileEnsureSummary, FileReuseConfig,
-    ObsoleteFileCleanupSummary,
+    ensure_game_files_from_manifest_with_pool, inspect_reuse_installations, read_local_game_files,
+    remove_blocking_obsolete_game_files, remove_obsolete_game_files, resolve_file_reuse_roots,
+    FileEnsureSummary, FileReuseConfig, ObsoleteFileCleanupSummary,
 };
 pub use files::vfs::{
-    download_vfs_resources, get_vfs_resource_info, plan_persistent_vfs_tasks, plan_vfs_tasks,
-    setup_persistent_vfs, PersistentVfsConfig, PersistentVfsFileSet, PersistentVfsPlan,
-    PersistentVfsResult, VfsFilePlanOptions, VfsTaskPlan, VfsUpdateResult,
+    commit_vfs_manifests, download_vfs_resources, finish_vfs_plan, get_vfs_resource_info,
+    plan_persistent_vfs_tasks, plan_vfs_tasks, setup_persistent_vfs, ManagedResourceFile,
+    PersistentVfsConfig, PersistentVfsFileSet, PersistentVfsPlan, PersistentVfsResult,
+    ResourceIdentity, ResourceManifestIdentity, VfsFilePlanOptions, VfsManifestCommit, VfsTaskPlan,
+    VfsUpdateResult,
 };
 pub use install_change::{
     ensure_install_ready, finish_install_change, read_install_change, start_install_change,
@@ -54,11 +59,11 @@ pub use local_install::{
 };
 pub use patch_apply::{
     available_space, check_patch_archives, discard_incomplete_patch_apply,
-    get_patch_recovery_state, read_patch_storage_layout, read_predownload_stage_metadata,
-    write_predownload_stage_metadata, PatchApplyOptions, PatchCheckReport, PatchPlan,
-    PatchRecoveryState, PatchStorageLayout, PlannedPatchEntry, PlannedPatchSource,
-    PredownloadStageMetadata, StagedArchivePart, PATCH_DEFERRED_DIR, PATCH_PLAN_NAME,
-    PATCH_STORAGE_METADATA_NAME, PREDOWNLOAD_STAGE_METADATA_NAME,
+    get_patch_recovery_state, read_asset_storage_layout, read_predownload_stage_metadata,
+    write_predownload_stage_metadata, AssetStorageLayout, PatchApplyOptions, PatchCheckReport,
+    PatchPlan, PatchRecoveryState, PlannedPatchEntry, PlannedPatchSource, PredownloadStageMetadata,
+    StagedArchivePart, ASSET_STORAGE_METADATA_NAME, PATCH_DEFERRED_DIR, PATCH_PLAN_NAME,
+    PREDOWNLOAD_STAGE_METADATA_NAME,
 };
 pub(crate) use patch_apply::{
     build_patch_plan_with_probe_cache, entry_dependency_indices, entry_wave_indices,
@@ -67,12 +72,13 @@ pub(crate) use patch_apply::{
 pub use paths::{
     build_cdn_file_url, files_base_url, griffr_archives_path, griffr_patch_path, griffr_path,
     griffr_predownload_path, is_griffr_private_path, is_launcher_metadata_path,
-    launcher_metadata_url, normalize_logical_path, persistent_path, resource_manifest_filename,
-    resource_manifest_url, streaming_assets_path, vfs_path, ResourceManifestKind, CDN_FILES_DIR,
-    CONFIG_INI_NAME, DELETE_FILES_MANIFEST_NAME, GAME_FILES_NAME, GRIFFR_ARCHIVES_DIR, GRIFFR_DIR,
-    GRIFFR_PATCH_DIR, GRIFFR_PREDOWNLOAD_DIR, PACKAGE_FILES_NAME, PATCH_DIFF_STAGE_DIR,
-    PATCH_FILES_STAGE_DIR, PATCH_MANIFEST_NAME, PATCH_STAGE_DIR, PERSISTENT_DIR,
-    RESOURCE_GROUP_BASE, RESOURCE_GROUP_MAIN, STREAMING_ASSETS_DIR, VFS_DIR,
+    is_resource_baseline_path, launcher_metadata_url, normalize_logical_path, persistent_path,
+    resource_manifest_filename, resource_manifest_url, streaming_assets_path, vfs_path,
+    ResourceManifestKind, CDN_FILES_DIR, CONFIG_INI_NAME, DELETE_FILES_MANIFEST_NAME,
+    GAME_FILES_NAME, GRIFFR_ARCHIVES_DIR, GRIFFR_DIR, GRIFFR_PATCH_DIR, GRIFFR_PREDOWNLOAD_DIR,
+    PACKAGE_FILES_NAME, PATCH_DIFF_STAGE_DIR, PATCH_FILES_STAGE_DIR, PATCH_MANIFEST_NAME,
+    PATCH_STAGE_DIR, PERSISTENT_DIR, RESOURCE_GROUP_BASE, RESOURCE_GROUP_MAIN,
+    STREAMING_ASSETS_DIR, VFS_DIR,
 };
 pub use progress::{
     PathAttemptKind, PathOutcome, PathOutcomeSummary, PathOutcomeTracker, PathReuseMethod,

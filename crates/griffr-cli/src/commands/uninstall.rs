@@ -2,7 +2,7 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use griffr_common::runtime::{read_patch_storage_layout, remove_dir_all};
+use griffr_common::runtime::{read_asset_storage_layout, remove_dir_all};
 
 use crate::progress::ActivityProgress;
 use crate::ui;
@@ -37,14 +37,14 @@ pub async fn uninstall(
         }
     }
 
-    let external_vfs_root =
-        read_patch_storage_layout(&target)?.map(|storage_layout| storage_layout.external_vfs_root);
+    let external_asset_root = read_asset_storage_layout(&target)?
+        .map(|storage_layout| storage_layout.external_asset_root);
 
     if opts.is_dry_run() {
         opts.dry_run(format!("Would delete {}", target.display()));
-        if let Some(external) = external_vfs_root.as_ref() {
+        if let Some(external) = external_asset_root.as_ref() {
             opts.dry_run(format!(
-                "Would also delete external VFS root {}",
+                "Would also delete external asset root {}",
                 external.display()
             ));
         }
@@ -63,11 +63,13 @@ pub async fn uninstall(
             return Err(err.into());
         }
         progress.finish();
-        if let Some(external) = external_vfs_root {
+        if let Some(external) = external_asset_root {
             let external_exists = compio::fs::metadata(&external).await.is_ok();
             if external_exists && !external.starts_with(&target) {
-                let external_progress =
-                    ActivityProgress::new(format!("Deleting external VFS {}", external.display()));
+                let external_progress = ActivityProgress::new(format!(
+                    "Deleting external assets {}",
+                    external.display()
+                ));
                 if let Err(err) = remove_dir_all(external.clone()).await {
                     external_progress.fail();
                     return Err(err.into());

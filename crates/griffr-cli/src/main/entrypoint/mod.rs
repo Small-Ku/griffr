@@ -46,7 +46,7 @@ pub(crate) async fn run() -> Result<()> {
         verbose: cli.verbose,
         skip_verify: false,
         force_full_package: false,
-        skip_vfs: false,
+        resource_policy: ResourcePolicyArg::Auto,
         keep_pack_archives: false,
         extraction_progress_buffer_bytes: cli.extraction_progress_buffer_bytes,
         download_progress_buffer_bytes: cli.download_progress_buffer_bytes,
@@ -72,6 +72,7 @@ pub(crate) async fn run() -> Result<()> {
             path,
             force,
             reuse,
+            resource_policy,
             skip_vfs,
             keep_pack_archives,
         } => {
@@ -82,15 +83,16 @@ pub(crate) async fn run() -> Result<()> {
                 force_copy,
             } = reuse;
 
+            let resource_policy = ResourcePolicyArg::resolve(resource_policy, skip_vfs);
             let opts = GlobalOptions {
-                skip_vfs,
+                resource_policy,
                 keep_pack_archives,
                 ..opts
             };
 
             opts.verbose(format!(
-                "Install command: game={:?}, region={}, channel={:?}, path={:?}, reuse_from={:?}, force_copy={}, skip_vfs={}, keep_pack_archives={}",
-                game_id, region_id, channel_id, path, reuse_from, force_copy, skip_vfs, keep_pack_archives
+                "Install command: game={:?}, region={}, channel={:?}, path={:?}, reuse_from={:?}, force_copy={}, resource_policy={:?}, keep_pack_archives={}",
+                game_id, region_id, channel_id, path, reuse_from, force_copy, resource_policy, keep_pack_archives
             ));
             commands::install(
                 game_id, region_id, channel_id, overrides, path, force, reuse_from, force_copy,
@@ -118,20 +120,22 @@ pub(crate) async fn run() -> Result<()> {
             skip_verify,
             full_package,
             use_predownload,
+            resource_policy,
             skip_vfs,
             keep_pack_archives,
             work_dir,
-            external_vfs_root,
+            external_asset_root,
         } => {
             let TargetPathsArg { paths } = paths;
             let ReuseSourcesArg {
                 reuse_from,
                 force_copy,
             } = reuse;
+            let resource_policy = ResourcePolicyArg::resolve(resource_policy, skip_vfs);
             let opts = GlobalOptions {
                 skip_verify,
                 force_full_package: full_package,
-                skip_vfs,
+                resource_policy,
                 keep_pack_archives,
                 ..opts
             };
@@ -147,7 +151,7 @@ pub(crate) async fn run() -> Result<()> {
                 use_predownload,
                 griffr_common::runtime::PatchApplyOptions {
                     work_dir,
-                    external_vfs_root,
+                    external_asset_root,
                 },
                 opts,
             )
@@ -173,15 +177,17 @@ pub(crate) async fn run() -> Result<()> {
                 overrides,
                 output_dir,
                 skip_verify,
+                resource_policy,
                 skip_vfs,
                 keep_pack_archives,
                 work_dir,
-                external_vfs_root,
+                external_asset_root,
             } => {
                 let PathArg { path } = path;
+                let resource_policy = ResourcePolicyArg::resolve(resource_policy, skip_vfs);
                 let opts = GlobalOptions {
                     skip_verify,
-                    skip_vfs,
+                    resource_policy,
                     keep_pack_archives,
                     ..opts
                 };
@@ -195,7 +201,7 @@ pub(crate) async fn run() -> Result<()> {
                     output_dir,
                     griffr_common::runtime::PatchApplyOptions {
                         work_dir,
-                        external_vfs_root,
+                        external_asset_root,
                     },
                     opts,
                 )
@@ -220,6 +226,7 @@ pub(crate) async fn run() -> Result<()> {
             repair,
             reuse,
             relink_reuse,
+            scope,
             skip_vfs,
             skip_local_detect,
         } => {
@@ -242,9 +249,14 @@ pub(crate) async fn run() -> Result<()> {
             let channel = region
                 .map(|region| ChannelPair::parse(region, channel, sub_channel))
                 .transpose()?;
+            let scope = if skip_vfs {
+                Some(VerifyScopeArg::Core)
+            } else {
+                scope
+            };
             opts.verbose(format!(
-                "Verify paths: {:?}, game={:?}, region={:?}, channel={:?}, repair={}, reuse_from={:?}, force_copy={}, relink_reuse={}, skip_vfs={}, skip_local_detect={}",
-                paths, game, region, channel, repair, reuse_from, force_copy, relink_reuse, skip_vfs, skip_local_detect
+                "Verify paths: {:?}, game={:?}, region={:?}, channel={:?}, repair={}, reuse_from={:?}, force_copy={}, relink_reuse={}, scope={:?}, skip_local_detect={}",
+                paths, game, region, channel, repair, reuse_from, force_copy, relink_reuse, scope, skip_local_detect
             ));
             commands::verify(
                 paths,
@@ -257,38 +269,33 @@ pub(crate) async fn run() -> Result<()> {
                 reuse_from,
                 force_copy,
                 relink_reuse,
-                skip_vfs,
+                scope,
                 opts,
             )
             .await?;
         }
-        Commands::SetupVfs {
+        Commands::SetupPersistentResources {
             path,
             overrides,
             file_set,
-            reuse,
+            reuse_from,
             allow_download,
-            relink_reuse,
-            no_prune,
+            prefer_reuse,
+            prune,
         } => {
             let PathArg { path } = path;
-            let ReuseSourcesArg {
-                reuse_from,
-                force_copy,
-            } = reuse;
             opts.verbose(format!(
-                "Setup VFS path={:?}, file_set={:?}, reuse_from={:?}, force_copy={}, allow_download={}, relink_reuse={}, no_prune={}",
-                path, file_set, reuse_from, force_copy, allow_download, relink_reuse, no_prune
+                "Setup Persistent resources path={:?}, file_set={:?}, reuse_from={:?}, allow_download={}, prefer_reuse={}, prune={}",
+                path, file_set, reuse_from, allow_download, prefer_reuse, prune
             ));
-            commands::setup_vfs(
+            commands::setup_persistent_resources(
                 path,
                 overrides,
                 file_set,
                 reuse_from,
-                force_copy,
                 allow_download,
-                relink_reuse,
-                !no_prune,
+                prefer_reuse,
+                prune,
                 opts,
             )
             .await?;

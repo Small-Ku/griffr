@@ -2,7 +2,6 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use crate::api::ApiClient;
-use crate::config::InstallTarget;
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::fs_ops::{
     commit_unchecked_artifact, commit_verified_artifact, make_temp_write_path,
@@ -69,16 +68,9 @@ async fn download_metadata_file(
 pub async fn sync_launcher_metadata(
     api_client: &ApiClient,
     install_path: &Path,
-    install_target: &InstallTarget,
-    version: Option<&str>,
+    snapshot: &crate::runtime::GameManifestSnapshot,
 ) -> Result<()> {
-    let version_info = api_client
-        .get_latest_game(&install_target.api, version)
-        .await?;
-    let pkg = version_info.pkg.as_ref().ok_or_else(|| Error::Message {
-        context: "API client wrapper error: ",
-        detail: "No package information available".to_string(),
-    })?;
+    let pkg = &snapshot.package;
 
     let game_files_url = launcher_metadata_url(&pkg.file_path, GAME_FILES_NAME)?;
     let game_files_path = install_path.join(GAME_FILES_NAME);

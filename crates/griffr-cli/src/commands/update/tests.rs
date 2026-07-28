@@ -25,7 +25,7 @@ fn test_global_options() -> GlobalOptions {
         verbose: false,
         skip_verify: false,
         force_full_package: false,
-        skip_vfs: true,
+        resource_policy: crate::ResourcePolicyArg::PackageOnly,
         keep_pack_archives: false,
         extraction_progress_buffer_bytes: DEFAULT_PROGRESS_BUFFER_BYTES,
         download_progress_buffer_bytes: DEFAULT_PROGRESS_BUFFER_BYTES,

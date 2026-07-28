@@ -252,8 +252,12 @@ pub(crate) enum PredownloadCommands {
         #[arg(long)]
         skip_verify: bool,
 
-        /// Skip VFS resource download
-        #[arg(long)]
+        /// Choose how launcher resource-index files are sourced
+        #[arg(long, value_enum, conflicts_with = "skip_vfs")]
+        resource_policy: Option<crate::ResourcePolicyArg>,
+
+        /// Skip launcher resource-index sync. Package and game_files resource entries are still installed and verified.
+        #[arg(long, conflicts_with = "resource_policy")]
         skip_vfs: bool,
 
         /// Keep archive files after successful extraction
@@ -264,9 +268,9 @@ pub(crate) enum PredownloadCommands {
         #[arg(long)]
         work_dir: Option<std::path::PathBuf>,
 
-        /// Persist the VFS tree under this directory and link it into the install root
+        /// Persist the patch-managed asset tree under this directory and link it into the install root
         #[arg(long)]
-        external_vfs_root: Option<std::path::PathBuf>,
+        external_asset_root: Option<std::path::PathBuf>,
     },
     /// Resume a persisted forward patch apply or legacy extracted patch state
     Resume {
@@ -345,7 +349,7 @@ pub struct GlobalOptions {
     pub verbose: bool,
     pub skip_verify: bool,
     pub force_full_package: bool,
-    pub skip_vfs: bool,
+    pub resource_policy: crate::ResourcePolicyArg,
     pub keep_pack_archives: bool,
     pub extraction_progress_buffer_bytes: usize,
     pub download_progress_buffer_bytes: usize,

@@ -12,7 +12,7 @@ use super::PATCH_PLAN_NAME;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PatchApplyOptions {
     pub work_dir: Option<PathBuf>,
-    pub external_vfs_root: Option<PathBuf>,
+    pub external_asset_root: Option<PathBuf>,
 }
 
 impl PatchApplyOptions {
@@ -54,8 +54,8 @@ impl PatchApplyOptions {
             .as_deref()
             .map(Self::normalize_absolute_path)
             .transpose()?;
-        let external_vfs_root = self
-            .external_vfs_root
+        let external_asset_root = self
+            .external_asset_root
             .as_deref()
             .map(Self::normalize_absolute_path)
             .transpose()?;
@@ -72,28 +72,30 @@ impl PatchApplyOptions {
                 });
             }
         }
-        if let Some(external_vfs_root) = external_vfs_root.as_deref() {
-            if external_vfs_root.starts_with(&install_root) {
+        if let Some(external_asset_root) = external_asset_root.as_deref() {
+            if external_asset_root.starts_with(&install_root) {
                 return Err(Error::Message {
                     context: "Configuration error: ",
                     detail: format!(
-                        "External VFS root {} must be outside install root {}",
-                        external_vfs_root.display(),
+                        "External asset root {} must be outside install root {}",
+                        external_asset_root.display(),
                         install_root.display()
                     ),
                 });
             }
         }
-        if let (Some(work_dir), Some(external_vfs_root)) =
-            (work_dir.as_deref(), external_vfs_root.as_deref())
+        if let (Some(work_dir), Some(external_asset_root)) =
+            (work_dir.as_deref(), external_asset_root.as_deref())
         {
-            if work_dir.starts_with(external_vfs_root) || external_vfs_root.starts_with(work_dir) {
+            if work_dir.starts_with(external_asset_root)
+                || external_asset_root.starts_with(work_dir)
+            {
                 return Err(Error::Message {
                     context: "Configuration error: ",
                     detail: format!(
-                        "Patch work directory {} and external VFS root {} must not overlap",
+                        "Patch work directory {} and external asset root {} must not overlap",
                         work_dir.display(),
-                        external_vfs_root.display()
+                        external_asset_root.display()
                     ),
                 });
             }
@@ -101,7 +103,7 @@ impl PatchApplyOptions {
 
         Ok(Self {
             work_dir,
-            external_vfs_root,
+            external_asset_root,
         })
     }
 }
