@@ -9,6 +9,13 @@ use crate::api::crypto;
 use crate::api::types::{GameFileEntry, ResIndex, ResourcePatch};
 use crate::runtime::{launcher_metadata_url, GAME_FILES_NAME};
 
+#[derive(Debug, Clone)]
+pub struct ResIndexDocument {
+    pub index: ResIndex,
+    pub encrypted_bytes: Vec<u8>,
+    pub md5: String,
+}
+
 pub(crate) fn parse_game_files(encrypted_data: &[u8]) -> Result<Vec<GameFileEntry>> {
     let decrypted = crypto::decrypt_game_files(encrypted_data)?;
     let mut entries = Vec::new();
@@ -79,8 +86,8 @@ impl ApiClient {
         parse_game_files(&encrypted_data)
     }
 
-    /// Fetch and decrypt a resource index file (index_main.json / index_initial.json)
-    pub async fn fetch_res_index(&self, url: &str, key: &str) -> Result<ResIndex> {
+    /// Fetch the exact encrypted resource index document and its parsed content.
+    pub async fn fetch_res_index_document(&self, url: &str, key: &str) -> Result<ResIndexDocument> {
         let response = self
             .client
             .get(url)?
@@ -104,13 +111,17 @@ impl ApiClient {
             });
         }
 
-        let base64_data = response.text().await.map_err(|e| Error::Message {
+        let encrypted_bytes = response.bytes().await.map_err(|e| Error::Message {
             context: "API client wrapper error: ",
-            detail: format!("Failed to read resource index as text: {e}"),
+            detail: format!("Failed to read resource index bytes: {e}"),
+        })?;
+        let base64_data = std::str::from_utf8(&encrypted_bytes).map_err(|e| Error::Message {
+            context: "API client wrapper error: ",
+            detail: format!("Resource index response is not UTF-8 text: {e}"),
         })?;
 
         // Decrypt
-        let decrypted = crypto::decrypt_res_index(&base64_data, key)?;
+        let decrypted = crypto::decrypt_res_index(base64_data.trim(), key)?;
 
         // Parse JSON
         let index: ResIndex = serde_json::from_str(&decrypted).map_err(|e| Error::Message {
@@ -118,7 +129,18 @@ impl ApiClient {
             detail: format!("Failed to parse decrypted resource index JSON: {e}"),
         })?;
 
-        Ok(index)
+        let encrypted_bytes = encrypted_bytes.to_vec();
+        let md5 = crate::to_hex(&Md5::digest(&encrypted_bytes));
+        Ok(ResIndexDocument {
+            index,
+            encrypted_bytes,
+            md5,
+        })
+    }
+
+    /// Fetch and decrypt a resource index file (index_main.json / index_initial.json).
+    pub async fn fetch_res_index(&self, url: &str, key: &str) -> Result<ResIndex> {
+        Ok(self.fetch_res_index_document(url, key).await?.index)
     }
 
     /// Fetch the resource patch manifest (patch.json)

@@ -6,7 +6,8 @@ use anyhow::Result;
 use griffr_common::api::types::GameFileEntry;
 use griffr_common::runtime::task_pool::{NodeId, Task, TaskGraphBuilder};
 use griffr_common::runtime::{
-    CONFIG_INI_NAME, GAME_FILES_NAME, GRIFFR_DIR, INSTALL_CHANGE_STATE_NAME, PACKAGE_FILES_NAME,
+    ArtifactClaim, CONFIG_INI_NAME, GAME_FILES_NAME, GRIFFR_DIR, INSTALL_CHANGE_STATE_NAME,
+    PACKAGE_FILES_NAME,
 };
 
 fn normalize_relative_path(path: &Path) -> String {
@@ -27,6 +28,18 @@ fn archive_task_path(
 ) -> Option<String> {
     let target = task.target_path()?;
     let relative = target.strip_prefix(install_path).ok()?;
+    let normalized = normalize_relative_path(relative);
+    expected_files
+        .contains_key(&normalized)
+        .then_some(normalized)
+}
+
+fn archive_claim_path(
+    claim: &ArtifactClaim,
+    install_path: &Path,
+    expected_files: &BTreeMap<String, GameFileEntry>,
+) -> Option<String> {
+    let relative = claim.path().strip_prefix(install_path).ok()?;
     let normalized = normalize_relative_path(relative);
     expected_files
         .contains_key(&normalized)
@@ -55,12 +68,18 @@ pub(crate) fn owned_archive_paths(
 /// game-file check, so `config.ini` remains the finish marker.
 pub(crate) fn full_archive_excluded_paths(
     tasks: &[Task],
+    claims: &[ArtifactClaim],
     install_path: &Path,
     expected_files: &BTreeMap<String, GameFileEntry>,
 ) -> Arc<BTreeSet<String>> {
     let mut excluded = owned_archive_paths(tasks, install_path, expected_files)
         .as_ref()
         .clone();
+    excluded.extend(
+        claims
+            .iter()
+            .filter_map(|claim| archive_claim_path(claim, install_path, expected_files)),
+    );
     excluded.extend(protected_archive_paths());
     excluded.extend([
         CONFIG_INI_NAME.to_string(),
@@ -156,7 +175,7 @@ mod tests {
         let expected = expected();
         let file_task = verify_task(&root.join("Data/VFS/a.bin"), "a.bin");
 
-        let excluded = full_archive_excluded_paths(&[file_task], root, &expected);
+        let excluded = full_archive_excluded_paths(&[file_task], &[], root, &expected);
 
         assert_eq!(
             excluded.as_ref(),
@@ -168,6 +187,32 @@ mod tests {
                 "package_files".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn full_package_omits_claimed_manifest_without_a_file_task() {
+        let root = Path::new("game");
+        let mut expected = expected();
+        expected.insert(
+            "data/index_main.json".to_string(),
+            GameFileEntry {
+                path: "Data/index_main.json".to_string(),
+                md5: "11111111111111111111111111111111".to_string(),
+                size: 2,
+            },
+        );
+        let claim = ArtifactClaim::new(
+            root.join("Data/index_main.json"),
+            griffr_common::runtime::ArtifactExpectation::new(
+                "index_main.json",
+                "11111111111111111111111111111111",
+                Some(2),
+            ),
+        );
+
+        let excluded = full_archive_excluded_paths(&[], &[claim], root, &expected);
+
+        assert!(excluded.contains("data/index_main.json"));
     }
 
     #[test]

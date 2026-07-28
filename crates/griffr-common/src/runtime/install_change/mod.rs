@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::runtime::paths::griffr_path;
 use crate::runtime::task_pool::fs_ops::write_atomic_bytes;
+use crate::runtime::ResourceIdentity;
 
 pub const INSTALL_CHANGE_STATE_NAME: &str = "state.json";
 
@@ -62,13 +63,15 @@ pub struct InstallChangeState {
     pub from_version: Option<String>,
     pub target_version: String,
     pub game_files_md5: Option<String>,
+    pub game_files_path: Option<String>,
     pub payload_md5s: Vec<String>,
     pub sync_vfs: bool,
+    pub resource_identity: Option<ResourceIdentity>,
     pub start_time: String,
 }
 
 impl InstallChangeState {
-    pub const SCHEMA_VERSION: u32 = 2;
+    pub const SCHEMA_VERSION: u32 = 3;
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -97,13 +100,25 @@ impl InstallChangeState {
             game_files_md5: game_files_md5
                 .filter(|value| !value.trim().is_empty())
                 .map(|value| value.to_ascii_lowercase()),
+            game_files_path: None,
             payload_md5s: payload_md5s
                 .into_iter()
                 .map(|value| value.to_ascii_lowercase())
                 .collect(),
             sync_vfs,
+            resource_identity: None,
             start_time: Utc::now().to_rfc3339(),
         }
+    }
+
+    pub fn with_game_files_path(mut self, path: impl Into<String>) -> Self {
+        self.game_files_path = normalize_game_files_path(&path.into());
+        self
+    }
+
+    pub fn with_resource_identity(mut self, identity: Option<ResourceIdentity>) -> Self {
+        self.resource_identity = identity;
+        self
     }
 
     pub fn state_path(install_root: &Path) -> PathBuf {
@@ -186,8 +201,35 @@ impl InstallChangeState {
         if let Some(md5) = self.game_files_md5.as_deref() {
             validate_md5("game_files_md5", md5)?;
         }
+        if self
+            .game_files_path
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            return Err(Error::Message {
+                context: "Configuration error: ",
+                detail: "Install change game_files_path cannot be empty".to_string(),
+            });
+        }
         for md5 in &self.payload_md5s {
             validate_md5("payload_md5s", md5)?;
+        }
+        if let Some(identity) = self.resource_identity.as_ref() {
+            if identity.res_version.trim().is_empty() {
+                return Err(Error::Message {
+                    context: "Configuration error: ",
+                    detail: "Resource identity version cannot be empty".to_string(),
+                });
+            }
+            for manifest in &identity.manifests {
+                if manifest.logical_path.trim().is_empty() {
+                    return Err(Error::Message {
+                        context: "Configuration error: ",
+                        detail: "Resource manifest identity path cannot be empty".to_string(),
+                    });
+                }
+                validate_md5("resource manifest md5", &manifest.md5)?;
+            }
         }
         Ok(())
     }
@@ -221,8 +263,10 @@ impl InstallChangeState {
             && self.from_version == other.from_version
             && self.target_version == other.target_version
             && self.game_files_md5 == other.game_files_md5
+            && self.game_files_path == other.game_files_path
             && self.payload_md5s == other.payload_md5s
             && self.sync_vfs == other.sync_vfs
+            && self.resource_identity == other.resource_identity
     }
 
     /// Return whether the live API response still identifies the same target
@@ -230,9 +274,23 @@ impl InstallChangeState {
     /// marker captured a `game_files` digest, the live manifest must keep the
     /// same digest as well; this prevents a stale marker from silently using a
     /// newer release manifest under the old target label.
-    pub fn matches_release(&self, target_version: &str, game_files_md5: Option<&str>) -> bool {
+    pub fn matches_release(
+        &self,
+        target_version: &str,
+        game_files_path: Option<&str>,
+        game_files_md5: Option<&str>,
+    ) -> bool {
         if self.target_version != target_version {
             return false;
+        }
+        if let Some(expected) = self.game_files_path.as_deref() {
+            if game_files_path
+                .and_then(normalize_game_files_path)
+                .as_deref()
+                != Some(expected)
+            {
+                return false;
+            }
         }
         match self.game_files_md5.as_deref() {
             Some(expected) => game_files_md5
@@ -244,6 +302,15 @@ impl InstallChangeState {
 
     fn can_advance_to(&self, next: &Self) -> bool {
         if !self.same_install(next) {
+            return false;
+        }
+        // Keep one deterministic resource plan for an in-flight target. The
+        // endpoint is probed again on every command, but newly available or
+        // changed resource metadata under the same target must not silently
+        // replace the marker that guarded earlier writes.
+        if self.target_version == next.target_version
+            && (self.sync_vfs != next.sync_vfs || self.resource_identity != next.resource_identity)
+        {
             return false;
         }
         match (self.kind, next.kind) {
@@ -424,6 +491,16 @@ fn remove_stale_state_temps(state_path: &Path) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+fn normalize_game_files_path(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let end = value.find(['?', '#']).unwrap_or(value.len());
+    let normalized = value[..end].trim_end_matches('/');
+    (!normalized.is_empty()).then(|| normalized.to_string())
 }
 
 fn validate_md5(field: &str, value: &str) -> Result<()> {

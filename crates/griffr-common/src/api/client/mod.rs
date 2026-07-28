@@ -5,3 +5,4 @@ mod resources;
 pub use media::MediaResponse;
 pub use requests::ApiClient;
 pub(crate) use resources::parse_game_files;
+pub use resources::ResIndexDocument;

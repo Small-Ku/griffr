@@ -10,7 +10,8 @@ use crate::runtime::task_pool::fs_ops::{
     commit_observed_artifact, verify_artifact, write_atomic_bytes,
 };
 use crate::runtime::{
-    griffr_predownload_path, ArtifactDigest, ArtifactExpectation, ArtifactSource,
+    griffr_predownload_path, ArtifactDigest, ArtifactExpectation, ArtifactSource, ResourceIdentity,
+    ResourceManifestIdentity,
 };
 
 fn state(
@@ -32,6 +33,7 @@ fn state(
         vec!["fedcba9876543210fedcba9876543210".to_string()],
         true,
     )
+    .with_game_files_path("https://cdn.example/game/files?auth_key=old")
 }
 
 #[test]
@@ -174,7 +176,7 @@ fn unfinished_repair_can_advance_to_a_new_release() {
 }
 
 #[test]
-fn same_repair_can_change_vfs_scope_explicitly() {
+fn same_target_cannot_change_resource_scope_mid_change() {
     let temp = tempfile::tempdir().unwrap();
     let with_vfs = state(
         InstallChangeKind::Repair,
@@ -186,11 +188,9 @@ fn same_repair_can_change_vfs_scope_explicitly() {
     without_vfs.sync_vfs = false;
     start_install_change(temp.path(), &with_vfs).unwrap();
 
-    assert_eq!(
-        start_install_change(temp.path(), &without_vfs).unwrap(),
-        InstallChangeStart::Advance
-    );
-    assert_eq!(read_install_change(temp.path()).unwrap(), Some(without_vfs));
+    let error = start_install_change(temp.path(), &without_vfs).unwrap_err();
+    assert!(error.to_string().contains("conflicts"));
+    assert_eq!(read_install_change(temp.path()).unwrap(), Some(with_vfs));
 }
 
 #[test]
@@ -202,9 +202,58 @@ fn release_identity_uses_target_and_manifest_digest() {
         "1.1",
     );
 
-    assert!(requested.matches_release("1.1", Some("0123456789ABCDEF0123456789ABCDEF")));
-    assert!(!requested.matches_release("1.2", Some("0123456789abcdef0123456789abcdef")));
-    assert!(!requested.matches_release("1.1", Some("fedcba9876543210fedcba9876543210")));
+    assert!(requested.matches_release(
+        "1.1",
+        Some("https://cdn.example/game/files?auth_key=fresh"),
+        Some("0123456789ABCDEF0123456789ABCDEF"),
+    ));
+    assert!(!requested.matches_release(
+        "1.2",
+        Some("https://cdn.example/game/files"),
+        Some("0123456789abcdef0123456789abcdef"),
+    ));
+    assert!(!requested.matches_release(
+        "1.1",
+        Some("https://cdn.example/other/files"),
+        Some("0123456789abcdef0123456789abcdef"),
+    ));
+    assert!(!requested.matches_release(
+        "1.1",
+        Some("https://cdn.example/game/files"),
+        Some("fedcba9876543210fedcba9876543210"),
+    ));
+}
+
+#[test]
+fn same_target_cannot_replace_resource_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = state(
+        InstallChangeKind::Update,
+        InstallChangeSource::PatchArchive,
+        Some("1.0"),
+        "1.1",
+    )
+    .with_resource_identity(Some(ResourceIdentity {
+        res_version: "r1".to_string(),
+        manifests: vec![ResourceManifestIdentity {
+            logical_path: "index_initial.json".to_string(),
+            md5: "11111111111111111111111111111111".to_string(),
+            size: 4,
+        }],
+    }));
+    let changed = first.clone().with_resource_identity(Some(ResourceIdentity {
+        res_version: "r2".to_string(),
+        manifests: vec![ResourceManifestIdentity {
+            logical_path: "index_initial.json".to_string(),
+            md5: "22222222222222222222222222222222".to_string(),
+            size: 4,
+        }],
+    }));
+    start_install_change(temp.path(), &first).unwrap();
+
+    let error = start_install_change(temp.path(), &changed).unwrap_err();
+    assert!(error.to_string().contains("conflicts"));
+    assert_eq!(read_install_change(temp.path()).unwrap(), Some(first));
 }
 
 #[test]
@@ -321,7 +370,7 @@ fn marker_survives_a_crash_after_version_metadata_commit() {
     start_install_change(temp.path(), &requested).unwrap();
 
     // This models the last crash window: config.ini has advertised the
-    // target, but the command has not yet removed the operation marker.
+    // target, but the command has not yet removed the change marker.
     std::fs::write(temp.path().join("config.ini"), b"version=1.1\n").unwrap();
 
     assert_eq!(read_install_change(temp.path()).unwrap(), Some(requested));
