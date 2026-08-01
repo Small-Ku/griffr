@@ -82,6 +82,23 @@ fn register_resource_claim(
     Ok(true)
 }
 
+/// Returns whether a decrypted resource index's version string is compatible with the expected resource versions.
+///
+/// An index version is compatible if:
+/// - It is empty (many server index manifests omit or leave the internal top-level version field blank), OR
+/// - It matches the specific resource group's version (e.g. `"8764515-7"`), OR
+/// - It matches the aggregate resource version string (e.g. `"initial_8764515-7_main_8764515-7"`).
+pub fn is_compatible_res_index_version(
+    index_version: &str,
+    group_version: &str,
+    aggregate_res_version: &str,
+) -> bool {
+    let trimmed = index_version.trim();
+    trimmed.is_empty()
+        || trimmed == group_version.trim()
+        || trimmed == aggregate_res_version.trim()
+}
+
 pub async fn plan_vfs_tasks(
     api_client: &ApiClient,
     target: &ApiTarget,
@@ -113,12 +130,16 @@ pub async fn plan_vfs_tasks(
                 context: "VFS error: ",
                 detail: format!("Failed to fetch resource index for {}: {e}", resource.name),
             })?;
-        if document.index.version != resources.res_version {
+        if !is_compatible_res_index_version(
+            &document.index.version,
+            &resource.version,
+            &resources.res_version,
+        ) {
             return Err(Error::Message {
                 context: "VFS error: ",
                 detail: format!(
-                    "Resource index {} has version {}, expected {}",
-                    resource.name, document.index.version, resources.res_version
+                    "Resource index {} has version {}, expected {} or {}",
+                    resource.name, document.index.version, resource.version, resources.res_version
                 ),
             });
         }
@@ -507,5 +528,24 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("different expected content"));
+    }
+
+    #[test]
+    fn test_is_compatible_res_index_version() {
+        let group_ver = "8764515-7";
+        let agg_ver = "initial_8764515-7_main_8764515-7";
+
+        // Empty version string in manifest is compatible
+        assert!(is_compatible_res_index_version("", group_ver, agg_ver));
+        assert!(is_compatible_res_index_version("  ", group_ver, agg_ver));
+
+        // Matching group version is compatible
+        assert!(is_compatible_res_index_version(group_ver, group_ver, agg_ver));
+
+        // Matching aggregate version is compatible
+        assert!(is_compatible_res_index_version(agg_ver, group_ver, agg_ver));
+
+        // Mismatched version is incompatible
+        assert!(!is_compatible_res_index_version("9999999-9", group_ver, agg_ver));
     }
 }

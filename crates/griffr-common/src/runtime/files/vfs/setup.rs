@@ -1,3 +1,4 @@
+use super::sync::is_compatible_res_index_version;
 use crate::error::{Error, Result};
 use md5::Digest;
 use std::collections::BTreeMap;
@@ -495,12 +496,16 @@ pub async fn plan_persistent_vfs_tasks(
             document
         };
 
-        if document.index.version != resources.res_version {
+        if !is_compatible_res_index_version(
+            &document.index.version,
+            &resource.version,
+            &resources.res_version,
+        ) {
             return Err(Error::Message {
                 context: "VFS error: ",
                 detail: format!(
-                    "Persistent preference manifest {} has resource version {}, expected {}",
-                    pref_filename, document.index.version, resources.res_version
+                    "Persistent preference manifest {} has resource version {}, expected {} or {}",
+                    pref_filename, document.index.version, resource.version, resources.res_version
                 ),
             });
         }
