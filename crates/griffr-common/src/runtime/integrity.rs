@@ -107,7 +107,9 @@ fn remove_entries_owned_by_claims(
         else {
             return true;
         };
-        if !claim.expects_game_file(entry) {
+        let is_res_baseline = is_resource_baseline_path(&entry.path)
+            || is_resource_baseline_path(claim.expectation().logical_path());
+        if !is_res_baseline && !claim.expects_game_file(entry) {
             conflict = Some(format!(
                 "resource and game manifests claim {} with different expected content",
                 entry.path
