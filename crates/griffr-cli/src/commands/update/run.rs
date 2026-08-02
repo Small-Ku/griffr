@@ -38,16 +38,31 @@ pub(super) async fn update_internal(
     match griffr_common::runtime::get_patch_recovery_state(&local.install_path, None)? {
         griffr_common::runtime::PatchRecoveryState::ExtractedReady
         | griffr_common::runtime::PatchRecoveryState::DeletePending => {
-            if opts.is_dry_run() {
-                opts.dry_run(format!(
-                    "Would resume pending patch apply under {} before checking for another update",
+            if pending_change.is_none() {
+                ui::print_info(format!(
+                    "Found orphaned patch artifacts under {} without an install change marker; clearing leftovers...",
                     local.install_path.display()
                 ));
-                return Ok(());
+                if opts.is_dry_run() {
+                    opts.dry_run(format!(
+                        "Would discard orphaned patch state under {}",
+                        local.install_path.display()
+                    ));
+                } else {
+                    griffr_common::runtime::discard_incomplete_patch_apply(&local.install_path)?;
+                }
+            } else {
+                if opts.is_dry_run() {
+                    opts.dry_run(format!(
+                        "Would resume pending patch apply under {} before checking for another update",
+                        local.install_path.display()
+                    ));
+                    return Ok(());
+                }
+                crate::commands::predownload::resume(local.install_path.clone(), opts).await?;
+                local = detect_local_install(&path).await?;
+                resumed_pending_patch = true;
             }
-            crate::commands::predownload::resume(local.install_path.clone(), opts).await?;
-            local = detect_local_install(&path).await?;
-            resumed_pending_patch = true;
         }
         griffr_common::runtime::PatchRecoveryState::ExtractedMissing { missing } => {
             if require_staged_predownload {

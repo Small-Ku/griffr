@@ -95,17 +95,40 @@ fn entry_is_recoverable(
 /// rebuild its plan and replay archive ranges. Files already committed to the
 /// install remain in place and will be recognized as valid by the next plan.
 pub fn discard_incomplete_patch_apply(install_root: &Path) -> Result<()> {
-    let plan_path = griffr_patch_path(install_root).join(PATCH_PLAN_NAME);
-    if !plan_path.is_file() {
-        return Ok(());
-    }
-    let plan = read_patch_plan(install_root)?;
-    if plan.stage_root.exists() {
-        std::fs::remove_dir_all(&plan.stage_root).map_err(|source| Error::IoAt {
-            action: "remove file or directory",
-            path: plan.stage_root.clone(),
+    let manifest_path = install_root.join(PATCH_MANIFEST_NAME);
+    if manifest_path.is_file() {
+        std::fs::remove_file(&manifest_path).map_err(|source| Error::IoAt {
+            action: "remove file",
+            path: manifest_path,
             source,
         })?;
+    }
+    let delete_manifest = install_root.join(DELETE_FILES_MANIFEST_NAME);
+    if delete_manifest.is_file() {
+        std::fs::remove_file(&delete_manifest).map_err(|source| Error::IoAt {
+            action: "remove file",
+            path: delete_manifest,
+            source,
+        })?;
+    }
+    let stage_root = install_root.join(PATCH_STAGE_DIR);
+    if stage_root.exists() {
+        std::fs::remove_dir_all(&stage_root).map_err(|source| Error::IoAt {
+            action: "remove file or directory",
+            path: stage_root,
+            source,
+        })?;
+    }
+    let plan_path = griffr_patch_path(install_root).join(PATCH_PLAN_NAME);
+    if plan_path.is_file() {
+        let plan = read_patch_plan(install_root)?;
+        if plan.stage_root.exists() {
+            std::fs::remove_dir_all(&plan.stage_root).map_err(|source| Error::IoAt {
+                action: "remove file or directory",
+                path: plan.stage_root.clone(),
+                source,
+            })?;
+        }
     }
     let patch_root = griffr_patch_path(install_root);
     if patch_root.exists() {
@@ -352,5 +375,26 @@ mod tests {
             std::fs::read(predownload.join("part.zip.001")).unwrap(),
             b"cached"
         );
+    }
+
+    #[test]
+    fn discard_incomplete_patch_apply_removes_root_manifests() {
+        let temp = tempfile::tempdir().unwrap();
+        let install_root = temp.path().join("install");
+        std::fs::create_dir_all(&install_root).unwrap();
+
+        let manifest = install_root.join(PATCH_MANIFEST_NAME);
+        let delete_manifest = install_root.join(DELETE_FILES_MANIFEST_NAME);
+        let stage_root = install_root.join(PATCH_STAGE_DIR);
+
+        std::fs::write(&manifest, b"{}").unwrap();
+        std::fs::write(&delete_manifest, b"delete.txt").unwrap();
+        std::fs::create_dir_all(&stage_root).unwrap();
+
+        discard_incomplete_patch_apply(&install_root).unwrap();
+
+        assert!(!manifest.exists());
+        assert!(!delete_manifest.exists());
+        assert!(!stage_root.exists());
     }
 }
