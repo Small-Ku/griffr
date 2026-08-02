@@ -161,7 +161,9 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                 reserve_storage(&mut request, dest, *expected_size);
                 request.mutation_paths.push(path_key(dest));
             } else {
-                request.metadata_volumes.push(volume_key(dest));
+                let volume = volume_key(dest);
+                request.read_volumes.push(volume.clone());
+                request.metadata_volumes.push(volume);
                 request.mutation_paths.push(path_key(dest));
                 request.reuse_commit = true;
             }
@@ -738,9 +740,14 @@ fn run_class(task: &Task) -> RunClass {
         }
         Task::FetchArchiveRepairFile { .. }
         | Task::FetchArchiveRange { .. }
-        | Task::ReuseFile { .. }
+        | Task::ReuseFile {
+            copy_only: true, ..
+        }
         | Task::ApplyDeleteManifest { .. } => RunClass::AsyncIo,
         Task::Verify { .. }
+        | Task::ReuseFile {
+            copy_only: false, ..
+        }
         | Task::RepairFile { .. }
         | Task::VerifyReuseVolume { .. }
         | Task::ProbePatchArtifact { .. } => RunClass::Cpu,
@@ -826,11 +833,7 @@ fn volume_key(path: &Path) -> String {
 }
 
 fn path_key(path: &Path) -> String {
-    std::fs::canonicalize(path)
-        .unwrap_or_else(|_| path.to_path_buf())
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_ascii_lowercase()
+    crate::runtime::artifact::physical_path_key(path)
 }
 
 pub(super) fn task_path(task: &Task) -> String {
@@ -896,8 +899,17 @@ mod tests {
     use crate::runtime::{griffr_patch_path, PatchPlan, PATCH_DEFERRED_DIR, PATCH_STAGE_DIR};
     use md5::{Digest, Md5};
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn mutation_path_keys_preserve_case_on_case_sensitive_platforms() {
+        assert_ne!(
+            super::path_key(Path::new("Data")),
+            super::path_key(Path::new("data"))
+        );
+    }
 
     fn reuse_task(copy_only: bool) -> Task {
         Task::ReuseFile {
@@ -918,13 +930,14 @@ mod tests {
     }
 
     #[test]
-    fn hardlink_reuse_uses_metadata_capacity_without_streaming_read() {
+    fn hardlink_reuse_accounts_for_hashing_and_metadata_capacity() {
         let resources = task_resources(&reuse_task(false));
-        assert!(resources.read_volumes.is_empty());
+        assert_eq!(resources.read_volumes.len(), 1);
         assert!(resources.write_volumes.is_empty());
         assert_eq!(resources.metadata_volumes.len(), 1);
         assert!(resources.reuse_commit);
-        assert_eq!(resources.run, RunClass::AsyncIo);
+        assert_eq!(resources.estimated_bytes, 1);
+        assert_eq!(resources.run, RunClass::Cpu);
     }
 
     #[test]
@@ -949,9 +962,9 @@ mod tests {
     }
 
     #[test]
-    fn reuse_hardlink_uses_async_dispatcher_runtime() {
+    fn reuse_hardlink_uses_cpu_dispatcher_runtime() {
         let reuse = task_resources(&reuse_task(false));
-        assert_eq!(reuse.run, RunClass::AsyncIo);
+        assert_eq!(reuse.run, RunClass::Cpu);
     }
 
     #[test]

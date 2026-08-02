@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use super::super::fs_ops::{
-    classify_reuse_mode, copy_verified_file_async, create_hardlink_async, storage_volume_group_key,
+    classify_reuse_mode, copy_verified_file_async, create_hardlink, storage_volume_group_key,
     storage_volume_id, ReuseMode,
 };
 use super::super::graph::{GraphExpansion, TaskRun};
@@ -363,7 +363,7 @@ pub(super) fn run_verify_reuse_volume(
     task_list_run(group.finish_volume(copy_only, source))
 }
 
-pub(super) async fn run_hardlink_reuse_file(
+pub(super) fn run_hardlink_reuse_file(
     task: Task,
     event_tx: &flume::Sender<WorkerEvent>,
 ) -> TaskRun {
@@ -380,7 +380,7 @@ pub(super) async fn run_hardlink_reuse_file(
         unreachable!("hardlink reuse runner requires a reuse task");
     };
     assert!(!copy_only, "copy reuse routed to hardlink runner");
-    let result = create_hardlink_async(source, dest).await.and_then(|()| {
+    let result = create_hardlink(source, dest).and_then(|()| {
         let expectation =
             ArtifactExpectation::new(logical_path, expected_md5, Some(*expected_size));
         super::super::fs_ops::verify_artifact(dest, &expectation, ArtifactSource::ReuseHardlink)

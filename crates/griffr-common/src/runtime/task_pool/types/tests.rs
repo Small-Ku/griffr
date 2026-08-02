@@ -1,6 +1,7 @@
 use super::{
-    destination_or_repair_tasks, ArchiveRepairSession, ArchiveRetention, ArchiveWork,
-    FileEnsureTask, PreparedArchive, Task, TaskOutcome, TaskPoolConfig, TransferClass, WorkerEvent,
+    destination_or_repair_tasks, should_report_item_progress, ArchiveDirectCommitState,
+    ArchiveRepairSession, ArchiveRetention, ArchiveWork, FileEnsureTask, PreparedArchive, Task,
+    TaskOutcome, TaskPoolConfig, TransferClass, WorkerEvent,
 };
 use crate::download::extractor::MultiVolumeLayout;
 use std::collections::BTreeMap;
@@ -200,6 +201,24 @@ fn relink_verifies_destination_before_repair_preparation() {
             }
         )
     ));
+}
+
+#[test]
+fn archive_commit_progress_is_batched_but_always_reports_completion() {
+    let state = ArchiveDirectCommitState::new(33);
+    for expected in 1..32 {
+        assert_eq!(state.finish_file(), (expected, false));
+    }
+    assert_eq!(state.finish_file(), (32, true));
+    assert_eq!(state.finish_file(), (33, true));
+}
+
+#[test]
+fn item_progress_reports_start_batches_and_completion() {
+    assert!(should_report_item_progress(0, 33));
+    assert!(!should_report_item_progress(1, 33));
+    assert!(should_report_item_progress(32, 33));
+    assert!(should_report_item_progress(33, 33));
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use super::super::routing::{ResourceRequest, RunClass};
 use crate::runtime::task_pool::{TaskPoolConfig, VolumeStreamingMode};
@@ -77,69 +77,94 @@ impl ResourceState {
             return false;
         }
 
-        for volume in request_volume_set(request) {
-            let policy = config.volume_policy(volume);
-            let wants_read = request
-                .read_volumes
-                .iter()
-                .any(|item| item.as_str() == volume);
-            let wants_write = request
-                .write_volumes
-                .iter()
-                .any(|item| item.as_str() == volume);
-            let wants_metadata = request
-                .metadata_volumes
-                .iter()
-                .any(|item| item.as_str() == volume);
-            let reads = self.volume_reads.get(volume).copied().unwrap_or(0);
-            let writes = self.volume_writes.get(volume).copied().unwrap_or(0);
-            let metadata = self.volume_metadata.get(volume).copied().unwrap_or(0);
-
-            if reads.saturating_add(usize::from(wants_read)) > policy.read_limit
-                || writes.saturating_add(usize::from(wants_write)) > policy.write_limit
-                || metadata.saturating_add(usize::from(wants_metadata)) > policy.metadata_limit
-            {
+        for volume in &request.read_volumes {
+            if !self.can_acquire_volume(request, config, admission, volume) {
                 return false;
             }
-
-            let (current_pressure, requested_pressure) = match policy.streaming_mode {
-                VolumeStreamingMode::Exclusive => {
-                    if (wants_read && writes > 0)
-                        || (wants_write && reads > 0)
-                        || (wants_metadata && (reads > 0 || writes > 0))
-                        || ((wants_read || wants_write) && metadata > 0)
-                    {
-                        return false;
-                    }
-                    if admission.reserved_write_volumes.contains(volume)
-                        && !wants_write
-                        && wants_metadata
-                    {
-                        return false;
-                    }
-                    (reads.max(writes), usize::from(wants_read || wants_write))
-                }
-                VolumeStreamingMode::Mixed => (
-                    reads.saturating_add(writes),
-                    usize::from(wants_read).saturating_add(usize::from(wants_write)),
-                ),
-            };
-
-            let reserve_for_waiting_writer = usize::from(
-                admission.reserved_write_volumes.contains(volume)
-                    && requested_pressure > 0
-                    && !wants_write
-                    && writes < policy.write_limit,
-            );
-            if current_pressure
-                .saturating_add(requested_pressure)
-                .saturating_add(reserve_for_waiting_writer)
-                > policy.streaming_pressure_limit
-            {
+        }
+        for volume in &request.write_volumes {
+            if request.read_volumes.contains(volume) {
+                continue;
+            }
+            if !self.can_acquire_volume(request, config, admission, volume) {
+                return false;
+            }
+        }
+        for volume in &request.metadata_volumes {
+            if request.read_volumes.contains(volume) || request.write_volumes.contains(volume) {
+                continue;
+            }
+            if !self.can_acquire_volume(request, config, admission, volume) {
                 return false;
             }
         }
         true
+    }
+
+    fn can_acquire_volume(
+        &self,
+        request: &ResourceRequest,
+        config: &TaskPoolConfig,
+        admission: &AdmissionSnapshot,
+        volume: &str,
+    ) -> bool {
+        let policy = config.volume_policy(volume);
+        let wants_read = request
+            .read_volumes
+            .iter()
+            .any(|item| item.as_str() == volume);
+        let wants_write = request
+            .write_volumes
+            .iter()
+            .any(|item| item.as_str() == volume);
+        let wants_metadata = request
+            .metadata_volumes
+            .iter()
+            .any(|item| item.as_str() == volume);
+        let reads = self.volume_reads.get(volume).copied().unwrap_or(0);
+        let writes = self.volume_writes.get(volume).copied().unwrap_or(0);
+        let metadata = self.volume_metadata.get(volume).copied().unwrap_or(0);
+
+        if reads.saturating_add(usize::from(wants_read)) > policy.read_limit
+            || writes.saturating_add(usize::from(wants_write)) > policy.write_limit
+            || metadata.saturating_add(usize::from(wants_metadata)) > policy.metadata_limit
+        {
+            return false;
+        }
+
+        let (current_pressure, requested_pressure) = match policy.streaming_mode {
+            VolumeStreamingMode::Exclusive => {
+                if (wants_read && writes > 0)
+                    || (wants_write && reads > 0)
+                    || (wants_metadata && (reads > 0 || writes > 0))
+                    || ((wants_read || wants_write) && metadata > 0)
+                {
+                    return false;
+                }
+                if admission.reserved_write_volumes.contains(volume)
+                    && !wants_write
+                    && wants_metadata
+                {
+                    return false;
+                }
+                (reads.max(writes), usize::from(wants_read || wants_write))
+            }
+            VolumeStreamingMode::Mixed => (
+                reads.saturating_add(writes),
+                usize::from(wants_read).saturating_add(usize::from(wants_write)),
+            ),
+        };
+
+        let reserve_for_waiting_writer = usize::from(
+            admission.reserved_write_volumes.contains(volume)
+                && requested_pressure > 0
+                && !wants_write
+                && writes < policy.write_limit,
+        );
+        current_pressure
+            .saturating_add(requested_pressure)
+            .saturating_add(reserve_for_waiting_writer)
+            <= policy.streaming_pressure_limit
     }
 
     fn can_reserve_storage(
@@ -275,16 +300,6 @@ fn mutation_path_contains(parent: &str, child: &str) -> bool {
     child.strip_prefix(parent).is_some_and(|suffix| {
         suffix.starts_with('/') || (parent.ends_with('/') && !suffix.is_empty())
     })
-}
-
-fn request_volume_set(request: &ResourceRequest) -> BTreeSet<&str> {
-    request
-        .read_volumes
-        .iter()
-        .chain(&request.write_volumes)
-        .chain(&request.metadata_volumes)
-        .map(String::as_str)
-        .collect()
 }
 
 fn decrement(counts: &mut HashMap<String, usize>, key: &str) {

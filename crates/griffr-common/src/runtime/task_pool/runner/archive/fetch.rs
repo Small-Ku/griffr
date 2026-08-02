@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::download::extractor::{
     ArchiveDirectory, ArchiveDirectoryDiscovery, ArchiveIndex, ArchiveRangeRequest,
@@ -7,6 +8,8 @@ use crate::download::extractor::{
 };
 use crate::runtime::task_pool::graph::{GraphExpansion, TaskRun};
 use crate::runtime::task_pool::types::{ArchiveRangePriority, ArchiveWork, Task, WorkerEvent};
+
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 
 fn archive_range_logical_path(work: &ArchiveWork, request: &ArchiveRangeRequest) -> String {
     format!(
@@ -37,11 +40,15 @@ pub(super) async fn fetch_archive_range_once(
         expected,
         false,
     ));
+    let mut last_progress_at = Instant::now();
     let written = crate::download::extractor::fetch_archive_range_to_cache(
         request,
         user_agent,
         progress_buffer_bytes,
         |written| {
+            if written < expected && last_progress_at.elapsed() < PROGRESS_EMIT_INTERVAL {
+                return;
+            }
             let _ = event_tx.send(WorkerEvent::progress(
                 crate::runtime::ProgressPhase::Download,
                 logical_path.clone(),
@@ -49,6 +56,7 @@ pub(super) async fn fetch_archive_range_once(
                 expected,
                 false,
             ));
+            last_progress_at = Instant::now();
         },
     )
     .await?;

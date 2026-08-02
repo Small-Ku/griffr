@@ -1,12 +1,13 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use futures_util::{stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::runtime::{
-    griffr_path, normalize_logical_path, path_is_file, remove_empty_dirs_recursive,
-    ArtifactExpectation, ArtifactSource,
+    griffr_path, normalize_logical_path, remove_empty_dirs_recursive, ArtifactExpectation,
+    ArtifactSource,
 };
 
 use super::{commit_vfs_manifests, ResourceIdentity, VfsTaskPlan};
@@ -93,39 +94,51 @@ async fn prune_previous_files(
         .iter()
         .map(|file| normalize_logical_path(&file.path))
         .collect::<rapidhash::RapidHashSet<_>>();
-    let mut removed_any = false;
-
+    let mut seen = rapidhash::RapidHashSet::default();
+    let mut jobs = Vec::new();
     for file in &previous.files {
-        if current.contains(&normalize_logical_path(&file.path)) {
+        let normalized = normalize_logical_path(&file.path);
+        if current.contains(&normalized) || !seen.insert(normalized) {
             continue;
         }
         let relative = crate::runtime::task_pool::fs_ops::path_safety::parse_safe_relative_path(
             "resource baseline state path",
             &file.path,
         )?;
-        let path = streaming_assets_root.join(relative);
-        if !path_is_file(&path).await {
-            continue;
-        }
-        // A state record grants permission to remove only the exact artifact
-        // Griffr committed previously. Preserve user- or game-modified files.
-        if crate::runtime::task_pool::fs_ops::verify_artifact(
-            &path,
-            &file.expectation(),
-            ArtifactSource::Existing,
-        )
-        .is_err()
-        {
-            continue;
-        }
-        compio::fs::remove_file(&path)
+        jobs.push((streaming_assets_root.join(relative), file.expectation()));
+    }
+
+    let prune_jobs = stream::iter(jobs)
+        .map(|(path, expectation)| async move {
+            crate::runtime::compat_fs::run_blocking("resource baseline prune", move || {
+                if !std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+                    return Ok(false);
+                }
+                // A state record grants permission to remove only the exact artifact
+                // Griffr committed previously. Preserve user- or game-modified files.
+                if crate::runtime::task_pool::fs_ops::verify_artifact(
+                    &path,
+                    &expectation,
+                    ArtifactSource::Existing,
+                )
+                .is_err()
+                {
+                    return Ok(false);
+                }
+                std::fs::remove_file(&path).map_err(|source| Error::IoAt {
+                    action: "remove file or directory",
+                    path: path.clone(),
+                    source,
+                })?;
+                Ok(true)
+            })
             .await
-            .map_err(|source| Error::IoAt {
-                action: "remove file or directory",
-                path: path.clone(),
-                source,
-            })?;
-        removed_any = true;
+        })
+        .buffered(super::RESOURCE_PRUNE_CONCURRENCY);
+    futures_util::pin_mut!(prune_jobs);
+    let mut removed_any = false;
+    while let Some(removed) = prune_jobs.try_next().await? {
+        removed_any |= removed;
     }
 
     if removed_any {

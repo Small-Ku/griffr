@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+
+use futures_util::{stream, StreamExt, TryStreamExt};
 
 use rapidhash::RapidHashSet as HashSet;
 
@@ -11,6 +14,8 @@ use crate::runtime::{
     normalize_logical_path, LocalInstall, GAME_FILES_NAME,
 };
 
+const PATH_INSPECTION_CONCURRENCY: usize = 8;
+
 /// Inspect explicit reuse paths, reject incompatible games, and omit the
 /// destination itself. Reused bytes are always checked against the target
 /// manifest, so source version and channel do not decide file eligibility.
@@ -19,20 +24,26 @@ pub async fn inspect_reuse_installations(
     destination: &Path,
     source_paths: &[PathBuf],
 ) -> Result<Vec<LocalInstall>> {
+    let inspected = stream::iter(source_paths.iter())
+        .map(|source_path| async move {
+            detect_local_install(source_path)
+                .await
+                .map_err(|error| Error::Message {
+                    context: "Configuration error: ",
+                    detail: format!(
+                        "Failed to inspect reuse source {}: {error}",
+                        source_path.display()
+                    ),
+                })
+        })
+        .buffered(PATH_INSPECTION_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+
     let destination_key = install_path_key(destination);
     let mut seen = HashSet::default();
     let mut sources = Vec::new();
-
-    for source_path in source_paths {
-        let source = detect_local_install(source_path)
-            .await
-            .map_err(|error| Error::Message {
-                context: "Configuration error: ",
-                detail: format!(
-                    "Failed to inspect reuse source {}: {error}",
-                    source_path.display()
-                ),
-            })?;
+    for source in inspected {
         let source_game_id = source.require_known_game()?;
         if &source_game_id != game_id {
             return Err(Error::Message {
@@ -106,6 +117,13 @@ fn obsolete_game_files<'a>(
         .into_iter()
         .map(|(_, relative)| super::ensure::normalized_relative_path(&relative))
         .collect::<HashSet<_>>();
+    obsolete_game_files_matching(current, |normalized| target_paths.contains(normalized))
+}
+
+fn obsolete_game_files_matching<'a>(
+    current: &'a [GameFileEntry],
+    mut target_contains: impl FnMut(&str) -> bool,
+) -> Result<Vec<(&'a GameFileEntry, PathBuf)>> {
     let mut seen = HashSet::default();
     let mut obsolete = Vec::new();
 
@@ -129,7 +147,7 @@ fn obsolete_game_files<'a>(
                 ),
             });
         }
-        if target_paths.contains(&normalized) {
+        if target_contains(&normalized) {
             continue;
         }
         obsolete.push((entry, relative));
@@ -145,23 +163,31 @@ fn blocking_obsolete_game_files<'a>(
     let target_paths = super::ensure::validated_game_file_entries(target)?
         .into_iter()
         .map(|(_, relative)| (super::ensure::normalized_relative_path(&relative), relative))
-        .collect::<Vec<_>>();
+        .collect::<BTreeMap<_, _>>();
     let mut blocking = Vec::new();
     let mut target_dirs = Vec::new();
     let mut seen_dirs = HashSet::default();
 
-    for (entry, relative) in obsolete_game_files(current, target)? {
+    for (entry, relative) in
+        obsolete_game_files_matching(current, |normalized| target_paths.contains_key(normalized))?
+    {
         let normalized = super::ensure::normalized_relative_path(&relative);
-        let mut blocks_target = false;
-        for (target_normalized, target_relative) in &target_paths {
-            if super::ensure::logical_path_is_ancestor(&normalized, target_normalized) {
+        let descendant_prefix = format!("{normalized}/");
+        let mut blocks_target = target_paths
+            .range(descendant_prefix.clone()..)
+            .next()
+            .is_some_and(|(candidate, _)| candidate.starts_with(descendant_prefix.as_str()));
+
+        let mut ancestor = relative.parent();
+        while let Some(path) = ancestor {
+            let target_normalized = super::ensure::normalized_relative_path(path);
+            if let Some(target_relative) = target_paths.get(&target_normalized) {
                 blocks_target = true;
-            } else if super::ensure::logical_path_is_ancestor(target_normalized, &normalized) {
-                blocks_target = true;
-                if seen_dirs.insert(target_normalized.clone()) {
+                if seen_dirs.insert(target_normalized) {
                     target_dirs.push(target_relative.clone());
                 }
             }
+            ancestor = path.parent();
         }
         if blocks_target {
             blocking.push((entry, relative));
@@ -180,7 +206,7 @@ fn blocking_owned_directories(
     let targets = target_dirs
         .iter()
         .map(|path| super::ensure::normalized_relative_path(path))
-        .collect::<Vec<_>>();
+        .collect::<HashSet<_>>();
     let mut seen = HashSet::default();
     let mut directories = Vec::new();
 
@@ -188,10 +214,15 @@ fn blocking_owned_directories(
         let mut parent = relative.parent();
         while let Some(directory) = parent {
             let normalized = super::ensure::normalized_relative_path(directory);
-            let belongs_to_target = targets.iter().any(|target| {
-                normalized != *target
-                    && super::ensure::logical_path_is_ancestor(target, &normalized)
-            });
+            let mut ancestor = normalized.as_str();
+            let mut belongs_to_target = false;
+            while let Some(separator) = ancestor.rfind('/') {
+                ancestor = &ancestor[..separator];
+                if targets.contains(ancestor) {
+                    belongs_to_target = true;
+                    break;
+                }
+            }
             if belongs_to_target && seen.insert(normalized) {
                 directories.push(directory.to_path_buf());
             }
@@ -461,6 +492,17 @@ mod tests {
             vec![PathBuf::from("OldDir/file.bin"), PathBuf::from("OldFile")]
         );
         assert_eq!(target_dirs, vec![PathBuf::from("OldDir")]);
+    }
+
+    #[test]
+    fn blocking_paths_do_not_match_component_prefix_siblings() {
+        let current = vec![entry("Data")];
+        let target = vec![entry("Database/file.bin")];
+
+        let (blocking, target_dirs) = blocking_obsolete_game_files(&current, &target).unwrap();
+
+        assert!(blocking.is_empty());
+        assert!(target_dirs.is_empty());
     }
 
     #[test]

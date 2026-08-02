@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::{Error, Result};
+use futures_util::{stream, StreamExt, TryStreamExt};
 use tracing::{info, warn};
 
 use crate::api::client::ApiClient;
@@ -94,9 +95,7 @@ pub fn is_compatible_res_index_version(
     aggregate_res_version: &str,
 ) -> bool {
     let trimmed = index_version.trim();
-    trimmed.is_empty()
-        || trimmed == group_version.trim()
-        || trimmed == aggregate_res_version.trim()
+    trimmed.is_empty() || trimmed == group_version.trim() || trimmed == aggregate_res_version.trim()
 }
 
 pub async fn plan_vfs_tasks(
@@ -120,16 +119,23 @@ pub async fn plan_vfs_tasks(
     let mut total_files = 0usize;
     let mut total_bytes = 0u64;
 
-    for resource in &resources.resources {
-        let index_url =
-            resource_manifest_url(&resource.path, ResourceManifestKind::Index, &resource.name);
-        let document = api_client
-            .fetch_res_index_document(&index_url, RES_INDEX_KEY)
-            .await
-            .map_err(|e| Error::Message {
-                context: "VFS error: ",
-                detail: format!("Failed to fetch resource index for {}: {e}", resource.name),
-            })?;
+    let resource_documents = stream::iter(&resources.resources)
+        .map(|resource| async move {
+            let index_url =
+                resource_manifest_url(&resource.path, ResourceManifestKind::Index, &resource.name);
+            let document = api_client
+                .fetch_res_index_document(&index_url, RES_INDEX_KEY)
+                .await
+                .map_err(|e| Error::Message {
+                    context: "VFS error: ",
+                    detail: format!("Failed to fetch resource index for {}: {e}", resource.name),
+                })?;
+            Ok::<_, Error>((resource, document))
+        })
+        .buffered(super::RESOURCE_MANIFEST_CONCURRENCY);
+    futures_util::pin_mut!(resource_documents);
+
+    while let Some((resource, document)) = resource_documents.try_next().await? {
         if !is_compatible_res_index_version(
             &document.index.version,
             &resource.version,
@@ -418,16 +424,26 @@ pub async fn get_vfs_resource_info(
     let mut total_files = 0;
     let mut total_size: u64 = 0;
 
-    for resource in &resources.resources {
-        let index_url =
-            resource_manifest_url(&resource.path, ResourceManifestKind::Index, &resource.name);
-        match api_client.fetch_res_index(&index_url, RES_INDEX_KEY).await {
+    let resource_indexes = stream::iter(&resources.resources)
+        .map(|resource| async move {
+            let index_url =
+                resource_manifest_url(&resource.path, ResourceManifestKind::Index, &resource.name);
+            (
+                resource.name.as_str(),
+                api_client.fetch_res_index(&index_url, RES_INDEX_KEY).await,
+            )
+        })
+        .buffered(super::RESOURCE_MANIFEST_CONCURRENCY);
+    futures_util::pin_mut!(resource_indexes);
+
+    while let Some((resource_name, result)) = resource_indexes.next().await {
+        match result {
             Ok(index) => {
                 total_files += index.files.len();
                 total_size += index.files.iter().map(|f| f.size).sum::<u64>();
             }
             Err(e) => {
-                warn!("Could not fetch VFS index for {}: {}", resource.name, e);
+                warn!("Could not fetch VFS index for {}: {}", resource_name, e);
             }
         }
     }
@@ -540,12 +556,18 @@ mod tests {
         assert!(is_compatible_res_index_version("  ", group_ver, agg_ver));
 
         // Matching group version is compatible
-        assert!(is_compatible_res_index_version(group_ver, group_ver, agg_ver));
+        assert!(is_compatible_res_index_version(
+            group_ver, group_ver, agg_ver
+        ));
 
         // Matching aggregate version is compatible
         assert!(is_compatible_res_index_version(agg_ver, group_ver, agg_ver));
 
         // Mismatched version is incompatible
-        assert!(!is_compatible_res_index_version("9999999-9", group_ver, agg_ver));
+        assert!(!is_compatible_res_index_version(
+            "9999999-9",
+            group_ver,
+            agg_ver
+        ));
     }
 }

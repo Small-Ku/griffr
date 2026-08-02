@@ -2,8 +2,11 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use futures_util::{stream, StreamExt, TryStreamExt};
 use griffr_common::config::GameId;
 use griffr_common::runtime::{detect_local_install, LocalInstall};
+
+const PATH_INSPECTION_CONCURRENCY: usize = 8;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TargetReusePaths {
@@ -65,12 +68,18 @@ async fn inspect_unique_paths(paths: &[PathBuf], role: &str) -> Result<Vec<Local
         return Ok(Vec::new());
     }
 
-    let mut installs = Vec::with_capacity(paths.len());
-    let mut seen = HashSet::with_capacity(paths.len());
-    for path in paths {
-        let install = detect_local_install(path)
-            .await
-            .with_context(|| format!("Failed to inspect {role} {}", path.display()))?;
+    let installs = stream::iter(paths.iter())
+        .map(|path| async move {
+            detect_local_install(path)
+                .await
+                .with_context(|| format!("Failed to inspect {role} {}", path.display()))
+        })
+        .buffered(PATH_INSPECTION_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+
+    let mut seen = HashSet::with_capacity(installs.len());
+    for install in &installs {
         let key = path_key(&install.install_path);
         if !seen.insert(key) {
             anyhow::bail!(
@@ -78,7 +87,6 @@ async fn inspect_unique_paths(paths: &[PathBuf], role: &str) -> Result<Vec<Local
                 install.install_path.display()
             );
         }
-        installs.push(install);
     }
     Ok(installs)
 }

@@ -16,6 +16,12 @@ use crate::runtime::task_pool::verify::VerifiedArtifactCache;
 
 use super::tasks::{ArchivePart, ArchiveRetention};
 
+const ITEM_PROGRESS_BATCH: usize = 32;
+
+pub(crate) fn should_report_item_progress(finished: usize, total: usize) -> bool {
+    finished == 0 || finished == total || finished % ITEM_PROGRESS_BATCH == 0
+}
+
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct PatchApplyWork {
@@ -45,8 +51,12 @@ impl PatchApplyWork {
         self.plan.entries.len()
     }
 
-    pub(crate) fn finish_entry(&self) -> usize {
-        self.finished_entries.fetch_add(1, Ordering::AcqRel) + 1
+    pub(crate) fn finish_entry(&self) -> (usize, bool) {
+        let finished = self.finished_entries.fetch_add(1, Ordering::AcqRel) + 1;
+        (
+            finished,
+            should_report_item_progress(finished, self.entry_count()),
+        )
     }
 
     pub(crate) fn verification_cache(&self) -> &VerifiedArtifactCache {
@@ -683,8 +693,10 @@ impl ArchiveDirectCommitState {
         })
     }
 
-    pub(crate) fn finish_file(&self) -> usize {
-        self.finished_files.fetch_add(1, Ordering::AcqRel) + 1
+    pub(crate) fn finish_file(&self) -> (usize, bool) {
+        let finished = self.finished_files.fetch_add(1, Ordering::AcqRel) + 1;
+        let report_progress = should_report_item_progress(finished, self.total_files);
+        (finished, report_progress)
     }
 
     pub(crate) fn total_files(&self) -> usize {

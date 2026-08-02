@@ -18,6 +18,8 @@ const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const COORDINATOR_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const BLOCKING_DISPATCH_RETRY_DELAY: Duration = Duration::from_millis(10);
 const MAX_IDLE_BLOCKING_DISPATCH_RETRIES: usize = 100;
+const MAX_WORKER_EVENTS_PER_TICK: usize = 256;
+const MAX_TASK_FINISHES_PER_TICK: usize = 256;
 
 mod metrics;
 mod progress;
@@ -62,6 +64,46 @@ fn record_worker_event(
         WorkerEvent::Outcome(outcome) => outcomes.push(outcome),
         WorkerEvent::Progress { .. } => {}
     }
+}
+
+fn complete_task(
+    finish: TaskFinish,
+    in_flight: &mut usize,
+    queue: &mut SchedulerQueue,
+    metrics: &SchedulerMetrics,
+    graph: &mut TaskGraph,
+    event_tx: &flume::Sender<WorkerEvent>,
+) -> Result<()> {
+    *in_flight = (*in_flight).saturating_sub(1);
+    queue.release(&finish.resources);
+    metrics.record(finish.queue_wait, finish.run_time, &finish.resources);
+    if let Some((reason, report)) = finish.run.failure_details() {
+        if report {
+            let _ = event_tx.send(WorkerEvent::failed(finish.path.clone(), reason.to_string()));
+        }
+    }
+    let ready = graph.finish(finish.node_id, finish.run)?;
+    enqueue_ready_tasks(queue, ready);
+    Ok(())
+}
+
+fn complete_task_batch(
+    first: TaskFinish,
+    finish_rx: &flume::Receiver<TaskFinish>,
+    in_flight: &mut usize,
+    queue: &mut SchedulerQueue,
+    metrics: &SchedulerMetrics,
+    graph: &mut TaskGraph,
+    event_tx: &flume::Sender<WorkerEvent>,
+) -> Result<()> {
+    complete_task(first, in_flight, queue, metrics, graph, event_tx)?;
+    for _ in 1..MAX_TASK_FINISHES_PER_TICK {
+        let Ok(finish) = finish_rx.try_recv() else {
+            break;
+        };
+        complete_task(finish, in_flight, queue, metrics, graph, event_tx)?;
+    }
+    Ok(())
 }
 
 impl TaskPoolRunner {
@@ -119,8 +161,15 @@ impl TaskPoolRunner {
         let mut idle_blocking_dispatch_retries = 0usize;
 
         while graph.has_unresolved() {
-            while let Ok(event) = self.event_rx.try_recv() {
+            let mut worker_events_handled = 0usize;
+            for _ in 0..MAX_WORKER_EVENTS_PER_TICK {
+                let Ok(event) = self.event_rx.try_recv() else {
+                    break;
+                };
                 record_worker_event(&mut progress, &mut outcomes, event);
+                worker_events_handled = worker_events_handled.saturating_add(1);
+            }
+            if worker_events_handled > 0 {
                 last_heartbeat_at = Instant::now();
             }
 
@@ -177,20 +226,33 @@ impl TaskPoolRunner {
                 ) });
             }
 
+            if let Ok(finish) = finish_rx.try_recv() {
+                complete_task_batch(
+                    finish,
+                    &finish_rx,
+                    &mut in_flight,
+                    &mut queue,
+                    &metrics,
+                    &mut graph,
+                    &self.event_tx,
+                )?;
+                continue;
+            }
+            if worker_events_handled == MAX_WORKER_EVENTS_PER_TICK {
+                continue;
+            }
+
             match finish_rx.recv_timeout(COORDINATOR_POLL_INTERVAL) {
                 Ok(finish) => {
-                    in_flight = in_flight.saturating_sub(1);
-                    queue.release(&finish.resources);
-                    metrics.record(finish.queue_wait, finish.run_time, &finish.resources);
-                    if let Some((reason, report)) = finish.run.failure_details() {
-                        if report {
-                            let _ = self
-                                .event_tx
-                                .send(WorkerEvent::failed(finish.path.clone(), reason.to_string()));
-                        }
-                    }
-                    let ready = graph.finish(finish.node_id, finish.run)?;
-                    enqueue_ready_tasks(&mut queue, ready);
+                    complete_task_batch(
+                        finish,
+                        &finish_rx,
+                        &mut in_flight,
+                        &mut queue,
+                        &metrics,
+                        &mut graph,
+                        &self.event_tx,
+                    )?;
                 }
                 Err(flume::RecvTimeoutError::Timeout)
                     if last_heartbeat_at.elapsed() >= PROGRESS_HEARTBEAT_INTERVAL =>

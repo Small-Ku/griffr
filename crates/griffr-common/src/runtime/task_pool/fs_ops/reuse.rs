@@ -7,6 +7,7 @@ use compio::buf::BufResult;
 use compio::io::{AsyncReadAt, AsyncWriteAtExt};
 
 use crate::error::{Error, Result};
+use crate::runtime::task_pool::blocking_buffer::with_blocking_io_buffer;
 use crate::runtime::{
     preallocate_file, ArtifactDigest, ArtifactExpectation, ArtifactProof, ArtifactSource,
 };
@@ -41,25 +42,26 @@ pub(crate) fn hash_file_prefix_into_hasher(
         source: e,
     })?;
     let mut remaining = prefix_len;
-    let mut buf = vec![0u8; 1024 * 1024];
-    while remaining > 0 {
-        let to_read = remaining.min(buf.len() as u64) as usize;
-        let n = file.read(&mut buf[..to_read])?;
-        if n == 0 {
-            return Err(Error::Message {
-                context: "Extraction error: ",
-                detail: format!(
-                    "Partial file shorter than expected prefix: {} < {} for {}",
-                    prefix_len - remaining,
-                    prefix_len,
-                    path.display()
-                ),
-            });
+    with_blocking_io_buffer(|buffer| -> Result<()> {
+        while remaining > 0 {
+            let to_read = remaining.min(buffer.len() as u64) as usize;
+            let n = file.read(&mut buffer[..to_read])?;
+            if n == 0 {
+                return Err(Error::Message {
+                    context: "Extraction error: ",
+                    detail: format!(
+                        "Partial file shorter than expected prefix: {} < {} for {}",
+                        prefix_len - remaining,
+                        prefix_len,
+                        path.display()
+                    ),
+                });
+            }
+            md5::Digest::update(hasher, &buffer[..n]);
+            remaining -= n as u64;
         }
-        md5::Digest::update(hasher, &buf[..n]);
-        remaining -= n as u64;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 pub(crate) fn commit_partial_download(part_path: &Path, dest_path: &Path) -> Result<()> {
@@ -98,18 +100,16 @@ pub(crate) fn commit_partial_download(part_path: &Path, dest_path: &Path) -> Res
     super::extract::move_path_replace(part_path, dest_path)
 }
 
-pub(crate) async fn create_hardlink_async(src: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn create_hardlink(src: &Path, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
-        compio::fs::create_dir_all(parent)
-            .await
-            .map_err(|source| Error::IoAt {
-                action: "create directory",
-                path: parent.to_path_buf(),
-                source,
-            })?;
+        std::fs::create_dir_all(parent).map_err(|source| Error::IoAt {
+            action: "create directory",
+            path: parent.to_path_buf(),
+            source,
+        })?;
     }
     let temp_path = make_temp_write_path(dest)?;
-    match compio::fs::remove_file(&temp_path).await {
+    match std::fs::remove_file(&temp_path) {
         Ok(()) => {}
         Err(source) if source.kind() == ErrorKind::NotFound => {}
         Err(source) => {
@@ -117,11 +117,11 @@ pub(crate) async fn create_hardlink_async(src: &Path, dest: &Path) -> Result<()>
                 action: "remove file or directory",
                 path: temp_path,
                 source,
-            })
+            });
         }
     }
-    if let Err(source) = compio::fs::hard_link(src, &temp_path).await {
-        let _ = compio::fs::remove_file(&temp_path).await;
+    if let Err(source) = std::fs::hard_link(src, &temp_path) {
+        let _ = std::fs::remove_file(&temp_path);
         return Err(Error::Message {
             context: "",
             detail: format!(
@@ -133,7 +133,7 @@ pub(crate) async fn create_hardlink_async(src: &Path, dest: &Path) -> Result<()>
         });
     }
     if let Err(error) = super::extract::move_path_replace(&temp_path, dest) {
-        let _ = compio::fs::remove_file(&temp_path).await;
+        let _ = std::fs::remove_file(&temp_path);
         return Err(error);
     }
     Ok(())

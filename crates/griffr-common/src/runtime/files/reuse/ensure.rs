@@ -11,12 +11,6 @@ use crate::runtime::{
 };
 use tracing::{info, warn};
 
-pub(super) fn logical_path_is_ancestor(parent: &str, child: &str) -> bool {
-    child
-        .strip_prefix(parent)
-        .is_some_and(|suffix| suffix.starts_with('/'))
-}
-
 pub(super) fn normalized_relative_path(path: &Path) -> String {
     normalize_logical_path(&path.to_string_lossy())
 }
@@ -26,8 +20,7 @@ pub(super) fn validated_game_file_entries(
 ) -> Result<Vec<(&GameFileEntry, PathBuf)>> {
     let mut seen = HashSet::default();
     seen.reserve(manifest.len());
-    let mut normalized_paths: Vec<String> = Vec::with_capacity(manifest.len());
-    let mut planned = Vec::with_capacity(manifest.len());
+    let mut validated = Vec::with_capacity(manifest.len());
 
     for entry in manifest {
         let relative = crate::runtime::task_pool::fs_ops::path_safety::parse_safe_relative_path(
@@ -50,25 +43,31 @@ pub(super) fn validated_game_file_entries(
                 detail: format!("Target manifest contains duplicate path {}", entry.path),
             });
         }
-        if normalized_paths.iter().any(|other| {
-            logical_path_is_ancestor(other.as_str(), &normalized)
-                || logical_path_is_ancestor(&normalized, other.as_str())
-        }) {
-            return Err(Error::Message {
-                context: "File reuse planning error: ",
-                detail: format!(
-                    "Target manifest contains conflicting file/directory path {}",
-                    entry.path
-                ),
-            });
-        }
-        normalized_paths.push(normalized);
-        if !is_launcher_metadata_path(&relative.to_string_lossy()) {
-            planned.push((entry, relative));
+        validated.push((entry, relative, normalized));
+    }
+
+    for (entry, _, normalized) in &validated {
+        let mut ancestor = normalized.as_str();
+        while let Some(separator) = ancestor.rfind('/') {
+            ancestor = &ancestor[..separator];
+            if seen.contains(ancestor) {
+                return Err(Error::Message {
+                    context: "File reuse planning error: ",
+                    detail: format!(
+                        "Target manifest contains conflicting file/directory path {}",
+                        entry.path
+                    ),
+                });
+            }
         }
     }
 
-    Ok(planned)
+    Ok(validated
+        .into_iter()
+        .filter_map(|(entry, relative, _)| {
+            (!is_launcher_metadata_path(&relative.to_string_lossy())).then_some((entry, relative))
+        })
+        .collect())
 }
 
 pub async fn ensure_game_files_from_manifest_with_pool(
@@ -267,8 +266,17 @@ mod tests {
 
     #[test]
     fn planned_entries_reject_file_directory_conflicts() {
-        let error =
-            validated_game_file_entries(&[entry("Data"), entry("Data/file.bin")]).unwrap_err();
-        assert!(error.to_string().contains("file/directory path"));
+        for manifest in [
+            vec![entry("Data"), entry("Data/file.bin")],
+            vec![entry("Data/file.bin"), entry("Data")],
+        ] {
+            let error = validated_game_file_entries(&manifest).unwrap_err();
+            assert!(error.to_string().contains("file/directory path"));
+        }
+    }
+
+    #[test]
+    fn planned_entries_allow_component_prefix_siblings() {
+        assert!(validated_game_file_entries(&[entry("Data"), entry("Database/file.bin")]).is_ok());
     }
 }

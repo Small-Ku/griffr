@@ -2,7 +2,7 @@ use super::fs_ops::{
     apply_delete_files_manifest_async, apply_extracted_vfs_patch_manifest, resume_patch_apply,
 };
 use super::graph::TaskRun;
-use super::types::{Task, WorkerEvent};
+use super::types::{should_report_item_progress, Task, WorkerEvent};
 
 mod archive;
 mod transfer;
@@ -119,12 +119,17 @@ pub(crate) fn run_blocking_task(
         Task::ApplyExtractedVfsPatchManifest { install_root } => {
             run_apply_patch_manifest(install_root, event_tx)
         }
+        task @ Task::ReuseFile {
+            copy_only: false, ..
+        } => transfer::run_hardlink_reuse_file(task, event_tx),
         Task::Download {
             resume: Some(_), ..
         }
         | Task::FetchArchiveRepairFile { .. }
         | Task::FetchArchiveRange { .. }
-        | Task::ReuseFile { .. }
+        | Task::ReuseFile {
+            copy_only: true, ..
+        }
         | Task::ApplyDeleteManifest { .. } => {
             unreachable!("async I/O task routed to blocking runner")
         }
@@ -179,13 +184,12 @@ pub(crate) async fn run_async_task(
             )
             .await
         }
-        task @ Task::ReuseFile { copy_only, .. } => {
-            if copy_only {
-                transfer::run_copy_reuse_file(task, event_tx).await
-            } else {
-                transfer::run_hardlink_reuse_file(task, event_tx).await
-            }
-        }
+        task @ Task::ReuseFile {
+            copy_only: true, ..
+        } => transfer::run_copy_reuse_file(task, event_tx).await,
+        Task::ReuseFile {
+            copy_only: false, ..
+        } => unreachable!("hardlink reuse routed to async I/O runner"),
         Task::ApplyDeleteManifest { install_root } => {
             run_apply_delete_manifest(install_root, event_tx).await
         }
@@ -206,35 +210,41 @@ fn run_apply_patch_manifest(
             if finished > 0 {
                 let _ = event_tx.send(WorkerEvent::changed(normalized.clone()));
             }
-            let _ = event_tx.send(WorkerEvent::progress(
-                crate::runtime::ProgressPhase::Commit,
-                normalized,
-                finished as u64,
-                total as u64,
-                false,
-            ));
+            if should_report_item_progress(finished, total) {
+                let _ = event_tx.send(WorkerEvent::progress(
+                    crate::runtime::ProgressPhase::Commit,
+                    normalized,
+                    finished as u64,
+                    total as u64,
+                    false,
+                ));
+            }
         };
         let mut on_patch = |path: &str, finished: usize, total: usize| {
-            let _ = event_tx.send(WorkerEvent::progress(
-                crate::runtime::ProgressPhase::Patch,
-                path.to_string(),
-                finished as u64,
-                total as u64,
-                false,
-            ));
+            if should_report_item_progress(finished, total) {
+                let _ = event_tx.send(WorkerEvent::progress(
+                    crate::runtime::ProgressPhase::Patch,
+                    path.to_string(),
+                    finished as u64,
+                    total as u64,
+                    false,
+                ));
+            }
         };
         let mut on_delete = |path: &std::path::Path, finished: usize, total: usize| {
             let normalized = path.to_string_lossy().replace('\\', "/");
             if finished > 0 {
                 let _ = event_tx.send(WorkerEvent::changed(normalized.clone()));
             }
-            let _ = event_tx.send(WorkerEvent::progress(
-                crate::runtime::ProgressPhase::Delete,
-                normalized,
-                finished as u64,
-                total as u64,
-                false,
-            ));
+            if should_report_item_progress(finished, total) {
+                let _ = event_tx.send(WorkerEvent::progress(
+                    crate::runtime::ProgressPhase::Delete,
+                    normalized,
+                    finished as u64,
+                    total as u64,
+                    false,
+                ));
+            }
         };
         resume_patch_apply(
             &install_root,
@@ -244,13 +254,15 @@ fn run_apply_patch_manifest(
         )
     } else {
         let mut on_progress = |path: &str, finished: usize, total: usize| {
-            let _ = event_tx.send(WorkerEvent::progress(
-                crate::runtime::ProgressPhase::Patch,
-                path.to_string(),
-                finished as u64,
-                total as u64,
-                false,
-            ));
+            if should_report_item_progress(finished, total) {
+                let _ = event_tx.send(WorkerEvent::progress(
+                    crate::runtime::ProgressPhase::Patch,
+                    path.to_string(),
+                    finished as u64,
+                    total as u64,
+                    false,
+                ));
+            }
         };
         apply_extracted_vfs_patch_manifest(&install_root, Some(&mut on_progress))
     };

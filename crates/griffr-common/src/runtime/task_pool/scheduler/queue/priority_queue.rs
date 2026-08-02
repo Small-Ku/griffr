@@ -8,6 +8,7 @@ use super::resources::{AdmissionSnapshot, ResourceState};
 use crate::runtime::task_pool::{NodeId, Task, TaskPoolConfig};
 
 const CONTINUATION_BURST: usize = 4;
+const PRIORITY_LOOKAHEAD: usize = 64;
 const RUN_SCHEDULE: [RunClass; 4] = [
     RunClass::AsyncIo,
     RunClass::Cpu,
@@ -76,7 +77,7 @@ impl QueueState {
                     .storage_available_bytes
                     .insert(reservation.volume.clone(), available);
             }
-            if queued.resources.reuse_probe {
+            if queued.resources.reuse_commit {
                 admission.queued_reuse_commits = admission.queued_reuse_commits.saturating_add(1);
             }
             if (queued.resources.run == RunClass::Cpu
@@ -91,9 +92,11 @@ impl QueueState {
             {
                 continue;
             }
-            admission
-                .reserved_write_volumes
-                .extend(queued.resources.write_volumes.iter().cloned());
+            if queued.enqueued_at.elapsed() >= config.volume_write_reservation_delay {
+                admission
+                    .reserved_write_volumes
+                    .extend(queued.resources.write_volumes.iter().cloned());
+            }
         }
         admission
     }
@@ -104,13 +107,17 @@ impl QueueState {
         blocking_dispatch_available: bool,
     ) -> Option<QueuedTask> {
         let admission = self.admission_snapshot(config);
+        let continuation_depth = volume_depth(&self.continuation);
+        let bulk_depth = volume_depth(&self.bulk);
         for offset in 0..RUN_SCHEDULE.len() {
             let index = (self.run_cursor + offset) % RUN_SCHEDULE.len();
             let class = RUN_SCHEDULE[index];
             if !blocking_dispatch_available && class != RunClass::AsyncIo {
                 continue;
             }
-            if let Some(task) = self.pop_runnable(class, config, &admission) {
+            if let Some(task) =
+                self.pop_runnable(class, config, &admission, &continuation_depth, &bulk_depth)
+            {
                 self.run_cursor = (index + 1) % RUN_SCHEDULE.len();
                 return Some(task);
             }
@@ -123,6 +130,8 @@ impl QueueState {
         class: RunClass,
         config: &TaskPoolConfig,
         admission: &AdmissionSnapshot,
+        continuation_depth: &HashMap<String, usize>,
+        bulk_depth: &HashMap<String, usize>,
     ) -> Option<QueuedTask> {
         let class_index = Self::class_index(class);
         let force_bulk = self.continuation_streak[class_index] >= CONTINUATION_BURST;
@@ -141,6 +150,7 @@ impl QueueState {
                 &self.resources,
                 config,
                 admission,
+                continuation_depth,
             ) {
                 self.continuation_streak[class_index] =
                     self.continuation_streak[class_index].saturating_add(1);
@@ -154,6 +164,7 @@ impl QueueState {
             &self.resources,
             config,
             admission,
+            bulk_depth,
         ) {
             self.continuation_streak[class_index] = 0;
             return Some(task);
@@ -166,6 +177,7 @@ impl QueueState {
                 &self.resources,
                 config,
                 admission,
+                continuation_depth,
             ) {
                 self.continuation_streak[class_index] = 1;
                 return Some(task);
@@ -182,6 +194,7 @@ fn remove_runnable(
     resources: &ResourceState,
     config: &TaskPoolConfig,
     admission: &AdmissionSnapshot,
+    volume_depth: &HashMap<String, usize>,
 ) -> Option<QueuedTask> {
     let preferred = runnable_index(
         queue,
@@ -190,9 +203,19 @@ fn remove_runnable(
         resources,
         config,
         admission,
+        volume_depth,
     );
-    let fallback =
-        preferred.or_else(|| runnable_index(queue, class, None, resources, config, admission));
+    let fallback = preferred.or_else(|| {
+        runnable_index(
+            queue,
+            class,
+            None,
+            resources,
+            config,
+            admission,
+            volume_depth,
+        )
+    });
     fallback.and_then(|index| queue.remove(index))
 }
 
@@ -203,8 +226,67 @@ fn runnable_index(
     resources: &ResourceState,
     config: &TaskPoolConfig,
     admission: &AdmissionSnapshot,
+    volume_depth: &HashMap<String, usize>,
 ) -> Option<usize> {
-    let mut volume_depth = HashMap::<&str, usize>::new();
+    let runnable = |queued: &QueuedTask| {
+        queued.resources.run == class
+            && network.is_none_or(|selected| queued.resources.network == Some(selected))
+            && resources.can_acquire(&queued.resources, config, admission)
+    };
+    let priority = |index: usize, queued: &QueuedTask| {
+        let age_bucket = queued.enqueued_at.elapsed().as_secs() / 5;
+        let backlog = queued
+            .resources
+            .read_volumes
+            .iter()
+            .chain(&queued.resources.write_volumes)
+            .chain(&queued.resources.metadata_volumes)
+            .map(|volume| volume_depth.get(volume.as_str()).copied().unwrap_or(0))
+            .sum::<usize>();
+        let reserved_writer_rank = if queued
+            .resources
+            .write_volumes
+            .iter()
+            .any(|volume| admission.reserved_write_volumes.contains(volume))
+        {
+            0
+        } else {
+            1
+        };
+        let metadata_rank = if queued.resources.metadata_volumes.is_empty() {
+            1
+        } else {
+            0
+        };
+        (
+            Reverse(age_bucket),
+            reserved_writer_rank,
+            metadata_rank,
+            Reverse(backlog),
+            queued.resources.estimated_bytes,
+            index,
+        )
+    };
+
+    queue
+        .iter()
+        .enumerate()
+        .take(PRIORITY_LOOKAHEAD)
+        .filter(|(_, queued)| runnable(queued))
+        .min_by_key(|(index, queued)| priority(*index, queued))
+        .map(|(index, _)| index)
+        .or_else(|| {
+            queue
+                .iter()
+                .enumerate()
+                .skip(PRIORITY_LOOKAHEAD)
+                .find(|(_, queued)| runnable(queued))
+                .map(|(index, _)| index)
+        })
+}
+
+fn volume_depth(queue: &VecDeque<QueuedTask>) -> HashMap<String, usize> {
+    let mut depth = HashMap::new();
     for queued in queue {
         for volume in queued
             .resources
@@ -213,52 +295,14 @@ fn runnable_index(
             .chain(&queued.resources.write_volumes)
             .chain(&queued.resources.metadata_volumes)
         {
-            *volume_depth.entry(volume.as_str()).or_default() += 1;
+            if let Some(count) = depth.get_mut(volume) {
+                *count += 1;
+            } else {
+                depth.insert(volume.clone(), 1);
+            }
         }
     }
-    queue
-        .iter()
-        .enumerate()
-        .filter(|(_, queued)| {
-            queued.resources.run == class
-                && network.is_none_or(|selected| queued.resources.network == Some(selected))
-                && resources.can_acquire(&queued.resources, config, admission)
-        })
-        .min_by_key(|(index, queued)| {
-            let age_bucket = queued.enqueued_at.elapsed().as_secs() / 5;
-            let backlog = queued
-                .resources
-                .read_volumes
-                .iter()
-                .chain(&queued.resources.write_volumes)
-                .chain(&queued.resources.metadata_volumes)
-                .map(|volume| volume_depth.get(volume.as_str()).copied().unwrap_or(0))
-                .sum::<usize>();
-            let reserved_writer_rank = if queued
-                .resources
-                .write_volumes
-                .iter()
-                .any(|volume| admission.reserved_write_volumes.contains(volume))
-            {
-                0
-            } else {
-                1
-            };
-            let metadata_rank = if queued.resources.metadata_volumes.is_empty() {
-                1
-            } else {
-                0
-            };
-            (
-                Reverse(age_bucket),
-                reserved_writer_rank,
-                metadata_rank,
-                Reverse(backlog),
-                queued.resources.estimated_bytes,
-                *index,
-            )
-        })
-        .map(|(index, _)| index)
+    depth
 }
 
 #[derive(Debug)]

@@ -217,11 +217,16 @@ impl ContentPlan {
             let key = physical_path_key(claim.path());
             if let Some(previous) = files.get(&key) {
                 let is_res_baseline = previous.domain == ContentDomain::ResourceBaseline
-                    || crate::runtime::is_resource_baseline_path(claim.expectation().logical_path())
-                    || crate::runtime::is_resource_baseline_path(previous.expectation.logical_path());
+                    || crate::runtime::is_resource_baseline_path(
+                        claim.expectation().logical_path(),
+                    )
+                    || crate::runtime::is_resource_baseline_path(
+                        previous.expectation.logical_path(),
+                    );
                 if !is_res_baseline
                     && (previous.expectation.expected_md5() != claim.expectation().expected_md5()
-                        || previous.expectation.expected_size() != claim.expectation().expected_size())
+                        || previous.expectation.expected_size()
+                            != claim.expectation().expected_size())
                 {
                     return Err(Error::Message {
                         context: "Integrity error: ",

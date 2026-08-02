@@ -260,15 +260,26 @@ pub(crate) fn physical_path_key(path: &Path) -> String {
             other => normalized.push(other.as_os_str()),
         }
     }
-    normalized
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_ascii_lowercase()
+    let normalized = normalized.to_string_lossy().replace('\\', "/");
+    if cfg!(any(windows, target_os = "macos")) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn physical_keys_preserve_case_on_case_sensitive_platforms() {
+        assert_ne!(
+            physical_path_key(Path::new("Data")),
+            physical_path_key(Path::new("data"))
+        );
+    }
 
     #[test]
     fn proof_is_invalid_after_committed_file_changes() {

@@ -1,5 +1,6 @@
 use super::sync::is_compatible_res_index_version;
 use crate::error::{Error, Result};
+use futures_util::{stream, StreamExt, TryStreamExt};
 use md5::Digest;
 use std::collections::BTreeMap;
 
@@ -390,44 +391,55 @@ async fn prune_previous_managed_files(
         .iter()
         .map(|file| normalize_logical_path(&file.path))
         .collect();
-    let vfs_root = vfs_path(persistent_root);
-    let mut removed_any = false;
-
+    let mut seen = HashSet::default();
+    let mut jobs = Vec::new();
     for file in &previous.files {
-        if current.contains(&normalize_logical_path(&file.path)) {
+        let normalized = normalize_logical_path(&file.path);
+        if current.contains(&normalized) || !seen.insert(normalized) {
             continue;
         }
         let relative = crate::runtime::task_pool::fs_ops::path_safety::parse_safe_relative_path(
             "Persistent VFS state path",
             &file.path,
         )?;
-        let path = persistent_root.join(relative);
-        if !path_is_file(&path).await {
-            continue;
-        }
-        // Delete only files that still match the exact artifact Griffr
-        // previously managed. Preserve game- or user-modified content.
-        if crate::runtime::task_pool::fs_ops::verify_artifact(
-            &path,
-            &file.expectation(),
-            crate::runtime::ArtifactSource::Existing,
-        )
-        .is_err()
-        {
-            continue;
-        }
-        compio::fs::remove_file(&path)
+        jobs.push((persistent_root.join(relative), file.expectation()));
+    }
+
+    let prune_jobs = stream::iter(jobs)
+        .map(|(path, expectation)| async move {
+            crate::runtime::compat_fs::run_blocking("Persistent VFS prune", move || {
+                if !std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+                    return Ok(false);
+                }
+                // Delete only files that still match the exact artifact Griffr
+                // previously managed. Preserve game- or user-modified content.
+                if crate::runtime::task_pool::fs_ops::verify_artifact(
+                    &path,
+                    &expectation,
+                    crate::runtime::ArtifactSource::Existing,
+                )
+                .is_err()
+                {
+                    return Ok(false);
+                }
+                std::fs::remove_file(&path).map_err(|source| Error::IoAt {
+                    action: "remove file or directory",
+                    path: path.clone(),
+                    source,
+                })?;
+                Ok(true)
+            })
             .await
-            .map_err(|source| Error::IoAt {
-                action: "remove file or directory",
-                path: path.clone(),
-                source,
-            })?;
-        removed_any = true;
+        })
+        .buffered(super::RESOURCE_PRUNE_CONCURRENCY);
+    futures_util::pin_mut!(prune_jobs);
+    let mut removed_any = false;
+    while let Some(removed) = prune_jobs.try_next().await? {
+        removed_any |= removed;
     }
 
     if removed_any {
-        remove_empty_dirs_recursive(vfs_root).await?;
+        remove_empty_dirs_recursive(vfs_path(persistent_root)).await?;
     }
     Ok(())
 }
@@ -452,50 +464,59 @@ pub async fn plan_persistent_vfs_tasks(
     let mut manifest_identities = Vec::new();
     let mut file_set_parts = Vec::new();
 
-    let mut source_roots = vec![cfg.source_streaming_assets.clone()];
-    for root in &cfg.extra_source_streaming_assets {
-        if !source_roots.iter().any(|candidate| candidate == root) {
+    let mut source_roots = Vec::with_capacity(1 + cfg.extra_source_streaming_assets.len());
+    let mut seen_source_roots = HashSet::default();
+    for root in
+        std::iter::once(&cfg.source_streaming_assets).chain(&cfg.extra_source_streaming_assets)
+    {
+        if seen_source_roots.insert(root.clone()) {
             source_roots.push(root.clone());
         }
     }
 
-    for resource in &resources.resources {
-        if !file_set_includes_group(cfg.file_set, &resource.name) {
-            continue;
-        }
+    let selected_resources = resources
+        .resources
+        .iter()
+        .filter(|resource| file_set_includes_group(cfg.file_set, &resource.name));
+    let resource_documents = stream::iter(selected_resources)
+        .map(|resource| async move {
+            let pref_filename =
+                resource_manifest_filename(ResourceManifestKind::Pref, &resource.name);
+            let pref_path = persistent_root.join(&pref_filename);
+            let pref_url =
+                resource_manifest_url(&resource.path, ResourceManifestKind::Pref, &resource.name);
 
-        let pref_filename = resource_manifest_filename(ResourceManifestKind::Pref, &resource.name);
-        let pref_path = persistent_root.join(&pref_filename);
-        let pref_url =
-            resource_manifest_url(&resource.path, ResourceManifestKind::Pref, &resource.name);
-
-        let document = if let Some(document) = read_local_res_index_document(&pref_path)
-            .await
-            .map_err(|e| Error::Message {
-                context: "VFS error: ",
-                detail: format!("Failed to parse local {pref_filename}: {e}"),
-            })? {
-            document
-        } else {
-            let document = api_client
-                    .fetch_res_index_document(&pref_url, RES_INDEX_KEY)
+            let (document, commit_manifest) =
+                if let Some(document) = read_local_res_index_document(&pref_path)
                     .await
                     .map_err(|e| Error::Message {
                         context: "VFS error: ",
-                        detail: format!(
-                            "Persistent requires the game-selected {pref_filename} manifest for resource group {}. Start the game and let it select resources, or make the pref manifest available from the resource service. The full index is intentionally not used as a fallback: {e}",
-                            resource.name
-                        ),
-                    })?;
-            manifest_commits.push(VfsManifestCommit {
-                dest: pref_path,
-                logical_path: pref_filename.clone(),
-                encrypted_bytes: document.encrypted_bytes.clone(),
-                expected_md5: document.md5.clone(),
-            });
-            document
-        };
+                        detail: format!("Failed to parse local {pref_filename}: {e}"),
+                    })?
+                {
+                    (document, false)
+                } else {
+                    let document = api_client
+                        .fetch_res_index_document(&pref_url, RES_INDEX_KEY)
+                        .await
+                        .map_err(|e| Error::Message {
+                            context: "VFS error: ",
+                            detail: format!(
+                                "Persistent requires the game-selected {pref_filename} manifest for resource group {}. Start the game and let it select resources, or make the pref manifest available from the resource service. The full index is intentionally not used as a fallback: {e}",
+                                resource.name
+                            ),
+                        })?;
+                    (document, true)
+                };
 
+            Ok::<_, Error>((resource, pref_filename, pref_path, document, commit_manifest))
+        })
+        .buffered(super::RESOURCE_MANIFEST_CONCURRENCY);
+    futures_util::pin_mut!(resource_documents);
+
+    while let Some((resource, pref_filename, pref_path, document, commit_manifest)) =
+        resource_documents.try_next().await?
+    {
         if !is_compatible_res_index_version(
             &document.index.version,
             &resource.version,
@@ -511,8 +532,8 @@ pub async fn plan_persistent_vfs_tasks(
         }
 
         manifest_identities.push(ResourceManifestIdentity {
-            logical_path: pref_filename,
-            md5: document.md5,
+            logical_path: pref_filename.clone(),
+            md5: document.md5.clone(),
             size: document.encrypted_bytes.len() as u64,
         });
         let (group_tasks, group_files, _) = res_index_to_ensure_tasks(
@@ -537,6 +558,14 @@ pub async fn plan_persistent_vfs_tasks(
                 continue;
             }
             files_by_path.insert(key, (file, task));
+        }
+        if commit_manifest {
+            manifest_commits.push(VfsManifestCommit {
+                dest: pref_path,
+                logical_path: pref_filename,
+                encrypted_bytes: document.encrypted_bytes,
+                expected_md5: document.md5,
+            });
         }
         file_set_parts.push(resource.name.clone());
     }

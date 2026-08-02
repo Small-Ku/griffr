@@ -84,6 +84,40 @@ fn unavailable_blocking_pool_does_not_stall_async_admission() {
 }
 
 #[test]
+fn runnable_task_beyond_priority_lookahead_is_still_admitted() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig::default();
+    for index in 0..64 {
+        queue.push(
+            NodeId::from_index(index),
+            task(&format!("blocking-{index}")),
+            ResourceRequest {
+                run: RunClass::Blocking,
+                ..ResourceRequest::default()
+            },
+            TaskPriority::Bulk,
+        );
+    }
+    queue.push(
+        NodeId::from_index(64),
+        task("async-after-lookahead"),
+        ResourceRequest {
+            run: RunClass::AsyncIo,
+            ..ResourceRequest::default()
+        },
+        TaskPriority::Bulk,
+    );
+
+    let selected = queue.pop_next(&config, false).unwrap();
+    assert!(matches!(
+        selected.task,
+        Task::ApplyDeleteManifest { ref install_root }
+            if install_root == &PathBuf::from("async-after-lookahead")
+    ));
+    queue.release(&selected.resources);
+}
+
+#[test]
 fn volume_writer_blocks_only_the_same_volume() {
     let mut queue = SchedulerQueue::default();
     let config = TaskPoolConfig::default();
@@ -247,6 +281,91 @@ fn reuse_queue_limit_limits_verified_but_uncommitted_files() {
         ..AdmissionSnapshot::default()
     };
     assert!(!ResourceState::default().can_acquire(&probe, &config, &admission));
+}
+
+#[test]
+fn queued_reuse_probes_do_not_count_as_uncommitted_reuse_files() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig {
+        reuse_queue_limit: 2,
+        ..Default::default()
+    };
+    for index in 0..3 {
+        queue.push(
+            NodeId::from_index(index),
+            task(&format!("probe-{index}")),
+            ResourceRequest {
+                run: RunClass::Cpu,
+                reuse_probe: true,
+                read_volumes: vec!["volume-a".to_string()],
+                ..ResourceRequest::default()
+            },
+            TaskPriority::Bulk,
+        );
+    }
+
+    let selected = queue
+        .pop_next(&config, true)
+        .expect("queued probes must not deadlock reuse admission");
+    queue.release(&selected.resources);
+}
+
+#[test]
+fn writer_reservation_waits_for_the_configured_delay() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig {
+        default_volume_policy: VolumeIoPolicy::new(1, 1, 1, 1, VolumeStreamingMode::Exclusive),
+        volume_write_reservation_delay: std::time::Duration::from_secs(60),
+        ..Default::default()
+    };
+    queue.push(
+        NodeId::from_index(0),
+        task("writer"),
+        write("volume-a"),
+        TaskPriority::Bulk,
+    );
+    queue.push(
+        NodeId::from_index(1),
+        task("reader"),
+        read("volume-a"),
+        TaskPriority::Bulk,
+    );
+
+    let selected = queue.pop_next(&config, true).unwrap();
+    assert!(matches!(
+        selected.task,
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("reader")
+    ));
+    queue.release(&selected.resources);
+}
+
+#[test]
+fn zero_writer_reservation_delay_prioritizes_the_waiting_writer() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig {
+        default_volume_policy: VolumeIoPolicy::new(1, 1, 1, 1, VolumeStreamingMode::Exclusive),
+        volume_write_reservation_delay: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    queue.push(
+        NodeId::from_index(0),
+        task("writer"),
+        write("volume-a"),
+        TaskPriority::Bulk,
+    );
+    queue.push(
+        NodeId::from_index(1),
+        task("reader"),
+        read("volume-a"),
+        TaskPriority::Bulk,
+    );
+
+    let selected = queue.pop_next(&config, true).unwrap();
+    assert!(matches!(
+        selected.task,
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("writer")
+    ));
+    queue.release(&selected.resources);
 }
 
 #[test]

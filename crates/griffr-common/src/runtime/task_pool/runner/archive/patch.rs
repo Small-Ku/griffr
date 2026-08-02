@@ -120,20 +120,22 @@ pub(crate) fn run_apply_patch_entry(
     };
     match apply_patch_entry(patch.plan(), entry_index, patch.verification_cache()) {
         Ok(proof) => {
-            let finished = patch.finish_entry();
+            let (finished, report_progress) = patch.finish_entry();
             let logical = patch.plan().vfs_base_path.join(&entry.name);
             let path = logical.to_string_lossy().replace('\\', "/");
             if proof.source() != ArtifactSource::Existing {
                 let _ = event_tx.send(WorkerEvent::changed(path.clone()));
             }
             let _ = event_tx.send(WorkerEvent::committed(proof));
-            let _ = event_tx.send(WorkerEvent::progress(
-                crate::runtime::ProgressPhase::Patch,
-                path,
-                finished as u64,
-                patch.entry_count() as u64,
-                false,
-            ));
+            if report_progress {
+                let _ = event_tx.send(WorkerEvent::progress(
+                    crate::runtime::ProgressPhase::Patch,
+                    path,
+                    finished as u64,
+                    patch.entry_count() as u64,
+                    false,
+                ));
+            }
             TaskRun::succeeded()
         }
         Err(error) => TaskRun::failed(error.to_string()),
@@ -156,13 +158,15 @@ pub(crate) fn run_apply_patch_deletes(
         if finished > 0 {
             let _ = event_tx.send(WorkerEvent::changed(normalized.clone()));
         }
-        let _ = event_tx.send(WorkerEvent::progress(
-            crate::runtime::ProgressPhase::Delete,
-            normalized,
-            finished as u64,
-            total as u64,
-            false,
-        ));
+        if crate::runtime::task_pool::types::should_report_item_progress(finished, total) {
+            let _ = event_tx.send(WorkerEvent::progress(
+                crate::runtime::ProgressPhase::Delete,
+                normalized,
+                finished as u64,
+                total as u64,
+                false,
+            ));
+        }
     };
     match apply_patch_deletes(patch.plan(), Some(&mut on_delete)) {
         Ok(()) => TaskRun::succeeded(),

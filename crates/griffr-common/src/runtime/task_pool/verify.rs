@@ -15,6 +15,8 @@ use md5::{Digest, Md5};
 
 use crate::runtime::issues::{FileIssue, FileIssueKind};
 
+use super::blocking_buffer::with_blocking_io_buffer;
+
 pub(crate) fn run_verify(
     path: &Path,
     logical_path: &str,
@@ -226,19 +228,21 @@ pub(crate) fn verify_candidate_cancellable(
         Err(_) => return CandidateVerification::Invalid,
     };
     let mut hasher = Md5::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
+    let read_failure = with_blocking_io_buffer(|buffer| loop {
         if is_cancelled() {
-            return CandidateVerification::Cancelled;
+            return Some(CandidateVerification::Cancelled);
         }
-        let read = match file.read(&mut buffer) {
+        let read = match file.read(buffer) {
             Ok(read) => read,
-            Err(_) => return CandidateVerification::Invalid,
+            Err(_) => return Some(CandidateVerification::Invalid),
         };
         if read == 0 {
-            break;
+            return None;
         }
         hasher.update(&buffer[..read]);
+    });
+    if let Some(result) = read_failure {
+        return result;
     }
     let actual_md5 = crate::to_hex(&hasher.finalize());
     if actual_md5 == expected_md5.to_ascii_lowercase() {
@@ -255,14 +259,16 @@ pub(crate) fn file_md5(path: &Path) -> Result<String> {
         source: e,
     })?;
     let mut hasher = Md5::new();
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
+    with_blocking_io_buffer(|buffer| -> std::io::Result<()> {
+        loop {
+            let n = file.read(buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
         }
-        hasher.update(&buf[..n]);
-    }
+        Ok(())
+    })?;
     Ok(crate::to_hex(&hasher.finalize()))
 }
 

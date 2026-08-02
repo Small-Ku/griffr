@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{Error, Result};
-use crate::runtime::preallocate_file;
+use crate::runtime::task_pool::blocking_buffer::with_blocking_io_buffer;
 use crate::runtime::task_pool::verify::file_md5;
+use crate::runtime::{preallocate_file, ArtifactDigest};
 use md5::{Digest, Md5};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -242,22 +243,24 @@ pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDi
         preallocate_file(&output, dest, expected_size)?;
         let mut hasher = Md5::new();
         let mut copied = 0u64;
-        let mut buffer = vec![0u8; 1024 * 1024];
-        loop {
-            let read = input.read(&mut buffer)?;
-            if read == 0 {
-                break;
+        with_blocking_io_buffer(|buffer| -> Result<()> {
+            loop {
+                let read = input.read(buffer)?;
+                if read == 0 {
+                    break;
+                }
+                output
+                    .write_all(&buffer[..read])
+                    .map_err(|source| Error::IoAt {
+                        action: "write to file",
+                        path: dest.to_path_buf(),
+                        source,
+                    })?;
+                hasher.update(&buffer[..read]);
+                copied = copied.saturating_add(read as u64);
             }
-            output
-                .write_all(&buffer[..read])
-                .map_err(|source| Error::IoAt {
-                    action: "write to file",
-                    path: dest.to_path_buf(),
-                    source,
-                })?;
-            hasher.update(&buffer[..read]);
-            copied = copied.saturating_add(read as u64);
-        }
+            Ok(())
+        })?;
         output.sync_all().map_err(|source| Error::IoAt {
             action: "write to file",
             path: dest.to_path_buf(),
@@ -275,9 +278,31 @@ pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDi
     copy_result
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MovePathReplaceOutcome {
+    Renamed,
+    Copied,
+}
+
 pub(crate) fn move_path_replace_cross_volume(src: &Path, dest: &Path) -> Result<()> {
+    move_path_replace_cross_volume_inner(src, dest, None).map(|_| ())
+}
+
+pub(crate) fn move_path_replace_cross_volume_observed(
+    src: &Path,
+    dest: &Path,
+    expected: &ArtifactDigest,
+) -> Result<MovePathReplaceOutcome> {
+    move_path_replace_cross_volume_inner(src, dest, Some(expected))
+}
+
+fn move_path_replace_cross_volume_inner(
+    src: &Path,
+    dest: &Path,
+    expected: Option<&ArtifactDigest>,
+) -> Result<MovePathReplaceOutcome> {
     match move_path_replace(src, dest) {
-        Ok(()) => return Ok(()),
+        Ok(()) => return Ok(MovePathReplaceOutcome::Renamed),
         Err(Error::IoBetween {
             action,
             src: _,
@@ -317,10 +342,17 @@ pub(crate) fn move_path_replace_cross_volume(src: &Path, dest: &Path) -> Result<
             return Err(error);
         }
     };
-    // Generic staging commits do not carry an expected checksum, so retain one
-    // destination read for durability while eliminating the former source
-    // re-read. Expected-checksum callers use the inline digest directly.
-    if copied.bytes != source_metadata.len() || copied.md5 != file_md5(&temp)? {
+    let digest_matches = match expected {
+        Some(expected) => copied.bytes == expected.bytes && copied.md5 == expected.md5,
+        None => match file_md5(&temp) {
+            Ok(temp_md5) => copied.md5 == temp_md5,
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp);
+                return Err(error);
+            }
+        },
+    };
+    if copied.bytes != source_metadata.len() || !digest_matches {
         let _ = std::fs::remove_file(&temp);
         return Err(Error::Message {
             context: "",
@@ -331,12 +363,16 @@ pub(crate) fn move_path_replace_cross_volume(src: &Path, dest: &Path) -> Result<
             ),
         });
     }
-    move_path_replace(&temp, dest)?;
+    if let Err(error) = move_path_replace(&temp, dest) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
     std::fs::remove_file(src).map_err(|source| Error::IoAt {
         action: "remove file or directory",
         path: src.to_path_buf(),
         source,
-    })
+    })?;
+    Ok(MovePathReplaceOutcome::Copied)
 }
 
 #[cfg(test)]

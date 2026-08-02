@@ -1,4 +1,5 @@
 mod archive_plan;
+mod blocking_buffer;
 pub mod download;
 pub(crate) mod fs_ops;
 pub mod graph;

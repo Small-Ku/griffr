@@ -6,14 +6,13 @@ use md5::{Digest, Md5};
 
 use crate::error::{Error, Result};
 use crate::runtime::preallocate_file;
+use crate::runtime::task_pool::blocking_buffer::with_blocking_io_buffer;
 use crate::runtime::task_pool::fs_ops::commit_partial_download;
 use crate::runtime::task_pool::graph::{GraphExpansion, TaskRun};
 use crate::runtime::task_pool::types::{
     ArchivePart, ArchiveRangePriority, ArchiveWork, Task, WorkerEvent,
 };
 use crate::runtime::task_pool::verify;
-
-const COPY_BUFFER_BYTES: usize = 1024 * 1024;
 
 pub(crate) fn run_retain_archive_volume(
     work: Arc<ArchiveWork>,
@@ -183,28 +182,30 @@ fn write_archive_volume(work: &ArchiveWork, index: usize, part: &ArchivePart) ->
         preallocate_file(&output, &temp, part.expected_size)?;
         let mut remaining = part.expected_size;
         let mut hasher = Md5::new();
-        let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
-        while remaining > 0 {
-            let limit = usize::try_from(remaining)
-                .unwrap_or(usize::MAX)
-                .min(buffer.len());
-            let read = input.read(&mut buffer[..limit])?;
-            if read == 0 {
-                return Err(Error::Message {
-                    context: "Extraction error: ",
-                    detail: format!("archive stream ended while saving {}", part.logical_path),
-                });
+        with_blocking_io_buffer(|buffer| -> Result<()> {
+            while remaining > 0 {
+                let limit = usize::try_from(remaining)
+                    .unwrap_or(usize::MAX)
+                    .min(buffer.len());
+                let read = input.read(&mut buffer[..limit])?;
+                if read == 0 {
+                    return Err(Error::Message {
+                        context: "Extraction error: ",
+                        detail: format!("archive stream ended while saving {}", part.logical_path),
+                    });
+                }
+                output
+                    .write_all(&buffer[..read])
+                    .map_err(|source| Error::IoAt {
+                        action: "write to file",
+                        path: temp.clone(),
+                        source,
+                    })?;
+                hasher.update(&buffer[..read]);
+                remaining -= read as u64;
             }
-            output
-                .write_all(&buffer[..read])
-                .map_err(|source| Error::IoAt {
-                    action: "write to file",
-                    path: temp.clone(),
-                    source,
-                })?;
-            hasher.update(&buffer[..read]);
-            remaining -= read as u64;
-        }
+            Ok(())
+        })?;
         output.sync_all().map_err(|source| Error::IoAt {
             action: "write to file",
             path: temp.clone(),

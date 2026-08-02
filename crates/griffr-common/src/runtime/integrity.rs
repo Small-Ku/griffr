@@ -79,14 +79,26 @@ fn remove_already_verified_entries(
     if proofs.is_empty() {
         return;
     }
-    let current_proofs = proofs
-        .iter()
-        .filter(|proof| proof.is_current())
-        .collect::<Vec<_>>();
+    let mut current_proofs = HashMap::<String, Vec<(&str, Option<u64>)>>::default();
+    current_proofs.reserve(proofs.len());
+    for proof in proofs.iter().filter(|proof| proof.is_current()) {
+        current_proofs
+            .entry(crate::runtime::artifact::physical_path_key(proof.path()))
+            .or_default()
+            .push((proof.expected_md5(), proof.expected_size()));
+    }
+    if current_proofs.is_empty() {
+        return;
+    }
+
     entries.retain(|entry| {
-        !current_proofs
-            .iter()
-            .any(|proof| proof.matches_game_file(install_root, entry))
+        let key = crate::runtime::artifact::physical_path_key(&install_root.join(&entry.path));
+        let expected_md5 = entry.md5.to_ascii_lowercase();
+        !current_proofs.get(&key).is_some_and(|expectations| {
+            expectations
+                .iter()
+                .any(|(md5, size)| *md5 == expected_md5.as_str() && *size == Some(entry.size))
+        })
     });
 }
 
@@ -99,12 +111,18 @@ fn remove_entries_owned_by_claims(
         return Ok(());
     }
 
+    let mut claims_by_path = HashMap::<String, &ArtifactClaim>::default();
+    claims_by_path.reserve(claims.len());
+    for claim in claims {
+        claims_by_path
+            .entry(crate::runtime::artifact::physical_path_key(claim.path()))
+            .or_insert(claim);
+    }
+
     let mut conflict = None;
     entries.retain(|entry| {
-        let Some(claim) = claims
-            .iter()
-            .find(|claim| claim.matches_game_file_path(install_path, entry))
-        else {
+        let key = crate::runtime::artifact::physical_path_key(&install_path.join(&entry.path));
+        let Some(claim) = claims_by_path.get(&key).copied() else {
             return true;
         };
         let is_res_baseline = is_resource_baseline_path(&entry.path)
@@ -365,8 +383,9 @@ mod tests {
         }
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
-    fn duplicate_identical_physical_targets_are_collapsed() {
+    fn duplicate_case_insensitive_physical_targets_are_collapsed() {
         let tasks = vec![
             verify_task("root/VFS/file.blc", "00", 4),
             verify_task("ROOT\\vfs\\file.blc", "00", 4),
@@ -377,8 +396,9 @@ mod tests {
         assert_eq!(unique.len(), 1);
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
-    fn conflicting_physical_targets_are_rejected() {
+    fn conflicting_case_insensitive_physical_targets_are_rejected() {
         let tasks = vec![
             verify_task("root/VFS/file.blc", "00", 4),
             verify_task("ROOT\\vfs\\file.blc", "11", 4),
@@ -392,6 +412,18 @@ mod tests {
                 .contains("conflicting integrity tasks target"),
             "unexpected error: {error}"
         );
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn case_distinct_physical_targets_remain_distinct() {
+        let unique = deduplicate_target_tasks(vec![
+            verify_task("root/VFS/file.blc", "00", 4),
+            verify_task("root/vfs/file.blc", "11", 4),
+        ])
+        .unwrap();
+
+        assert_eq!(unique.len(), 2);
     }
 
     #[test]

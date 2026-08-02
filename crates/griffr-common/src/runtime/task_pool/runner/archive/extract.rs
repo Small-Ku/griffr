@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::download::extractor::{ArchiveExtractionShardPlan, ArchiveIndex, MultiVolumeExtractor};
 use crate::error::{Error, Result};
@@ -19,6 +20,8 @@ use crate::runtime::task_pool::types::{
     ArchiveShardTask, ArchiveWork, PatchApplyWork, PatchCheckWork, PreparedArchive, Task,
     WorkerEvent,
 };
+
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) fn run_plan_archive_extraction(
     work: Arc<ArchiveWork>,
@@ -507,11 +510,16 @@ pub(crate) fn run_extract_archive_shard(
 
     let extractor = MultiVolumeExtractor::from_layout(work.layout.clone());
     let extraction_total_bytes = shard.total_extract_bytes;
+    let mut last_progress_at = Instant::now();
     let mut on_extract_progress = |bytes| {
         let extracted = work
             .extracted_bytes
             .fetch_add(bytes, std::sync::atomic::Ordering::AcqRel)
             .saturating_add(bytes);
+        if extracted < extraction_total_bytes && last_progress_at.elapsed() < PROGRESS_EMIT_INTERVAL
+        {
+            return;
+        }
         let _ = event_tx.send(WorkerEvent::progress(
             crate::runtime::ProgressPhase::Extract,
             work.base_name.clone(),
@@ -519,6 +527,7 @@ pub(crate) fn run_extract_archive_shard(
             extraction_total_bytes,
             false,
         ));
+        last_progress_at = Instant::now();
     };
     let result = if let Some(commit) = shard.direct_commit.as_ref() {
         extractor.extract_entries_with_progress_and_file(
@@ -555,15 +564,17 @@ pub(crate) fn run_extract_archive_shard(
                     })?;
                 }
 
-                let finished = commit.finish_file();
+                let (finished, report_progress) = commit.finish_file();
                 let _ = event_tx.send(WorkerEvent::changed(normalized.to_string()));
-                let _ = event_tx.send(WorkerEvent::progress(
-                    crate::runtime::ProgressPhase::Commit,
-                    normalized.to_string(),
-                    finished as u64,
-                    commit.total_files() as u64,
-                    false,
-                ));
+                if report_progress {
+                    let _ = event_tx.send(WorkerEvent::progress(
+                        crate::runtime::ProgressPhase::Commit,
+                        normalized.to_string(),
+                        finished as u64,
+                        commit.total_files() as u64,
+                        false,
+                    ));
+                }
                 Ok(())
             },
         )

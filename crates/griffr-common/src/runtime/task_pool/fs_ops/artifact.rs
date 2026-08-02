@@ -4,7 +4,10 @@ use std::path::Path;
 use crate::error::{Error, Result};
 use crate::runtime::{ArtifactDigest, ArtifactExpectation, ArtifactProof, ArtifactSource};
 
-use super::extract::{move_path_replace, move_path_replace_cross_volume};
+use super::extract::{
+    move_path_replace, move_path_replace_cross_volume, move_path_replace_cross_volume_observed,
+    MovePathReplaceOutcome,
+};
 use super::reuse::make_temp_write_path;
 
 fn digest_error(
@@ -102,9 +105,14 @@ pub(crate) fn commit_verified_artifact(
     expectation: &ArtifactExpectation,
     source: ArtifactSource,
 ) -> Result<ArtifactProof> {
-    verify_artifact(source_path, expectation, source)?;
-    move_path_replace_cross_volume(source_path, destination)?;
-    verify_artifact(destination, expectation, source)
+    let verified = verify_artifact(source_path, expectation, source)?;
+    let digest = ArtifactDigest::new(verified.observed_size(), expectation.expected_md5());
+    match move_path_replace_cross_volume_observed(source_path, destination, &digest)? {
+        MovePathReplaceOutcome::Renamed => verify_artifact(destination, expectation, source),
+        MovePathReplaceOutcome::Copied => {
+            proof_from_digest(destination, expectation, source, &digest)
+        }
+    }
 }
 
 pub(crate) fn commit_observed_artifact(
@@ -119,7 +127,7 @@ pub(crate) fn commit_observed_artifact(
     }
     #[cfg(test)]
     crate::runtime::test_checkpoint::hit("artifact.before_replace");
-    move_path_replace_cross_volume(source_path, destination)?;
+    let _ = move_path_replace_cross_volume_observed(source_path, destination, digest)?;
     #[cfg(test)]
     crate::runtime::test_checkpoint::hit("artifact.after_replace");
     proof_from_digest(destination, expectation, source, digest)

@@ -1,6 +1,5 @@
 use super::{
-    classify_reuse_mode, copy_verified_file_async, create_hardlink_async, storage_volume_id,
-    ReuseMode,
+    classify_reuse_mode, copy_verified_file_async, create_hardlink, storage_volume_id, ReuseMode,
 };
 use md5::Md5;
 
@@ -20,39 +19,32 @@ fn volume_classification_only_forces_copy_for_proven_differences() {
     );
 }
 
-#[compio::test]
-async fn hardlink_reuses_the_already_verified_inode_without_rehashing() {
+#[test]
+fn hardlink_atomically_replaces_the_destination() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source.bin");
     let destination = temp.path().join("destination.bin");
-    compio::fs::write(&source, b"verified-before-reuse".to_vec())
-        .await
-        .0
-        .unwrap();
+    std::fs::write(&source, b"verified-before-reuse").unwrap();
+    std::fs::write(&destination, b"old-destination").unwrap();
 
-    create_hardlink_async(&source, &destination).await.unwrap();
+    create_hardlink(&source, &destination).unwrap();
 
     assert_eq!(
-        compio::fs::read(&destination).await.unwrap(),
+        std::fs::read(&destination).unwrap(),
         b"verified-before-reuse"
     );
 }
 
-#[compio::test]
-async fn failed_hardlink_keeps_existing_destination() {
+#[test]
+fn failed_hardlink_keeps_existing_destination() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("missing-source.bin");
     let destination = temp.path().join("destination.bin");
-    compio::fs::write(&destination, b"keep-me".to_vec())
-        .await
-        .0
-        .unwrap();
+    std::fs::write(&destination, b"keep-me").unwrap();
 
-    create_hardlink_async(&source, &destination)
-        .await
-        .unwrap_err();
+    create_hardlink(&source, &destination).unwrap_err();
 
-    assert_eq!(compio::fs::read(&destination).await.unwrap(), b"keep-me");
+    assert_eq!(std::fs::read(&destination).unwrap(), b"keep-me");
 }
 
 #[compio::test]

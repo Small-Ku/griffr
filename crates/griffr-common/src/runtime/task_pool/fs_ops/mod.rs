@@ -18,7 +18,7 @@ pub(crate) use patch_manifest::{
     commit_deferred_patch_files, prepare_patch_apply, release_patch_base, resume_patch_apply,
 };
 pub(crate) use reuse::{
-    classify_reuse_mode, commit_partial_download, copy_verified_file_async, create_hardlink_async,
+    classify_reuse_mode, commit_partial_download, copy_verified_file_async, create_hardlink,
     hash_file_prefix_into_hasher, make_partial_download_path, make_temp_write_path,
     storage_volume_group_key, storage_volume_id, ReuseMode,
 };

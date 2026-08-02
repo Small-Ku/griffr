@@ -1,6 +1,8 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use futures_util::{stream, StreamExt, TryStreamExt};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::GetLatestGameResponse;
 use griffr_common::config::InstallTarget;
@@ -17,6 +19,8 @@ use super::*;
 use crate::ui;
 use crate::GlobalOptions;
 use griffr_common::runtime::detect_local_install;
+
+const PEER_INSPECTION_CONCURRENCY: usize = 8;
 
 pub(super) async fn update_internal(
     api_client: &ApiClient,
@@ -203,15 +207,20 @@ pub(super) async fn update_internal(
     }
 
     let reuse_roots = merge_reuse_paths(&explicit_reuse_paths, &peer_reuse_paths);
-    let mut target_version_peer_roots = Vec::new();
-    for source_path in &peer_reuse_paths {
-        let source = detect_local_install(source_path)
-            .await
-            .with_context(|| format!("Failed to refresh reuse peer {}", source_path.display()))?;
-        if install_can_source_target(&source, &version_info.version) {
-            target_version_peer_roots.push(source.install_path);
-        }
-    }
+    let refreshed_peers = stream::iter(peer_reuse_paths.iter())
+        .map(|source_path| async move {
+            detect_local_install(source_path)
+                .await
+                .with_context(|| format!("Failed to refresh reuse peer {}", source_path.display()))
+        })
+        .buffered(PEER_INSPECTION_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
+    let target_version_peer_roots = refreshed_peers
+        .into_iter()
+        .filter(|source| install_can_source_target(source, &version_info.version))
+        .map(|source| source.install_path)
+        .collect::<Vec<_>>();
 
     ui::print_phase(format!(
         "Updating {} (region={}, channel={}, sub-channel={}) at {}",
@@ -677,13 +686,13 @@ pub(super) async fn update_internal(
 }
 
 fn merge_reuse_paths(explicit: &[PathBuf], peers: &[PathBuf]) -> Vec<PathBuf> {
-    let mut paths = Vec::with_capacity(explicit.len() + peers.len());
-    for path in explicit.iter().chain(peers) {
-        if !paths.iter().any(|existing| existing == path) {
-            paths.push(path.clone());
-        }
-    }
-    paths
+    let mut seen = HashSet::with_capacity(explicit.len() + peers.len());
+    explicit
+        .iter()
+        .chain(peers)
+        .filter(|path| seen.insert((*path).clone()))
+        .cloned()
+        .collect()
 }
 
 fn install_can_source_target(
