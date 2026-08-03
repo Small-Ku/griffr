@@ -56,8 +56,11 @@ async fn dispatch_resource_sync(args: PersistentResourceArgs, opts: GlobalOption
 pub(crate) async fn run() -> Result<()> {
     let cli = Cli::parse();
 
+    crate::ui::set_quiet(cli.quiet);
     let default_level = if cli.verbose {
         "warn,griffr=debug,griffr_common=debug"
+    } else if cli.quiet {
+        "error"
     } else {
         "warn"
     };

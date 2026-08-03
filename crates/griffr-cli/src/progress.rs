@@ -72,7 +72,7 @@ impl StepProgress {
     }
 
     pub fn update_count(&self, finished: usize, total: usize, file: &str) {
-        if total == 0 {
+        if crate::ui::is_quiet() || total == 0 {
             return;
         }
         let finished = finished.min(total);
@@ -119,6 +119,9 @@ impl StepProgress {
     }
 
     pub fn update_bytes(&self, finished: u64, total: u64, file: &str) {
+        if crate::ui::is_quiet() {
+            return;
+        }
         let total = total.max(1);
         self.ensure_started(total);
 
@@ -166,7 +169,7 @@ impl StepProgress {
     }
 
     pub fn finish(&self) {
-        if !self.started.load(Ordering::Acquire) {
+        if crate::ui::is_quiet() || !self.started.load(Ordering::Acquire) {
             return;
         }
         let done = self.bar.position();

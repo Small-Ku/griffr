@@ -13,11 +13,14 @@ pub struct ActivityProgress {
 impl ActivityProgress {
     pub fn new(label: impl Into<String>) -> Self {
         let label = label.into();
-        let plain = !std::io::stderr().is_terminal();
+        let quiet = crate::ui::is_quiet();
+        let plain = quiet || !std::io::stderr().is_terminal();
         let bar = ProgressBar::new_spinner();
         if plain {
             bar.set_draw_target(ProgressDrawTarget::hidden());
-            eprintln!("{}: started", label);
+            if !quiet {
+                eprintln!("{}: started", label);
+            }
         } else {
             bar.set_draw_target(ProgressDrawTarget::stderr_with_hz(20));
             bar.set_style(
@@ -32,6 +35,9 @@ impl ActivityProgress {
     }
 
     pub fn finish(&self) {
+        if crate::ui::is_quiet() {
+            return;
+        }
         if self.plain {
             eprintln!("{}: done", self.label);
         } else {
@@ -40,6 +46,9 @@ impl ActivityProgress {
     }
 
     pub fn fail(&self) {
+        if crate::ui::is_quiet() {
+            return;
+        }
         if self.plain {
             eprintln!("{}: failed", self.label);
         } else {

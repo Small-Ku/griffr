@@ -1,16 +1,33 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+pub fn set_quiet(quiet: bool) {
+    QUIET.store(quiet, Ordering::Release);
+}
+
+pub fn is_quiet() -> bool {
+    QUIET.load(Ordering::Acquire)
+}
 
 pub fn print_phase(message: impl AsRef<str>) {
-    println!("==> {}", message.as_ref());
+    if !is_quiet() {
+        println!("==> {}", message.as_ref());
+    }
 }
 
 pub fn print_success(message: impl AsRef<str>) {
-    println!("OK: {}", message.as_ref());
+    if !is_quiet() {
+        println!("OK: {}", message.as_ref());
+    }
 }
 
 pub fn print_info(message: impl AsRef<str>) {
-    println!("{}", message.as_ref());
+    if !is_quiet() {
+        println!("{}", message.as_ref());
+    }
 }
 
 pub fn print_warning(message: impl AsRef<str>) {
@@ -18,7 +35,7 @@ pub fn print_warning(message: impl AsRef<str>) {
 }
 
 pub fn print_kv_section(title: &str, rows: &[(String, String)]) {
-    if rows.is_empty() {
+    if is_quiet() || rows.is_empty() {
         return;
     }
 

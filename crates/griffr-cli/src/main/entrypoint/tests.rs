@@ -425,3 +425,22 @@ fn batch_controls_default_to_keep_going_and_bound_jobs() {
     assert!(batch.fail_fast);
     assert!(!batch.continue_after_failure());
 }
+
+#[test]
+fn quiet_is_global_and_conflicts_with_verbose() {
+    let cli =
+        Cli::try_parse_from(["griffr", "--quiet", "info", "--path", r"C:\Games\Endfield"]).unwrap();
+    assert!(cli.quiet);
+
+    let Err(error) = Cli::try_parse_from([
+        "griffr",
+        "--quiet",
+        "--verbose",
+        "info",
+        "--path",
+        r"C:\Games\Endfield",
+    ]) else {
+        panic!("expected quiet and verbose to conflict");
+    };
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+}

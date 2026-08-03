@@ -11,8 +11,18 @@ use crate::debug_cli::{AccountCommands, DebugCommands, StageCommands};
 #[command(version)]
 pub(crate) struct Cli {
     /// Enable diagnostic logging on stderr
-    #[arg(short, long, global = true, help = "Enable diagnostic logging")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        conflicts_with = "quiet",
+        help = "Enable diagnostic logging"
+    )]
     pub(crate) verbose: bool,
+
+    /// Suppress progress and nonessential status output
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
+    pub(crate) quiet: bool,
 
     #[command(subcommand)]
     pub(crate) command: Commands,
