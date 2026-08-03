@@ -5,7 +5,7 @@ use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::TaskPoolRunner;
 use griffr_common::runtime::{
     finish_install_change, finish_vfs_plan, is_launcher_metadata_path, read_install_change,
-    run_integrity_pool, start_install_change, sync_launcher_metadata, ContentPlan,
+    run_integrity_pool, start_install_change, sync_launcher_metadata, ContentPlan, FileIssue,
     GameManifestSnapshot, InstallChangeKind, InstallChangeSource, InstallChangeStart,
     InstallChangeState, IntegritySelection, ProgressLane, ProgressSender,
 };
@@ -13,11 +13,186 @@ use griffr_common::runtime::{
     plan_vfs_tasks, streaming_assets_path, VfsFilePlanOptions, VfsTaskPlan,
 };
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::progress::CountAndByteProgress;
 use crate::ui;
 use crate::{GlobalOptions, OutputFormat};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RepairClosure {
+    metadata_issues: usize,
+    non_metadata_issues: usize,
+}
+
+impl RepairClosure {
+    fn from_issues(issues: &[FileIssue]) -> Self {
+        let metadata_issues = issues
+            .iter()
+            .filter(|issue| is_launcher_metadata_path(&issue.path))
+            .count();
+        Self {
+            metadata_issues,
+            non_metadata_issues: issues.len().saturating_sub(metadata_issues),
+        }
+    }
+
+    const fn is_satisfied(self) -> bool {
+        self.non_metadata_issues == 0
+    }
+}
+
+#[derive(Debug)]
+struct RepairTransaction {
+    enabled: bool,
+    scope: crate::VerifyScopeArg,
+    change: Option<InstallChangeState>,
+    prepared: bool,
+    file_dag_completed: bool,
+    closure: Option<RepairClosure>,
+    committed: bool,
+}
+
+impl RepairTransaction {
+    fn prepare(
+        enabled: bool,
+        scope: crate::VerifyScopeArg,
+        active_change: Option<&InstallChangeState>,
+        install_path: &Path,
+        game_id: &GameId,
+        region_id: RegionId,
+        channel_id: &ChannelPair,
+        checked_version: &str,
+        content_plan: &ContentPlan,
+        vfs_plan: &VfsTaskPlan,
+        text_output: bool,
+    ) -> Result<Self> {
+        if !enabled {
+            return Ok(Self {
+                enabled: false,
+                scope,
+                change: None,
+                prepared: false,
+                file_dag_completed: false,
+                closure: None,
+                committed: false,
+            });
+        }
+
+        let change = if let Some(state) = active_change {
+            Some(state.clone())
+        } else if scope == crate::VerifyScopeArg::Resources {
+            None
+        } else {
+            let state = InstallChangeState::new(
+                InstallChangeKind::Repair,
+                InstallChangeSource::Repair,
+                game_id.to_string(),
+                region_id.to_string(),
+                channel_id.channel().to_string(),
+                channel_id.sub_channel().to_string(),
+                Some(checked_version.to_string()),
+                checked_version.to_string(),
+                content_plan.snapshot().release.game_files_md5.clone(),
+                Vec::new(),
+                scope != crate::VerifyScopeArg::Core,
+            )
+            .with_game_files_path(content_plan.snapshot().release.file_path.clone())
+            .with_resource_identity(vfs_plan.identity.clone());
+            let start = start_install_change(install_path, &state)?;
+            if text_output {
+                match start {
+                    InstallChangeStart::New => {}
+                    InstallChangeStart::Resume => {
+                        ui::print_info(format!("Resuming unfinished repair for {checked_version}"))
+                    }
+                    InstallChangeStart::Advance => unreachable!("repair cannot advance a change"),
+                }
+            }
+            Some(state)
+        };
+
+        Ok(Self {
+            enabled: true,
+            scope,
+            change,
+            prepared: true,
+            file_dag_completed: false,
+            closure: None,
+            committed: false,
+        })
+    }
+
+    fn complete_file_dag(&mut self, issues: &[FileIssue]) -> RepairClosure {
+        let closure = RepairClosure::from_issues(issues);
+        self.file_dag_completed = true;
+        self.closure = Some(closure);
+        closure
+    }
+
+    async fn commit(
+        &mut self,
+        api_client: &ApiClient,
+        install_path: &Path,
+        install_target: &griffr_common::config::InstallTarget,
+        content_plan: &mut ContentPlan,
+        vfs_plan: &VfsTaskPlan,
+        text_output: bool,
+    ) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let closure = self
+            .closure
+            .context("repair transaction closure was not evaluated")?;
+        if !closure.is_satisfied() {
+            anyhow::bail!(
+                "verify+repair stopped with {} remaining non-metadata issue(s); the install change marker was kept",
+                closure.non_metadata_issues
+            );
+        }
+
+        if self.scope != crate::VerifyScopeArg::Core {
+            finish_vfs_plan(install_path, vfs_plan, true)
+                .await
+                .context("Failed to finish the resource baseline after repair")?;
+        }
+        if self.scope != crate::VerifyScopeArg::Resources {
+            if text_output {
+                ui::print_phase("Syncing launcher metadata");
+            }
+            content_plan
+                .refresh_delivery(api_client, &install_target.api)
+                .await
+                .context("Failed to refresh launcher metadata URLs")?;
+            sync_launcher_metadata(api_client, install_path, content_plan.snapshot())
+                .await
+                .context("Failed to sync launcher metadata after repair")?;
+            if let Some(state) = self.change.as_ref() {
+                finish_install_change(install_path, state)
+                    .context("Failed to remove the install change marker")?;
+            }
+            if text_output {
+                ui::print_success("Launcher metadata synced");
+            }
+        }
+        self.committed = true;
+        Ok(())
+    }
+
+    fn report(&self) -> serde_json::Value {
+        let closure = self.closure;
+        json!({
+            "enabled": self.enabled,
+            "prepared": self.prepared,
+            "file_dag_completed": self.file_dag_completed,
+            "closure_satisfied": closure.map(RepairClosure::is_satisfied),
+            "metadata_issues": closure.map(|value| value.metadata_issues),
+            "non_metadata_issues": closure.map(|value| value.non_metadata_issues),
+            "committed": self.committed,
+        })
+    }
+}
 
 async fn verify_one(
     api_client: &ApiClient,
@@ -327,43 +502,19 @@ async fn verify_one(
             pool_cfg.network_slots
         ));
     }
-    let repair_change = if execute_repairs {
-        if let Some(state) = active_change.as_ref() {
-            Some(state.clone())
-        } else if effective_scope == crate::VerifyScopeArg::Resources {
-            None
-        } else {
-            let state = InstallChangeState::new(
-                InstallChangeKind::Repair,
-                InstallChangeSource::Repair,
-                game_id.to_string(),
-                region_id.to_string(),
-                channel_id.channel().to_string(),
-                channel_id.sub_channel().to_string(),
-                Some(checked_version.clone()),
-                checked_version.clone(),
-                content_plan.snapshot().release.game_files_md5.clone(),
-                Vec::new(),
-                effective_scope != crate::VerifyScopeArg::Core,
-            )
-            .with_game_files_path(content_plan.snapshot().release.file_path.clone())
-            .with_resource_identity(vfs_plan.identity.clone());
-            let start = start_install_change(&local.install_path, &state)?;
-            if text_output {
-                match start {
-                    InstallChangeStart::New => {}
-                    InstallChangeStart::Resume => ui::print_info(format!(
-                        "Resuming unfinished repair for {}",
-                        checked_version
-                    )),
-                    InstallChangeStart::Advance => unreachable!("repair cannot advance a change"),
-                }
-            }
-            Some(state)
-        }
-    } else {
-        None
-    };
+    let mut repair_transaction = RepairTransaction::prepare(
+        execute_repairs,
+        effective_scope,
+        active_change.as_ref(),
+        &local.install_path,
+        &game_id,
+        region_id,
+        &channel_id,
+        &checked_version,
+        &content_plan,
+        &vfs_plan,
+        text_output,
+    )?;
     let summary = run_integrity_pool(
         &content_plan,
         match (effective_scope, execute_repairs) {
@@ -389,6 +540,61 @@ async fn verify_one(
     if let Some(progress) = progress {
         progress.finish();
     }
+
+    if text_output {
+        ui::print_info(format!("Integrity issues found: {}", summary.issues.len()));
+        if execute_repairs {
+            ui::print_info(format!(
+                "Repair summary: downloaded={} reused={}",
+                summary.downloaded_files, summary.reused_files
+            ));
+        } else if repair && opts.is_dry_run() {
+            opts.dry_run(format!(
+                "Would repair {} integrity issue(s); no files or install state were changed",
+                summary.issues.len()
+            ));
+        }
+        for issue in &summary.issues {
+            ui::print_warning(format!(
+                "{} {:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
+                issue.path,
+                issue.kind,
+                issue.expected_size,
+                issue.actual_size,
+                issue.expected_md5,
+                issue.actual_md5
+            ));
+        }
+    }
+
+    let closure = repair_transaction.complete_file_dag(&summary.issues);
+    if execute_repairs && closure.metadata_issues > 0 && text_output {
+        ui::print_info(format!(
+            "Metadata-only issues to normalize: {}",
+            closure.metadata_issues
+        ));
+    }
+    if !execute_repairs && summary.issues.is_empty() {
+        if let Some(state) = active_change.as_ref() {
+            if text_output {
+                ui::print_warning(format!(
+                    "Target {} is valid, but the unfinished {} marker remains. Run verify --repair to sync launcher metadata and finish the change.",
+                    state.target_version, state.kind
+                ));
+            }
+        }
+    }
+
+    repair_transaction
+        .commit(
+            api_client,
+            &local.install_path,
+            &install_target,
+            &mut content_plan,
+            &vfs_plan,
+            text_output,
+        )
+        .await?;
 
     let issue_list = summary
         .issues
@@ -424,121 +630,11 @@ async fn verify_one(
         "dry_run": opts.is_dry_run(),
         "repairs_executed": execute_repairs,
         "scope": format!("{:?}", effective_scope).to_ascii_lowercase(),
+        "transaction": repair_transaction.report(),
         "issues": issue_list,
         "downloaded_files": summary.downloaded_files,
         "reused_files": summary.reused_files,
     });
-    if text_output {
-        ui::print_info(format!("Integrity issues found: {}", summary.issues.len()));
-        if execute_repairs {
-            ui::print_info(format!(
-                "Repair summary: downloaded={} reused={}",
-                summary.downloaded_files, summary.reused_files
-            ));
-        } else if repair && opts.is_dry_run() {
-            opts.dry_run(format!(
-                "Would repair {} integrity issue(s); no files or install state were changed",
-                summary.issues.len()
-            ));
-        }
-    }
-
-    if summary.issues.is_empty() {
-        if execute_repairs {
-            if effective_scope != crate::VerifyScopeArg::Core {
-                finish_vfs_plan(&local.install_path, &vfs_plan, true)
-                    .await
-                    .context("Failed to finish the resource baseline after repair")?;
-            }
-            if effective_scope != crate::VerifyScopeArg::Resources {
-                content_plan
-                    .refresh_delivery(api_client, &install_target.api)
-                    .await
-                    .context("Failed to refresh launcher metadata URLs")?;
-                sync_launcher_metadata(api_client, &local.install_path, content_plan.snapshot())
-                    .await
-                    .context("Failed to sync launcher metadata")?;
-                if let Some(state) = repair_change.as_ref() {
-                    finish_install_change(&local.install_path, state)
-                        .context("Failed to remove the install change marker")?;
-                }
-            }
-        } else if let Some(state) = active_change.as_ref() {
-            if text_output {
-                ui::print_warning(format!(
-                    "Target {} is valid, but the unfinished {} marker remains. Run verify --repair to sync launcher metadata and finish the change.",
-                    state.target_version, state.kind
-                ));
-            }
-        }
-        return Ok(report);
-    }
-
-    if text_output {
-        for issue in &summary.issues {
-            ui::print_warning(format!(
-                "{} {:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
-                issue.path,
-                issue.kind,
-                issue.expected_size,
-                issue.actual_size,
-                issue.expected_md5,
-                issue.actual_md5
-            ));
-        }
-    }
-
-    if execute_repairs {
-        let metadata_issues: Vec<_> = summary
-            .issues
-            .iter()
-            .filter(|issue| is_launcher_metadata_path(&issue.path))
-            .cloned()
-            .collect();
-        let remaining_non_metadata = summary
-            .issues
-            .iter()
-            .filter(|issue| !is_launcher_metadata_path(&issue.path))
-            .count();
-
-        if !metadata_issues.is_empty() {
-            ui::print_info(format!(
-                "Ignored metadata-only issues: {} (launcher metadata files will be normalized)",
-                metadata_issues.len()
-            ));
-        }
-        if remaining_non_metadata > 0 {
-            anyhow::bail!(
-                "verify+repair stopped with {} remaining non-metadata issue(s); the install change marker was kept",
-                remaining_non_metadata
-            );
-        }
-
-        if effective_scope != crate::VerifyScopeArg::Core {
-            finish_vfs_plan(&local.install_path, &vfs_plan, true)
-                .await
-                .context("Failed to finish the resource baseline after repair")?;
-        }
-        if effective_scope != crate::VerifyScopeArg::Resources {
-            if text_output {
-                ui::print_phase("Syncing launcher metadata");
-            }
-            content_plan
-                .refresh_delivery(api_client, &install_target.api)
-                .await
-                .context("Failed to refresh launcher metadata URLs")?;
-            sync_launcher_metadata(api_client, &local.install_path, content_plan.snapshot())
-                .await
-                .context("Failed to sync launcher metadata after repair")?;
-            if let Some(state) = repair_change.as_ref() {
-                finish_install_change(&local.install_path, state)
-                    .context("Failed to remove the install change marker")?;
-            }
-            if text_output {
-                ui::print_success("Launcher metadata synced");
-            }
-        }
-    }
 
     if text_output {
         ui::print_success(if execute_repairs {
@@ -812,5 +908,42 @@ pub async fn verify(
         Ok(())
     } else {
         Err(crate::commands::batch::batch_error("Verify", &failures))
+    }
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+    use griffr_common::runtime::FileIssueKind;
+
+    fn issue(path: &str) -> FileIssue {
+        FileIssue {
+            path: path.to_string(),
+            expected_md5: "0".repeat(32),
+            expected_size: 1,
+            actual_size: None,
+            actual_md5: None,
+            kind: FileIssueKind::Missing,
+        }
+    }
+
+    #[test]
+    fn repair_closure_accepts_clean_and_metadata_only_results() {
+        assert!(RepairClosure::from_issues(&[]).is_satisfied());
+        let closure = RepairClosure::from_issues(&[issue("config.ini")]);
+        assert!(closure.is_satisfied());
+        assert_eq!(closure.metadata_issues, 1);
+        assert_eq!(closure.non_metadata_issues, 0);
+    }
+
+    #[test]
+    fn repair_closure_blocks_remaining_payload_issues() {
+        let closure = RepairClosure::from_issues(&[
+            issue("config.ini"),
+            issue("Endfield_Data/StreamingAssets/data.bin"),
+        ]);
+        assert!(!closure.is_satisfied());
+        assert_eq!(closure.metadata_issues, 1);
+        assert_eq!(closure.non_metadata_issues, 1);
     }
 }
