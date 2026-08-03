@@ -298,15 +298,24 @@ async fn remove_verified_obsolete_game_files(
         return Ok(super::types::ObsoleteFileCleanupSummary::default());
     }
 
-    let canonical_install_root =
-        std::fs::canonicalize(install_path).map_err(|source| Error::IoAt {
-            action: "resolve install root for cleanup",
-            path: install_path.to_path_buf(),
-            source,
-        })?;
-    for (_, relative) in &obsolete {
-        ensure_cleanup_path_is_contained(&canonical_install_root, &install_path.join(relative))?;
-    }
+    let cleanup_root = install_path.to_path_buf();
+    let cleanup_paths = obsolete
+        .iter()
+        .map(|(_, relative)| cleanup_root.join(relative))
+        .collect::<Vec<_>>();
+    crate::runtime::compat_fs::run_blocking("obsolete cleanup path check", move || {
+        let canonical_install_root =
+            std::fs::canonicalize(&cleanup_root).map_err(|source| Error::IoAt {
+                action: "resolve install root for cleanup",
+                path: cleanup_root.clone(),
+                source,
+            })?;
+        for target_path in cleanup_paths {
+            ensure_cleanup_path_is_contained(&canonical_install_root, &target_path)?;
+        }
+        Ok(())
+    })
+    .await?;
 
     let tasks = obsolete
         .iter()

@@ -18,7 +18,7 @@ Reference material:
 - API documentation: `docs/API.md` and `docs/API_*.md`
 - Design documentation: `docs/DESIGN.md` and `docs/DESIGN_*.md`
 - Reverse-engineering references: `ref/`
-- Static checker: `scripts/rust_check.py` and `scripts/rust_check_lib/`
+- Repository policy checker: `scripts/check_repo.py`
 
 Always obey the closest nested `AGENTS.md` when working inside a subdirectory.
 
@@ -81,23 +81,33 @@ Shared APIs must expose domain semantics, not frontend mechanics.
 
 ## Static Analysis Policy
 
-Repository-specific invariants belong in `scripts/rust_check_lib`, not in disposable grep scripts or one-off review commands.
+`scripts/check_repo.py` contains only repository-specific checks that the Rust
+toolchain does not express. Keep it dependency-free and focused on stable
+architecture boundaries:
 
-When adding a checker rule:
+- frontend-neutral `griffr-common` dependencies and APIs;
+- canonical progress wrappers and lane catalog;
+- Dispatcher-only task-pool concurrency;
+- explicit blocking filesystem calls inside production async code;
+- removed duplicate model names and broad source file names.
 
-- implement it in the appropriate reusable checker module;
-- reason about effective Rust visibility and module reachability rather than matching every textual occurrence;
+Do not add generic Rust syntax, formatting, name resolution, module graph, cfg,
+unused-code, style, or compiler diagnostics to the Python checker. Rustfmt,
+rustc, Clippy, Cargo, and the Rust test suite are authoritative for those
+concerns.
+
+When adding a repository policy rule:
+
+- require a concrete invariant that rustc and Clippy do not already enforce;
+- keep the implementation small and deterministic;
 - attach a stable diagnostic code;
-- include evidence and limitations in inferred diagnostics;
-- add positive and negative regression samples under `scripts/tests`;
-- document the rule in `scripts/rust_check_lib/README.md`;
-- keep the rule focused on architecture or semantics that rustc and Clippy do not already enforce reliably.
+- add positive and negative cases under `scripts/tests`;
+- document the rule in `scripts/README.md`;
+- prefer a Rust type, unit test, or compile-time constraint when it can express
+  the invariant directly.
 
-Current progress rules are the `PRG***` family. Do not bypass them by renaming types or hiding equivalent callback/channel forms behind aliases.
-
-The Python checker is deliberately high-recall and review-oriented. Prefer reducing false positives through better parsing, module analysis, name resolution, and evidence—not by removing useful checks.
-
-The checker is not a compiler. It must not claim to replace rustc, rustfmt, Clippy, or tests.
+The checker must never invoke Cargo or claim to replace compiler-level
+validation.
 
 ## Verification Commands
 
@@ -112,28 +122,18 @@ cargo test --workspace
 
 Run targeted tests while iterating, then run the workspace-level commands before packaging.
 
-Python structural analysis with pinned parser versions:
+Repository policy check and its regression suite:
 
 ```powershell
-uv run --with tree-sitter==0.23.2 --with tree-sitter-rust==0.23.2 `
-  scripts/rust_check.py . --run-tools never
+python scripts/check_repo.py .
+python -m unittest discover -s scripts/tests -v
+python -m compileall -q scripts
 ```
 
-Checker regression suite:
-
-```powershell
-uv run --with tree-sitter==0.23.2 --with tree-sitter-rust==0.23.2 `
-  python -m unittest discover -s scripts/tests -v
-```
-
-Also run, when available:
-
-```powershell
-uv run ruff check scripts
-uv run python -m compileall -q scripts
-```
-
-If Cargo or the Rust toolchain is unavailable, run all available Python checks and state clearly that compiler-level validation did not run. Never present the structural checker as equivalent to a successful Cargo build.
+Also run `ruff check scripts` when Ruff is available. If Cargo or the Rust
+toolchain is unavailable, run the repository policy checks and state clearly
+that compiler-level validation did not run. Never present the Python checker as
+equivalent to a successful Cargo build.
 
 ## Functional Verification
 
@@ -170,7 +170,7 @@ When the user requests a ZIP:
 2. Preserve repository-relative paths.
 3. Create the archive from the verified working tree.
 4. Extract it into a fresh directory.
-5. Run the structural checker and regression suite against the extracted copy.
+5. Run `scripts/check_repo.py` and its regression suite against the extracted copy.
 6. Run Cargo checks against the extracted copy when the toolchain is available.
 7. Report the archive SHA-256.
 

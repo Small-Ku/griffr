@@ -94,12 +94,7 @@ When an external name is not clear, explain it once with direct project wording.
 
 ## 6. Automatic Check
 
-`scripts/rust_check.py` reports restricted terms as `WRD001` and broad file names as `WRD002`.
-The check covers Rust, Python, PowerShell, Markdown, TOML, YAML, and text files. It checks file and directory names, plain text, and name segments such as `completed_tasks`, `TaskCompletion`, and `TaskInitializer`.
-
-The Rust pass uses Tree-sitter after the checker builds the crate module graph and its local name index. It checks project definitions such as items, methods, fields, variants, parameters, local bindings, generic parameters, and explicit import aliases. It does not scan all Rust identifiers as plain text. Thus, a call to an external method such as `Digest::finalize` does not become a project wording fault.
-
-The module graph resolves `mod`, `#[path]`, and literal `include!` declarations to source files. The local name resolver can also map direct project paths to the `Symbol` and source file that define them. It cannot fully resolve macro output, inferred method calls, trait dispatch, build-script output, or all `cfg` combinations. Cargo and rust-analyzer remain the final tools for those cases.
-
-The checker still scans Rust comments, documentation, and string literals as text. It also uses text checks for non-Rust files because those locations do not have Rust symbol meaning.
-The guide and checker source are glossary exceptions because they must contain the terms that they restrict. Fixed external names listed in section 5 are also allowed.
+`scripts/check_repo.py` reports overly broad source file names as `NAM001`.
+The controlled vocabulary in this document remains a review and naming guide;
+it is not duplicated as a Python approximation of Rust name resolution.
+Rustfmt, rustc, and Clippy remain authoritative for Rust syntax and style.

@@ -37,6 +37,7 @@ Format/Lint:
 ```bash
 cargo fmt --all
 cargo clippy --all-targets --all-features
+python scripts/check_repo.py .
 ```
 
 Release build:
