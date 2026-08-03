@@ -1,32 +1,25 @@
-//! Windows admin elevation utilities
-//!
-//! Provides functions to check for admin privileges and self-elevate
-//! when running the launch command.
+//! Windows administrator elevation utilities.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use tracing::{debug, info, warn};
 
-/// Check if the current process is running with administrator privileges
+/// Check if the current process is running with administrator privileges.
 #[cfg(windows)]
 pub fn is_running_as_admin() -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::Security::GetTokenInformation;
-    use windows_sys::Win32::Security::TokenElevation;
-    use windows_sys::Win32::Security::TOKEN_ELEVATION;
-    use windows_sys::Win32::Security::TOKEN_QUERY;
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, OpenProcessToken, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+    };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
-    use windows_sys::Win32::System::Threading::OpenProcessToken;
 
     unsafe {
         let mut token = std::ptr::null_mut();
-        let result = OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token);
-        if result == 0 {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
             return false;
         }
 
         let mut elevation: TOKEN_ELEVATION = std::mem::zeroed();
         let mut size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
-
         let result = GetTokenInformation(
             token,
             TokenElevation,
@@ -34,97 +27,130 @@ pub fn is_running_as_admin() -> bool {
             size,
             &mut size,
         );
-
         CloseHandle(token);
-
-        if result == 0 {
-            return false;
-        }
-
-        elevation.TokenIsElevated != 0
+        result != 0 && elevation.TokenIsElevated != 0
     }
 }
 
 #[cfg(not(windows))]
 pub fn is_running_as_admin() -> bool {
-    // On non-Windows platforms, assume we have sufficient permissions
     true
 }
 
-/// Restart the current program file with admin privileges
+/// Quote one argument using the parsing rules consumed by `CommandLineToArgvW`.
 ///
-/// This function will:
-/// 1. Get the current program file path
-/// 2. Get the current command line arguments
-/// 3. Use ShellExecute to relaunch with "runas" verb
-/// 4. Exit the current process
-///
-/// Note: This function never returns on success - it exits the process
+/// The caller joins quoted arguments with one ASCII space. Backslashes are
+/// doubled only where they precede a quote or the closing quote.
+#[cfg(any(windows, test))]
+fn quote_windows_argument_units(argument: &[u16]) -> Vec<u16> {
+    const BACKSLASH: u16 = b'\\' as u16;
+    const QUOTE: u16 = b'"' as u16;
+    const SPACE: u16 = b' ' as u16;
+    const TAB: u16 = b'\t' as u16;
+
+    let needs_quotes = argument.is_empty()
+        || argument
+            .iter()
+            .any(|value| matches!(*value, SPACE | TAB | QUOTE));
+    if !needs_quotes {
+        return argument.to_vec();
+    }
+
+    let mut quoted = Vec::with_capacity(argument.len() + 2);
+    quoted.push(QUOTE);
+    let mut backslashes = 0usize;
+    for &value in argument {
+        if value == BACKSLASH {
+            backslashes += 1;
+            continue;
+        }
+        if value == QUOTE {
+            quoted.extend(std::iter::repeat_n(BACKSLASH, backslashes * 2 + 1));
+            quoted.push(QUOTE);
+        } else {
+            quoted.extend(std::iter::repeat_n(BACKSLASH, backslashes));
+            quoted.push(value);
+        }
+        backslashes = 0;
+    }
+    quoted.extend(std::iter::repeat_n(BACKSLASH, backslashes * 2));
+    quoted.push(QUOTE);
+    quoted
+}
+
 #[cfg(windows)]
-pub fn restart_as_admin() {
-    use std::ffi::OsString;
+fn current_parameter_line() -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut line = Vec::new();
+    for argument in std::env::args_os().skip(1) {
+        if !line.is_empty() {
+            line.push(b' ' as u16);
+        }
+        let units = argument.as_os_str().encode_wide().collect::<Vec<_>>();
+        line.extend(quote_windows_argument_units(&units));
+    }
+    line.push(0);
+    line
+}
+
+/// Restart the current executable with administrator privileges.
+///
+/// On success this function terminates the current process. Failures are
+/// returned to the caller instead of panicking.
+#[cfg(windows)]
+pub fn restart_as_admin() -> Result<()> {
+    use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-    // Get current program file path
-    let exe_path = std::env::current_exe().expect("Failed to get current program file path");
-
-    // Get current arguments (skip the first one which is the exe path)
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let args_str = args.join(" ");
-
-    // Convert to wide strings
-    let exe_wide: Vec<u16> = exe_path.as_os_str().encode_wide().chain(Some(0)).collect();
-
-    let args_wide: Vec<u16> = OsString::from(&args_str)
+    let exe_path = std::env::current_exe()?;
+    let exe_wide = exe_path
+        .as_os_str()
         .encode_wide()
         .chain(Some(0))
-        .collect();
-
-    let runas_wide: Vec<u16> = OsString::from("runas")
+        .collect::<Vec<_>>();
+    let args_wide = current_parameter_line();
+    let runas_wide = OsStr::new("runas")
         .encode_wide()
         .chain(Some(0))
-        .collect();
+        .collect::<Vec<_>>();
 
-    unsafe {
-        let result = ShellExecuteW(
+    let result = unsafe {
+        ShellExecuteW(
             std::ptr::null_mut(),
             runas_wide.as_ptr(),
             exe_wide.as_ptr(),
             args_wide.as_ptr(),
             std::ptr::null(),
             SW_SHOWNORMAL,
-        );
-
-        // ShellExecute returns a value > 32 on success
-        let result_as_int = result as isize;
-        if result_as_int <= 32 {
-            let error = GetLastError();
-            panic!(
-                "Failed to elevate to admin. Error code: {}. \
-                 This may happen if you clicked 'No' on the UAC prompt.",
-                error
-            );
-        }
-
-        // Exit the current (non-elevated) process
-        std::process::exit(0);
+        )
+    };
+    let shell_code = result as isize;
+    if shell_code <= 32 {
+        let os_error = unsafe { GetLastError() };
+        return Err(Error::Message {
+            context: "Failed to request administrator privileges: ",
+            detail: format!(
+                "ShellExecuteW returned {shell_code} (OS error {os_error}); the UAC prompt may have been cancelled"
+            ),
+        });
     }
+
+    std::process::exit(0);
 }
 
 #[cfg(not(windows))]
-pub fn restart_as_admin() {
-    panic!("Admin elevation not supported on this platform");
+pub fn restart_as_admin() -> Result<()> {
+    Err(Error::Message {
+        context: "Administrator elevation is unavailable: ",
+        detail: "this operation is supported only on Windows".to_string(),
+    })
 }
 
-/// Ensure the process is running as admin, or restart with elevation
-///
-/// If the process is already running as admin, this function returns Ok(()).
-/// Otherwise, it attempts to restart with admin privileges and exits the current process.
-///
-/// Note: This function does not return if elevation is needed - the process exits instead
+/// Ensure the process is running as administrator, or restart it elevated.
 pub fn ensure_admin() -> Result<()> {
     if is_running_as_admin() {
         debug!("Already running as administrator");
@@ -132,22 +158,35 @@ pub fn ensure_admin() -> Result<()> {
     }
 
     info!("Requesting administrator privileges...");
-    warn!("A UAC prompt will appear. Please click 'Yes' to continue.");
-
-    restart_as_admin();
-
-    // This is unreachable - restart_as_admin always exits
-    #[allow(unreachable_code)]
-    Ok(())
+    warn!("A UAC prompt will appear. Approve it to continue.");
+    restart_as_admin()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn quote(argument: &str) -> String {
+        String::from_utf16(&quote_windows_argument_units(
+            &argument.encode_utf16().collect::<Vec<_>>(),
+        ))
+        .unwrap()
+    }
+
     #[test]
-    fn test_is_running_as_admin_does_not_panic() {
-        // Just ensure the function doesn't panic
+    fn admin_probe_does_not_panic() {
         let _ = is_running_as_admin();
+    }
+
+    #[test]
+    fn windows_arguments_quote_spaces_quotes_and_trailing_slashes() {
+        assert_eq!(quote("plain"), "plain");
+        assert_eq!(quote(""), "\"\"");
+        assert_eq!(
+            quote(r"C:\\Game Files\\config.ini"),
+            r#""C:\\Game Files\\config.ini""#
+        );
+        assert_eq!(quote(r#"a"b"#), r#""a\"b""#);
+        assert_eq!(quote("path with slash\\"), "\"path with slash\\\\\"");
     }
 }

@@ -2,6 +2,7 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+#[cfg(windows)]
 use griffr_common::runtime::admin::ensure_admin;
 #[cfg(not(windows))]
 use griffr_common::runtime::WineConfig;
@@ -20,7 +21,6 @@ pub async fn launch(
 ) -> Result<()> {
     let local = detect_local_install(&path).await?;
     ensure_install_ready(&local.install_path)?;
-    ensure_admin().map_err(|e| anyhow::anyhow!("Failed to get administrator rights: {}", e))?;
 
     let game_id = local.require_known_game()?;
     let region_id = local.require_known_region()?;
@@ -102,13 +102,18 @@ pub async fn launch(
         return Ok(());
     }
 
-    if launcher.is_game_running() {
-        if !force {
-            anyhow::bail!(
-                "Game process already running at {}",
-                local.install_path.display()
-            );
-        }
+    let game_running = launcher.is_game_running();
+    if game_running && !force {
+        anyhow::bail!(
+            "Game process already running at {}",
+            local.install_path.display()
+        );
+    }
+
+    #[cfg(windows)]
+    ensure_admin().context("Failed to get administrator rights")?;
+
+    if game_running {
         ui::print_info("A game process is running; stop it because --force is set");
         launcher.stop_game().await?;
     }
