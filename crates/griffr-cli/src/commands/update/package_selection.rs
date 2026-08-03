@@ -146,7 +146,9 @@ pub(super) fn build_update_dry_run_plan(
     }
 
     if skip_verify {
-        lines.push("Would skip post-update integrity verification (--skip-verify).".to_string());
+        lines.push(
+            "Would defer post-update integrity verification (--defer-verification).".to_string(),
+        );
     } else {
         lines.push("Would run post-update integrity verification.".to_string());
     }

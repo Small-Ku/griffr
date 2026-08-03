@@ -46,7 +46,7 @@ pub(super) async fn verify_updated_install(
             .await
             .context("Failed to finish the resource baseline after update tasks")?;
         ui::print_info(
-            "Skipping post-update integrity verification (--skip-verify); launcher metadata remains unchanged until verify --repair closes the saved change",
+            "Deferring post-update integrity verification (--defer-verification); launcher metadata remains unchanged until verify --repair closes the saved change",
         );
         return Ok(PostUpdateResult::VerificationDeferred);
     }

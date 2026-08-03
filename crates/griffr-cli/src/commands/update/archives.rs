@@ -115,10 +115,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
         let mut archive_nodes = Vec::with_capacity(archive_groups.len());
         let mut verify_task_count = 0usize;
         for group in &archive_groups {
-            opts.verbose(format!(
-                "queued predownload apply archive {}",
-                group.base_name
-            ));
+            opts.verbose(format!("queued staged update archive {}", group.base_name));
             let verify_nodes = group
                 .parts
                 .iter()

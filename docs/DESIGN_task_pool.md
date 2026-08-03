@@ -1,6 +1,6 @@
 # Task Pool and DAG Design
 
-A frontend-neutral, command-scoped task DAG drives install, update, verify, repair, VFS sync, and predownload apply. The DAG describes ordering; the resource-aware scheduler decides when a ready node may run; `compio::Dispatcher` remains the only run backend.
+A frontend-neutral, command-scoped task DAG drives install, update, verify, repair, VFS sync, and staged update apply. The DAG describes ordering; the resource-aware scheduler decides when a ready node may run; `compio::Dispatcher` remains the only run backend.
 
 ```text
 planner -> TaskGraph -> resource-aware scheduler -> Dispatcher

@@ -50,12 +50,12 @@ cargo build --release
 
 Install using launcher resource index:
 ```bash
-cargo run -p griffr-cli -- install --game endfield --region sg --path <GAME_PATH> --resource-policy auto
+cargo run -p griffr-cli -- install --game endfield --region sg --path <GAME_PATH> --resources auto
 ```
 
-Update using packages and `game_files` only (`--skip-vfs` is an alias for `--resource-policy package-only`):
+Update using packages and `game_files` only:
 ```bash
-cargo run -p griffr-cli -- update --path <GAME_PATH> --resource-policy package-only
+cargo run -p griffr-cli -- update --path <GAME_PATH> --resources package-only
 ```
 
 Verify core files only:
@@ -63,10 +63,23 @@ Verify core files only:
 cargo run -p griffr-cli -- verify --path <GAME_PATH> --scope core
 ```
 
-Set up game-selected Persistent working set (copy-only; add `--prune` to clean unchanged recorded baseline):
+Synchronize the game-selected Persistent working set (copy-only; add `--prune` to clean unchanged recorded baseline):
 ```bash
-cargo run -p griffr-cli -- setup-persistent-resources --path <GAME_PATH>
+cargo run -p griffr-cli -- resources sync --path <GAME_PATH>
 ```
+
+Stage update archives without applying them, then require that exact stage during update:
+```bash
+cargo run -p griffr-cli -- stage fetch --path <GAME_PATH> --stage-dir <STAGE_DIR>
+cargo run -p griffr-cli -- update --path <GAME_PATH> --stage-dir <STAGE_DIR> --require-staged
+```
+
+Resume an interrupted patch transaction:
+```bash
+cargo run -p griffr-cli -- recover --path <GAME_PATH>
+```
+
+Batch update or verify defaults to keep-going. Use `--fail-fast` for a serial batch, or `--jobs N` for targets on independent storage volumes.
 
 ## Wine on Linux
 

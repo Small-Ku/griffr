@@ -13,9 +13,9 @@ A patch archive can contain standard replacements and a VFS payload (`patch.json
 
 ---
 
-## 2. Predownload Metadata
+## 2. Staged Update Metadata
 
-`predownload fetch` stores each package set under `.griffr/predownload/<from>-<to>/` and persists `.griffr-predownload.json` alongside the split archive parts:
+`stage fetch` stores each package set under `.griffr/predownload/<from>-<to>/` and persists `.griffr-predownload.json` alongside the split archive parts:
 *   Records game identity, channel, source/target versions, and archive file hashes.
 *   Prevents incorrect versions from being applied based on directory names alone.
 

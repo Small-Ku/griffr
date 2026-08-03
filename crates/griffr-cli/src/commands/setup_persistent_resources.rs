@@ -148,8 +148,8 @@ pub async fn setup_persistent_resources(
     let mut task_pool_runner = TaskPoolRunner::new(pool_cfg)?;
 
     let progress = CountAndByteProgress::new(
-        "setup-persistent-resources.verify",
-        "setup-persistent-resources.download",
+        "resources.sync.verify",
+        "resources.sync.download",
         opts.verbose,
     );
     let progress_session = progress.start(ProgressLane::VFS_VERIFY, ProgressLane::VFS_DOWNLOAD);

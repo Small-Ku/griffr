@@ -85,12 +85,12 @@ pub fn resolve_staged_patch_recovery_dir(
     match candidates.len() {
         1 => Ok(candidates.remove(0)),
         0 => Err(Error::Message { context: "Configuration error: ", detail: format!(
-            "No ready staged predownload metadata targeting installed version {} was found under {}. Pass --output-dir explicitly.",
+            "No ready staged predownload metadata targeting installed version {} was found under {}. Pass --stage-dir explicitly.",
             target_version,
             root.display()
         ) }),
         _ => Err(Error::Message { context: "Configuration error: ", detail: format!(
-            "Multiple ready staged predownload directories target installed version {} under {}: {}. Pass --output-dir explicitly.",
+            "Multiple ready staged predownload directories target installed version {} under {}: {}. Pass --stage-dir explicitly.",
             target_version,
             root.display(),
             candidates

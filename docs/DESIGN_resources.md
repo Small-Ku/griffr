@@ -15,7 +15,7 @@ The `auto` resource policy calls `get_latest_resources` without hard-coded param
 
 The `package-only` policy skips `get_latest_resources`. Package archives and `game_files` manage resource files.
 
-`--skip-vfs` is an alias for `--resource-policy package-only` on install and update. It does not filter resource entries inside packages or `game_files`.
+`--resources package-only` selects package-only handling on install and update. The hidden legacy `--skip-vfs` alias remains for compatibility; it does not filter resource entries inside packages or `game_files`.
 
 ---
 
@@ -74,7 +74,7 @@ During repair, launcher metadata is excluded from generic file repair. `game_fil
 
 ## 5. Persistent Working Set
 
-`setup-persistent-resources` handles the game-selected working set under `Persistent`.
+`resources sync` handles the game-selected working set under `Persistent`.
 
 Persistent rules:
 
