@@ -13,6 +13,10 @@ pub use graph::{NodeId, NodeState, TaskGraph, TaskGraphBuilder, TaskGraphSummary
 pub use scheduler::{
     run_task_graph, run_task_graph_with_progress, run_tasks, run_tasks_with_progress,
 };
+/// Return the stable physical-volume identity used by scheduler admission.
+pub fn storage_volume_key(path: impl AsRef<std::path::Path>) -> String {
+    fs_ops::storage_volume_group_key(path.as_ref())
+}
 pub use types::{
     archive_expected_files, ArchivePart, ArchiveRangePriority, ArchiveRetention, ArchiveSource,
     DownloadResumeState, FileEnsureTask, FinalFileRef, Task, TaskOutcome, TaskPoolConfig,

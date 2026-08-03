@@ -8,6 +8,81 @@ use griffr_common::runtime::{detect_local_install, LocalInstall};
 
 const PATH_INSPECTION_CONCURRENCY: usize = 8;
 
+#[derive(Debug, Clone)]
+pub(crate) struct BatchFailure {
+    pub(crate) path: PathBuf,
+    pub(crate) error: String,
+}
+
+pub(crate) fn validate_batch_options(batch: crate::BatchArgs) -> Result<()> {
+    if !(1..=16).contains(&batch.jobs) {
+        anyhow::bail!("--jobs must be between 1 and 16");
+    }
+    if batch.jobs > 1 && batch.fail_fast {
+        anyhow::bail!("--fail-fast requires --jobs 1 so in-flight mutations are never abandoned");
+    }
+    Ok(())
+}
+
+pub(crate) fn plan_disjoint_volume_waves<T>(
+    items: Vec<T>,
+    max_parallel: usize,
+    volume_keys: impl Fn(&T) -> &[String],
+) -> Vec<Vec<T>> {
+    let mut pending = std::collections::VecDeque::from(items);
+    let mut waves = Vec::new();
+    while !pending.is_empty() {
+        let mut claimed = HashSet::new();
+        let mut wave = Vec::new();
+        let mut deferred = std::collections::VecDeque::new();
+        while let Some(item) = pending.pop_front() {
+            let keys = volume_keys(&item);
+            let conflicts = keys.iter().any(|key| claimed.contains(key));
+            if wave.len() < max_parallel && !conflicts {
+                claimed.extend(keys.iter().cloned());
+                wave.push(item);
+            } else {
+                deferred.push_back(item);
+            }
+        }
+        debug_assert!(!wave.is_empty());
+        waves.push(wave);
+        pending = deferred;
+    }
+    waves
+}
+
+pub(crate) fn print_batch_summary(operation: &str, total: usize, failures: &[BatchFailure]) {
+    if total <= 1 {
+        return;
+    }
+    let succeeded = total.saturating_sub(failures.len());
+    crate::ui::print_info(format!(
+        "{operation} batch: {succeeded} succeeded, {} failed, {total} total",
+        failures.len()
+    ));
+    for failure in failures {
+        crate::ui::print_warning(format!(
+            "{} failed for {}: {}",
+            operation,
+            failure.path.display(),
+            failure.error
+        ));
+    }
+}
+
+pub(crate) fn batch_error(operation: &str, failures: &[BatchFailure]) -> anyhow::Error {
+    let details = failures
+        .iter()
+        .map(|failure| format!("{}: {}", failure.path.display(), failure.error))
+        .collect::<Vec<_>>()
+        .join("; ");
+    anyhow::anyhow!(
+        "{operation} failed for {} target(s): {details}",
+        failures.len()
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TargetReusePaths {
     pub(crate) explicit: Vec<PathBuf>,
@@ -206,6 +281,42 @@ mod tests {
         let paths = reuse_paths_for_target(&[], &targets, &[GameId::ENDFIELD, GameId::ENDFIELD], 0);
 
         assert_eq!(paths.peers, vec![PathBuf::from("B")]);
+    }
+
+    #[test]
+    fn disjoint_volume_waves_serialize_conflicting_targets() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct Item {
+            id: u8,
+            keys: Vec<String>,
+        }
+        let waves = plan_disjoint_volume_waves(
+            vec![
+                Item {
+                    id: 1,
+                    keys: vec!["a".into()],
+                },
+                Item {
+                    id: 2,
+                    keys: vec!["a".into()],
+                },
+                Item {
+                    id: 3,
+                    keys: vec!["b".into()],
+                },
+            ],
+            2,
+            |item| &item.keys,
+        );
+        assert_eq!(waves.len(), 2);
+        assert_eq!(
+            waves[0].iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(
+            waves[1].iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     #[test]

@@ -40,6 +40,37 @@ pub(crate) struct MutationArgs {
 }
 
 #[derive(Args, Debug, Clone, Copy)]
+pub(crate) struct BatchArgs {
+    /// Maximum target operations run concurrently; targets sharing storage are serialized
+    #[arg(long, default_value_t = 1)]
+    pub(crate) jobs: usize,
+
+    /// Stop after the first failed target; requires --jobs 1
+    #[arg(long, conflicts_with = "keep_going")]
+    pub(crate) fail_fast: bool,
+
+    /// Continue after target failures (the default)
+    #[arg(long, conflicts_with = "fail_fast")]
+    pub(crate) keep_going: bool,
+}
+
+impl Default for BatchArgs {
+    fn default() -> Self {
+        Self {
+            jobs: 1,
+            fail_fast: false,
+            keep_going: false,
+        }
+    }
+}
+
+impl BatchArgs {
+    pub(crate) const fn continue_after_failure(self) -> bool {
+        self.keep_going || !self.fail_fast
+    }
+}
+
+#[derive(Args, Debug, Clone, Copy)]
 pub(crate) struct OutputArgs {
     /// Output format for the final report
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
@@ -308,6 +339,9 @@ pub(crate) enum Commands {
         mutation: MutationArgs,
 
         #[command(flatten)]
+        batch: BatchArgs,
+
+        #[command(flatten)]
         paths: TargetPathsArg,
 
         #[command(flatten)]
@@ -404,6 +438,9 @@ pub(crate) enum Commands {
     Verify {
         #[command(flatten)]
         mutation: MutationArgs,
+
+        #[command(flatten)]
+        batch: BatchArgs,
 
         #[command(flatten)]
         paths: TargetPathsArg,

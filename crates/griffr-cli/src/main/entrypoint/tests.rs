@@ -390,3 +390,38 @@ fn dry_run_is_scoped_to_mutating_commands() {
     };
     assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
 }
+
+#[test]
+fn batch_controls_default_to_keep_going_and_bound_jobs() {
+    let cli = Cli::try_parse_from([
+        "griffr",
+        "verify",
+        "--path",
+        r"C:\Games\Endfield-CN",
+        "--path",
+        r"D:\Games\Endfield-OS",
+        "--jobs",
+        "2",
+        "--keep-going",
+    ])
+    .unwrap();
+    let Commands::Verify { batch, .. } = cli.command else {
+        panic!("expected verify command");
+    };
+    assert_eq!(batch.jobs, 2);
+    assert!(batch.continue_after_failure());
+
+    let cli = Cli::try_parse_from([
+        "griffr",
+        "update",
+        "--path",
+        r"C:\Games\Endfield",
+        "--fail-fast",
+    ])
+    .unwrap();
+    let Commands::Update { batch, .. } = cli.command else {
+        panic!("expected update command");
+    };
+    assert!(batch.fail_fast);
+    assert!(!batch.continue_after_failure());
+}

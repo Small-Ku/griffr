@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use futures_util::{stream, StreamExt};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::TaskPoolRunner;
@@ -563,8 +564,10 @@ pub async fn verify(
     force_copy: bool,
     relink_reuse: bool,
     scope: Option<crate::VerifyScopeArg>,
+    batch: crate::BatchArgs,
     opts: GlobalOptions,
 ) -> Result<()> {
+    crate::commands::batch::validate_batch_options(batch)?;
     if relink_reuse && !repair {
         anyhow::bail!("--relink-reuse requires --repair");
     }
@@ -599,64 +602,215 @@ pub async fn verify(
         })
         .collect::<Result<Vec<_>>>()?;
     crate::commands::batch::validate_reuse_source_games(&explicit_sources, &target_games)?;
-    let reuse_by_target = installs
+
+    #[derive(Debug)]
+    struct VerifyWork {
+        index: usize,
+        install: griffr_common::runtime::LocalInstall,
+        reuse_paths: Vec<PathBuf>,
+        volume_keys: Vec<String>,
+    }
+
+    let target_paths = installs
         .iter()
-        .enumerate()
-        .map(|(index, install)| {
-            let paths = if repair {
-                crate::commands::batch::reuse_paths_for_target(
-                    &explicit_sources,
-                    &installs,
-                    &target_games,
-                    index,
-                )
-                .all()
+        .map(|install| install.install_path.clone())
+        .collect::<Vec<_>>();
+    let mut suppressed_peer_reuse = false;
+    let mut work = Vec::with_capacity(installs.len());
+    for (index, install) in installs.iter().enumerate() {
+        let mut reuse = if repair {
+            let target_reuse = crate::commands::batch::reuse_paths_for_target(
+                &explicit_sources,
+                &installs,
+                &target_games,
+                index,
+            );
+            if batch.jobs > 1 {
+                suppressed_peer_reuse |= !target_reuse.peers.is_empty();
+                target_reuse
+                    .explicit
+                    .into_iter()
+                    .filter(|source| !target_paths.iter().any(|target| target == source))
+                    .collect::<Vec<_>>()
             } else {
-                Vec::new()
-            };
-            if relink_reuse && paths.is_empty() {
-                anyhow::bail!(
-                    "--relink-reuse requires a compatible --reuse-from or another same-game --path for {}",
-                    install.install_path.display()
-                );
+                target_reuse.all()
             }
-            Ok(paths)
-        })
-        .collect::<Result<Vec<_>>>()?;
+        } else {
+            Vec::new()
+        };
+        reuse.sort_unstable();
+        reuse.dedup();
+        if relink_reuse && reuse.is_empty() {
+            anyhow::bail!(
+                "--relink-reuse requires a stable compatible --reuse-from{} for {}",
+                if batch.jobs > 1 {
+                    " when --jobs is greater than 1"
+                } else {
+                    " or another same-game --path"
+                },
+                install.install_path.display()
+            );
+        }
+
+        let mut volume_keys = vec![griffr_common::runtime::task_pool::storage_volume_key(
+            &install.install_path,
+        )];
+        volume_keys.extend(
+            reuse
+                .iter()
+                .map(griffr_common::runtime::task_pool::storage_volume_key),
+        );
+        volume_keys.sort_unstable();
+        volume_keys.dedup();
+        work.push(VerifyWork {
+            index,
+            install: install.clone(),
+            reuse_paths: reuse,
+            volume_keys,
+        });
+    }
+
+    if suppressed_peer_reuse {
+        ui::print_warning(
+            "Concurrent repairs do not reuse from other selected targets while those targets may be changing",
+        );
+    }
 
     let api_client = ApiClient::new()?;
-    let mut pool_runner = TaskPoolRunner::new(opts.task_pool_config())?;
-    let mut reports = Vec::with_capacity(installs.len());
-
-    for (install, target_reuse_paths) in installs.iter().zip(reuse_by_target) {
-        reports.push(
-            verify_one(
+    let mut reports = vec![None; installs.len()];
+    let mut failures = Vec::new();
+    if batch.jobs == 1 {
+        let mut pool_runner = TaskPoolRunner::new(opts.task_pool_config())?;
+        for item in work {
+            let path = item.install.install_path.clone();
+            match verify_one(
                 &api_client,
                 &mut pool_runner,
-                install.clone(),
+                item.install,
                 game_override.clone(),
                 region_override,
                 channel_override.clone(),
                 overrides.clone(),
                 skip_local_detect,
                 repair,
-                target_reuse_paths,
+                item.reuse_paths,
                 force_copy,
                 relink_reuse,
                 scope,
                 opts,
             )
             .await
-            .with_context(|| format!("Verify failed for {}", install.install_path.display()))?,
-        );
+            {
+                Ok(report) => reports[item.index] = Some(report),
+                Err(error) => {
+                    failures.push(crate::commands::batch::BatchFailure {
+                        path,
+                        error: format!("{error:#}"),
+                    });
+                    if !batch.continue_after_failure() {
+                        break;
+                    }
+                }
+            }
+        }
+    } else {
+        let waves = crate::commands::batch::plan_disjoint_volume_waves(work, batch.jobs, |item| {
+            &item.volume_keys
+        });
+        for wave in waves {
+            let mut results = stream::iter(wave)
+                .map(|item| {
+                    let api_client = api_client.clone();
+                    let game_override = game_override.clone();
+                    let channel_override = channel_override.clone();
+                    let overrides = overrides.clone();
+                    async move {
+                        let path = item.install.install_path.clone();
+                        let result = async {
+                            let mut runner =
+                                TaskPoolRunner::new(opts.task_pool_config_for_batch(batch.jobs))?;
+                            verify_one(
+                                &api_client,
+                                &mut runner,
+                                item.install,
+                                game_override,
+                                region_override,
+                                channel_override,
+                                overrides,
+                                skip_local_detect,
+                                repair,
+                                item.reuse_paths,
+                                force_copy,
+                                relink_reuse,
+                                scope,
+                                opts,
+                            )
+                            .await
+                        }
+                        .await;
+                        (item.index, path, result)
+                    }
+                })
+                .buffer_unordered(batch.jobs)
+                .collect::<Vec<_>>()
+                .await;
+            results.sort_by_key(|(index, ..)| *index);
+            for (index, path, result) in results {
+                match result {
+                    Ok(report) => reports[index] = Some(report),
+                    Err(error) => failures.push(crate::commands::batch::BatchFailure {
+                        path,
+                        error: format!("{error:#}"),
+                    }),
+                }
+            }
+        }
     }
 
     if opts.output == OutputFormat::Json {
-        if reports.len() == 1 {
-            ui::emit_json(&reports[0])?;
+        if installs.len() == 1 && failures.is_empty() {
+            ui::emit_json(reports[0].as_ref().expect("single successful report"))?;
         } else {
-            ui::emit_json(&json!({ "results": reports }))?;
+            let results = installs
+                .iter()
+                .enumerate()
+                .map(|(index, install)| {
+                    if let Some(report) = reports[index].as_ref() {
+                        json!({
+                            "path": install.install_path,
+                            "status": "ok",
+                            "report": report,
+                        })
+                    } else {
+                        let error = failures
+                            .iter()
+                            .find(|failure| failure.path == install.install_path)
+                            .map(|failure| failure.error.as_str())
+                            .unwrap_or("not run after fail-fast");
+                        json!({
+                            "path": install.install_path,
+                            "status": "error",
+                            "error": error,
+                        })
+                    }
+                })
+                .collect::<Vec<_>>();
+            ui::emit_json(&json!({
+                "results": results,
+                "summary": {
+                    "total": installs.len(),
+                    "succeeded": reports.iter().filter(|report| report.is_some()).count(),
+                    "failed": failures.len(),
+                }
+            }))?;
         }
+    } else {
+        crate::commands::batch::print_batch_summary("Verify", installs.len(), &failures);
     }
-    Ok(())
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(crate::commands::batch::batch_error("Verify", &failures))
+    }
 }

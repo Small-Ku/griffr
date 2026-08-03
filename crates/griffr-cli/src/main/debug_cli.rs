@@ -452,20 +452,36 @@ impl GlobalOptions {
     }
 
     pub fn task_pool_config(&self) -> griffr_common::runtime::task_pool::TaskPoolConfig {
+        self.task_pool_config_for_batch(1)
+    }
+
+    pub fn task_pool_config_for_batch(
+        &self,
+        target_jobs: usize,
+    ) -> griffr_common::runtime::task_pool::TaskPoolConfig {
         use griffr_common::runtime::task_pool::{TaskPoolConfig, VolumeIoPolicy};
 
+        let target_jobs = target_jobs.max(1);
+        let share = |value: usize| value.div_ceil(target_jobs).max(1);
         let mut config = TaskPoolConfig::with_progress_buffers(
             self.extraction_progress_buffer_bytes,
             self.download_progress_buffer_bytes,
         );
+        config.dispatcher_threads = share(config.dispatcher_threads);
+        config.network_slots = share(config.network_slots);
+        config.cpu_slots = share(config.cpu_slots);
+        config.blocking_slots = share(config.blocking_slots);
+        config.blocking_pool_limit = share(config.blocking_pool_limit).max(2);
+        config.extract_slots = share(config.extract_slots);
+        config.extract_shards = share(config.extract_shards);
         config.default_volume_policy = VolumeIoPolicy::new(
-            self.volume_read_limit,
-            self.volume_write_limit,
-            self.volume_metadata_limit,
-            self.volume_streaming_pressure_limit,
+            share(self.volume_read_limit),
+            share(self.volume_write_limit),
+            share(self.volume_metadata_limit),
+            share(self.volume_streaming_pressure_limit),
             self.volume_streaming_mode,
         );
-        config.reuse_queue_limit = self.reuse_queue_limit.max(1);
+        config.reuse_queue_limit = share(self.reuse_queue_limit);
         config
     }
 

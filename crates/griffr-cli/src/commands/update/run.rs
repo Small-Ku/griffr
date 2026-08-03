@@ -756,15 +756,18 @@ pub async fn update(
     stage_dir: Option<PathBuf>,
     require_staged: bool,
     use_default_stage: bool,
+    batch: crate::BatchArgs,
     patch_options: griffr_common::runtime::PatchApplyOptions,
     opts: GlobalOptions,
 ) -> Result<()> {
+    crate::commands::batch::validate_batch_options(batch)?;
     if require_staged && stage_dir.is_none() {
         anyhow::bail!("--require-staged requires --stage-dir");
     }
     if stage_dir.is_some() && paths.len() != 1 {
         anyhow::bail!("An explicit --stage-dir can only be used with one update target");
     }
+
     let installs = crate::commands::batch::inspect_unique_installations(&paths).await?;
     let explicit_sources =
         crate::commands::batch::inspect_unique_reuse_sources(&reuse_paths).await?;
@@ -773,9 +776,22 @@ pub async fn update(
         .map(|install| install.require_known_game())
         .collect::<Result<Vec<_>, _>>()?;
     crate::commands::batch::validate_reuse_source_games(&explicit_sources, &target_games)?;
-    let api_client = ApiClient::new()?;
-    let mut task_pool_runner = TaskPoolRunner::new(opts.task_pool_config())?;
 
+    #[derive(Debug)]
+    struct UpdateWork {
+        index: usize,
+        path: PathBuf,
+        explicit_reuse: Vec<PathBuf>,
+        peer_reuse: Vec<PathBuf>,
+        volume_keys: Vec<String>,
+    }
+
+    let target_paths = installs
+        .iter()
+        .map(|install| install.install_path.clone())
+        .collect::<Vec<_>>();
+    let mut suppressed_peer_reuse = false;
+    let mut work = Vec::with_capacity(installs.len());
     for (index, install) in installs.iter().enumerate() {
         let target_reuse_paths = crate::commands::batch::reuse_paths_for_target(
             &explicit_sources,
@@ -783,24 +799,139 @@ pub async fn update(
             &target_games,
             index,
         );
-        update_internal(
-            &api_client,
-            &mut task_pool_runner,
-            install.install_path.clone(),
-            overrides.clone(),
-            target_reuse_paths.explicit,
-            target_reuse_paths.peers,
-            force_copy,
-            use_default_stage || stage_dir.is_some(),
-            patch_options.clone(),
-            stage_dir.clone(),
-            require_staged,
-            opts,
-        )
-        .await
-        .with_context(|| format!("Update failed for {}", install.install_path.display()))?;
+        let (mut explicit_reuse, peer_reuse) = if batch.jobs > 1 {
+            suppressed_peer_reuse |= !target_reuse_paths.peers.is_empty();
+            let mut explicit = target_reuse_paths.explicit;
+            explicit.retain(|source| !target_paths.iter().any(|target| target == source));
+            (explicit, Vec::new())
+        } else {
+            (target_reuse_paths.explicit, target_reuse_paths.peers)
+        };
+        explicit_reuse.shrink_to_fit();
+
+        let mut volume_keys = vec![griffr_common::runtime::task_pool::storage_volume_key(
+            &install.install_path,
+        )];
+        volume_keys.extend(
+            explicit_reuse
+                .iter()
+                .chain(&peer_reuse)
+                .map(griffr_common::runtime::task_pool::storage_volume_key),
+        );
+        volume_keys.extend(
+            [
+                stage_dir.as_ref(),
+                patch_options.work_dir.as_ref(),
+                patch_options.external_asset_root.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(griffr_common::runtime::task_pool::storage_volume_key),
+        );
+        volume_keys.sort_unstable();
+        volume_keys.dedup();
+        work.push(UpdateWork {
+            index,
+            path: install.install_path.clone(),
+            explicit_reuse,
+            peer_reuse,
+            volume_keys,
+        });
     }
-    Ok(())
+
+    if suppressed_peer_reuse {
+        ui::print_warning(
+            "Concurrent target updates do not reuse from other selected targets while those targets may be changing",
+        );
+    }
+
+    let api_client = ApiClient::new()?;
+    let mut failures = Vec::new();
+    if batch.jobs == 1 {
+        let mut task_pool_runner = TaskPoolRunner::new(opts.task_pool_config())?;
+        for item in work {
+            let result = update_internal(
+                &api_client,
+                &mut task_pool_runner,
+                item.path.clone(),
+                overrides.clone(),
+                item.explicit_reuse,
+                item.peer_reuse,
+                force_copy,
+                use_default_stage || stage_dir.is_some(),
+                patch_options.clone(),
+                stage_dir.clone(),
+                require_staged,
+                opts,
+            )
+            .await;
+            if let Err(error) = result {
+                failures.push(crate::commands::batch::BatchFailure {
+                    path: item.path,
+                    error: format!("{error:#}"),
+                });
+                if !batch.continue_after_failure() {
+                    break;
+                }
+            }
+        }
+    } else {
+        let waves = crate::commands::batch::plan_disjoint_volume_waves(work, batch.jobs, |item| {
+            &item.volume_keys
+        });
+        for wave in waves {
+            let mut results = stream::iter(wave)
+                .map(|item| {
+                    let api_client = api_client.clone();
+                    let overrides = overrides.clone();
+                    let patch_options = patch_options.clone();
+                    let stage_dir = stage_dir.clone();
+                    async move {
+                        let path = item.path.clone();
+                        let result = async {
+                            let mut runner =
+                                TaskPoolRunner::new(opts.task_pool_config_for_batch(batch.jobs))?;
+                            update_internal(
+                                &api_client,
+                                &mut runner,
+                                item.path,
+                                overrides,
+                                item.explicit_reuse,
+                                item.peer_reuse,
+                                force_copy,
+                                use_default_stage || stage_dir.is_some(),
+                                patch_options,
+                                stage_dir,
+                                require_staged,
+                                opts,
+                            )
+                            .await
+                        }
+                        .await;
+                        (item.index, path, result)
+                    }
+                })
+                .buffer_unordered(batch.jobs)
+                .collect::<Vec<_>>()
+                .await;
+            results.sort_by_key(|(index, ..)| *index);
+            for (_, path, result) in results {
+                if let Err(error) = result {
+                    failures.push(crate::commands::batch::BatchFailure {
+                        path,
+                        error: format!("{error:#}"),
+                    });
+                }
+            }
+        }
+    }
+
+    crate::commands::batch::print_batch_summary("Update", installs.len(), &failures);
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(crate::commands::batch::batch_error("Update", &failures))
+    }
 }
 
 pub(crate) async fn apply_staged_predownload(

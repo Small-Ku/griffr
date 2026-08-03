@@ -131,6 +131,7 @@ pub(crate) async fn run() -> Result<()> {
 
         Commands::Update {
             mutation,
+            batch,
             paths,
             overrides,
             reuse,
@@ -172,6 +173,7 @@ pub(crate) async fn run() -> Result<()> {
                 stage_dir,
                 require_staged,
                 use_default_stage,
+                batch,
                 griffr_common::runtime::PatchApplyOptions {
                     work_dir,
                     external_asset_root,
@@ -269,6 +271,7 @@ pub(crate) async fn run() -> Result<()> {
 
         Commands::Verify {
             mutation,
+            batch,
             paths,
             remote,
             overrides,
@@ -323,6 +326,7 @@ pub(crate) async fn run() -> Result<()> {
                 force_copy,
                 relink_reuse,
                 scope,
+                batch,
                 opts,
             )
             .await?;
