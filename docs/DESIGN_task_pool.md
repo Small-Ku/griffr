@@ -94,6 +94,8 @@ resource-aware coordinator
    `- enqueue newly ready nodes
 ```
 
+The coordinator caches admission data for one dispatch wave instead of rebuilding queue depths, writer reservations, reuse backlog, and free-space state before every selected node. The cache is updated as nodes leave the queue, expires when the next writer reservation becomes due, and is invalidated by queue or active-resource changes. Physical volume identities are also cached for the command so repeated continuations do not repeat volume probes for the same path.
+
 Every ready task is assigned one `ResourceRequest`:
 
 ```rust
@@ -114,7 +116,9 @@ struct ResourceRequest {
 
 Dependency readiness and resource admission are deliberately separate. A node runs only when both are satisfied. `network_slots`, `cpu_slots`, and `blocking_slots` are admission limits, not custom thread counts.
 
-Async transfers, hardlink commits, verified reuse copies, and delete-manifest namespace actions run on Dispatcher runtimes. CPU and blocking work uses the Dispatcher's bounded blocking pool. A transient blocking-pool rejection restores the same graph node to the queue without losing its resource or dependency identity.
+Async transfers, hardlink commits, verified reuse copies, and delete-manifest namespace actions run on Dispatcher runtimes. Async dispatch moves the scheduled node directly into the runtime closure; only blocking dispatch keeps a recoverable shared slot because a full blocking pool may reject submission. CPU and blocking work uses the Dispatcher's bounded blocking pool. A transient blocking-pool rejection restores the same graph node to the queue without losing its resource or dependency identity.
+
+HTTP transfers use a bounded receive/write pipeline. Small body chunks are coalesced into 1 MiB batches, at most two completed batches wait for disk, and progress is emitted from completed writes rather than received bytes. This overlaps network receive, digest calculation, and storage I/O while preserving bounded memory and durable resume semantics.
 
 ---
 

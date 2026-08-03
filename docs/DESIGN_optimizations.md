@@ -48,11 +48,18 @@ This design uses six code stages followed by packaging metadata.
 - Read-only, verify, delete, base-release, hardlink, and metadata-only tasks do not consume byte reservations.
 - Failed copy paths remove partial temporary outputs immediately.
 
+
+## 7. Bounded Transfer and Scheduler Hot Paths
+
+- HTTP response chunks are coalesced into 1 MiB write batches and passed through a bounded two-entry queue. Receiving and digesting the next batch can overlap the previous `write_all_at` without allowing unbounded body buffering.
+- Download progress advances only after a batch has been persisted, so retries and resume offsets continue to describe durable bytes. The same writer serves ordinary downloads and archive-range cache files.
+- The scheduler reuses one admission snapshot across a dispatch wave. Queue depth, queued reuse commits, writer reservations, and storage availability are updated incrementally as tasks leave the ready queues.
+- Admission snapshots expire at the next pending writer-reservation deadline and are invalidated when work is enqueued, restored, or releases resources. Free-space queries are delayed until an active reservation or a newly selected first writer makes the value necessary.
+- One command-scoped volume-key cache avoids repeating physical-volume identity probes when continuations or related tasks route the same path.
+
 ## Validation
 
-The packaging environment has no Rust compiler or rustfmt and cannot resolve
-the Rust distribution host. Validation therefore uses the repository's pinned
-Tree-sitter checker, its Python regression tests, whitespace checks, patch
-replay from the uploaded baseline, source-tree comparison, and extracted-ZIP
-revalidation. Compiler-level `cargo fmt`, `cargo check`, `cargo clippy`, and
-`cargo test` remain recommended on Windows after extraction.
+Validation uses `cargo fmt`, workspace `cargo check`, Clippy with warnings denied,
+the Rust test suite, and the repository policy checker. Platform-specific I/O
+behavior still requires final Windows verification because IOCP is the primary
+runtime path.
