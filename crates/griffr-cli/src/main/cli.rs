@@ -366,6 +366,14 @@ pub(crate) enum Commands {
         /// Stop the existing process if it is running
         #[arg(short, long)]
         force: bool,
+
+        /// Wine-compatible runner used on non-Windows hosts
+        #[arg(long, value_name = "PROGRAM")]
+        wine: Option<std::path::PathBuf>,
+
+        /// Wine prefix used on non-Windows hosts
+        #[arg(long, value_name = "PATH")]
+        wine_prefix: Option<std::path::PathBuf>,
     },
 
     /// Verify one or more local installs against their game_files manifests

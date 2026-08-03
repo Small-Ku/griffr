@@ -19,7 +19,7 @@ use super::tasks::{ArchivePart, ArchiveRetention};
 const ITEM_PROGRESS_BATCH: usize = 32;
 
 pub(crate) fn should_report_item_progress(finished: usize, total: usize) -> bool {
-    finished == 0 || finished == total || finished % ITEM_PROGRESS_BATCH == 0
+    finished == 0 || finished == total || finished.is_multiple_of(ITEM_PROGRESS_BATCH)
 }
 
 #[doc(hidden)]

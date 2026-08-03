@@ -214,9 +214,17 @@ pub(crate) async fn run() -> Result<()> {
             }
         },
 
-        Commands::Launch { path, force } => {
-            opts.verbose(format!("Launch path: {:?}, force={}", path, force));
-            commands::launch(path, force, opts).await?;
+        Commands::Launch {
+            path,
+            force,
+            wine,
+            wine_prefix,
+        } => {
+            opts.verbose(format!(
+                "Launch path: {:?}, force={}, wine={:?}, wine_prefix={:?}",
+                path, force, wine, wine_prefix
+            ));
+            commands::launch(path, force, wine, wine_prefix, opts).await?;
         }
 
         Commands::Verify {

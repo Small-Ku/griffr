@@ -426,7 +426,10 @@ fn mutation_paths_block_ancestors_and_descendants_only() {
 
 #[test]
 fn archive_commit_limits_same_volume_metadata_and_cross_volume_copies() {
-    let config = TaskPoolConfig::default();
+    let mut config = TaskPoolConfig::default();
+    // This test isolates the archive-commit lane. Keep the unrelated blocking
+    // lane from becoming the limit on small CI/VM machines.
+    config.blocking_slots = config.blocking_slots.max(3);
     let admission = AdmissionSnapshot::default();
     let metadata_commit = ResourceRequest {
         archive_commit_volumes: vec![("volume-a".to_string(), false)],

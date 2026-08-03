@@ -120,10 +120,10 @@ fn obsolete_game_files<'a>(
     obsolete_game_files_matching(current, |normalized| target_paths.contains(normalized))
 }
 
-fn obsolete_game_files_matching<'a>(
-    current: &'a [GameFileEntry],
+fn obsolete_game_files_matching(
+    current: &[GameFileEntry],
     mut target_contains: impl FnMut(&str) -> bool,
-) -> Result<Vec<(&'a GameFileEntry, PathBuf)>> {
+) -> Result<Vec<(&GameFileEntry, PathBuf)>> {
     let mut seen = HashSet::default();
     let mut obsolete = Vec::new();
 

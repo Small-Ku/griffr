@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use crate::error::{Error, Result};
+#[cfg(windows)]
+use crate::error::Error;
+use crate::error::Result;
 
 /// Reserves the final allocation without changing the file's logical EOF.
 ///
@@ -50,7 +52,53 @@ where
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub(crate) fn preallocate_file<T>(file: &T, path: &Path, bytes: u64) -> Result<()>
+where
+    T: std::os::fd::AsRawFd + ?Sized,
+{
+    if bytes == 0 {
+        return Ok(());
+    }
+
+    let length = libc::off_t::try_from(bytes).map_err(|_| crate::error::Error::IoAt {
+        action: "write to file",
+        path: path.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("allocation size {bytes} exceeds Linux off_t range"),
+        ),
+    })?;
+
+    loop {
+        // SAFETY: fallocate only borrows this valid file descriptor for the duration
+        // of the call. KEEP_SIZE reserves blocks without extending logical EOF.
+        let result =
+            unsafe { libc::fallocate(file.as_raw_fd(), libc::FALLOC_FL_KEEP_SIZE, 0, length) };
+        if result == 0 {
+            return Ok(());
+        }
+
+        let source = std::io::Error::last_os_error();
+        match source.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            // Some filesystems do not implement KEEP_SIZE. Preserve the former
+            // no-op behavior there instead of making downloads unusable.
+            Some(libc::EOPNOTSUPP | libc::ENOSYS | libc::EINVAL) => {
+                return Ok(());
+            }
+            _ => {
+                return Err(crate::error::Error::IoAt {
+                    action: "write to file",
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        }
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "linux")))]
 pub(crate) fn preallocate_file<T: ?Sized>(_file: &T, _path: &Path, _bytes: u64) -> Result<()> {
     Ok(())
 }

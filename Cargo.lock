@@ -1298,6 +1298,7 @@ dependencies = [
  "flume",
  "futures-util",
  "hdiffpatch-rs",
+ "libc",
  "md-5",
  "rapidhash",
  "serde",

@@ -18,6 +18,52 @@ use tracing::{debug, info, warn};
 use crate::config::{GameId, InstallTarget};
 use crate::runtime::install_change::ensure_install_ready;
 
+#[cfg(target_os = "linux")]
+mod wine;
+
+/// Wine runner configuration for non-Windows hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WineConfig {
+    /// Wine-compatible executable, such as `wine`, `wine64`, or a custom runner shim.
+    pub runner: PathBuf,
+    /// Wine prefix to expose through `WINEPREFIX`.
+    pub prefix: Option<PathBuf>,
+}
+
+impl WineConfig {
+    /// Resolve Wine configuration from the current process environment.
+    pub fn from_environment() -> Self {
+        let runner = std::env::var_os("GRIFFR_WINE")
+            .filter(|value| !value.is_empty())
+            .or_else(|| std::env::var_os("WINE"))
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("wine"));
+        let prefix = std::env::var_os("WINEPREFIX")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        Self { runner, prefix }
+    }
+
+    /// Resolve the prefix used by Wine, including Wine's default `$HOME/.wine` location.
+    pub fn effective_prefix(&self) -> Option<PathBuf> {
+        self.prefix
+            .clone()
+            .or_else(|| {
+                std::env::var_os("WINEPREFIX")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            })
+            .or_else(|| dirs::home_dir().map(|home| home.join(".wine")))
+    }
+}
+
+impl Default for WineConfig {
+    fn default() -> Self {
+        Self::from_environment()
+    }
+}
+
 /// Data for a running game process
 #[derive(Debug, Clone)]
 pub struct GameProcess {
@@ -39,6 +85,7 @@ pub struct Launcher {
     game_id: GameId,
     target: InstallTarget,
     install_path: PathBuf,
+    wine: Option<WineConfig>,
 }
 
 impl Launcher {
@@ -48,7 +95,19 @@ impl Launcher {
             game_id,
             target,
             install_path: install_path.into(),
+            wine: (!cfg!(windows)).then(WineConfig::default),
         }
+    }
+
+    /// Override the Wine runner used on non-Windows hosts.
+    pub fn with_wine_config(mut self, wine: WineConfig) -> Self {
+        self.wine = Some(wine);
+        self
+    }
+
+    /// Return the configured Wine runner, if this launcher uses Wine.
+    pub fn wine_config(&self) -> Option<&WineConfig> {
+        self.wine.as_ref()
     }
 
     /// Get the main game program file name
@@ -74,7 +133,14 @@ impl Launcher {
         }
         #[cfg(not(windows))]
         {
-            vec![]
+            #[cfg(target_os = "linux")]
+            {
+                wine::find_game_processes(self)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                vec![]
+            }
         }
     }
 
@@ -281,7 +347,12 @@ impl Launcher {
         self.force_stop_process(pid)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    fn request_process_stop(&self, pid: u32) -> Result<()> {
+        wine::signal_process(self, pid, libc::SIGTERM)
+    }
+
+    #[cfg(all(not(windows), not(target_os = "linux")))]
     fn request_process_stop(&self, _pid: u32) -> Result<()> {
         Ok(())
     }
@@ -317,7 +388,12 @@ impl Launcher {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    fn force_stop_process(&self, pid: u32) -> Result<()> {
+        wine::signal_process(self, pid, libc::SIGKILL)
+    }
+
+    #[cfg(all(not(windows), not(target_os = "linux")))]
     fn force_stop_process(&self, _pid: u32) -> Result<()> {
         Ok(())
     }
@@ -377,14 +453,25 @@ impl Launcher {
 
         #[cfg(not(windows))]
         {
-            let mut cmd = Command::new(&exe_path);
+            let wine = self.wine.as_ref().ok_or_else(|| Error::Message {
+                context: "Launcher/Process error: ",
+                detail: "Wine is not configured for this non-Windows host".to_owned(),
+            })?;
+            let mut cmd = Command::new(&wine.runner);
+            cmd.arg(&exe_path);
+            if let Some(prefix) = &wine.prefix {
+                cmd.env("WINEPREFIX", prefix);
+            }
             cmd.current_dir(&working_dir)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
 
             let child = cmd.spawn().map_err(|e| Error::Message {
                 context: "Launcher/Process error: ",
-                detail: format!("Failed to launch game from {:?}: {e}", exe_path),
+                detail: format!(
+                    "Failed to launch game from {:?} with Wine runner {:?}: {e}",
+                    exe_path, wine.runner
+                ),
             })?;
 
             info!("Game launched with PID: {:?}", child.id());
@@ -394,6 +481,7 @@ impl Launcher {
 }
 
 /// Check if a process program file is within the game installation directory
+#[cfg(windows)]
 fn is_process_in_game_directory(exe_path: &Path, game_dir: &Path) -> bool {
     exe_path.ancestors().any(|ancestor| ancestor == game_dir)
 }

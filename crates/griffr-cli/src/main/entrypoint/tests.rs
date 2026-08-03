@@ -235,3 +235,37 @@ fn explicit_resource_policy_conflicts_with_skip_vfs() {
 
     assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
 }
+
+#[test]
+fn launch_accepts_wine_runner_and_prefix() {
+    let cli = Cli::try_parse_from([
+        "griffr",
+        "launch",
+        "--path",
+        "/games/endfield",
+        "--wine",
+        "/opt/wine/bin/wine64",
+        "--wine-prefix",
+        "/home/user/.wine-endfield",
+        "--force",
+    ])
+    .unwrap();
+
+    let Commands::Launch {
+        path,
+        force,
+        wine,
+        wine_prefix,
+    } = cli.command
+    else {
+        panic!("expected launch command");
+    };
+
+    assert_eq!(path, std::path::PathBuf::from("/games/endfield"));
+    assert!(force);
+    assert_eq!(wine, Some(std::path::PathBuf::from("/opt/wine/bin/wine64")));
+    assert_eq!(
+        wine_prefix,
+        Some(std::path::PathBuf::from("/home/user/.wine-endfield"))
+    );
+}

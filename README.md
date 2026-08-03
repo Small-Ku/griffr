@@ -67,6 +67,36 @@ Set up game-selected Persistent working set (copy-only; add `--prune` to clean u
 cargo run -p griffr-cli -- setup-persistent-resources --path <GAME_PATH>
 ```
 
+## Wine on Linux
+
+On non-Windows hosts, `launch` runs the game through Wine. It uses `wine` by
+default and inherits `WINEPREFIX` when set:
+
+```bash
+WINEPREFIX="$HOME/.wine-endfield" cargo run -p griffr-cli -- launch --path <GAME_PATH>
+```
+
+An explicit Wine-compatible runner and prefix can be selected when several
+Wine environments are installed:
+
+```bash
+cargo run -p griffr-cli -- launch --path <GAME_PATH> \
+  --wine /opt/wine/bin/wine64 \
+  --wine-prefix "$HOME/.wine-endfield"
+```
+
+`--force` only signals Linux processes that Griffr can prove belong to the
+selected install by their process name and `/proc` path information. The
+runner can also be set through `GRIFFR_WINE`.
+
+The deterministic Linux integration test uses a Wine-compatible shim and a
+real child process. A real Wine smoke test generates a small PE executable and
+can be run on a host with Wine, clang, and lld-link:
+
+```bash
+cargo test -p griffr-common real_wine_launch_smoke -- --ignored --nocapture
+```
+
 ## Documentation
 - API/protocol docs: [`docs/API.md`](docs/API.md)
 - Design & architecture docs: [`docs/DESIGN.md`](docs/DESIGN.md)

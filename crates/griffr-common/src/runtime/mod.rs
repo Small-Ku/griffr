@@ -51,7 +51,7 @@ pub use install_change::{
 };
 pub use integrity::{run_integrity_pool, IntegrityRunSummary, IntegritySelection};
 pub use issues::{FileIssue, FileIssueKind};
-pub use launcher::{GameProcess, Launcher};
+pub use launcher::{GameProcess, Launcher, WineConfig};
 pub use launcher_metadata::sync_launcher_metadata;
 pub use local_install::{
     decrypt_config_ini, detect_local_install, resolve_install_path, resolve_named_path,
