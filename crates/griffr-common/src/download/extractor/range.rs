@@ -2,10 +2,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use compio::buf::BufResult;
-use compio::io::AsyncWriteAtExt;
 use compio::time::timeout;
-use futures_util::StreamExt;
 
 use crate::api::protocol::{RANGE_HEADER, USER_AGENT_HEADER};
 use crate::error::{Error, Result};
@@ -121,7 +118,7 @@ pub(crate) async fn fetch_archive_range_to_cache(
         });
     }
 
-    let mut file = compio::fs::OpenOptions::new()
+    let file = compio::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
@@ -134,43 +131,24 @@ pub(crate) async fn fetch_archive_range_to_cache(
         })?;
     preallocate_file(&file, &part_path, expected)?;
 
-    let mut current_offset = resume_offset;
-    let mut buffered_bytes = 0usize;
-    let flush_threshold = progress_buffer_bytes.max(64 * 1024);
-    let mut stream = response.bytes_stream();
-
-    loop {
-        let chunk = timeout(ARCHIVE_RANGE_BODY_TIMEOUT, stream.next())
-            .await
-            .map_err(|_| Error::Message {
-                context: "Download error: ",
-                detail: format!("Timeout reading archive range body for {}", request.url),
-            })?;
-
-        let Some(chunk_res) = chunk else {
-            break;
-        };
-
-        let chunk = chunk_res.map_err(|source| Error::Message {
-            context: "Download error: ",
-            detail: format!("HTTP download error for {}: {source}", request.url),
-        })?;
-
-        let chunk_len = chunk.len() as u64;
-        let BufResult(result, _) = file.write_all_at(chunk, current_offset).await;
-        result.map_err(|source| Error::IoAt {
-            action: "write to file",
-            path: part_path.clone(),
-            source,
-        })?;
-
-        current_offset += chunk_len;
-        buffered_bytes = buffered_bytes.saturating_add(chunk_len as usize);
-        if buffered_bytes >= flush_threshold || current_offset == expected {
-            on_progress(current_offset);
-            buffered_bytes = 0;
-        }
-    }
+    let flush_threshold = progress_buffer_bytes.max(64 * 1024) as u64;
+    let mut last_reported = resume_offset;
+    let (file, current_offset) = crate::runtime::task_pool::download_write::write_http_body(
+        response.bytes_stream(),
+        file,
+        &part_path,
+        &request.url,
+        resume_offset,
+        ARCHIVE_RANGE_BODY_TIMEOUT,
+        |_| {},
+        |written| {
+            if written.saturating_sub(last_reported) >= flush_threshold || written == expected {
+                on_progress(written);
+                last_reported = written;
+            }
+        },
+    )
+    .await?;
 
     if current_offset != expected {
         return Err(Error::Message {

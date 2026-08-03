@@ -1,6 +1,7 @@
 mod archive_plan;
 mod blocking_buffer;
 pub mod download;
+pub(crate) mod download_write;
 pub(crate) mod fs_ops;
 pub mod graph;
 mod runner;

@@ -169,3 +169,103 @@ fn do_download(
         }
     }
 }
+
+#[test]
+fn bounded_download_writer_batches_small_body_chunks() {
+    use compio::bytes::Bytes;
+    use futures_util::stream;
+    use std::time::Duration;
+
+    let payload = (0..(2 * 1024 * 1024 + 17_321))
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let chunks = payload
+        .chunks(3079)
+        .map(|chunk| Ok::<_, std::io::Error>(Bytes::copy_from_slice(chunk)))
+        .collect::<Vec<_>>();
+    let expected_md5 = crate::to_hex(&Md5::digest(&payload));
+    let tmp = tempdir().unwrap();
+    let dest = tmp.path().join("streamed.bin");
+    let runtime = compio::runtime::Runtime::new().unwrap();
+    let mut hasher = Md5::new();
+    let mut progress = Vec::new();
+
+    let written = runtime.block_on(async {
+        let file = compio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&dest)
+            .await
+            .unwrap();
+        let (file, written) = crate::runtime::task_pool::download_write::write_http_body(
+            stream::iter(chunks),
+            file,
+            &dest,
+            "test body",
+            0,
+            Duration::from_secs(5),
+            |chunk| md5::Digest::update(&mut hasher, chunk),
+            |written| progress.push(written),
+        )
+        .await
+        .unwrap();
+        file.close().await.unwrap();
+        written
+    });
+
+    assert_eq!(written, payload.len() as u64);
+    assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    assert_eq!(crate::to_hex(&md5::Digest::finalize(hasher)), expected_md5);
+    assert_eq!(progress.last().copied(), Some(written));
+}
+
+#[test]
+fn bounded_download_writer_preserves_resumed_prefix() {
+    use compio::bytes::Bytes;
+    use futures_util::stream;
+    use std::time::Duration;
+
+    let prefix = b"already-downloaded-prefix".to_vec();
+    let suffix = (0..(1024 * 1024 + 8193))
+        .map(|index| (index % 239) as u8)
+        .collect::<Vec<_>>();
+    let chunks = suffix
+        .chunks(4093)
+        .map(|chunk| Ok::<_, std::io::Error>(Bytes::copy_from_slice(chunk)))
+        .collect::<Vec<_>>();
+    let tmp = tempdir().unwrap();
+    let dest = tmp.path().join("resumed.bin");
+    std::fs::write(&dest, &prefix).unwrap();
+    let runtime = compio::runtime::Runtime::new().unwrap();
+    let mut progress = Vec::new();
+
+    let written = runtime.block_on(async {
+        let file = compio::fs::OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .open(&dest)
+            .await
+            .unwrap();
+        let (file, written) = crate::runtime::task_pool::download_write::write_http_body(
+            stream::iter(chunks),
+            file,
+            &dest,
+            "resumed body",
+            prefix.len() as u64,
+            Duration::from_secs(5),
+            |_| {},
+            |written| progress.push(written),
+        )
+        .await
+        .unwrap();
+        file.close().await.unwrap();
+        written
+    });
+
+    let mut expected = prefix;
+    expected.extend_from_slice(&suffix);
+    assert_eq!(written, expected.len() as u64);
+    assert_eq!(std::fs::read(&dest).unwrap(), expected);
+    assert_eq!(progress.last().copied(), Some(written));
+}

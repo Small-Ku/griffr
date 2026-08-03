@@ -7,10 +7,6 @@ use crate::error::{Error, Result};
 use crate::runtime::{
     preallocate_file, ArtifactDigest, ArtifactExpectation, ArtifactProof, ArtifactSource,
 };
-use compio::buf::BufResult;
-use compio::bytes::Bytes;
-use compio::io::AsyncWriteAtExt;
-use futures_util::StreamExt;
 use md5::{Digest, Md5};
 use tracing::debug;
 
@@ -251,7 +247,7 @@ pub(crate) async fn do_prepared_download(
             .create(true)
             .write(true)
             .truncate(!resume_effective);
-        let mut out = open_options
+        let out = open_options
             .open(&part_path_for_write)
             .await
             .map_err(|e| Error::IoAt {
@@ -269,53 +265,35 @@ pub(crate) async fn do_prepared_download(
         } else {
             Md5::new()
         };
-        let mut stream = response.bytes_stream();
-        let mut total_written = if resume_effective { resume_offset } else { 0 };
-        let mut write_offset = total_written;
-        let mut last_reported_bytes = total_written;
+        let start_offset = if resume_effective { resume_offset } else { 0 };
+        let mut last_reported_bytes = start_offset;
         let mut last_reported_at = Instant::now();
         let progress_threshold = (progress_buffer_bytes as u64).max(1);
-        loop {
-            let next: Option<std::result::Result<Bytes, cyper::Error>> =
-                compio::time::timeout(body_timeout, stream.next())
-                    .await
-                    .map_err(|_| Error::Message {
-                        context: "Download error: ",
-                        detail: format!(
-                            "Timed out reading response body from {} (timeout={}s)",
-                            url_owned,
-                            body_timeout.as_secs()
-                        ),
-                    })?;
-            let Some(chunk) = next else {
-                break;
-            };
-            let chunk: Bytes = chunk.map_err(|e| Error::Message {
-                context: "Download error: ",
-                detail: format!("Failed to read response body chunk: {e}"),
-            })?;
-            md5::Digest::update(&mut hasher, chunk.as_ref());
-            let chunk_len = chunk.len() as u64;
-            let BufResult(write_result, _) = out.write_all_at(chunk, write_offset).await;
-            write_result.map_err(|e| Error::IoAt {
-                action: "write to file",
-                path: part_path_for_write.clone(),
-                source: e,
-            })?;
-            write_offset = write_offset.saturating_add(chunk_len);
-            total_written = total_written.saturating_add(chunk_len);
-            if let Some(ref callback) = on_progress {
-                let byte_threshold_reached =
-                    total_written.saturating_sub(last_reported_bytes) >= progress_threshold;
-                if byte_threshold_reached || last_reported_at.elapsed() >= PROGRESS_EMIT_INTERVAL {
-                    callback(DownloadProgress::Advanced(total_written));
-                    last_reported_bytes = total_written;
-                    last_reported_at = Instant::now();
+        let progress = &on_progress;
+        let (out, total_written) = super::download_write::write_http_body(
+            response.bytes_stream(),
+            out,
+            &part_path_for_write,
+            &url_owned,
+            start_offset,
+            body_timeout,
+            |chunk| md5::Digest::update(&mut hasher, chunk),
+            |written| {
+                if let Some(callback) = progress.as_ref() {
+                    let byte_threshold_reached =
+                        written.saturating_sub(last_reported_bytes) >= progress_threshold;
+                    if byte_threshold_reached
+                        || last_reported_at.elapsed() >= PROGRESS_EMIT_INTERVAL
+                    {
+                        callback(DownloadProgress::Advanced(written));
+                        last_reported_bytes = written;
+                        last_reported_at = Instant::now();
+                    }
                 }
-            }
-        }
-
-        if let Some(ref callback) = on_progress {
+            },
+        )
+        .await?;
+        if let Some(callback) = on_progress.as_ref() {
             if total_written > last_reported_bytes {
                 callback(DownloadProgress::Advanced(total_written));
             }
