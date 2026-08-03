@@ -24,6 +24,33 @@ fn parse_remote_args(
     ))
 }
 
+async fn dispatch_resource_sync(args: PersistentResourceArgs, opts: GlobalOptions) -> Result<()> {
+    let PersistentResourceArgs {
+        path: PathArg { path },
+        overrides,
+        file_set,
+        reuse_from,
+        allow_download,
+        prefer_reuse,
+        prune,
+    } = args;
+    opts.verbose(format!(
+        "Resource sync path={:?}, file_set={:?}, reuse_from={:?}, allow_download={}, prefer_reuse={}, prune={}",
+        path, file_set, reuse_from, allow_download, prefer_reuse, prune
+    ));
+    commands::setup_persistent_resources(
+        path,
+        overrides,
+        file_set,
+        reuse_from,
+        allow_download,
+        prefer_reuse,
+        prune,
+        opts,
+    )
+    .await
+}
+
 pub(crate) async fn run() -> Result<()> {
     let cli = Cli::parse();
 
@@ -99,6 +126,8 @@ pub(crate) async fn run() -> Result<()> {
             reuse,
             defer_verification,
             full_package,
+            stage_dir,
+            require_staged,
             use_predownload,
             resource_policy,
             skip_vfs,
@@ -119,16 +148,19 @@ pub(crate) async fn run() -> Result<()> {
                 keep_pack_archives,
                 ..opts
             };
+            let use_default_stage = use_predownload && stage_dir.is_none();
             opts.verbose(format!(
-                "Update paths: {:?}, reuse_from={:?}, force_copy={}, use_predownload={}",
-                paths, reuse_from, force_copy, use_predownload
+                "Update paths: {:?}, reuse_from={:?}, force_copy={}, stage_dir={:?}, require_staged={}, use_default_stage={}",
+                paths, reuse_from, force_copy, stage_dir, require_staged, use_default_stage
             ));
             commands::update(
                 paths,
                 overrides,
                 reuse_from,
                 force_copy,
-                use_predownload,
+                stage_dir,
+                require_staged,
+                use_default_stage,
                 griffr_common::runtime::PatchApplyOptions {
                     work_dir,
                     external_asset_root,
@@ -138,25 +170,25 @@ pub(crate) async fn run() -> Result<()> {
             .await?;
         }
 
-        Commands::Predownload { command } => match command {
-            PredownloadCommands::Check { path } => {
+        Commands::Stage { command } => match command {
+            StageCommands::Inspect { path } => {
                 let PathArg { path } = path;
                 opts.verbose(format!("Predownload check path: {:?}", path));
                 commands::predownload_check(path, opts).await?;
             }
-            PredownloadCommands::Fetch { path, output_dir } => {
+            StageCommands::Fetch { path, stage_dir } => {
                 let PathArg { path } = path;
                 opts.verbose(format!(
-                    "Predownload fetch path: {:?}, output_dir={:?}",
-                    path, output_dir
+                    "Stage fetch path: {:?}, stage_dir={:?}",
+                    path, stage_dir
                 ));
-                commands::predownload_fetch(path, output_dir, opts).await?;
+                commands::predownload_fetch(path, stage_dir, opts).await?;
             }
-            PredownloadCommands::Apply {
+            StageCommands::Apply {
                 path,
                 overrides,
-                output_dir,
-                skip_verify,
+                stage_dir,
+                defer_verification,
                 resource_policy,
                 skip_vfs,
                 keep_pack_archives,
@@ -166,19 +198,19 @@ pub(crate) async fn run() -> Result<()> {
                 let PathArg { path } = path;
                 let resource_policy = ResourcePolicyArg::resolve(resource_policy, skip_vfs);
                 let opts = GlobalOptions {
-                    skip_verify,
+                    skip_verify: defer_verification,
                     resource_policy,
                     keep_pack_archives,
                     ..opts
                 };
                 opts.verbose(format!(
-                    "Predownload apply path: {:?}, output_dir={:?}",
-                    path, output_dir
+                    "Legacy stage apply path: {:?}, stage_dir={:?}",
+                    path, stage_dir
                 ));
                 commands::predownload_apply(
                     path,
                     overrides,
-                    output_dir,
+                    stage_dir,
                     griffr_common::runtime::PatchApplyOptions {
                         work_dir,
                         external_asset_root,
@@ -187,12 +219,18 @@ pub(crate) async fn run() -> Result<()> {
                 )
                 .await?;
             }
-            PredownloadCommands::Resume { path } => {
+            StageCommands::Resume { path } => {
                 let PathArg { path } = path;
                 opts.verbose(format!("Predownload resume path: {:?}", path));
                 commands::predownload_resume(path, opts).await?;
             }
         },
+
+        Commands::Recover { path } => {
+            let PathArg { path } = path;
+            opts.verbose(format!("Recover path: {:?}", path));
+            commands::predownload_resume(path, opts).await?;
+        }
 
         Commands::Launch {
             path,
@@ -264,31 +302,13 @@ pub(crate) async fn run() -> Result<()> {
             )
             .await?;
         }
-        Commands::SetupPersistentResources {
-            path,
-            overrides,
-            file_set,
-            reuse_from,
-            allow_download,
-            prefer_reuse,
-            prune,
-        } => {
-            let PathArg { path } = path;
-            opts.verbose(format!(
-                "Setup Persistent resources path={:?}, file_set={:?}, reuse_from={:?}, allow_download={}, prefer_reuse={}, prune={}",
-                path, file_set, reuse_from, allow_download, prefer_reuse, prune
-            ));
-            commands::setup_persistent_resources(
-                path,
-                overrides,
-                file_set,
-                reuse_from,
-                allow_download,
-                prefer_reuse,
-                prune,
-                opts,
-            )
-            .await?;
+        Commands::Resources { command } => match command {
+            ResourceCommands::Sync { args } => {
+                dispatch_resource_sync(args, opts).await?;
+            }
+        },
+        Commands::SetupPersistentResources { args } => {
+            dispatch_resource_sync(args, opts).await?;
         }
 
         Commands::Info { selector } => {

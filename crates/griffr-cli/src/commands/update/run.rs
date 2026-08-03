@@ -753,10 +753,18 @@ pub async fn update(
     overrides: crate::InstallTargetOverrideArgs,
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
-    use_predownload: bool,
+    stage_dir: Option<PathBuf>,
+    require_staged: bool,
+    use_default_stage: bool,
     patch_options: griffr_common::runtime::PatchApplyOptions,
     opts: GlobalOptions,
 ) -> Result<()> {
+    if require_staged && stage_dir.is_none() {
+        anyhow::bail!("--require-staged requires --stage-dir");
+    }
+    if stage_dir.is_some() && paths.len() != 1 {
+        anyhow::bail!("An explicit --stage-dir can only be used with one update target");
+    }
     let installs = crate::commands::batch::inspect_unique_installations(&paths).await?;
     let explicit_sources =
         crate::commands::batch::inspect_unique_reuse_sources(&reuse_paths).await?;
@@ -783,10 +791,10 @@ pub async fn update(
             target_reuse_paths.explicit,
             target_reuse_paths.peers,
             force_copy,
-            use_predownload,
+            use_default_stage || stage_dir.is_some(),
             patch_options.clone(),
-            None,
-            false,
+            stage_dir.clone(),
+            require_staged,
             opts,
         )
         .await

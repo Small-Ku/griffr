@@ -261,3 +261,86 @@ fn launch_accepts_wine_runner_and_prefix() {
         Some(std::path::PathBuf::from("/home/user/.wine-endfield"))
     );
 }
+
+#[test]
+fn stage_recover_and_resource_commands_use_result_oriented_names() {
+    let stage = Cli::try_parse_from([
+        "griffr",
+        "stage",
+        "fetch",
+        "--path",
+        r"C:\Games\Endfield",
+        "--stage-dir",
+        r"D:\Staging\Endfield",
+    ])
+    .unwrap();
+    let Commands::Stage { command } = stage.command else {
+        panic!("expected stage command");
+    };
+    let StageCommands::Fetch { stage_dir, .. } = command else {
+        panic!("expected stage fetch command");
+    };
+    assert_eq!(
+        stage_dir,
+        Some(std::path::PathBuf::from(r"D:\Staging\Endfield"))
+    );
+
+    let recover =
+        Cli::try_parse_from(["griffr", "recover", "--path", r"C:\Games\Endfield"]).unwrap();
+    assert!(matches!(recover.command, Commands::Recover { .. }));
+
+    let resources = Cli::try_parse_from([
+        "griffr",
+        "resources",
+        "sync",
+        "--path",
+        r"C:\Games\Endfield",
+        "--allow-download",
+    ])
+    .unwrap();
+    let Commands::Resources { command } = resources.command else {
+        panic!("expected resources command");
+    };
+    assert!(matches!(command, ResourceCommands::Sync { .. }));
+}
+
+#[test]
+fn update_stage_contract_is_explicit() {
+    let cli = Cli::try_parse_from([
+        "griffr",
+        "update",
+        "--path",
+        r"C:\Games\Endfield",
+        "--stage-dir",
+        r"D:\Staging\Endfield",
+        "--require-staged",
+    ])
+    .unwrap();
+    let Commands::Update {
+        stage_dir,
+        require_staged,
+        ..
+    } = cli.command
+    else {
+        panic!("expected update command");
+    };
+    assert_eq!(
+        stage_dir,
+        Some(std::path::PathBuf::from(r"D:\Staging\Endfield"))
+    );
+    assert!(require_staged);
+
+    let Err(error) = Cli::try_parse_from([
+        "griffr",
+        "update",
+        "--path",
+        r"C:\Games\Endfield",
+        "--require-staged",
+    ]) else {
+        panic!("expected --require-staged to require --stage-dir");
+    };
+    assert_eq!(
+        error.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+}

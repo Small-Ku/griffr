@@ -161,7 +161,7 @@ async fn print_predownload_status(
     );
 
     ui::print_phase(format!(
-        "Checking predownload for {} (region={}, channel={}, sub-channel={}) at {}",
+        "Inspecting staged update for {} (region={}, channel={}, sub-channel={}) at {}",
         game_id,
         region_id,
         channel_id.channel(),
@@ -201,7 +201,7 @@ pub async fn fetch(path: PathBuf, output_dir: Option<PathBuf>, opts: GlobalOptio
 
     if opts.is_dry_run() {
         opts.dry_run(format!(
-            "Would stage {} predownload archive part(s) into {}",
+            "Would stage {} update archive part(s) into {}",
             pre_patch.patches.len(),
             stage_dir.display()
         ));
@@ -273,7 +273,7 @@ pub async fn apply(
 ) -> Result<()> {
     if let Some(output_dir) = output_dir.as_ref() {
         ui::print_info(format!(
-            "Using explicit predownload stage dir: {}",
+            "Using explicit stage directory: {}",
             output_dir.display()
         ));
     }
@@ -332,7 +332,7 @@ pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
             reasons.join("; ")
         ),
         PatchRecoveryState::ArchiveReady { stage_dir } => anyhow::bail!(
-            "Archive-only state at {} must be applied with `predownload apply --output-dir`, not resume.",
+            "Archive-only state at {} must be applied with `update --stage-dir`, not `recover`.",
             stage_dir.display()
         ),
         PatchRecoveryState::Idle => anyhow::bail!(

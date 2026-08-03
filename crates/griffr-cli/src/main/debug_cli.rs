@@ -221,9 +221,10 @@ pub(crate) enum DebugCommands {
 }
 
 #[derive(Subcommand)]
-pub(crate) enum PredownloadCommands {
-    /// Check whether a predownload payload is available
-    Check {
+pub(crate) enum StageCommands {
+    /// Inspect whether a staged update payload is available
+    #[command(alias = "check")]
+    Inspect {
         #[command(flatten)]
         path: PathArg,
     },
@@ -232,11 +233,12 @@ pub(crate) enum PredownloadCommands {
         #[command(flatten)]
         path: PathArg,
 
-        /// Override the staging directory for downloaded predownload archives
-        #[arg(long)]
-        output_dir: Option<std::path::PathBuf>,
+        /// Directory for downloaded staged archives
+        #[arg(long = "stage-dir", alias = "output-dir")]
+        stage_dir: Option<std::path::PathBuf>,
     },
-    /// Apply the live release update using staged predownload archives when possible
+    /// Legacy alias for `update --stage-dir ... --require-staged`
+    #[command(hide = true)]
     Apply {
         #[command(flatten)]
         path: PathArg,
@@ -244,13 +246,13 @@ pub(crate) enum PredownloadCommands {
         #[command(flatten)]
         overrides: InstallTargetOverrideArgs,
 
-        /// Override the staging directory used for staged predownload archives
-        #[arg(long)]
-        output_dir: Option<std::path::PathBuf>,
+        /// Directory containing staged archives
+        #[arg(long = "stage-dir", alias = "output-dir")]
+        stage_dir: Option<std::path::PathBuf>,
 
-        /// Skip post-update verification
-        #[arg(long)]
-        skip_verify: bool,
+        /// Commit content but defer final verification
+        #[arg(long = "defer-verification", alias = "skip-verify")]
+        defer_verification: bool,
 
         /// Choose how launcher resource-index files are sourced
         #[arg(long, value_enum, conflicts_with = "skip_vfs")]
@@ -272,7 +274,8 @@ pub(crate) enum PredownloadCommands {
         #[arg(long)]
         external_asset_root: Option<std::path::PathBuf>,
     },
-    /// Resume a persisted forward patch apply or legacy extracted patch state
+    /// Legacy alias for the top-level recover command
+    #[command(hide = true)]
     Resume {
         #[command(flatten)]
         path: PathArg,

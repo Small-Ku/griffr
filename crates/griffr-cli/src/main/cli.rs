@@ -2,7 +2,7 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use griffr_common::api::protocol::DEFAULT_LANGUAGE;
 use griffr_common::runtime::PersistentVfsFileSet;
 
-use crate::debug_cli::{AccountCommands, DebugCommands, PredownloadCommands};
+use crate::debug_cli::{AccountCommands, DebugCommands, StageCommands};
 
 /// Griffr - Hypergryph Game Launcher CLI
 #[derive(Parser)]
@@ -203,6 +203,44 @@ pub(crate) struct InfoSelectorArgs {
     pub(crate) report: OutputArgs,
 }
 
+#[derive(Args)]
+pub(crate) struct PersistentResourceArgs {
+    #[command(flatten)]
+    pub(crate) path: PathArg,
+
+    #[command(flatten)]
+    pub(crate) overrides: InstallTargetOverrideArgs,
+
+    /// File set to write in Persistent
+    #[arg(long, default_value_t = PersistentVfsFileSet::Base)]
+    pub(crate) file_set: PersistentVfsFileSet,
+
+    /// Reuse matching files from other local install paths; Persistent copies are never hardlinked
+    #[arg(long = "reuse-from")]
+    pub(crate) reuse_from: Vec<std::path::PathBuf>,
+
+    /// Allow downloading missing files from CDN when not found in source roots
+    #[arg(long)]
+    pub(crate) allow_download: bool,
+
+    /// Prefer copying from reuse sources even when target files already verify
+    #[arg(long)]
+    pub(crate) prefer_reuse: bool,
+
+    /// Remove previously Griffr-managed Persistent files no longer in the selected file set
+    #[arg(long)]
+    pub(crate) prune: bool,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ResourceCommands {
+    /// Synchronize the selected Persistent resource working set
+    Sync {
+        #[command(flatten)]
+        args: PersistentResourceArgs,
+    },
+}
+
 #[derive(Subcommand)]
 pub(crate) enum Commands {
     /// Download and install a game to an explicit path
@@ -275,8 +313,16 @@ pub(crate) enum Commands {
         #[arg(long)]
         full_package: bool,
 
-        /// Reuse staged predownload patch archives when they match the live update payload
-        #[arg(long)]
+        /// Prefer archives from this staging directory
+        #[arg(long = "stage-dir")]
+        stage_dir: Option<std::path::PathBuf>,
+
+        /// Fail instead of downloading when staged archives are absent or mismatched
+        #[arg(long, requires = "stage_dir")]
+        require_staged: bool,
+
+        /// Deprecated alias that uses Griffr's default stage directory
+        #[arg(long, hide = true)]
         use_predownload: bool,
 
         /// Choose how launcher resource-index files are sourced
@@ -305,10 +351,17 @@ pub(crate) enum Commands {
         external_asset_root: Option<std::path::PathBuf>,
     },
 
-    /// Predownload patch archive calls
-    Predownload {
+    /// Inspect and fetch staged update archives
+    #[command(alias = "predownload")]
+    Stage {
         #[command(subcommand)]
-        command: PredownloadCommands,
+        command: StageCommands,
+    },
+
+    /// Resume a persisted patch transaction
+    Recover {
+        #[command(flatten)]
+        path: PathArg,
     },
 
     /// Launch a local install path
@@ -367,33 +420,17 @@ pub(crate) enum Commands {
         #[command(flatten)]
         report: OutputArgs,
     },
-    /// Set up the game-selected Persistent resource working set
+    /// Manage launcher resource working sets
+    Resources {
+        #[command(subcommand)]
+        command: ResourceCommands,
+    },
+
+    /// Legacy alias for `resources sync`
+    #[command(hide = true)]
     SetupPersistentResources {
         #[command(flatten)]
-        path: PathArg,
-
-        #[command(flatten)]
-        overrides: InstallTargetOverrideArgs,
-
-        /// File set to write in Persistent
-        #[arg(long, default_value_t = PersistentVfsFileSet::Base)]
-        file_set: PersistentVfsFileSet,
-
-        /// Reuse matching files from other local install paths. Persistent copies are never hardlinked.
-        #[arg(long = "reuse-from")]
-        reuse_from: Vec<std::path::PathBuf>,
-
-        /// Allow downloading missing files from CDN when not found in source roots
-        #[arg(long)]
-        allow_download: bool,
-
-        /// Prefer copying from reuse sources even when target files already verify
-        #[arg(long)]
-        prefer_reuse: bool,
-
-        /// Remove previously Griffr-managed Persistent files no longer in the selected file set
-        #[arg(long)]
-        prune: bool,
+        args: PersistentResourceArgs,
     },
 
     /// Print local metadata from config.ini and optionally the matching remote state
