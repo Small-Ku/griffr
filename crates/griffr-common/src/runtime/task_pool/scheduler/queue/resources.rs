@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use rapidhash::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 
 use super::super::routing::{ResourceRequest, RunClass};
 use crate::runtime::task_pool::{TaskPoolConfig, VolumeStreamingMode};

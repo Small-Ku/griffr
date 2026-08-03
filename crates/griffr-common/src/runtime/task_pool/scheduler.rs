@@ -29,7 +29,7 @@ mod routing;
 use metrics::SchedulerMetrics;
 use progress::TaskProgressReducer;
 use queue::{ScheduledTask, SchedulerQueue};
-use routing::{task_path, task_resources, ResourceRequest, RunClass};
+use routing::{task_path, task_resources_cached, ResourceRequest, RunClass, VolumeKeyCache};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskPriority {
@@ -73,6 +73,7 @@ fn complete_task(
     metrics: &SchedulerMetrics,
     graph: &mut TaskGraph,
     event_tx: &flume::Sender<WorkerEvent>,
+    volume_keys: &mut VolumeKeyCache,
 ) -> Result<()> {
     *in_flight = (*in_flight).saturating_sub(1);
     queue.release(&finish.resources);
@@ -83,7 +84,7 @@ fn complete_task(
         }
     }
     let ready = graph.finish(finish.node_id, finish.run)?;
-    enqueue_ready_tasks(queue, ready);
+    enqueue_ready_tasks(queue, ready, volume_keys);
     Ok(())
 }
 
@@ -95,13 +96,30 @@ fn complete_task_batch(
     metrics: &SchedulerMetrics,
     graph: &mut TaskGraph,
     event_tx: &flume::Sender<WorkerEvent>,
+    volume_keys: &mut VolumeKeyCache,
 ) -> Result<()> {
-    complete_task(first, in_flight, queue, metrics, graph, event_tx)?;
+    complete_task(
+        first,
+        in_flight,
+        queue,
+        metrics,
+        graph,
+        event_tx,
+        volume_keys,
+    )?;
     for _ in 1..MAX_TASK_FINISHES_PER_TICK {
         let Ok(finish) = finish_rx.try_recv() else {
             break;
         };
-        complete_task(finish, in_flight, queue, metrics, graph, event_tx)?;
+        complete_task(
+            finish,
+            in_flight,
+            queue,
+            metrics,
+            graph,
+            event_tx,
+            volume_keys,
+        )?;
     }
     Ok(())
 }
@@ -151,7 +169,8 @@ impl TaskPoolRunner {
         while self.event_rx.try_recv().is_ok() {}
         let metrics = SchedulerMetrics::default();
         let mut queue = SchedulerQueue::default();
-        enqueue_ready_tasks(&mut queue, graph.start());
+        let mut volume_keys = VolumeKeyCache::default();
+        enqueue_ready_tasks(&mut queue, graph.start(), &mut volume_keys);
 
         let (finish_tx, finish_rx) = flume::unbounded::<TaskFinish>();
         let mut in_flight = 0usize;
@@ -235,6 +254,7 @@ impl TaskPoolRunner {
                     &metrics,
                     &mut graph,
                     &self.event_tx,
+                    &mut volume_keys,
                 )?;
                 continue;
             }
@@ -252,6 +272,7 @@ impl TaskPoolRunner {
                         &metrics,
                         &mut graph,
                         &self.event_tx,
+                        &mut volume_keys,
                     )?;
                 }
                 Err(flume::RecvTimeoutError::Timeout)
@@ -308,19 +329,12 @@ impl TaskPoolRunner {
         scheduled: ScheduledTask,
         finish_tx: flume::Sender<TaskFinish>,
     ) -> Result<DispatchAttempt> {
-        let run = scheduled.resources.run;
-        let job = Arc::new(Mutex::new(Some(scheduled)));
-        match run {
+        match scheduled.resources.run {
             RunClass::AsyncIo => {
-                let job_for_task = Arc::clone(&job);
+                let rejected_path = task_path(&scheduled.task);
                 let event_tx = self.event_tx.clone();
                 let config = self.config.clone();
                 match self.dispatcher.dispatch(move || async move {
-                    let scheduled = job_for_task
-                        .lock()
-                        .unwrap()
-                        .take()
-                        .expect("dispatched async task missing");
                     let ScheduledTask {
                         node_id,
                         task,
@@ -358,19 +372,19 @@ impl TaskPoolRunner {
                     }
                     Err(error) => {
                         drop(error);
-                        let scheduled = job
-                            .lock()
-                            .unwrap()
-                            .take()
-                            .expect("rejected async task missing");
-                        Err(Error::Message { context: "Task pool error: ", detail: format!(
-                            "Failed to dispatch async I/O task for {}: all dispatcher runtimes stopped",
-                            task_path(&scheduled.task)
-                        ) })
+                        Err(Error::Message {
+                            context: "Task pool error: ",
+                            detail: format!(
+                                "Failed to dispatch async I/O task for {rejected_path}: all dispatcher runtimes stopped"
+                            ),
+                        })
                     }
                 }
             }
             RunClass::Cpu | RunClass::Blocking => {
+                // dispatch_blocking can reject while its pool is full. Keep the
+                // task outside the closure so the coordinator can restore it.
+                let job = Arc::new(Mutex::new(Some(scheduled)));
                 let job_for_task = Arc::clone(&job);
                 let event_tx = self.event_tx.clone();
                 let config = self.config.clone();
@@ -488,9 +502,13 @@ pub fn run_tasks(root_tasks: Vec<Task>, config: TaskPoolConfig) -> Result<TaskPo
     run_tasks_with_progress(root_tasks, config, TaskProgress::disabled())
 }
 
-fn enqueue_ready_tasks(queue: &mut SchedulerQueue, ready: Vec<ReadyTask>) {
+fn enqueue_ready_tasks(
+    queue: &mut SchedulerQueue,
+    ready: Vec<ReadyTask>,
+    volume_keys: &mut VolumeKeyCache,
+) {
     for ready in ready {
-        let resources = task_resources(&ready.task);
+        let resources = task_resources_cached(&ready.task, volume_keys);
         let priority = if ready.continuation {
             TaskPriority::Continuation
         } else {

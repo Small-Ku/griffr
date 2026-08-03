@@ -451,3 +451,103 @@ fn archive_commit_limits_same_volume_metadata_and_cross_volume_copies() {
     }
     assert!(!state.can_acquire(&copy_commit, &config, &admission));
 }
+
+#[test]
+fn admission_snapshot_is_reused_across_one_dispatch_wave() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig {
+        blocking_slots: 8,
+        ..TaskPoolConfig::default()
+    };
+    for index in 0..4 {
+        queue.push(
+            NodeId::from_index(index),
+            task(&format!("task-{index}")),
+            resources("volume-a"),
+            TaskPriority::Bulk,
+        );
+    }
+
+    let mut selected = Vec::new();
+    while let Some(task) = queue.pop_next(&config, true) {
+        selected.push(task);
+    }
+
+    assert_eq!(selected.len(), 4);
+    assert_eq!(queue.admission_rebuilds(), 1);
+}
+
+#[test]
+fn selected_reuse_commit_is_not_double_counted_in_cached_admission() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig {
+        reuse_queue_limit: 2,
+        ..TaskPoolConfig::default()
+    };
+    queue.push(
+        NodeId::from_index(0),
+        task("commit"),
+        ResourceRequest {
+            run: RunClass::AsyncIo,
+            reuse_commit: true,
+            ..ResourceRequest::default()
+        },
+        TaskPriority::Bulk,
+    );
+    queue.push(
+        NodeId::from_index(1),
+        task("probe"),
+        ResourceRequest {
+            run: RunClass::AsyncIo,
+            reuse_probe: true,
+            ..ResourceRequest::default()
+        },
+        TaskPriority::Bulk,
+    );
+
+    let commit = queue.pop_next(&config, true).unwrap();
+    assert!(commit.resources.reuse_commit);
+    let probe = queue.pop_next(&config, true).unwrap();
+    assert!(probe.resources.reuse_probe);
+    assert_eq!(queue.admission_rebuilds(), 1);
+}
+
+#[test]
+fn cached_admission_expires_when_writer_reservation_becomes_due() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig {
+        volume_write_reservation_delay: std::time::Duration::from_millis(5),
+        ..TaskPoolConfig::default()
+    };
+    let mut writer = write("volume-a");
+    writer.run = RunClass::AsyncIo;
+    writer.estimated_bytes = 100;
+    let mut reader = read("volume-a");
+    reader.estimated_bytes = 1;
+    queue.push(
+        NodeId::from_index(0),
+        task("writer"),
+        writer,
+        TaskPriority::Bulk,
+    );
+    queue.push(
+        NodeId::from_index(1),
+        task("reader"),
+        reader,
+        TaskPriority::Bulk,
+    );
+
+    let selected = queue.pop_next(&config, true).unwrap();
+    assert!(matches!(
+        selected.task,
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("reader")
+    ));
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    let selected = queue.pop_next(&config, true).unwrap();
+    assert!(matches!(
+        selected.task,
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("writer")
+    ));
+    assert_eq!(queue.admission_rebuilds(), 2);
+}

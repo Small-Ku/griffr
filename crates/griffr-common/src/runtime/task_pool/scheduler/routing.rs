@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use rapidhash::RapidHashMap as HashMap;
+
 use crate::download::extractor::safe_relative_archive_path;
 use crate::runtime::task_pool::{ArchiveRangePriority, ArchiveSource, Task, TransferClass};
 
@@ -43,6 +45,22 @@ pub(super) struct ResourceRequest {
     pub(super) reuse_commit: bool,
 }
 
+#[derive(Debug, Default)]
+pub(super) struct VolumeKeyCache {
+    entries: HashMap<PathBuf, String>,
+}
+
+impl VolumeKeyCache {
+    fn resolve(&mut self, path: &Path) -> String {
+        if let Some(volume) = self.entries.get(path) {
+            return volume.clone();
+        }
+        let volume = crate::runtime::task_pool::fs_ops::storage_volume_group_key(path);
+        self.entries.insert(path.to_path_buf(), volume.clone());
+        volume
+    }
+}
+
 impl Default for ResourceRequest {
     fn default() -> Self {
         Self {
@@ -63,7 +81,12 @@ impl Default for ResourceRequest {
     }
 }
 
+#[cfg(test)]
 pub(super) fn task_resources(task: &Task) -> ResourceRequest {
+    task_resources_cached(task, &mut VolumeKeyCache::default())
+}
+
+pub(super) fn task_resources_cached(task: &Task, volumes: &mut VolumeKeyCache) -> ResourceRequest {
     let mut request = ResourceRequest {
         run: run_class(task),
         ..ResourceRequest::default()
@@ -78,7 +101,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                 ArchiveRangePriority::ExtractionCritical => NetworkClass::Archive,
                 ArchiveRangePriority::RetentionBackground => NetworkClass::ArchiveBackground,
             });
-            route_archive_range_write(&mut request, range);
+            route_archive_range_write(&mut request, range, volumes);
         }
         Task::FetchArchiveRepairFile { repair } => {
             request.network = Some(NetworkClass::Archive);
@@ -88,7 +111,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                 .missing_range_requests([repair.source_range.clone()])
             {
                 for range in ranges {
-                    route_archive_range_write(&mut request, &range);
+                    route_archive_range_write(&mut request, &range, volumes);
                 }
             }
         }
@@ -98,20 +121,25 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                     .work
                     .paths_for_indices(&repair.volume_indices)
                     .iter()
-                    .map(|path| volume_key(path)),
+                    .map(|path| volume_key(volumes, path)),
             );
-            let staging_volume = volume_key(&repair.staging_dir);
-            let destination_volume = volume_key(&repair.dest);
+            let staging_volume = volume_key(volumes, &repair.staging_dir);
+            let destination_volume = volume_key(volumes, &repair.dest);
             request.write_volumes.push(staging_volume.clone());
             request.write_volumes.push(destination_volume.clone());
-            reserve_storage(&mut request, &repair.staging_dir, repair.expected_size);
+            reserve_storage(
+                &mut request,
+                &repair.staging_dir,
+                repair.expected_size,
+                volumes,
+            );
             if staging_volume != destination_volume {
-                reserve_storage(&mut request, &repair.dest, repair.expected_size);
+                reserve_storage(&mut request, &repair.dest, repair.expected_size, volumes);
             }
             request.mutation_paths.push(path_key(&repair.dest));
             request.extract = true;
         }
-        Task::Verify { path, .. } => request.read_volumes.push(volume_key(path)),
+        Task::Verify { path, .. } => request.read_volumes.push(volume_key(volumes, path)),
         Task::Download {
             dest,
             expected_size,
@@ -119,7 +147,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             resume,
             ..
         } => {
-            let volume = volume_key(dest);
+            let volume = volume_key(volumes, dest);
             if resume.is_some() {
                 request.network = Some(match transfer_class {
                     TransferClass::General => NetworkClass::General,
@@ -127,7 +155,12 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                 });
                 request.write_volumes.push(volume);
                 if let (Some(expected_size), Some(resume)) = (expected_size, resume.as_ref()) {
-                    reserve_storage(&mut request, dest, resume.remaining_bytes(*expected_size));
+                    reserve_storage(
+                        &mut request,
+                        dest,
+                        resume.remaining_bytes(*expected_size),
+                        volumes,
+                    );
                 }
             } else {
                 request.read_volumes.push(volume.clone());
@@ -144,7 +177,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
         }
         Task::VerifyReuseVolume { candidates, .. } => {
             if let Some(path) = candidates.first() {
-                request.read_volumes.push(volume_key(path));
+                request.read_volumes.push(volume_key(volumes, path));
             }
             request.reuse_probe = true;
         }
@@ -156,12 +189,12 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             ..
         } => {
             if *copy_only {
-                request.read_volumes.push(volume_key(source));
-                request.write_volumes.push(volume_key(dest));
-                reserve_storage(&mut request, dest, *expected_size);
+                request.read_volumes.push(volume_key(volumes, source));
+                request.write_volumes.push(volume_key(volumes, dest));
+                reserve_storage(&mut request, dest, *expected_size, volumes);
                 request.mutation_paths.push(path_key(dest));
             } else {
-                let volume = volume_key(dest);
+                let volume = volume_key(volumes, dest);
                 request.read_volumes.push(volume.clone());
                 request.metadata_volumes.push(volume);
                 request.mutation_paths.push(path_key(dest));
@@ -171,15 +204,15 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
         Task::OpenArchive { source, .. } => match source {
             ArchiveSource::Remote(parts) => {
                 for part in parts {
-                    let volume = volume_key(&part.dest);
+                    let volume = volume_key(volumes, &part.dest);
                     request.read_volumes.push(volume.clone());
                     request.metadata_volumes.push(volume);
                     request.mutation_paths.push(path_key(&part.dest));
                 }
             }
-            ArchiveSource::Local(volumes) => {
-                for volume_path in volumes {
-                    let volume = volume_key(volume_path);
+            ArchiveSource::Local(volume_paths) => {
+                for volume_path in volume_paths {
+                    let volume = volume_key(volumes, volume_path);
                     request.read_volumes.push(volume.clone());
                     request.metadata_volumes.push(volume);
                 }
@@ -200,7 +233,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.read_volumes.extend(
                 work.paths_for_indices(&indices)
                     .iter()
-                    .map(|path| volume_key(path)),
+                    .map(|path| volume_key(volumes, path)),
             );
         }
         Task::InspectArchiveIndex { work, directory } => {
@@ -216,7 +249,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.read_volumes.extend(
                 work.paths_for_indices(&indices)
                     .iter()
-                    .map(|path| volume_key(path)),
+                    .map(|path| volume_key(volumes, path)),
             );
         }
         Task::ReadArchiveControls {
@@ -229,39 +262,43 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             request.read_volumes.extend(
                 work.paths_for_indices(&indices)
                     .iter()
-                    .map(|path| volume_key(path)),
+                    .map(|path| volume_key(volumes, path)),
             );
-            request.read_volumes.push(volume_key(&work.dest));
+            request.read_volumes.push(volume_key(volumes, &work.dest));
             let staging_parent = work
                 .patch_options
                 .work_dir
                 .as_deref()
                 .or_else(|| work.dest.parent())
                 .unwrap_or(work.dest.as_path());
-            request.metadata_volumes.push(volume_key(staging_parent));
+            request
+                .metadata_volumes
+                .push(volume_key(volumes, staging_parent));
         }
         Task::ProbePatchArtifact {
             patch_check,
             probe_index,
         } => {
             if let Some(path) = patch_check.probe_path(*probe_index) {
-                request.read_volumes.push(volume_key(path));
+                request.read_volumes.push(volume_key(volumes, path));
             }
         }
         Task::MeasurePatchRelocation { patch_check } => {
             if let Some(path) = patch_check.relocation_root() {
-                request.read_volumes.push(volume_key(path));
+                request.read_volumes.push(volume_key(volumes, path));
             }
         }
         Task::SavePatchPlan { work, .. } => {
-            request.read_volumes.push(volume_key(&work.dest));
+            request.read_volumes.push(volume_key(volumes, &work.dest));
             let staging_parent = work
                 .patch_options
                 .work_dir
                 .as_deref()
                 .or_else(|| work.dest.parent())
                 .unwrap_or(work.dest.as_path());
-            request.metadata_volumes.push(volume_key(staging_parent));
+            request
+                .metadata_volumes
+                .push(volume_key(volumes, staging_parent));
         }
         Task::ExtractArchiveShard { shard } => {
             request.read_volumes.extend(
@@ -269,9 +306,9 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                     .work
                     .paths_for_indices(&shard.volume_indices)
                     .iter()
-                    .map(|path| volume_key(path)),
+                    .map(|path| volume_key(volumes, path)),
             );
-            let staging_volume = volume_key(&shard.staging_dir);
+            let staging_volume = volume_key(volumes, &shard.staging_dir);
             request.write_volumes.push(staging_volume.clone());
             if shard.direct_commit.is_some() {
                 let peak_staging_bytes = shard
@@ -293,12 +330,13 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                     let relative = safe_relative_archive_path(name)
                         .expect("validated archive index contains an unsafe entry path");
                     let destination = shard.work.dest.join(relative);
-                    let destination_volume = volume_key(&destination);
+                    let destination_volume = volume_key(volumes, &destination);
                     let cross_volume = staging_volume != destination_volume;
                     accumulate_storage(
                         &mut destination_totals,
                         &destination,
                         shard.archive_index.entry_sizes[*entry_index],
+                        volumes,
                     );
                     if cross_volume {
                         request.read_volumes.push(staging_volume.clone());
@@ -313,16 +351,21 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                     request.mutation_paths.push(path_key(&destination));
                 }
                 if !destination_totals.contains_key(&staging_volume) {
-                    reserve_storage(&mut request, &shard.staging_dir, peak_staging_bytes);
+                    reserve_storage(
+                        &mut request,
+                        &shard.staging_dir,
+                        peak_staging_bytes,
+                        volumes,
+                    );
                 }
                 for (_, (path, bytes)) in destination_totals {
-                    reserve_storage(&mut request, &path, bytes);
+                    reserve_storage(&mut request, &path, bytes, volumes);
                 }
             } else {
                 let staged_bytes = shard.entries.iter().fold(0u64, |total, index| {
                     total.saturating_add(shard.archive_index.entry_sizes[*index])
                 });
-                reserve_storage(&mut request, &shard.staging_dir, staged_bytes);
+                reserve_storage(&mut request, &shard.staging_dir, staged_bytes, volumes);
             }
             request.extract = true;
         }
@@ -332,7 +375,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                 .volume_range(*volume_index)
                 .is_some_and(|range| work.layout.range_is_available(&range));
             if let Some(path) = work.layout.path(*volume_index) {
-                let volume = volume_key(path);
+                let volume = volume_key(volumes, path);
                 if full_volume_is_ready {
                     request.read_volumes.push(volume);
                 } else {
@@ -341,10 +384,10 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             }
             if full_volume_is_ready {
                 if let Some(part) = work.parts.get(*volume_index) {
-                    let volume = volume_key(&part.dest);
+                    let volume = volume_key(volumes, &part.dest);
                     request.write_volumes.push(volume.clone());
                     request.archive_save_volumes.push(volume);
-                    reserve_storage(&mut request, &part.dest, part.expected_size);
+                    reserve_storage(&mut request, &part.dest, part.expected_size, volumes);
                     request.mutation_paths.push(path_key(&part.dest));
                 }
             }
@@ -357,13 +400,13 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                 .as_ref()
                 .filter(|prepared| prepared.patch_plan.is_none())
             {
-                let staging_volume = volume_key(&prepared.staging_dir);
+                let staging_volume = volume_key(volumes, &prepared.staging_dir);
                 let mut destination_totals = BTreeMap::<String, (PathBuf, u64)>::new();
                 request.metadata_volumes.push(staging_volume.clone());
                 request.mutation_paths.push(path_key(&prepared.staging_dir));
                 for relative in &prepared.deferred_commit_paths {
                     let destination = work.dest.join(relative);
-                    let destination_volume = volume_key(&destination);
+                    let destination_volume = volume_key(volumes, &destination);
                     let cross_volume = staging_volume != destination_volume;
                     if cross_volume {
                         request.read_volumes.push(staging_volume.clone());
@@ -374,6 +417,7 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                             &mut destination_totals,
                             &destination,
                             existing_file_len(&source),
+                            volumes,
                         );
                     } else {
                         request.metadata_volumes.push(destination_volume.clone());
@@ -384,42 +428,63 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                     request.mutation_paths.push(path_key(&destination));
                 }
                 for (_, (path, bytes)) in destination_totals {
-                    reserve_storage(&mut request, &path, bytes);
+                    reserve_storage(&mut request, &path, bytes, volumes);
                 }
             }
         }
         Task::PreparePatchApply { patch } => {
-            route_prepare_patch_apply(&mut request, patch.plan());
+            route_prepare_patch_apply(&mut request, patch.plan(), volumes);
         }
         Task::ApplyPatchEntry { patch, entry_index } => {
             if let Some(entry) = patch.entry(*entry_index) {
                 match &entry.source {
                     crate::runtime::PlannedPatchSource::AlreadyPresent => {
-                        request.read_volumes.push(volume_key(&entry.destination));
+                        request
+                            .read_volumes
+                            .push(volume_key(volumes, &entry.destination));
                     }
                     crate::runtime::PlannedPatchSource::Local { payload } => {
                         let source = patch.plan().stage_root.join(payload);
-                        let source_volume = volume_key(&source);
-                        let destination_volume = volume_key(&entry.destination);
+                        let source_volume = volume_key(volumes, &source);
+                        let destination_volume = volume_key(volumes, &entry.destination);
                         request.read_volumes.push(source_volume.clone());
                         request.write_volumes.push(destination_volume.clone());
                         request.mutation_paths.push(path_key(&source));
                         if source_volume != destination_volume {
-                            reserve_storage(&mut request, &entry.destination, entry.expected_size);
+                            reserve_storage(
+                                &mut request,
+                                &entry.destination,
+                                entry.expected_size,
+                                volumes,
+                            );
                         }
                     }
                     crate::runtime::PlannedPatchSource::Hdiff { base, payload, .. } => {
                         let payload_path = patch.plan().stage_root.join(payload);
-                        request.read_volumes.push(volume_key(base));
-                        request.read_volumes.push(volume_key(&payload_path));
+                        request.read_volumes.push(volume_key(volumes, base));
+                        request
+                            .read_volumes
+                            .push(volume_key(volumes, &payload_path));
                         request.mutation_paths.push(path_key(&payload_path));
-                        request.write_volumes.push(volume_key(&entry.destination));
+                        request
+                            .write_volumes
+                            .push(volume_key(volumes, &entry.destination));
                         if let Some(work_dir) = patch.plan().work_dir.as_deref() {
-                            request.write_volumes.push(volume_key(work_dir));
-                            reserve_storage(&mut request, work_dir, entry.expected_size);
-                            reserve_storage(&mut request, &entry.destination, entry.expected_size);
+                            request.write_volumes.push(volume_key(volumes, work_dir));
+                            reserve_storage(&mut request, work_dir, entry.expected_size, volumes);
+                            reserve_storage(
+                                &mut request,
+                                &entry.destination,
+                                entry.expected_size,
+                                volumes,
+                            );
                         } else {
-                            reserve_storage(&mut request, &entry.destination, entry.expected_size);
+                            reserve_storage(
+                                &mut request,
+                                &entry.destination,
+                                entry.expected_size,
+                                volumes,
+                            );
                         }
                     }
                 }
@@ -427,13 +492,13 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
             }
         }
         Task::ReleasePatchBase { base, .. } => {
-            request.metadata_volumes.push(volume_key(base));
+            request.metadata_volumes.push(volume_key(volumes, base));
             request.mutation_paths.push(path_key(base));
         }
         Task::ApplyPatchDeletes { patch } => {
             for relative in &patch.plan().delete_paths {
                 let path = physical_patch_path(patch.plan(), relative);
-                request.metadata_volumes.push(volume_key(&path));
+                request.metadata_volumes.push(volume_key(volumes, &path));
                 request.mutation_paths.push(path_key(&path));
             }
         }
@@ -444,43 +509,53 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
                 .join(crate::runtime::PATCH_DEFERRED_DIR);
             for relative in &plan.deferred_paths {
                 let source = deferred_root.join(relative);
-                let source_volume = volume_key(&source);
+                let source_volume = volume_key(volumes, &source);
                 request.read_volumes.push(source_volume.clone());
                 request.mutation_paths.push(path_key(&source));
                 let target = plan.install_root.join(relative);
-                let destination_volume = volume_key(&target);
+                let destination_volume = volume_key(volumes, &target);
                 request.write_volumes.push(destination_volume.clone());
                 if source_volume != destination_volume {
                     accumulate_storage(
                         &mut destination_totals,
                         &target,
                         existing_file_len(&source),
+                        volumes,
                     );
                 }
                 request.mutation_paths.push(path_key(&target));
             }
             for (_, (path, bytes)) in destination_totals {
-                reserve_storage(&mut request, &path, bytes);
+                reserve_storage(&mut request, &path, bytes, volumes);
             }
         }
         Task::CleanPatchApply { patch, archive: _ } => {
             let plan = patch.plan();
             let patch_root = crate::runtime::griffr_patch_path(&plan.install_root);
-            request.metadata_volumes.push(volume_key(&plan.stage_root));
-            request.metadata_volumes.push(volume_key(&patch_root));
+            request
+                .metadata_volumes
+                .push(volume_key(volumes, &plan.stage_root));
+            request
+                .metadata_volumes
+                .push(volume_key(volumes, &patch_root));
             request.mutation_paths.push(path_key(&plan.stage_root));
             request.mutation_paths.push(path_key(&patch_root));
         }
         Task::CleanupArchive { work } => {
-            request
-                .metadata_volumes
-                .extend(work.layout.paths().iter().map(|path| volume_key(path)));
+            request.metadata_volumes.extend(
+                work.layout
+                    .paths()
+                    .iter()
+                    .map(|path| volume_key(volumes, path)),
+            );
         }
         Task::ApplyExtractedVfsPatchManifest { install_root } => {
-            route_extracted_vfs_patch_manifest(&mut request, install_root);
+            route_extracted_vfs_patch_manifest(&mut request, install_root, volumes);
         }
         Task::ApplyDeleteManifest { install_root } => {
-            request.metadata_volumes.push(volume_key(install_root));
+            request
+                .metadata_volumes
+                .push(volume_key(volumes, install_root));
             request.mutation_paths.push(path_key(install_root));
         }
         Task::RepairFile { .. } => {}
@@ -493,50 +568,60 @@ pub(super) fn task_resources(task: &Task) -> ResourceRequest {
 fn route_archive_range_write(
     request: &mut ResourceRequest,
     range: &crate::download::extractor::ArchiveRangeRequest,
+    volumes: &mut VolumeKeyCache,
 ) {
     let part_path = range.cache_path.with_extension("range.part");
-    request.write_volumes.push(volume_key(&part_path));
+    request.write_volumes.push(volume_key(volumes, &part_path));
     request.mutation_paths.push(path_key(&part_path));
     request.mutation_paths.push(path_key(&range.cache_path));
     reserve_remaining_file(
         request,
         &part_path,
         range.local_range.end - range.local_range.start,
+        volumes,
     );
 }
 
-fn route_prepare_patch_apply(request: &mut ResourceRequest, plan: &crate::runtime::PatchPlan) {
-    request.read_volumes.push(volume_key(&plan.stage_root));
-    request.write_volumes.push(volume_key(&plan.install_root));
+fn route_prepare_patch_apply(
+    request: &mut ResourceRequest,
+    plan: &crate::runtime::PatchPlan,
+    volumes: &mut VolumeKeyCache,
+) {
+    request
+        .read_volumes
+        .push(volume_key(volumes, &plan.stage_root));
     request
         .write_volumes
-        .push(volume_key(&plan.vfs_destination));
+        .push(volume_key(volumes, &plan.install_root));
+    request
+        .write_volumes
+        .push(volume_key(volumes, &plan.vfs_destination));
     if let Some(work_dir) = plan.work_dir.as_deref() {
-        request.write_volumes.push(volume_key(work_dir));
+        request.write_volumes.push(volume_key(volumes, work_dir));
     }
     request.mutation_paths.push(path_key(&plan.install_root));
     request.mutation_paths.push(path_key(&plan.stage_root));
     request.mutation_paths.push(path_key(&plan.vfs_destination));
 
     let logical_vfs_root = plan.install_root.join(&plan.vfs_base_path);
-    if volume_key(&logical_vfs_root) != volume_key(&plan.vfs_destination)
+    if volume_key(volumes, &logical_vfs_root) != volume_key(volumes, &plan.vfs_destination)
         && std::fs::symlink_metadata(&logical_vfs_root)
             .ok()
             .is_some_and(|metadata| !metadata.file_type().is_symlink())
     {
         if let Ok(bytes) = crate::runtime::dir_size_sync(&logical_vfs_root) {
-            reserve_storage(request, &plan.vfs_destination, bytes);
+            reserve_storage(request, &plan.vfs_destination, bytes, volumes);
         }
     }
 
     let mut destination_totals = BTreeMap::<String, (PathBuf, u64)>::new();
     for (source, destination, bytes) in patch_prepare_commit_files(plan) {
-        if volume_key(&source) != volume_key(&destination) {
-            accumulate_storage(&mut destination_totals, &destination, bytes);
+        if volume_key(volumes, &source) != volume_key(volumes, &destination) {
+            accumulate_storage(&mut destination_totals, &destination, bytes, volumes);
         }
     }
     for (_, (path, bytes)) in destination_totals {
-        reserve_storage(request, &path, bytes);
+        reserve_storage(request, &path, bytes, volumes);
     }
 }
 
@@ -588,15 +673,21 @@ fn is_patch_control_path(relative: &Path) -> bool {
         || relative.starts_with(crate::runtime::PATCH_STAGE_DIR)
 }
 
-fn route_extracted_vfs_patch_manifest(request: &mut ResourceRequest, install_root: &Path) {
+fn route_extracted_vfs_patch_manifest(
+    request: &mut ResourceRequest,
+    install_root: &Path,
+    volumes: &mut VolumeKeyCache,
+) {
     let manifest_path = install_root.join(crate::runtime::PATCH_MANIFEST_NAME);
     let stage_root = install_root.join(crate::runtime::PATCH_STAGE_DIR);
-    request.read_volumes.push(volume_key(&manifest_path));
+    request
+        .read_volumes
+        .push(volume_key(volumes, &manifest_path));
     let manifest = std::fs::read(&manifest_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<crate::api::types::ResourcePatch>(&bytes).ok());
     let Some(manifest) = manifest else {
-        let volume = volume_key(install_root);
+        let volume = volume_key(volumes, install_root);
         request.read_volumes.push(volume.clone());
         request.write_volumes.push(volume);
         request.mutation_paths.push(path_key(install_root));
@@ -611,7 +702,7 @@ fn route_extracted_vfs_patch_manifest(request: &mut ResourceRequest, install_roo
         request.mutation_paths.push(path_key(install_root));
         return;
     };
-    request.read_volumes.push(volume_key(&stage_root));
+    request.read_volumes.push(volume_key(volumes, &stage_root));
     let destination_root = install_root.join(vfs_base_path);
     let mut destination_totals = BTreeMap::<String, (PathBuf, u64)>::new();
     for entry in manifest.files {
@@ -622,41 +713,57 @@ fn route_extracted_vfs_patch_manifest(request: &mut ResourceRequest, install_roo
             continue;
         };
         let destination = destination_root.join(relative);
-        let volume = volume_key(&destination);
+        let volume = volume_key(volumes, &destination);
         request.read_volumes.push(volume.clone());
         request.write_volumes.push(volume);
         request.mutation_paths.push(path_key(&destination));
-        accumulate_storage(&mut destination_totals, &destination, entry.size);
+        accumulate_storage(&mut destination_totals, &destination, entry.size, volumes);
     }
     for (_, (path, bytes)) in destination_totals {
-        reserve_storage(request, &path, bytes);
+        reserve_storage(request, &path, bytes, volumes);
     }
 }
 
-fn reserve_storage(request: &mut ResourceRequest, path: &Path, bytes: u64) {
+fn reserve_storage(
+    request: &mut ResourceRequest,
+    path: &Path,
+    bytes: u64,
+    volumes: &mut VolumeKeyCache,
+) {
     if bytes == 0 {
         return;
     }
     request.storage_reservations.push(StorageReservation {
-        volume: volume_key(path),
+        volume: volume_key(volumes, path),
         probe_path: path.to_path_buf(),
         bytes,
     });
 }
 
-fn reserve_remaining_file(request: &mut ResourceRequest, path: &Path, expected_size: u64) {
+fn reserve_remaining_file(
+    request: &mut ResourceRequest,
+    path: &Path,
+    expected_size: u64,
+    volumes: &mut VolumeKeyCache,
+) {
     reserve_storage(
         request,
         path,
         expected_size.saturating_sub(existing_file_len(path).min(expected_size)),
+        volumes,
     );
 }
 
-fn accumulate_storage(totals: &mut BTreeMap<String, (PathBuf, u64)>, path: &Path, bytes: u64) {
+fn accumulate_storage(
+    totals: &mut BTreeMap<String, (PathBuf, u64)>,
+    path: &Path,
+    bytes: u64,
+    volumes: &mut VolumeKeyCache,
+) {
     if bytes == 0 {
         return;
     }
-    let volume = volume_key(path);
+    let volume = volume_key(volumes, path);
     let entry = totals
         .entry(volume)
         .or_insert_with(|| (path.to_path_buf(), 0));
@@ -828,8 +935,8 @@ fn physical_patch_path(plan: &crate::runtime::PatchPlan, relative: &Path) -> std
     plan.install_root.join(relative)
 }
 
-fn volume_key(path: &Path) -> String {
-    crate::runtime::task_pool::fs_ops::storage_volume_group_key(path)
+fn volume_key(volumes: &mut VolumeKeyCache, path: &Path) -> String {
+    volumes.resolve(path)
 }
 
 fn path_key(path: &Path) -> String {
@@ -891,7 +998,8 @@ pub(super) fn task_path(task: &Task) -> String {
 mod tests {
     use super::{
         normalize_volumes, patch_prepare_commit_files, route_archive_range_write, task_resources,
-        NetworkClass, ResourceRequest, RunClass, StorageReservation,
+        task_resources_cached, NetworkClass, ResourceRequest, RunClass, StorageReservation,
+        VolumeKeyCache,
     };
     use crate::download::extractor::ArchiveRangeRequest;
     use crate::runtime::task_pool::types::{ArchiveRepairSession, DownloadResumeState};
@@ -900,6 +1008,7 @@ mod tests {
     use md5::{Digest, Md5};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+
     use std::sync::Arc;
 
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -927,6 +1036,21 @@ mod tests {
             transfer_class: TransferClass::General,
             archive_repair: None,
         }
+    }
+
+    #[test]
+    fn task_routing_reuses_exact_path_volume_keys() {
+        let task = reuse_task(true);
+        let mut cache = VolumeKeyCache::default();
+
+        let first = task_resources_cached(&task, &mut cache);
+        let cached_paths = cache.entries.len();
+        let second = task_resources_cached(&task, &mut cache);
+
+        assert!(cached_paths >= 2);
+        assert_eq!(cache.entries.len(), cached_paths);
+        assert_eq!(first.read_volumes, second.read_volumes);
+        assert_eq!(first.write_volumes, second.write_volumes);
     }
 
     #[test]
@@ -1007,7 +1131,7 @@ mod tests {
         };
         let mut resources = ResourceRequest::default();
 
-        route_archive_range_write(&mut resources, &range);
+        route_archive_range_write(&mut resources, &range, &mut VolumeKeyCache::default());
         normalize_volumes(&mut resources);
 
         assert_eq!(resources.storage_reservations.len(), 1);
