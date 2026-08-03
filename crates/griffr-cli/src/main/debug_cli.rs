@@ -342,7 +342,9 @@ pub(crate) enum AccountCommands {
     },
 }
 
-/// Global options shared across all commands
+/// Runtime options shared across command implementations. User-facing I/O
+/// tuning is configured through `GRIFFR_*` environment variables so normal
+/// command help stays focused on operation semantics.
 #[derive(Debug, Clone, Copy)]
 pub struct GlobalOptions {
     pub dry_run: bool,
@@ -363,6 +365,70 @@ pub struct GlobalOptions {
 }
 
 impl GlobalOptions {
+    pub fn from_environment(dry_run: bool, verbose: bool, output: OutputFormat) -> Self {
+        use griffr_common::runtime::task_pool::{
+            VolumeStreamingMode, DEFAULT_PROGRESS_BUFFER_BYTES, DEFAULT_REUSE_QUEUE_LIMIT,
+            DEFAULT_VOLUME_METADATA_LIMIT, DEFAULT_VOLUME_READ_LIMIT,
+            DEFAULT_VOLUME_STREAMING_MODE, DEFAULT_VOLUME_STREAMING_PRESSURE_LIMIT,
+            DEFAULT_VOLUME_WRITE_LIMIT,
+        };
+
+        Self {
+            dry_run,
+            verbose,
+            skip_verify: false,
+            force_full_package: false,
+            resource_policy: crate::ResourcePolicyArg::Auto,
+            keep_pack_archives: false,
+            extraction_progress_buffer_bytes: env_usize(
+                "GRIFFR_EXTRACTION_PROGRESS_BUFFER_BYTES",
+                DEFAULT_PROGRESS_BUFFER_BYTES,
+            ),
+            download_progress_buffer_bytes: env_usize(
+                "GRIFFR_DOWNLOAD_PROGRESS_BUFFER_BYTES",
+                DEFAULT_PROGRESS_BUFFER_BYTES,
+            ),
+            volume_read_limit: env_positive_usize(
+                "GRIFFR_VOLUME_READ_LIMIT",
+                DEFAULT_VOLUME_READ_LIMIT,
+            ),
+            volume_write_limit: env_positive_usize(
+                "GRIFFR_VOLUME_WRITE_LIMIT",
+                DEFAULT_VOLUME_WRITE_LIMIT,
+            ),
+            volume_metadata_limit: env_positive_usize(
+                "GRIFFR_VOLUME_METADATA_LIMIT",
+                DEFAULT_VOLUME_METADATA_LIMIT,
+            ),
+            volume_streaming_pressure_limit: env_positive_usize(
+                "GRIFFR_VOLUME_STREAMING_PRESSURE_LIMIT",
+                DEFAULT_VOLUME_STREAMING_PRESSURE_LIMIT,
+            ),
+            volume_streaming_mode: match std::env::var("GRIFFR_VOLUME_STREAMING_MODE") {
+                Ok(value) if value.eq_ignore_ascii_case("exclusive") => {
+                    VolumeStreamingMode::Exclusive
+                }
+                Ok(value) if value.eq_ignore_ascii_case("mixed") => VolumeStreamingMode::Mixed,
+                Ok(value) => {
+                    tracing::warn!(
+                        "Ignoring invalid GRIFFR_VOLUME_STREAMING_MODE={value:?}; expected exclusive or mixed"
+                    );
+                    DEFAULT_VOLUME_STREAMING_MODE
+                }
+                Err(_) => DEFAULT_VOLUME_STREAMING_MODE,
+            },
+            reuse_queue_limit: env_positive_usize(
+                "GRIFFR_REUSE_QUEUE_LIMIT",
+                DEFAULT_REUSE_QUEUE_LIMIT,
+            ),
+            output,
+        }
+    }
+
+    pub fn with_output(self, output: OutputFormat) -> Self {
+        Self { output, ..self }
+    }
+
     pub fn task_pool_config(&self) -> griffr_common::runtime::task_pool::TaskPoolConfig {
         use griffr_common::runtime::task_pool::{TaskPoolConfig, VolumeIoPolicy};
 
@@ -381,22 +447,45 @@ impl GlobalOptions {
         config
     }
 
-    /// Print a message if verbose mode is enabled
+    /// Print a message if verbose mode is enabled.
     pub fn verbose(&self, msg: impl AsRef<str>) {
         if self.verbose {
             debug!("{}", msg.as_ref());
         }
     }
 
-    /// Print a dry run message
     pub fn dry_run(&self, msg: impl AsRef<str>) {
         if self.dry_run {
             crate::ui::print_info(format!("DRY RUN: {}", msg.as_ref()));
         }
     }
 
-    /// Check if we should skip actual run
     pub fn is_dry_run(&self) -> bool {
         self.dry_run
+    }
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    match std::env::var(name) {
+        Ok(value) => match value.parse::<usize>() {
+            Ok(value) => value,
+            Err(_) => {
+                tracing::warn!(
+                    "Ignoring invalid {name}={value:?}; expected a non-negative integer"
+                );
+                default
+            }
+        },
+        Err(_) => default,
+    }
+}
+
+fn env_positive_usize(name: &str, default: usize) -> usize {
+    let value = env_usize(name, default);
+    if value == 0 {
+        tracing::warn!("Ignoring {name}=0; expected an integer greater than zero");
+        default
+    } else {
+        value
     }
 }

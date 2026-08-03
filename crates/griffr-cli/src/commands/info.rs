@@ -13,6 +13,7 @@ struct InfoReport {
     local: Option<LocalReport>,
     remote: Option<RemoteReport>,
     media: Option<MediaReport>,
+    remote_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,12 +154,14 @@ pub async fn show(
     region: Option<String>,
     channel: Option<String>,
     sub_channel: Option<String>,
+    remote_state: bool,
+    local_only: bool,
+    include_media: bool,
     language: &str,
     opts: GlobalOptions,
 ) -> Result<()> {
-    let api_client = ApiClient::new()?;
-
     let mut remote_target: Option<(GameId, RegionId, ChannelPair)> = None;
+    let requested_by_path = path.is_some();
     let local_install = if let Some(path) = path {
         let local = detect_local_install(&path).await?;
         if let (Some(game_id), Some(region_id), Some(channel_id)) = (
@@ -182,69 +185,87 @@ pub async fn show(
     };
 
     let local = local_install.as_ref().map(LocalReport::from_install);
+    let should_fetch_remote = !local_only && (!requested_by_path || remote_state || include_media);
     let mut remote = None;
     let mut media = None;
+    let mut remote_error = None;
 
-    if let Some((game_id, region_id, channel_id)) = remote_target {
+    if should_fetch_remote {
+        let (game_id, region_id, channel_id) = remote_target.context(
+            "Could not determine game/region/channel for remote lookup; provide explicit remote arguments",
+        )?;
         let target = griffr_common::config::resolve_api_target(
             &game_id,
             region_id,
             &channel_id,
             &Default::default(),
         )?;
+        let api_client = ApiClient::new()?;
 
-        let info = api_client
-            .get_latest_game(&target, None)
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to fetch remote info for {:?} channel={} sub-channel={}",
-                    game_id,
-                    channel_id.channel(),
-                    channel_id.sub_channel()
-                )
-            })?;
+        match api_client.get_latest_game(&target, None).await {
+            Ok(info) => {
+                let has_full_package = info.has_full_package();
+                let has_patch_package = info.has_patch_package();
+                let package = info.pkg.as_ref().map(|package| PackageReport {
+                    file_path: package.file_path.clone(),
+                    packs: package.packs.len(),
+                    game_files_md5: package.game_files_md5.clone(),
+                });
+                remote = Some(RemoteReport {
+                    game: game_id.to_string(),
+                    region: region_id.to_string(),
+                    channel: channel_id.channel().to_string(),
+                    sub_channel: channel_id.sub_channel().to_string(),
+                    version: info.version,
+                    action: info.action,
+                    request_version: info.request_version,
+                    has_full_package,
+                    has_patch_package,
+                    package,
+                });
 
-        let has_full_package = info.has_full_package();
-        let has_patch_package = info.has_patch_package();
-        let package = info.pkg.as_ref().map(|package| PackageReport {
-            file_path: package.file_path.clone(),
-            packs: package.packs.len(),
-            game_files_md5: package.game_files_md5.clone(),
-        });
-        remote = Some(RemoteReport {
-            game: game_id.to_string(),
-            region: region_id.to_string(),
-            channel: channel_id.channel().to_string(),
-            sub_channel: channel_id.sub_channel().to_string(),
-            version: info.version,
-            action: info.action,
-            request_version: info.request_version,
-            has_full_package,
-            has_patch_package,
-            package,
-        });
-
-        if opts.verbose {
-            let response = api_client.get_media(&target, language).await?;
-            media = Some(MediaReport {
-                language: language.to_owned(),
-                banners: response
-                    .banners
-                    .as_ref()
-                    .map(|value| value.banners.len())
-                    .unwrap_or_default(),
-                announcement_tabs: response
-                    .announcements
-                    .as_ref()
-                    .map(|value| value.tabs.len())
-                    .unwrap_or_default(),
-                sidebar: response
-                    .sidebar
-                    .as_ref()
-                    .map(|value| value.sidebars.len())
-                    .unwrap_or_default(),
-            });
+                if include_media {
+                    let response = api_client
+                        .get_media(&target, language)
+                        .await
+                        .context("Failed to fetch requested remote media summary")?;
+                    media = Some(MediaReport {
+                        language: language.to_owned(),
+                        banners: response
+                            .banners
+                            .as_ref()
+                            .map(|value| value.banners.len())
+                            .unwrap_or_default(),
+                        announcement_tabs: response
+                            .announcements
+                            .as_ref()
+                            .map(|value| value.tabs.len())
+                            .unwrap_or_default(),
+                        sidebar: response
+                            .sidebar
+                            .as_ref()
+                            .map(|value| value.sidebars.len())
+                            .unwrap_or_default(),
+                    });
+                }
+            }
+            Err(error) if requested_by_path => {
+                let message = format!(
+                    "Failed to fetch matching remote state; local information is still available: {error}"
+                );
+                ui::print_warning(&message);
+                remote_error = Some(message);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Failed to fetch remote info for {:?} channel={} sub-channel={}",
+                        game_id,
+                        channel_id.channel(),
+                        channel_id.sub_channel()
+                    )
+                })
+            }
         }
     }
 
@@ -252,6 +273,7 @@ pub async fn show(
         local,
         remote,
         media,
+        remote_error,
     };
 
     if opts.output == OutputFormat::Json {

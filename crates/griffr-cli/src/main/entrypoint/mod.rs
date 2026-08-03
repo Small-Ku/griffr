@@ -41,23 +41,7 @@ pub(crate) async fn run() -> Result<()> {
         .without_time()
         .init();
 
-    let opts = GlobalOptions {
-        dry_run: cli.dry_run,
-        verbose: cli.verbose,
-        skip_verify: false,
-        force_full_package: false,
-        resource_policy: ResourcePolicyArg::Auto,
-        keep_pack_archives: false,
-        extraction_progress_buffer_bytes: cli.extraction_progress_buffer_bytes,
-        download_progress_buffer_bytes: cli.download_progress_buffer_bytes,
-        volume_read_limit: cli.volume_read_limit,
-        volume_write_limit: cli.volume_write_limit,
-        volume_metadata_limit: cli.volume_metadata_limit,
-        volume_streaming_pressure_limit: cli.volume_streaming_pressure_limit,
-        volume_streaming_mode: cli.volume_streaming_mode.into(),
-        reuse_queue_limit: cli.reuse_queue_limit,
-        output: cli.output,
-    };
+    let opts = GlobalOptions::from_environment(cli.dry_run, cli.verbose, OutputFormat::Text);
 
     if opts.verbose {
         debug!("Griffr CLI started");
@@ -113,7 +97,7 @@ pub(crate) async fn run() -> Result<()> {
             paths,
             overrides,
             reuse,
-            skip_verify,
+            defer_verification,
             full_package,
             use_predownload,
             resource_policy,
@@ -129,7 +113,7 @@ pub(crate) async fn run() -> Result<()> {
             } = reuse;
             let resource_policy = ResourcePolicyArg::resolve(resource_policy, skip_vfs);
             let opts = GlobalOptions {
-                skip_verify,
+                skip_verify: defer_verification,
                 force_full_package: full_package,
                 resource_policy,
                 keep_pack_archives,
@@ -233,7 +217,9 @@ pub(crate) async fn run() -> Result<()> {
             scope,
             skip_vfs,
             skip_local_detect,
+            report,
         } => {
+            let opts = opts.with_output(report.output);
             let TargetPathsArg { paths } = paths;
             let ReuseSourcesArg {
                 reuse_from,
@@ -306,6 +292,7 @@ pub(crate) async fn run() -> Result<()> {
         }
 
         Commands::Info { selector } => {
+            let opts = opts.with_output(selector.report.output);
             opts.verbose("Info query");
             commands::info_show(
                 selector.path,
@@ -313,6 +300,9 @@ pub(crate) async fn run() -> Result<()> {
                 selector.remote.region.region,
                 selector.remote.channel.channel,
                 selector.remote.channel.sub_channel,
+                selector.remote_state,
+                selector.local_only,
+                selector.include_media,
                 &selector.language,
                 opts,
             )
@@ -323,10 +313,22 @@ pub(crate) async fn run() -> Result<()> {
             remote,
             overrides,
             language,
+            include_links,
+            report,
         } => {
+            let opts = opts.with_output(report.output);
             let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
             opts.verbose(format!("News: {:?} {:?}", game_id, channel_id));
-            commands::news_show(game_id, region_id, channel_id, overrides, &language, opts).await?;
+            commands::news_show(
+                game_id,
+                region_id,
+                channel_id,
+                overrides,
+                &language,
+                include_links,
+                opts,
+            )
+            .await?;
         }
 
         Commands::Debug { command } => debug::dispatch_debug(command, opts).await?,

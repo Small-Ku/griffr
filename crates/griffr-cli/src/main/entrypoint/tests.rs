@@ -74,56 +74,48 @@ fn remote_args_default_to_region_official_channel() {
 }
 
 #[test]
-fn clap_accepts_explicit_volume_policy_and_reuse_step_tuning() {
-    let cli = Cli::try_parse_from([
+fn scheduler_tuning_is_not_part_of_the_public_cli() {
+    let Err(error) = Cli::try_parse_from([
         "griffr",
         "--volume-read-limit",
         "3",
-        "--volume-write-limit",
-        "1",
-        "--volume-metadata-limit",
-        "2",
-        "--volume-streaming-pressure-limit",
-        "4",
-        "--volume-streaming-mode",
-        "exclusive",
-        "--reuse-queue-limit",
-        "24",
         "verify",
         "--path",
         r"C:\Games\Endfield",
-    ])
-    .unwrap();
+    ]) else {
+        panic!("expected removed scheduler option to be rejected");
+    };
 
-    assert_eq!(cli.volume_read_limit, 3);
-    assert_eq!(cli.volume_write_limit, 1);
-    assert_eq!(cli.volume_metadata_limit, 2);
-    assert_eq!(cli.volume_streaming_pressure_limit, 4);
-    assert_eq!(cli.volume_streaming_mode, VolumeStreamingModeArg::Exclusive);
-    assert_eq!(cli.reuse_queue_limit, 24);
+    assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
 }
 
 #[test]
-fn clap_volume_policy_defaults_match_common_nvme_parameters() {
-    let cli = Cli::try_parse_from(["griffr", "verify", "--path", r"C:\Games\Endfield"]).unwrap();
+fn output_format_is_scoped_to_report_commands() {
+    let verify = Cli::try_parse_from([
+        "griffr",
+        "verify",
+        "--path",
+        r"C:\Games\Endfield",
+        "--output",
+        "json",
+    ])
+    .unwrap();
+    let Commands::Verify { report, .. } = verify.command else {
+        panic!("expected verify command");
+    };
+    assert_eq!(report.output, OutputFormat::Json);
 
-    assert_eq!(
-        cli.volume_read_limit,
-        griffr_common::runtime::task_pool::DEFAULT_VOLUME_READ_LIMIT
-    );
-    assert_eq!(
-        cli.volume_write_limit,
-        griffr_common::runtime::task_pool::DEFAULT_VOLUME_WRITE_LIMIT
-    );
-    assert_eq!(
-        cli.volume_metadata_limit,
-        griffr_common::runtime::task_pool::DEFAULT_VOLUME_METADATA_LIMIT
-    );
-    assert_eq!(
-        cli.volume_streaming_pressure_limit,
-        griffr_common::runtime::task_pool::DEFAULT_VOLUME_STREAMING_PRESSURE_LIMIT
-    );
-    assert_eq!(cli.volume_streaming_mode, VolumeStreamingModeArg::Mixed);
+    let Err(error) = Cli::try_parse_from([
+        "griffr",
+        "update",
+        "--path",
+        r"C:\Games\Endfield",
+        "--output",
+        "json",
+    ]) else {
+        panic!("expected report output to be rejected by update");
+    };
+    assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
 }
 
 #[test]

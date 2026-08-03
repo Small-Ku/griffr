@@ -34,6 +34,7 @@ async fn verify_one(
     scope: Option<crate::VerifyScopeArg>,
     opts: GlobalOptions,
 ) -> Result<serde_json::Value> {
+    let text_output = opts.output != OutputFormat::Json;
     let detected_game = local.game_id.as_ref();
     let detected_region = local.region_id;
     let detected_channel = local.channel_id.as_ref();
@@ -141,7 +142,7 @@ async fn verify_one(
 
     if !skip_local_detect {
         if let Some(detected_game) = detected_game {
-            if detected_game != &game_id && opts.output != OutputFormat::Json {
+            if detected_game != &game_id && text_output {
                 ui::print_warning(format!(
                     "Overriding detected game {} with CLI --game {}",
                     detected_game, game_id
@@ -149,7 +150,7 @@ async fn verify_one(
             }
         }
         if let Some(detected_region) = detected_region {
-            if detected_region != region_id && opts.output != OutputFormat::Json {
+            if detected_region != region_id && text_output {
                 ui::print_warning(format!(
                     "Overriding detected region {} with CLI --region {}",
                     detected_region, region_id
@@ -157,7 +158,7 @@ async fn verify_one(
             }
         }
         if let Some(detected_channel) = detected_channel {
-            if detected_channel != &channel_id && opts.output != OutputFormat::Json {
+            if detected_channel != &channel_id && text_output {
                 ui::print_warning(format!(
                     "Overriding detected channel {}/{} with CLI --channel {}/{}",
                     detected_channel.channel(),
@@ -169,28 +170,30 @@ async fn verify_one(
         }
     }
 
-    ui::print_phase(format!(
-        "Verifying {} (region={}, channel={}, sub-channel={}) at {}",
-        game_id,
-        region_id,
-        channel_id.channel(),
-        channel_id.sub_channel(),
-        local.install_path.display(),
-    ));
-    ui::print_info(format!("Installed version: {}", installed_version));
-    if let Some(state) = active_change.as_ref() {
-        ui::print_warning(format!(
-            "Unfinished {} change targets {}. Integrity will use the target manifest.",
-            state.kind, state.target_version
+    if text_output {
+        ui::print_phase(format!(
+            "Verifying {} (region={}, channel={}, sub-channel={}) at {}",
+            game_id,
+            region_id,
+            channel_id.channel(),
+            channel_id.sub_channel(),
+            local.install_path.display(),
         ));
+        ui::print_info(format!("Installed version: {}", installed_version));
+        if let Some(state) = active_change.as_ref() {
+            ui::print_warning(format!(
+                "Unfinished {} change targets {}. Integrity will use the target manifest.",
+                state.kind, state.target_version
+            ));
+        }
     }
 
     let manifest_snapshot = GameManifestSnapshot::fetch(api_client, &release_info)
         .await
         .context("Failed to fetch the integrity manifest snapshot")?;
 
-    let progress = (opts.output != OutputFormat::Json)
-        .then(|| CountAndByteProgress::new("verify", "repair.download", opts.verbose));
+    let progress =
+        (text_output).then(|| CountAndByteProgress::new("verify", "repair.download", opts.verbose));
     let progress_session = progress.as_ref().map(|progress| {
         progress.start(
             ProgressLane::INTEGRITY_VERIFY,
@@ -225,7 +228,7 @@ async fn verify_one(
         && effective_scope == crate::VerifyScopeArg::Core
     {
         effective_scope = crate::VerifyScopeArg::All;
-        if opts.output != OutputFormat::Json {
+        if text_output {
             ui::print_warning(
                 "Using --scope all because the unfinished change marker requires resource closure.",
             );
@@ -233,7 +236,7 @@ async fn verify_one(
     }
     let sync_vfs = effective_scope != crate::VerifyScopeArg::Core;
     let mut vfs_plan = if sync_vfs {
-        if opts.output != OutputFormat::Json {
+        if text_output {
             ui::print_info(
                 "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
             );
@@ -277,16 +280,19 @@ async fn verify_one(
                 previous_target, advanced.target_version
             ));
         } else {
-            match start_install_change(&local.install_path, &advanced)? {
-                InstallChangeStart::Advance => ui::print_warning(format!(
-                    "Advancing unfinished target {} to current release {} during repair",
-                    previous_target, advanced.target_version
-                )),
-                InstallChangeStart::Resume => ui::print_info(format!(
-                    "Resuming repair toward current release {}",
-                    advanced.target_version
-                )),
-                InstallChangeStart::New => unreachable!("an active marker was read above"),
+            let start = start_install_change(&local.install_path, &advanced)?;
+            if text_output {
+                match start {
+                    InstallChangeStart::Advance => ui::print_warning(format!(
+                        "Advancing unfinished target {} to current release {} during repair",
+                        previous_target, advanced.target_version
+                    )),
+                    InstallChangeStart::Resume => ui::print_info(format!(
+                        "Resuming repair toward current release {}",
+                        advanced.target_version
+                    )),
+                    InstallChangeStart::New => unreachable!("an active marker was read above"),
+                }
             }
         }
         active_change = Some(advanced);
@@ -341,15 +347,16 @@ async fn verify_one(
             )
             .with_game_files_path(content_plan.snapshot().release.file_path.clone())
             .with_resource_identity(vfs_plan.identity.clone());
-            match start_install_change(&local.install_path, &state)? {
-                InstallChangeStart::New => {}
-                InstallChangeStart::Resume => {
-                    ui::print_info(format!(
+            let start = start_install_change(&local.install_path, &state)?;
+            if text_output {
+                match start {
+                    InstallChangeStart::New => {}
+                    InstallChangeStart::Resume => ui::print_info(format!(
                         "Resuming unfinished repair for {}",
                         checked_version
-                    ));
+                    )),
+                    InstallChangeStart::Advance => unreachable!("repair cannot advance a change"),
                 }
-                InstallChangeStart::Advance => unreachable!("repair cannot advance a change"),
             }
             Some(state)
         }
@@ -420,7 +427,7 @@ async fn verify_one(
         "downloaded_files": summary.downloaded_files,
         "reused_files": summary.reused_files,
     });
-    if opts.output != OutputFormat::Json {
+    if text_output {
         ui::print_info(format!("Integrity issues found: {}", summary.issues.len()));
         if execute_repairs {
             ui::print_info(format!(
@@ -456,7 +463,7 @@ async fn verify_one(
                 }
             }
         } else if let Some(state) = active_change.as_ref() {
-            if opts.output != OutputFormat::Json {
+            if text_output {
                 ui::print_warning(format!(
                     "Target {} is valid, but the unfinished {} marker remains. Run verify --repair to sync launcher metadata and finish the change.",
                     state.target_version, state.kind
@@ -466,7 +473,7 @@ async fn verify_one(
         return Ok(report);
     }
 
-    if opts.output != OutputFormat::Json {
+    if text_output {
         for issue in &summary.issues {
             ui::print_warning(format!(
                 "{} {:?} expected_size={} actual_size={:?} expected_md5={} actual_md5={:?}",
@@ -512,7 +519,7 @@ async fn verify_one(
                 .context("Failed to finish the resource baseline after repair")?;
         }
         if effective_scope != crate::VerifyScopeArg::Resources {
-            if opts.output != OutputFormat::Json {
+            if text_output {
                 ui::print_phase("Syncing launcher metadata");
             }
             content_plan
@@ -526,13 +533,13 @@ async fn verify_one(
                 finish_install_change(&local.install_path, state)
                     .context("Failed to remove the install change marker")?;
             }
-            if opts.output != OutputFormat::Json {
+            if text_output {
                 ui::print_success("Launcher metadata synced");
             }
         }
     }
 
-    if opts.output != OutputFormat::Json {
+    if text_output {
         ui::print_success(if execute_repairs {
             "Verify and repair finished"
         } else if repair && opts.is_dry_run() {

@@ -15,6 +15,7 @@ pub async fn show(
     channel_id: ChannelPair,
     overrides: crate::ApiTargetOverrideArgs,
     language: &str,
+    include_links: bool,
     opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
@@ -97,7 +98,7 @@ pub async fn show(
             if let Some(ts) = ui::format_unix_ms(&announcement.start_ts) {
                 ui::print_info(format!("     start: {}", ts));
             }
-            if opts.verbose {
+            if include_links {
                 ui::print_info(format!("     id: {}", announcement.id));
                 ui::print_info(format!("     url: {}", announcement.jump_url));
             }
@@ -115,7 +116,7 @@ mod tests {
     fn announcement_text_is_sanitized() {
         assert_eq!(
             format_announcement_text("<h1>Patch</h1><p>Live now</p>"),
-            "PatchLive now"
+            "Patch Live now"
         );
     }
 }

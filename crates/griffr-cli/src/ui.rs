@@ -117,15 +117,58 @@ pub fn print_patch_check(report: &griffr_common::runtime::PatchCheckReport) {
 }
 
 pub fn strip_html_tags(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut in_tag = false;
+    const BLOCK_TAGS: &[&str] = &[
+        "address",
+        "article",
+        "aside",
+        "blockquote",
+        "br",
+        "div",
+        "footer",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "header",
+        "hr",
+        "li",
+        "main",
+        "nav",
+        "ol",
+        "p",
+        "pre",
+        "section",
+        "table",
+        "tr",
+        "ul",
+    ];
 
-    for ch in input.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '<' {
+            out.push(ch);
+            continue;
+        }
+
+        let mut tag = String::new();
+        for tag_ch in chars.by_ref() {
+            if tag_ch == '>' {
+                break;
+            }
+            tag.push(tag_ch);
+        }
+        let name = tag
+            .trim_start()
+            .trim_start_matches('/')
+            .split(|ch: char| ch.is_ascii_whitespace() || ch == '/' || ch == '>')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if BLOCK_TAGS.contains(&name.as_str()) && !out.ends_with(char::is_whitespace) {
+            out.push(' ');
         }
     }
 

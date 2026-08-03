@@ -1,11 +1,5 @@
-use clap::builder::TypedValueParser;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use griffr_common::api::protocol::DEFAULT_LANGUAGE;
-use griffr_common::runtime::task_pool::{
-    DEFAULT_PROGRESS_BUFFER_BYTES, DEFAULT_REUSE_QUEUE_LIMIT, DEFAULT_VOLUME_METADATA_LIMIT,
-    DEFAULT_VOLUME_READ_LIMIT, DEFAULT_VOLUME_STREAMING_MODE,
-    DEFAULT_VOLUME_STREAMING_PRESSURE_LIMIT, DEFAULT_VOLUME_WRITE_LIMIT,
-};
 use griffr_common::runtime::PersistentVfsFileSet;
 
 use crate::debug_cli::{AccountCommands, DebugCommands, PredownloadCommands};
@@ -24,81 +18,9 @@ pub(crate) struct Cli {
     )]
     pub(crate) dry_run: bool,
 
-    /// Enable verbose output
-    #[arg(short, long, global = true, help = "Enable verbose logging")]
+    /// Enable diagnostic logging on stderr
+    #[arg(short, long, global = true, help = "Enable diagnostic logging")]
     pub(crate) verbose: bool,
-
-    /// Output format for user-facing command results
-    #[arg(
-        long,
-        global = true,
-        value_enum,
-        default_value_t = OutputFormat::Text,
-        help = "Choose text or JSON output for report-style commands"
-    )]
-    pub(crate) output: OutputFormat,
-
-    /// Extraction progress buffer size in bytes (controls progress update granularity)
-    #[arg(long, global = true, default_value_t = DEFAULT_PROGRESS_BUFFER_BYTES)]
-    pub(crate) extraction_progress_buffer_bytes: usize,
-
-    /// Download progress buffer size in bytes (controls progress update granularity)
-    #[arg(long, global = true, default_value_t = DEFAULT_PROGRESS_BUFFER_BYTES)]
-    pub(crate) download_progress_buffer_bytes: usize,
-
-    /// Maximum concurrent streaming readers per physical volume
-    #[arg(
-        long,
-        global = true,
-        default_value_t = DEFAULT_VOLUME_READ_LIMIT,
-        value_parser = clap::value_parser!(u64).range(1..).map(|v| v as usize)
-    )]
-    pub(crate) volume_read_limit: usize,
-
-    /// Maximum concurrent streaming writers per physical volume
-    #[arg(
-        long,
-        global = true,
-        default_value_t = DEFAULT_VOLUME_WRITE_LIMIT,
-        value_parser = clap::value_parser!(u64).range(1..).map(|v| v as usize)
-    )]
-    pub(crate) volume_write_limit: usize,
-
-    /// Maximum concurrent metadata mutations per physical volume
-    #[arg(
-        long,
-        global = true,
-        default_value_t = DEFAULT_VOLUME_METADATA_LIMIT,
-        value_parser = clap::value_parser!(u64).range(1..).map(|v| v as usize)
-    )]
-    pub(crate) volume_metadata_limit: usize,
-
-    /// Maximum combined streaming read/write pressure per physical volume
-    #[arg(
-        long,
-        global = true,
-        default_value_t = DEFAULT_VOLUME_STREAMING_PRESSURE_LIMIT,
-        value_parser = clap::value_parser!(u64).range(1..).map(|v| v as usize)
-    )]
-    pub(crate) volume_streaming_pressure_limit: usize,
-
-    /// Whether streaming reads and writes may overlap on the same physical volume
-    #[arg(
-        long,
-        global = true,
-        value_enum,
-        default_value_t = VolumeStreamingModeArg::from_policy(DEFAULT_VOLUME_STREAMING_MODE)
-    )]
-    pub(crate) volume_streaming_mode: VolumeStreamingModeArg,
-
-    /// Maximum verified reuse files waiting for hardlink/copy commit
-    #[arg(
-        long,
-        global = true,
-        default_value_t = DEFAULT_REUSE_QUEUE_LIMIT,
-        value_parser = clap::value_parser!(u64).range(1..).map(|v| v as usize)
-    )]
-    pub(crate) reuse_queue_limit: usize,
 
     #[command(subcommand)]
     pub(crate) command: Commands,
@@ -116,6 +38,13 @@ pub(crate) struct TargetPathsArg {
     /// Install root or config.ini path; repeat --path to process a batch
     #[arg(long = "path", required = true)]
     pub(crate) paths: Vec<std::path::PathBuf>,
+}
+
+#[derive(Args, Debug, Clone, Copy)]
+pub(crate) struct OutputArgs {
+    /// Output format for the final report
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub(crate) output: OutputFormat,
 }
 
 #[derive(Args)]
@@ -254,9 +183,24 @@ pub(crate) struct InfoSelectorArgs {
     #[command(flatten)]
     pub(crate) remote: GameRegionChannelArgs,
 
-    /// Launcher language
+    /// Fetch the matching remote release when --path is used
+    #[arg(long = "remote", conflicts_with = "local_only")]
+    pub(crate) remote_state: bool,
+
+    /// Never contact the remote API; valid only with --path
+    #[arg(long, requires = "path", conflicts_with = "remote_state")]
+    pub(crate) local_only: bool,
+
+    /// Include a remote media summary; implies remote lookup
+    #[arg(long, conflicts_with = "local_only")]
+    pub(crate) include_media: bool,
+
+    /// Launcher language used for media lookup
     #[arg(long, default_value = DEFAULT_LANGUAGE)]
     pub(crate) language: String,
+
+    #[command(flatten)]
+    pub(crate) report: OutputArgs,
 }
 
 #[derive(Subcommand)]
@@ -280,11 +224,16 @@ pub(crate) enum Commands {
         reuse: ReuseSourcesArg,
 
         /// Choose how launcher resource-index files are sourced
-        #[arg(long, value_enum, conflicts_with = "skip_vfs")]
+        #[arg(
+            long = "resources",
+            alias = "resource-policy",
+            value_enum,
+            conflicts_with = "skip_vfs"
+        )]
         resource_policy: Option<ResourcePolicyArg>,
 
         /// Skip launcher resource-index sync. Package and game_files resource entries are still installed and verified.
-        #[arg(long, conflicts_with = "resource_policy")]
+        #[arg(long, hide = true, conflicts_with = "resource_policy")]
         skip_vfs: bool,
 
         /// Keep downloaded package archives after successful extraction
@@ -318,9 +267,9 @@ pub(crate) enum Commands {
         #[command(flatten)]
         reuse: ReuseSourcesArg,
 
-        /// Skip post-update verification
-        #[arg(long)]
-        skip_verify: bool,
+        /// Commit downloaded content but keep the install blocked until a later verify --repair
+        #[arg(long = "defer-verification", alias = "skip-verify")]
+        defer_verification: bool,
 
         /// Force full package instead of patch
         #[arg(long)]
@@ -331,11 +280,16 @@ pub(crate) enum Commands {
         use_predownload: bool,
 
         /// Choose how launcher resource-index files are sourced
-        #[arg(long, value_enum, conflicts_with = "skip_vfs")]
+        #[arg(
+            long = "resources",
+            alias = "resource-policy",
+            value_enum,
+            conflicts_with = "skip_vfs"
+        )]
         resource_policy: Option<ResourcePolicyArg>,
 
         /// Skip launcher resource-index sync. Package and game_files resource entries are still installed and verified.
-        #[arg(long, conflicts_with = "resource_policy")]
+        #[arg(long, hide = true, conflicts_with = "resource_policy")]
         skip_vfs: bool,
 
         /// Keep downloaded package archives after successful extraction
@@ -402,13 +356,16 @@ pub(crate) enum Commands {
         #[arg(long, value_enum, conflicts_with = "skip_vfs")]
         scope: Option<VerifyScopeArg>,
 
-        /// Verify core files only and do not query or hash launcher resource-index paths.
-        #[arg(long, conflicts_with = "scope")]
+        /// Deprecated alias for --scope core
+        #[arg(long, hide = true, conflicts_with = "scope")]
         skip_vfs: bool,
 
         /// Do not read game/region/channel from local install metadata; requires --game and --region
         #[arg(long, requires = "game", requires = "region")]
         skip_local_detect: bool,
+
+        #[command(flatten)]
+        report: OutputArgs,
     },
     /// Set up the game-selected Persistent resource working set
     SetupPersistentResources {
@@ -456,6 +413,13 @@ pub(crate) enum Commands {
         /// Launcher language
         #[arg(long, default_value = DEFAULT_LANGUAGE)]
         language: String,
+
+        /// Include announcement IDs and URLs in text output
+        #[arg(long)]
+        include_links: bool,
+
+        #[command(flatten)]
+        report: OutputArgs,
     },
 
     /// Developer-only helpers for raw launcher artifacts
@@ -504,30 +468,6 @@ pub enum VerifyScopeArg {
     Core,
     /// Verify launcher resource-index paths only.
     Resources,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
-pub enum VolumeStreamingModeArg {
-    Exclusive,
-    Mixed,
-}
-
-impl VolumeStreamingModeArg {
-    pub const fn from_policy(mode: griffr_common::runtime::task_pool::VolumeStreamingMode) -> Self {
-        match mode {
-            griffr_common::runtime::task_pool::VolumeStreamingMode::Exclusive => Self::Exclusive,
-            griffr_common::runtime::task_pool::VolumeStreamingMode::Mixed => Self::Mixed,
-        }
-    }
-}
-
-impl From<VolumeStreamingModeArg> for griffr_common::runtime::task_pool::VolumeStreamingMode {
-    fn from(mode: VolumeStreamingModeArg) -> Self {
-        match mode {
-            VolumeStreamingModeArg::Exclusive => Self::Exclusive,
-            VolumeStreamingModeArg::Mixed => Self::Mixed,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
