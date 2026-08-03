@@ -10,14 +10,6 @@ use crate::debug_cli::{AccountCommands, DebugCommands, StageCommands};
 #[command(about = "A CLI launcher for Hypergryph games (Arknights / Endfield)")]
 #[command(version)]
 pub(crate) struct Cli {
-    /// Show planned changes and do not change files
-    #[arg(
-        long,
-        global = true,
-        help = "Show what would be done without making changes"
-    )]
-    pub(crate) dry_run: bool,
-
     /// Enable diagnostic logging on stderr
     #[arg(short, long, global = true, help = "Enable diagnostic logging")]
     pub(crate) verbose: bool,
@@ -38,6 +30,13 @@ pub(crate) struct TargetPathsArg {
     /// Install root or config.ini path; repeat --path to process a batch
     #[arg(long = "path", required = true)]
     pub(crate) paths: Vec<std::path::PathBuf>,
+}
+
+#[derive(Args, Debug, Clone, Copy, Default)]
+pub(crate) struct MutationArgs {
+    /// Show planned changes without modifying files or processes
+    #[arg(long)]
+    pub(crate) dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone, Copy)]
@@ -206,6 +205,9 @@ pub(crate) struct InfoSelectorArgs {
 #[derive(Args)]
 pub(crate) struct PersistentResourceArgs {
     #[command(flatten)]
+    pub(crate) mutation: MutationArgs,
+
+    #[command(flatten)]
     pub(crate) path: PathArg,
 
     #[command(flatten)]
@@ -246,6 +248,9 @@ pub(crate) enum Commands {
     /// Download and install a game to an explicit path
     Install {
         #[command(flatten)]
+        mutation: MutationArgs,
+
+        #[command(flatten)]
         remote: RequiredGameRegionChannelArgs,
 
         #[command(flatten)]
@@ -281,6 +286,9 @@ pub(crate) enum Commands {
 
     /// Delete a local install path
     Uninstall {
+        #[command(flatten)]
+        mutation: MutationArgs,
+
         /// Install root
         #[arg(long)]
         path: std::path::PathBuf,
@@ -296,6 +304,9 @@ pub(crate) enum Commands {
 
     /// Update one or more existing installs identified by encrypted config.ini files
     Update {
+        #[command(flatten)]
+        mutation: MutationArgs,
+
         #[command(flatten)]
         paths: TargetPathsArg,
 
@@ -361,11 +372,17 @@ pub(crate) enum Commands {
     /// Resume a persisted patch transaction
     Recover {
         #[command(flatten)]
+        mutation: MutationArgs,
+
+        #[command(flatten)]
         path: PathArg,
     },
 
     /// Launch a local install path
     Launch {
+        #[command(flatten)]
+        mutation: MutationArgs,
+
         /// Install root or config.ini path
         #[arg(long)]
         path: std::path::PathBuf,
@@ -385,6 +402,9 @@ pub(crate) enum Commands {
 
     /// Verify one or more local installs against their game_files manifests
     Verify {
+        #[command(flatten)]
+        mutation: MutationArgs,
+
         #[command(flatten)]
         paths: TargetPathsArg,
 

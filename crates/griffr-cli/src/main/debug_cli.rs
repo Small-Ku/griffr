@@ -4,7 +4,7 @@ use griffr_common::config::{GameId, RegionId};
 use tracing::debug;
 
 use crate::cli::{
-    ApiTargetOverrideArgs, InstallTargetOverrideArgs, OutputFormat, PathArg,
+    ApiTargetOverrideArgs, InstallTargetOverrideArgs, MutationArgs, OutputFormat, PathArg,
     RequiredGameRegionChannelArgs, SnapshotHashScope, VfsDiffAgainst,
 };
 
@@ -231,6 +231,9 @@ pub(crate) enum StageCommands {
     /// Download and verify staged predownload archives without applying them
     Fetch {
         #[command(flatten)]
+        mutation: MutationArgs,
+
+        #[command(flatten)]
         path: PathArg,
 
         /// Directory for downloaded staged archives
@@ -240,6 +243,9 @@ pub(crate) enum StageCommands {
     /// Legacy alias for `update --stage-dir ... --require-staged`
     #[command(hide = true)]
     Apply {
+        #[command(flatten)]
+        mutation: MutationArgs,
+
         #[command(flatten)]
         path: PathArg,
 
@@ -278,6 +284,9 @@ pub(crate) enum StageCommands {
     #[command(hide = true)]
     Resume {
         #[command(flatten)]
+        mutation: MutationArgs,
+
+        #[command(flatten)]
         path: PathArg,
     },
 }
@@ -286,6 +295,9 @@ pub(crate) enum StageCommands {
 pub(crate) enum AccountCommands {
     /// Capture current local account state into a directory bundle
     Capture {
+        #[command(flatten)]
+        mutation: MutationArgs,
+
         /// Known game id
         game: GameId,
 
@@ -316,6 +328,9 @@ pub(crate) enum AccountCommands {
 
     /// Activate account state from a directory bundle
     Activate {
+        #[command(flatten)]
+        mutation: MutationArgs,
+
         /// Known game id
         game: GameId,
 
@@ -430,6 +445,10 @@ impl GlobalOptions {
 
     pub fn with_output(self, output: OutputFormat) -> Self {
         Self { output, ..self }
+    }
+
+    pub fn with_dry_run(self, dry_run: bool) -> Self {
+        Self { dry_run, ..self }
     }
 
     pub fn task_pool_config(&self) -> griffr_common::runtime::task_pool::TaskPoolConfig {

@@ -248,6 +248,7 @@ fn launch_accepts_wine_runner_and_prefix() {
         force,
         wine,
         wine_prefix,
+        ..
     } = cli.command
     else {
         panic!("expected launch command");
@@ -343,4 +344,49 @@ fn update_stage_contract_is_explicit() {
         error.kind(),
         clap::error::ErrorKind::MissingRequiredArgument
     );
+}
+
+#[test]
+fn dry_run_is_scoped_to_mutating_commands() {
+    let install = Cli::try_parse_from([
+        "griffr",
+        "install",
+        "--dry-run",
+        "--game",
+        "endfield",
+        "--region",
+        "sg",
+        "--path",
+        r"C:\Games\Endfield",
+    ])
+    .unwrap();
+    let Commands::Install { mutation, .. } = install.command else {
+        panic!("expected install command");
+    };
+    assert!(mutation.dry_run);
+
+    let verify = Cli::try_parse_from([
+        "griffr",
+        "verify",
+        "--dry-run",
+        "--repair",
+        "--path",
+        r"C:\Games\Endfield",
+    ])
+    .unwrap();
+    let Commands::Verify { mutation, .. } = verify.command else {
+        panic!("expected verify command");
+    };
+    assert!(mutation.dry_run);
+
+    let Err(error) = Cli::try_parse_from([
+        "griffr",
+        "info",
+        "--dry-run",
+        "--path",
+        r"C:\Games\Endfield",
+    ]) else {
+        panic!("expected info to reject mutation-only --dry-run");
+    };
+    assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
 }

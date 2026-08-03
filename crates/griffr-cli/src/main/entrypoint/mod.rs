@@ -26,6 +26,7 @@ fn parse_remote_args(
 
 async fn dispatch_resource_sync(args: PersistentResourceArgs, opts: GlobalOptions) -> Result<()> {
     let PersistentResourceArgs {
+        mutation,
         path: PathArg { path },
         overrides,
         file_set,
@@ -34,6 +35,7 @@ async fn dispatch_resource_sync(args: PersistentResourceArgs, opts: GlobalOption
         prefer_reuse,
         prune,
     } = args;
+    let opts = opts.with_dry_run(mutation.dry_run);
     opts.verbose(format!(
         "Resource sync path={:?}, file_set={:?}, reuse_from={:?}, allow_download={}, prefer_reuse={}, prune={}",
         path, file_set, reuse_from, allow_download, prefer_reuse, prune
@@ -68,16 +70,16 @@ pub(crate) async fn run() -> Result<()> {
         .without_time()
         .init();
 
-    let opts = GlobalOptions::from_environment(cli.dry_run, cli.verbose, OutputFormat::Text);
+    let opts = GlobalOptions::from_environment(false, cli.verbose, OutputFormat::Text);
 
     if opts.verbose {
         debug!("Griffr CLI started");
-        debug!("Dry run: {}", opts.dry_run);
         debug!("Verbose: {}", opts.verbose);
     }
 
     match cli.command {
         Commands::Install {
+            mutation,
             remote,
             overrides,
             path,
@@ -87,6 +89,7 @@ pub(crate) async fn run() -> Result<()> {
             skip_vfs,
             keep_pack_archives,
         } => {
+            let opts = opts.with_dry_run(mutation.dry_run);
             let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
             let PathArg { path } = path;
             let ReuseSourcesArg {
@@ -112,7 +115,13 @@ pub(crate) async fn run() -> Result<()> {
             .await?;
         }
 
-        Commands::Uninstall { path, detach, yes } => {
+        Commands::Uninstall {
+            mutation,
+            path,
+            detach,
+            yes,
+        } => {
+            let opts = opts.with_dry_run(mutation.dry_run);
             opts.verbose(format!(
                 "Uninstall command: path={:?}, detach={}, yes={}",
                 path, detach, yes
@@ -121,6 +130,7 @@ pub(crate) async fn run() -> Result<()> {
         }
 
         Commands::Update {
+            mutation,
             paths,
             overrides,
             reuse,
@@ -135,6 +145,7 @@ pub(crate) async fn run() -> Result<()> {
             work_dir,
             external_asset_root,
         } => {
+            let opts = opts.with_dry_run(mutation.dry_run);
             let TargetPathsArg { paths } = paths;
             let ReuseSourcesArg {
                 reuse_from,
@@ -176,7 +187,12 @@ pub(crate) async fn run() -> Result<()> {
                 opts.verbose(format!("Predownload check path: {:?}", path));
                 commands::predownload_check(path, opts).await?;
             }
-            StageCommands::Fetch { path, stage_dir } => {
+            StageCommands::Fetch {
+                mutation,
+                path,
+                stage_dir,
+            } => {
+                let opts = opts.with_dry_run(mutation.dry_run);
                 let PathArg { path } = path;
                 opts.verbose(format!(
                     "Stage fetch path: {:?}, stage_dir={:?}",
@@ -185,6 +201,7 @@ pub(crate) async fn run() -> Result<()> {
                 commands::predownload_fetch(path, stage_dir, opts).await?;
             }
             StageCommands::Apply {
+                mutation,
                 path,
                 overrides,
                 stage_dir,
@@ -195,6 +212,7 @@ pub(crate) async fn run() -> Result<()> {
                 work_dir,
                 external_asset_root,
             } => {
+                let opts = opts.with_dry_run(mutation.dry_run);
                 let PathArg { path } = path;
                 let resource_policy = ResourcePolicyArg::resolve(resource_policy, skip_vfs);
                 let opts = GlobalOptions {
@@ -219,25 +237,29 @@ pub(crate) async fn run() -> Result<()> {
                 )
                 .await?;
             }
-            StageCommands::Resume { path } => {
+            StageCommands::Resume { mutation, path } => {
+                let opts = opts.with_dry_run(mutation.dry_run);
                 let PathArg { path } = path;
                 opts.verbose(format!("Predownload resume path: {:?}", path));
                 commands::predownload_resume(path, opts).await?;
             }
         },
 
-        Commands::Recover { path } => {
+        Commands::Recover { mutation, path } => {
+            let opts = opts.with_dry_run(mutation.dry_run);
             let PathArg { path } = path;
             opts.verbose(format!("Recover path: {:?}", path));
             commands::predownload_resume(path, opts).await?;
         }
 
         Commands::Launch {
+            mutation,
             path,
             force,
             wine,
             wine_prefix,
         } => {
+            let opts = opts.with_dry_run(mutation.dry_run);
             opts.verbose(format!(
                 "Launch path: {:?}, force={}, wine={:?}, wine_prefix={:?}",
                 path, force, wine, wine_prefix
@@ -246,6 +268,7 @@ pub(crate) async fn run() -> Result<()> {
         }
 
         Commands::Verify {
+            mutation,
             paths,
             remote,
             overrides,
@@ -257,7 +280,9 @@ pub(crate) async fn run() -> Result<()> {
             skip_local_detect,
             report,
         } => {
-            let opts = opts.with_output(report.output);
+            let opts = opts
+                .with_dry_run(mutation.dry_run)
+                .with_output(report.output);
             let TargetPathsArg { paths } = paths;
             let ReuseSourcesArg {
                 reuse_from,
