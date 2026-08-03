@@ -1,86 +1,285 @@
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use griffr_common::runtime::{read_asset_storage_layout, remove_dir_all};
+use anyhow::{Context, Result};
+use griffr_common::runtime::{
+    read_asset_storage_layout, remove_dir_all, resolve_install_path, ASSET_STORAGE_METADATA_NAME,
+    CONFIG_INI_NAME, GRIFFR_DIR,
+};
+use serde::{Deserialize, Serialize};
 
 use crate::progress::ActivityProgress;
 use crate::ui;
 use crate::GlobalOptions;
-use griffr_common::runtime::resolve_install_path;
 
-pub async fn uninstall(
-    path: PathBuf,
-    keep_files: bool,
-    yes: bool,
-    opts: GlobalOptions,
-) -> Result<()> {
-    let target = resolve_install_path(&path).await;
+const UNINSTALL_PLAN_NAME: &str = ".griffr-uninstall.json";
 
-    ui::print_phase(format!("Uninstall target: {}", target.display()));
+#[derive(Debug)]
+struct UninstallTarget {
+    root: PathBuf,
+    storage: Option<griffr_common::runtime::AssetStorageLayout>,
+    owned_external_root: Option<PathBuf>,
+}
 
-    if keep_files {
-        ui::print_success("Skipped file deletion due to --keep-files");
+#[derive(Debug, Serialize, Deserialize)]
+struct UninstallPlan {
+    schema_version: u32,
+    install_root: PathBuf,
+    external_asset_root: Option<PathBuf>,
+}
+
+pub async fn uninstall(path: PathBuf, detach: bool, yes: bool, opts: GlobalOptions) -> Result<()> {
+    let target = inspect_uninstall_target(&path).await?;
+
+    ui::print_phase(format!(
+        "{} target: {}",
+        if detach { "Detach" } else { "Uninstall" },
+        target.root.display()
+    ));
+
+    if opts.is_dry_run() {
+        if detach {
+            opts.dry_run(format!(
+                "Would remove Griffr private state from {} and keep game files",
+                target.root.display()
+            ));
+            if target.owned_external_root.is_some() {
+                opts.dry_run("Would release external asset ownership without deleting its files");
+            }
+        } else {
+            opts.dry_run(format!("Would delete {}", target.root.display()));
+            match (&target.storage, &target.owned_external_root) {
+                (_, Some(external)) => opts.dry_run(format!(
+                    "Would first delete owned external asset root {}",
+                    external.display()
+                )),
+                (Some(layout), None) if !layout.external_asset_root.starts_with(&target.root) => {
+                    ui::print_warning(format!(
+                        "External asset root {} has no matching ownership sentinel and would be detached, not deleted",
+                        layout.external_asset_root.display()
+                    ));
+                }
+                _ => {}
+            }
+        }
         return Ok(());
     }
 
-    if !yes && !opts.is_dry_run() {
-        print!("delete {} ? [y/N]: ", target.display());
+    if !yes {
+        print!(
+            "{} {} ? [y/N]: ",
+            if detach { "detach" } else { "delete" },
+            target.root.display()
+        );
         use std::io::Write;
         let _ = std::io::stdout().flush();
 
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         if !input.trim().eq_ignore_ascii_case("y") {
-            ui::print_info("Uninstall cancelled.");
+            ui::print_info("Operation cancelled.");
             return Ok(());
         }
     }
 
-    let external_asset_root = read_asset_storage_layout(&target)?
-        .map(|storage_layout| storage_layout.external_asset_root);
-
-    if opts.is_dry_run() {
-        opts.dry_run(format!("Would delete {}", target.display()));
-        if let Some(external) = external_asset_root.as_ref() {
-            opts.dry_run(format!(
-                "Would also delete external asset root {}",
-                external.display()
-            ));
-        }
+    if detach {
+        detach_install(&target).await?;
+        ui::print_success(format!(
+            "Detached Griffr state from {}; game files were kept",
+            target.root.display()
+        ));
         return Ok(());
     }
 
-    let exists = match compio::fs::metadata(&target).await {
-        Ok(_) => true,
-        Err(err) if err.kind() == ErrorKind::NotFound => false,
-        Err(err) => return Err(anyhow::Error::from(err)),
-    };
-    if exists {
-        let progress = ActivityProgress::new(format!("Deleting {}", target.display()));
-        if let Err(err) = remove_dir_all(target.clone()).await {
-            progress.fail();
-            return Err(err.into());
-        }
-        progress.finish();
-        if let Some(external) = external_asset_root {
-            let external_exists = compio::fs::metadata(&external).await.is_ok();
-            if external_exists && !external.starts_with(&target) {
-                let external_progress = ActivityProgress::new(format!(
-                    "Deleting external assets {}",
-                    external.display()
-                ));
-                if let Err(err) = remove_dir_all(external.clone()).await {
-                    external_progress.fail();
-                    return Err(err.into());
-                }
-                external_progress.finish();
+    persist_uninstall_plan(&target).await?;
+
+    if let Some(external) = target.owned_external_root.as_ref() {
+        if !external.starts_with(&target.root) {
+            let progress = ActivityProgress::new(format!(
+                "Deleting owned external assets {}",
+                external.display()
+            ));
+            if let Err(error) = remove_dir_all(external.clone()).await {
+                progress.fail();
+                return Err(error.into());
             }
+            progress.finish();
         }
-        ui::print_success(format!("Deleted {}", target.display()));
-    } else {
-        ui::print_info("Target path does not exist; nothing to remove.");
     }
 
+    let progress = ActivityProgress::new(format!("Deleting {}", target.root.display()));
+    if let Err(error) = remove_dir_all(target.root.clone()).await {
+        progress.fail();
+        return Err(error.into());
+    }
+    progress.finish();
+    ui::print_success(format!("Deleted {}", target.root.display()));
     Ok(())
+}
+
+async fn inspect_uninstall_target(path: &Path) -> Result<UninstallTarget> {
+    let candidate = resolve_install_path(path).await?;
+    compio::runtime::spawn_blocking(move || inspect_uninstall_target_sync(&candidate))
+        .await
+        .map_err(|_| anyhow::anyhow!("uninstall path validation task panicked"))?
+}
+
+fn inspect_uninstall_target_sync(candidate: &Path) -> Result<UninstallTarget> {
+    let root = validate_uninstall_root(candidate)?;
+    let storage = read_asset_storage_layout(&root)?;
+    let owned_external_root = match storage.as_ref() {
+        Some(layout) if layout.external_asset_root.starts_with(&root) => None,
+        Some(layout) if layout.owns_external_root(&root)? => {
+            validate_destructive_root(&layout.external_asset_root, "external asset root")?;
+            Some(layout.external_asset_root.clone())
+        }
+        _ => None,
+    };
+
+    Ok(UninstallTarget {
+        root,
+        storage,
+        owned_external_root,
+    })
+}
+
+fn validate_uninstall_root(candidate: &Path) -> Result<PathBuf> {
+    let metadata = std::fs::symlink_metadata(candidate).with_context(|| {
+        format!(
+            "Install path {} does not exist or cannot be inspected",
+            candidate.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "Refusing to uninstall through symlink or junction {}. Use the real install path.",
+            candidate.display()
+        );
+    }
+    if !metadata.is_dir() {
+        anyhow::bail!("Install target {} is not a directory", candidate.display());
+    }
+
+    let root = std::fs::canonicalize(candidate)
+        .with_context(|| format!("Failed to canonicalize {}", candidate.display()))?;
+    validate_destructive_root(&root, "install root")?;
+
+    let has_marker = root.join(CONFIG_INI_NAME).is_file()
+        || root.join(GRIFFR_DIR).is_dir()
+        || root.join(ASSET_STORAGE_METADATA_NAME).is_file();
+    if !has_marker {
+        anyhow::bail!(
+            "Refusing to delete {} because it has no {}, {} directory, or {} ownership metadata",
+            root.display(),
+            CONFIG_INI_NAME,
+            GRIFFR_DIR,
+            ASSET_STORAGE_METADATA_NAME
+        );
+    }
+    Ok(root)
+}
+
+fn validate_destructive_root(path: &Path, role: &str) -> Result<()> {
+    if path.parent().is_none() || path.components().count() <= 1 {
+        anyhow::bail!(
+            "Refusing to use filesystem root {} as {role}",
+            path.display()
+        );
+    }
+    if let Some(home) = dirs::home_dir().and_then(|home| std::fs::canonicalize(home).ok()) {
+        if path == home {
+            anyhow::bail!("Refusing to use the home directory as {role}");
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir().and_then(std::fs::canonicalize) {
+        if cwd == path || cwd.starts_with(path) {
+            anyhow::bail!(
+                "Refusing to delete {role} {} while the current directory is inside it",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn persist_uninstall_plan(target: &UninstallTarget) -> Result<()> {
+    let path = target.root.join(UNINSTALL_PLAN_NAME);
+    let plan = UninstallPlan {
+        schema_version: 1,
+        install_root: target.root.clone(),
+        external_asset_root: target.owned_external_root.clone(),
+    };
+    let payload = serde_json::to_vec_pretty(&plan)?;
+    compio::fs::write(&path, payload)
+        .await
+        .0
+        .with_context(|| format!("Failed to persist uninstall plan at {}", path.display()))?;
+    Ok(())
+}
+
+async fn detach_install(target: &UninstallTarget) -> Result<()> {
+    if let Some(layout) = target.storage.clone() {
+        let root = target.root.clone();
+        compio::runtime::spawn_blocking(move || layout.remove_owner_sentinel_if_owned(&root))
+            .await
+            .map_err(|_| anyhow::anyhow!("external ownership detach task panicked"))??;
+    }
+
+    let private_state = target.root.join(GRIFFR_DIR);
+    match compio::fs::metadata(&private_state).await {
+        Ok(_) => remove_dir_all(private_state).await?,
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    for name in [ASSET_STORAGE_METADATA_NAME, UNINSTALL_PLAN_NAME] {
+        let path = target.root.join(name);
+        match compio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("Failed to remove {}", path.display()))
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_child_is_never_replaced_by_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(CONFIG_INI_NAME), b"marker").unwrap();
+        let missing = temp.path().join("missing-install");
+
+        let error = validate_uninstall_root(&missing).unwrap_err();
+        assert!(error.to_string().contains("does not exist"));
+        assert!(temp.path().exists());
+    }
+
+    #[test]
+    fn arbitrary_directory_without_install_marker_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("ordinary");
+        std::fs::create_dir_all(&target).unwrap();
+
+        let error = validate_uninstall_root(&target).unwrap_err();
+        assert!(error.to_string().contains("no config.ini"));
+    }
+
+    #[test]
+    fn recognizable_install_directory_is_accepted() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("game");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join(CONFIG_INI_NAME), b"marker").unwrap();
+
+        assert_eq!(
+            validate_uninstall_root(&target).unwrap(),
+            std::fs::canonicalize(target).unwrap()
+        );
+    }
 }

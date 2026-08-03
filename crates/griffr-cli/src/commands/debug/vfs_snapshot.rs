@@ -27,7 +27,7 @@ pub async fn config_ini(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
 }
 
 pub async fn game_files(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
-    let game_files_path = resolve_named_path(&path, GAME_FILES_NAME).await;
+    let game_files_path = resolve_named_path(&path, GAME_FILES_NAME).await?;
     let encrypted = compio::fs::read(&game_files_path)
         .await
         .with_context(|| format!("Failed to read {}", game_files_path.display()))?;

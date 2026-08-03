@@ -97,26 +97,100 @@ impl LocalInstall {
     }
 }
 
-use super::path_is_dir;
+fn filename_matches(path: &Path, filename: &str) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            if cfg!(windows) {
+                name.eq_ignore_ascii_case(filename)
+            } else {
+                name == filename
+            }
+        })
+}
 
-pub async fn resolve_install_path(path: &Path) -> PathBuf {
-    if path_is_dir(path).await {
-        path.to_path_buf()
-    } else {
-        path.parent().unwrap_or(path).to_path_buf()
+/// Resolve an existing install root or an explicitly named `config.ini` path.
+///
+/// A missing ordinary path remains an install-root candidate. It must never be
+/// silently replaced by its parent, because destructive callers such as
+/// uninstall would otherwise target the wrong directory.
+pub async fn resolve_install_path(path: &Path) -> Result<PathBuf> {
+    match compio::fs::metadata(path).await {
+        Ok(metadata) if metadata.is_dir() => Ok(path.to_path_buf()),
+        Ok(metadata) if metadata.is_file() => {
+            if !filename_matches(path, CONFIG_INI_NAME) {
+                return Err(Error::Message {
+                    context: "Path error: ",
+                    detail: format!(
+                        "Expected an install directory or {}, found file {}",
+                        CONFIG_INI_NAME,
+                        path.display()
+                    ),
+                });
+            }
+            path.parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| Error::Message {
+                    context: "Path error: ",
+                    detail: format!("{} has no parent install directory", path.display()),
+                })
+        }
+        Ok(_) => Err(Error::Message {
+            context: "Path error: ",
+            detail: format!(
+                "Expected an install directory or regular {}, found {}",
+                CONFIG_INI_NAME,
+                path.display()
+            ),
+        }),
+        Err(source) if source.kind() == ErrorKind::NotFound => {
+            if filename_matches(path, CONFIG_INI_NAME) {
+                path.parent()
+                    .map(Path::to_path_buf)
+                    .ok_or_else(|| Error::Message {
+                        context: "Path error: ",
+                        detail: format!("{} has no parent install directory", path.display()),
+                    })
+            } else {
+                Ok(path.to_path_buf())
+            }
+        }
+        Err(source) => Err(Error::IoAt {
+            action: "query file metadata/stat for",
+            path: path.to_path_buf(),
+            source,
+        }),
     }
 }
 
-pub async fn resolve_named_path(path: &Path, filename: &str) -> PathBuf {
-    if path_is_dir(path).await {
-        path.join(filename)
-    } else {
-        path.to_path_buf()
+pub async fn resolve_named_path(path: &Path, filename: &str) -> Result<PathBuf> {
+    match compio::fs::metadata(path).await {
+        Ok(metadata) if metadata.is_dir() => Ok(path.join(filename)),
+        Ok(metadata) if metadata.is_file() => Ok(path.to_path_buf()),
+        Ok(_) => Err(Error::Message {
+            context: "Path error: ",
+            detail: format!(
+                "Expected a directory or regular file, found {}",
+                path.display()
+            ),
+        }),
+        Err(source) if source.kind() == ErrorKind::NotFound => {
+            if filename_matches(path, filename) {
+                Ok(path.to_path_buf())
+            } else {
+                Ok(path.join(filename))
+            }
+        }
+        Err(source) => Err(Error::IoAt {
+            action: "query file metadata/stat for",
+            path: path.to_path_buf(),
+            source,
+        }),
     }
 }
 
 pub async fn decrypt_config_ini(path: &Path) -> Result<ParsedConfigIni> {
-    let config_path = resolve_named_path(path, CONFIG_INI_NAME).await;
+    let config_path = resolve_named_path(path, CONFIG_INI_NAME).await?;
     let encrypted = compio::fs::read(&config_path)
         .await
         .map_err(|source| Error::IoAt {
@@ -145,7 +219,7 @@ pub async fn decrypt_config_ini(path: &Path) -> Result<ParsedConfigIni> {
 }
 
 pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
-    let install_path = resolve_install_path(path).await;
+    let install_path = resolve_install_path(path).await?;
     let config_ini = decrypt_config_ini(&install_path).await?;
 
     let mut games_with_existing_exe = Vec::new();
@@ -261,5 +335,42 @@ mod tests {
         let err = local.require_config_ini_version().unwrap_err();
         assert!(err.to_string().contains("config.ini"));
         assert!(err.to_string().contains("version field"));
+    }
+
+    #[compio::test]
+    async fn missing_install_root_is_not_replaced_by_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing-install");
+
+        assert_eq!(resolve_install_path(&missing).await.unwrap(), missing);
+        assert_eq!(
+            resolve_named_path(&missing, CONFIG_INI_NAME).await.unwrap(),
+            missing.join(CONFIG_INI_NAME)
+        );
+    }
+
+    #[compio::test]
+    async fn explicit_config_path_resolves_to_parent_even_when_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join(CONFIG_INI_NAME);
+
+        assert_eq!(
+            resolve_install_path(&config).await.unwrap(),
+            temp.path().to_path_buf()
+        );
+        assert_eq!(
+            resolve_named_path(&config, CONFIG_INI_NAME).await.unwrap(),
+            config
+        );
+    }
+
+    #[compio::test]
+    async fn unrelated_existing_file_is_rejected_as_install_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("notes.txt");
+        std::fs::write(&file, b"not an install").unwrap();
+
+        let error = resolve_install_path(&file).await.unwrap_err();
+        assert!(error.to_string().contains("Expected an install directory"));
     }
 }

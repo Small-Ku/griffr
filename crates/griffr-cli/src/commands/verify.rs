@@ -202,7 +202,12 @@ async fn verify_one(
         .map(|session| session.sender())
         .unwrap_or_else(ProgressSender::disabled);
 
-    let source_roots = if repair { reuse_paths } else { Vec::new() };
+    let execute_repairs = repair && !opts.is_dry_run();
+    let source_roots = if execute_repairs {
+        reuse_paths
+    } else {
+        Vec::new()
+    };
 
     let mut effective_scope = scope.unwrap_or_else(|| {
         active_change
@@ -251,7 +256,7 @@ async fn verify_one(
                 &streaming_assets,
                 &VfsFilePlanOptions {
                     source_streaming_assets,
-                    allow_repair: repair,
+                    allow_repair: execute_repairs,
                     allow_copy_fallback: force_copy,
                     prefer_reuse: relink_reuse,
                 },
@@ -266,16 +271,23 @@ async fn verify_one(
 
     if let Some((previous_target, advanced)) = advanced_change.take() {
         let advanced = advanced.with_resource_identity(vfs_plan.identity.clone());
-        match start_install_change(&local.install_path, &advanced)? {
-            InstallChangeStart::Advance => ui::print_warning(format!(
-                "Advancing unfinished target {} to current release {} during repair",
+        if opts.is_dry_run() {
+            opts.dry_run(format!(
+                "Would advance unfinished target {} to current release {}",
                 previous_target, advanced.target_version
-            )),
-            InstallChangeStart::Resume => ui::print_info(format!(
-                "Resuming repair toward current release {}",
-                advanced.target_version
-            )),
-            InstallChangeStart::New => unreachable!("an active marker was read above"),
+            ));
+        } else {
+            match start_install_change(&local.install_path, &advanced)? {
+                InstallChangeStart::Advance => ui::print_warning(format!(
+                    "Advancing unfinished target {} to current release {} during repair",
+                    previous_target, advanced.target_version
+                )),
+                InstallChangeStart::Resume => ui::print_info(format!(
+                    "Resuming repair toward current release {}",
+                    advanced.target_version
+                )),
+                InstallChangeStart::New => unreachable!("an active marker was read above"),
+            }
         }
         active_change = Some(advanced);
     } else if let Some(state) = active_change.as_ref().filter(|state| state.sync_vfs) {
@@ -308,7 +320,7 @@ async fn verify_one(
             pool_cfg.network_slots
         ));
     }
-    let repair_change = if repair {
+    let repair_change = if execute_repairs {
         if let Some(state) = active_change.as_ref() {
             Some(state.clone())
         } else if effective_scope == crate::VerifyScopeArg::Resources {
@@ -346,14 +358,14 @@ async fn verify_one(
     };
     let summary = run_integrity_pool(
         &content_plan,
-        match (effective_scope, repair) {
+        match (effective_scope, execute_repairs) {
             (crate::VerifyScopeArg::All, true) => IntegritySelection::GameFiles,
             (crate::VerifyScopeArg::All, false) => IntegritySelection::Full,
             (crate::VerifyScopeArg::Core, _) => IntegritySelection::Core,
             (crate::VerifyScopeArg::Resources, _) => IntegritySelection::Resources,
         },
         &[],
-        repair,
+        execute_repairs,
         &source_roots,
         force_copy,
         relink_reuse,
@@ -401,6 +413,8 @@ async fn verify_one(
             "sync_vfs": state.sync_vfs,
         })),
         "repair": repair,
+        "dry_run": opts.is_dry_run(),
+        "repairs_executed": execute_repairs,
         "scope": format!("{:?}", effective_scope).to_ascii_lowercase(),
         "issues": issue_list,
         "downloaded_files": summary.downloaded_files,
@@ -408,16 +422,21 @@ async fn verify_one(
     });
     if opts.output != OutputFormat::Json {
         ui::print_info(format!("Integrity issues found: {}", summary.issues.len()));
-        if repair {
+        if execute_repairs {
             ui::print_info(format!(
                 "Repair summary: downloaded={} reused={}",
                 summary.downloaded_files, summary.reused_files
+            ));
+        } else if repair && opts.is_dry_run() {
+            opts.dry_run(format!(
+                "Would repair {} integrity issue(s); no files or install state were changed",
+                summary.issues.len()
             ));
         }
     }
 
     if summary.issues.is_empty() {
-        if repair {
+        if execute_repairs {
             if effective_scope != crate::VerifyScopeArg::Core {
                 finish_vfs_plan(&local.install_path, &vfs_plan, true)
                     .await
@@ -461,7 +480,7 @@ async fn verify_one(
         }
     }
 
-    if repair {
+    if execute_repairs {
         let metadata_issues: Vec<_> = summary
             .issues
             .iter()
@@ -514,8 +533,10 @@ async fn verify_one(
     }
 
     if opts.output != OutputFormat::Json {
-        ui::print_success(if repair {
+        ui::print_success(if execute_repairs {
             "Verify and repair finished"
+        } else if repair && opts.is_dry_run() {
+            "Verify dry-run finished"
         } else {
             "Verify finished"
         });

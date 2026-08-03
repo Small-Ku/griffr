@@ -298,9 +298,9 @@ pub(crate) enum Commands {
         #[arg(long)]
         path: std::path::PathBuf,
 
-        /// Keep files on disk
-        #[arg(long)]
-        keep_files: bool,
+        /// Remove Griffr private state but keep game and external asset files
+        #[arg(long, alias = "keep-files")]
+        detach: bool,
 
         /// Skip confirmation prompt
         #[arg(short, long)]

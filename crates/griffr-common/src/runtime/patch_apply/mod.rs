@@ -30,3 +30,4 @@ pub use storage::{read_asset_storage_layout, AssetStorageLayout};
 pub const PATCH_DEFERRED_DIR: &str = "deferred";
 pub const PATCH_PLAN_NAME: &str = "plan.json";
 pub const ASSET_STORAGE_METADATA_NAME: &str = ".griffr-storage.json";
+pub const ASSET_STORAGE_OWNER_NAME: &str = ".griffr-owner.json";

@@ -167,14 +167,12 @@ pub(super) fn prepare_external_asset_root(plan: &PatchPlan) -> Result<()> {
                 path: plan.vfs_destination.clone(),
                 source,
             })?;
-            return write_asset_storage_layout(
+            let layout = AssetStorageLayout::new_owned(
                 &plan.install_root,
-                &AssetStorageLayout {
-                    schema_version: AssetStorageLayout::SCHEMA_VERSION,
-                    asset_link: plan.vfs_base_path.clone(),
-                    external_asset_root: plan.vfs_destination.clone(),
-                },
-            );
+                plan.vfs_base_path.clone(),
+                plan.vfs_destination.clone(),
+            )?;
+            return write_asset_storage_layout(&plan.install_root, &layout);
         }
         return Err(Error::Message {
             context: "VFS error: ",
@@ -202,14 +200,12 @@ pub(super) fn prepare_external_asset_root(plan: &PatchPlan) -> Result<()> {
         })?;
     }
     create_directory_link(&logical, &plan.vfs_destination)?;
-    write_asset_storage_layout(
+    let layout = AssetStorageLayout::new_owned(
         &plan.install_root,
-        &AssetStorageLayout {
-            schema_version: AssetStorageLayout::SCHEMA_VERSION,
-            asset_link: plan.vfs_base_path.clone(),
-            external_asset_root: plan.vfs_destination.clone(),
-        },
-    )
+        plan.vfs_base_path.clone(),
+        plan.vfs_destination.clone(),
+    )?;
+    write_asset_storage_layout(&plan.install_root, &layout)
 }
 
 pub(super) fn is_patch_control_path(relative: &Path) -> bool {

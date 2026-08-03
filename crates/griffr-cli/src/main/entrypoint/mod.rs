@@ -101,16 +101,12 @@ pub(crate) async fn run() -> Result<()> {
             .await?;
         }
 
-        Commands::Uninstall {
-            path,
-            keep_files,
-            yes,
-        } => {
+        Commands::Uninstall { path, detach, yes } => {
             opts.verbose(format!(
-                "Uninstall command: path={:?}, keep_files={}, yes={}",
-                path, keep_files, yes
+                "Uninstall command: path={:?}, detach={}, yes={}",
+                path, detach, yes
             ));
-            commands::uninstall(path, keep_files, yes, opts).await?;
+            commands::uninstall(path, detach, yes, opts).await?;
         }
 
         Commands::Update {

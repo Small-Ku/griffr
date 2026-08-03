@@ -1270,6 +1270,7 @@ dependencies = [
  "chrono",
  "clap",
  "compio 0.19.1",
+ "dirs",
  "futures-util",
  "griffr-common",
  "indicatif",
