@@ -124,9 +124,9 @@ HTTP transfers use a bounded receive/write pipeline. Small body chunks are coale
 
 ## 4. Ready-Queue Priority and Fairness
 
-Root nodes enter the bulk queue. Requeued nodes and nodes created by dynamic expansion enter the continuation queue.
+Root nodes enter a bounded ready frontier before the admission queue. The frontier scales with command capacity and remains between 256 and 1,024 routed nodes, so a large manifest starts workers without first resolving every path. Unrouted nodes retain graph-ready state in a lightweight backlog. The backlog samples async I/O, CPU, and blocking classes round-robin, preventing one large root class from hiding otherwise usable capacity.
 
-The scheduler admits up to three continuations before forcing a bulk admission when bulk work is runnable. This keeps retries and dependency-unblocking work near the critical path without starving a large first scan.
+Requeued nodes and nodes created by dynamic expansion enter the continuation side of the backlog. Continuations route before bulk roots; once routed, the scheduler admits up to three continuations before forcing a bulk admission when bulk work is runnable. This keeps retries and dependency-unblocking work near the critical path without starving a large first scan.
 
 Within one priority class, selection considers:
 
@@ -143,7 +143,7 @@ General, archive, and VFS network tasks receive weighted opportunities in a `4:2
 
 ## 5. Physical-Volume Admission
 
-Reads, writes, and metadata steps are keyed by stable physical-volume identity. A `VolumeIoPolicy` controls:
+Reads, writes, and metadata steps are keyed by stable physical-volume identity. Verify routing caches that identity by exact parent directory, preserving directory mount-point boundaries while avoiding one Windows volume probe per sibling file. Windows resolver buffers scale with the actual mount-path prefix instead of allocating two 32K UTF-16 buffers per miss. A `VolumeIoPolicy` controls:
 
 - `read_limit`, `write_limit`, and `metadata_limit`;
 - `streaming_pressure_limit`;
@@ -393,8 +393,10 @@ Terminal facts are defined only in `TaskOutcome`; they are not mirrored as separ
 - total, pending, ready, running, waiting, succeeded, failed, and cancelled nodes;
 - dynamic expansion count;
 - finished dispatch count;
-- queue-wait p50 and p95;
+- queue-wait p50 and p95 for work already routed into admission;
 - task-duration p50 and p95;
+- initial graph activation, initial routing, and first-task-start latency;
+- ready-frontier limit, peak unrouted backlog, and volume-key cache hit/miss counts;
 - per-volume read/write/metadata counts, estimated bytes, and service time.
 
 `run_tasks*` remains a convenience wrapper that turns a vector into independent root nodes. Callers that need explicit ordering use `TaskGraphBuilder` and `run_task_graph*` or `TaskPoolRunner::run_graph`.
