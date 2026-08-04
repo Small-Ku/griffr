@@ -1007,7 +1007,7 @@ mod tests {
     use crate::runtime::{griffr_patch_path, PatchPlan, PATCH_DEFERRED_DIR, PATCH_STAGE_DIR};
     use md5::{Digest, Md5};
     use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     use std::sync::Arc;
 
@@ -1015,8 +1015,8 @@ mod tests {
     #[test]
     fn mutation_path_keys_preserve_case_on_case_sensitive_platforms() {
         assert_ne!(
-            super::path_key(Path::new("Data")),
-            super::path_key(Path::new("data"))
+            super::path_key(std::path::Path::new("Data")),
+            super::path_key(std::path::Path::new("data"))
         );
     }
 

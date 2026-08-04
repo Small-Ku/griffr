@@ -8,9 +8,9 @@ use tracing::{debug, info, warn};
 pub fn is_running_as_admin() -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::Security::{
-        GetTokenInformation, OpenProcessToken, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
     };
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     unsafe {
         let mut token = std::ptr::null_mut();
