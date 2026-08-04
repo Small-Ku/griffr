@@ -396,9 +396,8 @@ impl MultiVolumeLayout {
         &self,
         ranges: impl IntoIterator<Item = Range<u64>>,
     ) -> Result<Vec<ArchiveRangeRequest>> {
-        let ranges = ranges.into_iter().collect::<Vec<_>>();
-        let mut touched = Vec::new();
-        for range in &ranges {
+        let mut per_volume = vec![Vec::<Range<u64>>::new(); self.layouts.len()];
+        for range in ranges {
             if range.start > range.end || range.end > self.total_size {
                 return Err(Error::Message {
                     context: "Extraction error: ",
@@ -408,15 +407,6 @@ impl MultiVolumeLayout {
                     ),
                 });
             }
-            touched.extend(self.volume_index_bounds(range));
-        }
-        touched.sort_unstable();
-        touched.dedup();
-        self.refresh_local_full_volumes(touched);
-
-        let cached = self.ranges.read().unwrap();
-        let mut per_volume = vec![Vec::<Range<u64>>::new(); self.layouts.len()];
-        for range in ranges {
             for index in self.volume_index_bounds(&range) {
                 let layout = &self.layouts[index];
                 let start = range.start.max(layout.start);
@@ -424,7 +414,16 @@ impl MultiVolumeLayout {
                 per_volume[index].push(start - layout.start..end - layout.start);
             }
         }
+        if !self.is_remote() {
+            self.refresh_local_full_volumes(
+                per_volume
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, requested)| (!requested.is_empty()).then_some(index)),
+            );
+        }
 
+        let cached = self.ranges.read().unwrap();
         let mut requests = Vec::new();
         for (index, requested) in per_volume.into_iter().enumerate() {
             if requested.is_empty() {
