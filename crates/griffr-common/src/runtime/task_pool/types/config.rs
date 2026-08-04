@@ -150,6 +150,25 @@ impl TaskPoolConfig {
         }
     }
 
+    /// Recompute the shared compio blocking-pool limit after changing the
+    /// admitted CPU and blocking task counts.
+    pub fn fit_blocking_pool(&mut self) {
+        self.blocking_pool_limit = self
+            .cpu_slots
+            .saturating_add(self.blocking_slots)
+            .saturating_add(BLOCKING_POOL_INTERNAL_RESERVE)
+            .clamp(MIN_BLOCKING_POOL_LIMIT, MAX_BLOCKING_POOL_LIMIT);
+    }
+
+    /// Size one shared compio blocking pool for several independent schedulers.
+    pub fn fit_blocking_pool_for_runners(&mut self, runners: usize) {
+        let admitted_per_runner = self.cpu_slots.saturating_add(self.blocking_slots);
+        self.blocking_pool_limit = admitted_per_runner
+            .saturating_mul(runners.max(1))
+            .saturating_add(BLOCKING_POOL_INTERNAL_RESERVE)
+            .max(MIN_BLOCKING_POOL_LIMIT);
+    }
+
     pub fn with_volume_policy(mut self, path: impl AsRef<Path>, policy: VolumeIoPolicy) -> Self {
         let key = super::super::fs_ops::storage_volume_group_key(path.as_ref());
         self.volume_policies.insert(key, policy);

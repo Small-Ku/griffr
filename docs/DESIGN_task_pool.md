@@ -217,7 +217,9 @@ Archive repair is deliberately simple in this phase: it uses the archive only wh
 
 ### Batch Execution and Peer Reuse
 
-- **Batch Execution**: `update` and `verify` process repeated `--path` targets sequentially in input order using a single command-scoped `TaskPoolRunner`. Execution is fail-fast across targets.
+- **Batch Execution**: `update` and `verify` build a dependency graph over target and reuse-source physical volumes. Targets that share any volume retain input-order serialization; unrelated targets start as soon as their own predecessors finish instead of waiting for a wave-wide barrier.
+- **Shared Runtime**: Concurrent targets use independent schedulers and event channels over one command-scoped compio `Dispatcher` and one correctly sized blocking pool. This prevents `--jobs` from multiplying runtime threads and validates every runner against the real shared capacity.
+- **Resource Partitioning**: Network, CPU, blocking, extraction, and reuse lanes are divided by the graph's achievable target parallelism, not the requested `--jobs` value. Per-volume limits remain intact because the outer graph already prevents conflicting targets from running together.
 - **Reuse Provenance**: Selected same-game targets act as automatic peer sources for later batch targets. Explicit `--reuse-from` enables manifest-driven updates without archive extraction. Automatic peers bypass archives only when target-version matched; otherwise, they serve as VFS/repair sources.
 - **Candidate Validation**: Reused files are verified against the target manifest's size and MD5 before commit. Cross-game reuse is rejected.
 - **Hardlink Safety**: Hardlink reuse uses atomic replacement to maintain copy-on-write isolation for Griffr mutations. `--force-copy` forces copy fallback.

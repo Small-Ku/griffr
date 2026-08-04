@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use futures_util::{stream, StreamExt};
 use griffr_common::api::client::ApiClient;
 use griffr_common::config::{ChannelPair, GameId, RegionId};
 use griffr_common::runtime::task_pool::TaskPoolRunner;
@@ -810,55 +809,59 @@ pub async fn verify(
             }
         }
     } else {
-        let waves = crate::commands::batch::plan_disjoint_volume_waves(work, batch.jobs, |item| {
-            &item.volume_keys
-        });
-        for wave in waves {
-            let mut results = stream::iter(wave)
-                .map(|item| {
-                    let api_client = api_client.clone();
-                    let game_override = game_override.clone();
-                    let channel_override = channel_override.clone();
-                    let overrides = overrides.clone();
-                    async move {
-                        let path = item.install.install_path.clone();
-                        let result = async {
-                            let mut runner =
-                                TaskPoolRunner::new(opts.task_pool_config_for_batch(batch.jobs))?;
-                            verify_one(
-                                &api_client,
-                                &mut runner,
-                                item.install,
-                                game_override,
-                                region_override,
-                                channel_override,
-                                overrides,
-                                skip_local_detect,
-                                repair,
-                                item.reuse_paths,
-                                force_copy,
-                                relink_reuse,
-                                scope,
-                                opts,
-                            )
-                            .await
-                        }
-                        .await;
-                        (item.index, path, result)
+        let parallel_jobs = crate::commands::batch::volume_parallelism_bound(
+            &work,
+            batch.jobs.min(opts.batch_parallelism_limit()),
+            |item| &item.volume_keys,
+        );
+        let (runner_group, runner_config) = opts.task_pool_batch(parallel_jobs)?;
+        let mut results = crate::commands::batch::run_volume_dependency_graph(
+            work,
+            parallel_jobs,
+            |item| &item.volume_keys,
+            |item| {
+                let api_client = api_client.clone();
+                let runner_group = runner_group.clone();
+                let runner_config = runner_config.clone();
+                let game_override = game_override.clone();
+                let channel_override = channel_override.clone();
+                let overrides = overrides.clone();
+                async move {
+                    let path = item.install.install_path.clone();
+                    let result = async {
+                        let mut runner = runner_group.runner(runner_config)?;
+                        verify_one(
+                            &api_client,
+                            &mut runner,
+                            item.install,
+                            game_override,
+                            region_override,
+                            channel_override,
+                            overrides,
+                            skip_local_detect,
+                            repair,
+                            item.reuse_paths,
+                            force_copy,
+                            relink_reuse,
+                            scope,
+                            opts,
+                        )
+                        .await
                     }
-                })
-                .buffer_unordered(batch.jobs)
-                .collect::<Vec<_>>()
-                .await;
-            results.sort_by_key(|(index, ..)| *index);
-            for (index, path, result) in results {
-                match result {
-                    Ok(report) => reports[index] = Some(report),
-                    Err(error) => failures.push(crate::commands::batch::BatchFailure {
-                        path,
-                        error: format!("{error:#}"),
-                    }),
+                    .await;
+                    (item.index, path, result)
                 }
+            },
+        )
+        .await;
+        results.sort_by_key(|(index, ..)| *index);
+        for (index, path, result) in results {
+            match result {
+                Ok(report) => reports[index] = Some(report),
+                Err(error) => failures.push(crate::commands::batch::BatchFailure {
+                    path,
+                    error: format!("{error:#}"),
+                }),
             }
         }
     }

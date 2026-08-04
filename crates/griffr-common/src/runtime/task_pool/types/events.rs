@@ -140,6 +140,13 @@ pub struct TaskPoolResult {
     pub metrics: TaskPoolMetrics,
 }
 
+#[derive(Clone)]
+pub struct TaskPoolRunnerGroup {
+    pub(crate) dispatcher: std::sync::Arc<compio::dispatcher::Dispatcher>,
+    pub(crate) dispatcher_threads: usize,
+    pub(crate) blocking_pool_limit: usize,
+}
+
 pub struct TaskPoolRunner {
     pub(crate) config: super::TaskPoolConfig,
     pub(crate) dispatcher: std::sync::Arc<compio::dispatcher::Dispatcher>,

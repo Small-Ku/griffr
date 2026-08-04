@@ -876,52 +876,56 @@ pub async fn update(
             }
         }
     } else {
-        let waves = crate::commands::batch::plan_disjoint_volume_waves(work, batch.jobs, |item| {
-            &item.volume_keys
-        });
-        for wave in waves {
-            let mut results = stream::iter(wave)
-                .map(|item| {
-                    let api_client = api_client.clone();
-                    let overrides = overrides.clone();
-                    let patch_options = patch_options.clone();
-                    let stage_dir = stage_dir.clone();
-                    async move {
-                        let path = item.path.clone();
-                        let result = async {
-                            let mut runner =
-                                TaskPoolRunner::new(opts.task_pool_config_for_batch(batch.jobs))?;
-                            update_internal(
-                                &api_client,
-                                &mut runner,
-                                item.path,
-                                overrides,
-                                item.explicit_reuse,
-                                item.peer_reuse,
-                                force_copy,
-                                use_default_stage || stage_dir.is_some(),
-                                patch_options,
-                                stage_dir,
-                                require_staged,
-                                opts,
-                            )
-                            .await
-                        }
-                        .await;
-                        (item.index, path, result)
+        let parallel_jobs = crate::commands::batch::volume_parallelism_bound(
+            &work,
+            batch.jobs.min(opts.batch_parallelism_limit()),
+            |item| &item.volume_keys,
+        );
+        let (runner_group, runner_config) = opts.task_pool_batch(parallel_jobs)?;
+        let mut results = crate::commands::batch::run_volume_dependency_graph(
+            work,
+            parallel_jobs,
+            |item| &item.volume_keys,
+            |item| {
+                let api_client = api_client.clone();
+                let runner_group = runner_group.clone();
+                let runner_config = runner_config.clone();
+                let overrides = overrides.clone();
+                let patch_options = patch_options.clone();
+                let stage_dir = stage_dir.clone();
+                async move {
+                    let path = item.path.clone();
+                    let result = async {
+                        let mut runner = runner_group.runner(runner_config)?;
+                        update_internal(
+                            &api_client,
+                            &mut runner,
+                            item.path,
+                            overrides,
+                            item.explicit_reuse,
+                            item.peer_reuse,
+                            force_copy,
+                            use_default_stage || stage_dir.is_some(),
+                            patch_options,
+                            stage_dir,
+                            require_staged,
+                            opts,
+                        )
+                        .await
                     }
-                })
-                .buffer_unordered(batch.jobs)
-                .collect::<Vec<_>>()
-                .await;
-            results.sort_by_key(|(index, ..)| *index);
-            for (_, path, result) in results {
-                if let Err(error) = result {
-                    failures.push(crate::commands::batch::BatchFailure {
-                        path,
-                        error: format!("{error:#}"),
-                    });
+                    .await;
+                    (item.index, path, result)
                 }
+            },
+        )
+        .await;
+        results.sort_by_key(|(index, ..)| *index);
+        for (_, path, result) in results {
+            if let Err(error) = result {
+                failures.push(crate::commands::batch::BatchFailure {
+                    path,
+                    error: format!("{error:#}"),
+                });
             }
         }
     }

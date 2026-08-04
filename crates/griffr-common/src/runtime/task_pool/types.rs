@@ -13,7 +13,10 @@ pub use config::{
     DEFAULT_VOLUME_WRITE_LIMIT,
 };
 pub(crate) use events::WorkerEvent;
-pub use events::{TaskOutcome, TaskPoolMetrics, TaskPoolResult, TaskPoolRunner, VolumeTaskMetrics};
+pub use events::{
+    TaskOutcome, TaskPoolMetrics, TaskPoolResult, TaskPoolRunner, TaskPoolRunnerGroup,
+    VolumeTaskMetrics,
+};
 pub use progress::TaskProgress;
 pub use tasks::*;
 

@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use futures_util::{stream, StreamExt, TryStreamExt};
+use futures_util::{stream, stream::FuturesUnordered, StreamExt, TryStreamExt};
 use griffr_common::config::GameId;
 use griffr_common::runtime::{detect_local_install, LocalInstall};
 
@@ -24,32 +25,118 @@ pub(crate) fn validate_batch_options(batch: crate::BatchArgs) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn plan_disjoint_volume_waves<T>(
+fn volume_predecessors<T, K>(items: &[T], volume_keys: &K) -> Vec<Vec<usize>>
+where
+    K: Fn(&T) -> &[String],
+{
+    let mut last_user = HashMap::<&str, usize>::new();
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let mut dependencies = HashSet::new();
+            let mut item_volumes = HashSet::new();
+            for volume in volume_keys(item) {
+                if !item_volumes.insert(volume) {
+                    continue;
+                }
+                if let Some(previous) = last_user.insert(volume.as_str(), index) {
+                    dependencies.insert(previous);
+                }
+            }
+            let mut dependencies = dependencies.into_iter().collect::<Vec<_>>();
+            dependencies.sort_unstable();
+            dependencies
+        })
+        .collect()
+}
+
+pub(crate) fn volume_parallelism_bound<T, K>(
+    items: &[T],
+    max_parallel: usize,
+    volume_keys: K,
+) -> usize
+where
+    K: Fn(&T) -> &[String],
+{
+    let mut volumes = HashSet::new();
+    let mut without_volume = 0usize;
+    for item in items {
+        let keys = volume_keys(item);
+        if keys.is_empty() {
+            without_volume = without_volume.saturating_add(1);
+        } else {
+            volumes.extend(keys.iter().map(String::as_str));
+        }
+    }
+    max_parallel
+        .min(items.len())
+        .min(volumes.len().saturating_add(without_volume))
+        .max(1)
+}
+
+pub(crate) async fn run_volume_dependency_graph<T, R, K, F, Fut>(
     items: Vec<T>,
     max_parallel: usize,
-    volume_keys: impl Fn(&T) -> &[String],
-) -> Vec<Vec<T>> {
-    let mut pending = std::collections::VecDeque::from(items);
-    let mut waves = Vec::new();
-    while !pending.is_empty() {
-        let mut claimed = HashSet::new();
-        let mut wave = Vec::new();
-        let mut deferred = std::collections::VecDeque::new();
-        while let Some(item) = pending.pop_front() {
-            let keys = volume_keys(&item);
-            let conflicts = keys.iter().any(|key| claimed.contains(key));
-            if wave.len() < max_parallel && !conflicts {
-                claimed.extend(keys.iter().cloned());
-                wave.push(item);
-            } else {
-                deferred.push_back(item);
+    volume_keys: K,
+    mut run: F,
+) -> Vec<R>
+where
+    K: Fn(&T) -> &[String],
+    F: FnMut(T) -> Fut,
+    Fut: Future<Output = R>,
+{
+    assert!(max_parallel > 0);
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    let predecessors = volume_predecessors(&items, &volume_keys);
+    let mut successors = vec![Vec::<usize>::new(); items.len()];
+    let mut remaining_dependencies = predecessors.iter().map(Vec::len).collect::<Vec<_>>();
+    for (index, dependencies) in predecessors.into_iter().enumerate() {
+        for dependency in dependencies {
+            successors[dependency].push(index);
+        }
+    }
+
+    let mut items = items.into_iter().map(Some).collect::<Vec<_>>();
+    let mut ready = remaining_dependencies
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &remaining)| (remaining == 0).then_some(index))
+        .collect::<VecDeque<_>>();
+    let mut running = FuturesUnordered::new();
+    let mut results = Vec::with_capacity(items.len());
+
+    while results.len() < items.len() {
+        while running.len() < max_parallel {
+            let Some(index) = ready.pop_front() else {
+                break;
+            };
+            let item = items[index]
+                .take()
+                .expect("ready batch target is started only once");
+            let future = run(item);
+            running.push(async move { (index, future.await) });
+        }
+
+        let (finished, result) = running
+            .next()
+            .await
+            .expect("volume dependency graph is acyclic and has ready work");
+        results.push(result);
+        for &successor in &successors[finished] {
+            let remaining = &mut remaining_dependencies[successor];
+            debug_assert!(*remaining > 0);
+            *remaining -= 1;
+            if *remaining == 0 {
+                ready.push_back(successor);
             }
         }
-        debug_assert!(!wave.is_empty());
-        waves.push(wave);
-        pending = deferred;
     }
-    waves
+
+    results
 }
 
 pub(crate) fn print_batch_summary(operation: &str, total: usize, failures: &[BatchFailure]) {
@@ -284,38 +371,133 @@ mod tests {
     }
 
     #[test]
-    fn disjoint_volume_waves_serialize_conflicting_targets() {
-        #[derive(Debug, PartialEq, Eq)]
+    fn volume_parallelism_does_not_split_a_serial_volume_chain() {
+        #[derive(Debug)]
+        struct Item {
+            keys: Vec<String>,
+        }
+        let same_volume = vec![
+            Item {
+                keys: vec!["a".into()],
+            },
+            Item {
+                keys: vec!["a".into()],
+            },
+            Item {
+                keys: vec!["a".into()],
+            },
+        ];
+        let disjoint = vec![
+            Item {
+                keys: vec!["a".into()],
+            },
+            Item {
+                keys: vec!["b".into()],
+            },
+            Item {
+                keys: vec!["c".into()],
+            },
+        ];
+
+        assert_eq!(
+            volume_parallelism_bound(&same_volume, 16, |item| item.keys.as_slice()),
+            1
+        );
+        assert_eq!(
+            volume_parallelism_bound(&disjoint, 16, |item| item.keys.as_slice()),
+            3
+        );
+    }
+
+    #[compio::test]
+    async fn volume_dependency_graph_releases_successors_without_a_global_barrier() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        #[derive(Debug)]
         struct Item {
             id: u8,
             keys: Vec<String>,
+            delay: Duration,
         }
-        let waves = plan_disjoint_volume_waves(
-            vec![
-                Item {
-                    id: 1,
-                    keys: vec!["a".into()],
-                },
-                Item {
-                    id: 2,
-                    keys: vec!["a".into()],
-                },
-                Item {
-                    id: 3,
-                    keys: vec!["b".into()],
-                },
-            ],
+
+        let slow_a_finished = Arc::new(AtomicBool::new(false));
+        let second_b_finished_before_a = Arc::new(AtomicBool::new(false));
+        let observed_a = slow_a_finished.clone();
+        let observed_b = second_b_finished_before_a.clone();
+        let items = vec![
+            Item {
+                id: 1,
+                keys: vec!["a".into()],
+                delay: Duration::from_millis(80),
+            },
+            Item {
+                id: 2,
+                keys: vec!["b".into()],
+                delay: Duration::from_millis(5),
+            },
+            Item {
+                id: 3,
+                keys: vec!["b".into()],
+                delay: Duration::from_millis(5),
+            },
+        ];
+
+        let results = run_volume_dependency_graph(
+            items,
             2,
-            |item| &item.keys,
-        );
-        assert_eq!(waves.len(), 2);
+            |item| item.keys.as_slice(),
+            move |item| {
+                let slow_a_finished = observed_a.clone();
+                let second_b_finished_before_a = observed_b.clone();
+                async move {
+                    compio::time::sleep(item.delay).await;
+                    match item.id {
+                        1 => slow_a_finished.store(true, Ordering::SeqCst),
+                        3 => second_b_finished_before_a
+                            .store(!slow_a_finished.load(Ordering::SeqCst), Ordering::SeqCst),
+                        _ => {}
+                    }
+                    item.id
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(results.len(), 3);
+        assert!(second_b_finished_before_a.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn volume_dependencies_only_link_conflicting_targets() {
+        #[derive(Debug)]
+        struct Item {
+            keys: Vec<String>,
+        }
+        let items = vec![
+            Item {
+                keys: vec!["a".into()],
+            },
+            Item {
+                keys: vec!["a".into()],
+            },
+            Item {
+                keys: vec!["b".into()],
+            },
+            Item {
+                keys: vec!["a".into(), "b".into()],
+            },
+            Item {
+                keys: vec!["c".into(), "c".into()],
+            },
+        ];
+
+        let dependencies = volume_predecessors(&items, &|item| item.keys.as_slice());
+
         assert_eq!(
-            waves[0].iter().map(|item| item.id).collect::<Vec<_>>(),
-            vec![1, 3]
-        );
-        assert_eq!(
-            waves[1].iter().map(|item| item.id).collect::<Vec<_>>(),
-            vec![2]
+            dependencies,
+            vec![vec![], vec![0], vec![], vec![1, 2], vec![]]
         );
     }
 

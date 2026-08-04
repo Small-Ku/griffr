@@ -427,6 +427,31 @@ fn batch_controls_default_to_keep_going_and_bound_jobs() {
 }
 
 #[test]
+fn batch_targets_keep_full_disjoint_volume_policy() {
+    let options = GlobalOptions::from_environment(false, false, OutputFormat::Text);
+    let base = options.task_pool_config();
+    let batch = options.task_pool_config_for_batch(options.batch_parallelism_limit());
+
+    assert_eq!(batch.default_volume_policy, base.default_volume_policy);
+    assert!(options.batch_parallelism_limit() <= base.cpu_slots);
+    assert!(options.batch_parallelism_limit() <= base.blocking_slots);
+    assert!(options.batch_parallelism_limit() <= base.network_slots);
+}
+
+#[test]
+fn batch_task_pool_configs_keep_required_blocking_headroom() {
+    let options = GlobalOptions::from_environment(false, false, OutputFormat::Text);
+    for jobs in [1, 2, 3, 8, 16] {
+        let (group, config) = options
+            .task_pool_batch(jobs)
+            .unwrap_or_else(|error| panic!("invalid shared task pool for {jobs} jobs: {error}"));
+        group
+            .runner(config)
+            .unwrap_or_else(|error| panic!("invalid task-pool config for {jobs} jobs: {error}"));
+    }
+}
+
+#[test]
 fn quiet_is_global_and_conflicts_with_verbose() {
     let cli =
         Cli::try_parse_from(["griffr", "--quiet", "info", "--path", r"C:\Games\Endfield"]).unwrap();

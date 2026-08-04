@@ -11,7 +11,8 @@ use tracing::debug;
 use super::graph::{ReadyTask, TaskGraph, TaskRun};
 use super::runner::{run_async_task, run_blocking_task};
 use super::types::{
-    Task, TaskOutcome, TaskPoolConfig, TaskPoolResult, TaskPoolRunner, TaskProgress, WorkerEvent,
+    Task, TaskOutcome, TaskPoolConfig, TaskPoolResult, TaskPoolRunner, TaskPoolRunnerGroup,
+    TaskProgress, WorkerEvent,
 };
 
 const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -124,33 +125,62 @@ fn complete_task_batch(
     Ok(())
 }
 
+fn build_dispatcher(config: &TaskPoolConfig) -> Result<Arc<Dispatcher>> {
+    let mut proactor_builder = compio::driver::ProactorBuilder::new();
+    proactor_builder.thread_pool_limit(config.blocking_pool_limit);
+    Ok(Arc::new(
+        Dispatcher::builder()
+            .worker_threads(NonZeroUsize::new(config.dispatcher_threads).ok_or_else(|| {
+                Error::Message {
+                    context: "Task pool error: ",
+                    detail: "dispatcher threads must be non-zero".to_string(),
+                }
+            })?)
+            .proactor_builder(proactor_builder)
+            .build()
+            .map_err(|error| Error::Message {
+                context: "Task pool error: ",
+                detail: format!("Failed to create task-pool dispatcher: {error}"),
+            })?,
+    ))
+}
+
+fn runner_with_dispatcher(
+    config: TaskPoolConfig,
+    dispatcher: Arc<Dispatcher>,
+) -> Result<TaskPoolRunner> {
+    validate_config(&config)?;
+    let (event_tx, event_rx) = flume::unbounded::<WorkerEvent>();
+    Ok(TaskPoolRunner {
+        config,
+        dispatcher,
+        event_tx,
+        event_rx,
+    })
+}
+
+impl TaskPoolRunnerGroup {
+    pub fn new(config: TaskPoolConfig) -> Result<Self> {
+        validate_config(&config)?;
+        Ok(Self {
+            dispatcher: build_dispatcher(&config)?,
+            dispatcher_threads: config.dispatcher_threads,
+            blocking_pool_limit: config.blocking_pool_limit,
+        })
+    }
+
+    pub fn runner(&self, mut config: TaskPoolConfig) -> Result<TaskPoolRunner> {
+        config.dispatcher_threads = self.dispatcher_threads;
+        config.blocking_pool_limit = self.blocking_pool_limit;
+        runner_with_dispatcher(config, self.dispatcher.clone())
+    }
+}
+
 impl TaskPoolRunner {
     pub fn new(config: TaskPoolConfig) -> Result<Self> {
         validate_config(&config)?;
-        let mut proactor_builder = compio::driver::ProactorBuilder::new();
-        proactor_builder.thread_pool_limit(config.blocking_pool_limit);
-        let dispatcher = Arc::new(
-            Dispatcher::builder()
-                .worker_threads(NonZeroUsize::new(config.dispatcher_threads).ok_or_else(|| {
-                    Error::Message {
-                        context: "Task pool error: ",
-                        detail: "dispatcher threads must be non-zero".to_string(),
-                    }
-                })?)
-                .proactor_builder(proactor_builder)
-                .build()
-                .map_err(|error| Error::Message {
-                    context: "Task pool error: ",
-                    detail: format!("Failed to create task-pool dispatcher: {error}"),
-                })?,
-        );
-        let (event_tx, event_rx) = flume::unbounded::<WorkerEvent>();
-        Ok(Self {
-            config,
-            dispatcher,
-            event_tx,
-            event_rx,
-        })
+        let dispatcher = build_dispatcher(&config)?;
+        runner_with_dispatcher(config, dispatcher)
     }
 
     pub fn run_batch(
@@ -526,6 +556,39 @@ mod admission_config_tests {
     use super::validate_config;
     use crate::runtime::task_pool::types::BLOCKING_POOL_INTERNAL_RESERVE;
     use crate::runtime::task_pool::TaskPoolConfig;
+
+    #[test]
+    fn runner_group_reuses_one_dispatcher() {
+        let mut dispatcher_config = TaskPoolConfig::default();
+        dispatcher_config.fit_blocking_pool_for_runners(2);
+        let group = super::TaskPoolRunnerGroup::new(dispatcher_config).unwrap();
+        let runner_config = TaskPoolConfig::default();
+        let first = group.runner(runner_config.clone()).unwrap();
+        let second = group.runner(runner_config).unwrap();
+
+        assert!(std::sync::Arc::ptr_eq(
+            &first.dispatcher,
+            &second.dispatcher
+        ));
+    }
+
+    #[test]
+    fn runner_group_rejects_runner_larger_than_its_shared_pool() {
+        let mut dispatcher_config = TaskPoolConfig {
+            cpu_slots: 1,
+            blocking_slots: 2,
+            ..TaskPoolConfig::default()
+        };
+        dispatcher_config.fit_blocking_pool();
+        let group = super::TaskPoolRunnerGroup::new(dispatcher_config).unwrap();
+
+        let runner_config = TaskPoolConfig {
+            cpu_slots: 12,
+            blocking_slots: 8,
+            ..TaskPoolConfig::default()
+        };
+        assert!(group.runner(runner_config).is_err());
+    }
 
     #[test]
     fn blocking_pool_limit_reserves_compio_fallback_capacity() {

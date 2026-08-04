@@ -471,18 +471,51 @@ impl GlobalOptions {
         config.network_slots = share(config.network_slots);
         config.cpu_slots = share(config.cpu_slots);
         config.blocking_slots = share(config.blocking_slots);
-        config.blocking_pool_limit = share(config.blocking_pool_limit).max(2);
+        config.fit_blocking_pool();
         config.extract_slots = share(config.extract_slots);
         config.extract_shards = share(config.extract_shards);
+        // Batch targets that share a physical volume are serialized by the
+        // outer dependency scheduler. Keep the full per-volume policy so a
+        // target on an independent volume is not throttled by unrelated jobs.
         config.default_volume_policy = VolumeIoPolicy::new(
-            share(self.volume_read_limit),
-            share(self.volume_write_limit),
-            share(self.volume_metadata_limit),
-            share(self.volume_streaming_pressure_limit),
+            self.volume_read_limit,
+            self.volume_write_limit,
+            self.volume_metadata_limit,
+            self.volume_streaming_pressure_limit,
             self.volume_streaming_mode,
         );
         config.reuse_queue_limit = share(self.reuse_queue_limit);
         config
+    }
+
+    /// Bound outer target concurrency so the per-runner minimum of one CPU
+    /// and blocking lane cannot multiply past the command-wide worker budget.
+    pub fn batch_parallelism_limit(&self) -> usize {
+        let config = self.task_pool_config();
+        config
+            .network_slots
+            .min(config.cpu_slots)
+            .min(config.blocking_slots)
+            .max(1)
+    }
+
+    pub fn task_pool_batch(
+        &self,
+        target_jobs: usize,
+    ) -> griffr_common::error::Result<(
+        griffr_common::runtime::task_pool::TaskPoolRunnerGroup,
+        griffr_common::runtime::task_pool::TaskPoolConfig,
+    )> {
+        use griffr_common::runtime::task_pool::TaskPoolRunnerGroup;
+
+        let target_jobs = target_jobs.max(1);
+        let runner_config = self.task_pool_config_for_batch(target_jobs);
+        let mut dispatcher_config = self.task_pool_config();
+        dispatcher_config.cpu_slots = runner_config.cpu_slots;
+        dispatcher_config.blocking_slots = runner_config.blocking_slots;
+        dispatcher_config.fit_blocking_pool_for_runners(target_jobs);
+        let group = TaskPoolRunnerGroup::new(dispatcher_config)?;
+        Ok((group, runner_config))
     }
 
     /// Print a message if verbose mode is enabled.
