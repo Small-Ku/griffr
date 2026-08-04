@@ -56,6 +56,11 @@ This design uses six code stages followed by packaging metadata.
 - The scheduler reuses one admission snapshot across a dispatch wave. Queue depth, queued reuse commits, writer reservations, and storage availability are updated incrementally as tasks leave the ready queues.
 - Admission snapshots expire at the next pending writer-reservation deadline and are invalidated when work is enqueued, restored, or releases resources. Free-space queries are delayed until an active reservation or a newly selected first writer makes the value necessary.
 - One command-scoped volume-key cache avoids repeating physical-volume identity probes when continuations or related tasks route the same path.
+- Multi-target commands use a physical-volume dependency graph instead of barriered waves. Independent successors can start immediately, while one shared compio dispatcher prevents each target from creating another runtime and blocking pool.
+- Archive range tables remain sorted when ranges are registered. Coverage and missing-range queries inspect only intersecting volumes under a read lock; local layouts refresh only those touched full files, while remote full volumes are registered when promotion succeeds.
+- Archive streams retain the current file, volume, range, and local cursor. Sequential reads inside one segment therefore avoid repeated range-table locks, segment scans, and seeks.
+- Archive repair compares candidate groups by uncached byte count without constructing concrete request vectors, then selects the smallest archive transfer that beats the direct download remainder.
+- Download timeout environment values are resolved once per process, case-insensitive MD5 checks avoid temporary lowercase strings, and uncached verification avoids constructing artifact-cache keys.
 
 ## Validation
 

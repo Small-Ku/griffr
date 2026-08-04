@@ -136,27 +136,31 @@ fn build_issue_impl(
         }
     };
 
-    let normalized_md5 = expected_md5.to_ascii_lowercase();
-    let key = ArtifactKey {
-        path: path.to_path_buf(),
-        expected_md5: normalized_md5.clone(),
-        expected_size,
-    };
-    let stamp = ArtifactStamp::from_metadata(&metadata);
-    let cacheable = stamp.modified_nanos.is_some();
-    if cacheable {
-        if let Some(cached) = cache.and_then(|cache| {
-            cache
+    let cache_insert = if let Some(cache) = cache {
+        let stamp = ArtifactStamp::from_metadata(&metadata);
+        if stamp.modified_nanos.is_some() {
+            let key = ArtifactKey {
+                path: path.to_path_buf(),
+                expected_md5: expected_md5.to_ascii_lowercase(),
+                expected_size,
+            };
+            if let Some(cached) = cache
                 .entries
                 .lock()
                 .unwrap()
                 .get(&key)
                 .filter(|cached| cached.stamp == stamp)
                 .cloned()
-        }) {
-            return cached.issue;
+            {
+                return cached.issue;
+            }
+            Some((cache, key, stamp))
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
     let issue = if expected_size.is_some_and(|expected| metadata.len() != expected) {
         Some(FileIssue {
@@ -169,7 +173,7 @@ fn build_issue_impl(
         })
     } else {
         match file_md5(path) {
-            Ok(actual_md5) if actual_md5 == normalized_md5 => None,
+            Ok(actual_md5) if actual_md5.eq_ignore_ascii_case(expected_md5) => None,
             Ok(actual_md5) => Some(FileIssue {
                 path: logical_path.to_string(),
                 expected_md5: expected_md5.to_string(),
@@ -189,16 +193,14 @@ fn build_issue_impl(
         }
     };
 
-    if cacheable {
-        if let Some(cache) = cache {
-            cache.entries.lock().unwrap().insert(
-                key,
-                CachedArtifactCheck {
-                    stamp,
-                    issue: issue.clone(),
-                },
-            );
-        }
+    if let Some((cache, key, stamp)) = cache_insert {
+        cache.entries.lock().unwrap().insert(
+            key,
+            CachedArtifactCheck {
+                stamp,
+                issue: issue.clone(),
+            },
+        );
     }
     issue
 }
@@ -245,7 +247,7 @@ pub(crate) fn verify_candidate_cancellable(
         return result;
     }
     let actual_md5 = crate::to_hex(&hasher.finalize());
-    if actual_md5 == expected_md5.to_ascii_lowercase() {
+    if actual_md5.eq_ignore_ascii_case(expected_md5) {
         CandidateVerification::Valid
     } else {
         CandidateVerification::Invalid

@@ -1,5 +1,6 @@
 use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::api::protocol::{byte_range_from, RANGE_HEADER, USER_AGENT_HEADER};
@@ -16,13 +17,29 @@ const DEFAULT_DOWNLOAD_SEND_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_DOWNLOAD_BODY_TIMEOUT_SECS: u64 = 15 * 60;
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(100);
 
-fn duration_from_env_secs(var: &str, default_secs: u64) -> std::time::Duration {
+fn duration_from_env_secs(var: &str, default_secs: u64) -> Duration {
     let secs = std::env::var(var)
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|secs| *secs > 0)
         .unwrap_or(default_secs);
-    std::time::Duration::from_secs(secs)
+    Duration::from_secs(secs)
+}
+
+fn download_timeouts() -> (Duration, Duration) {
+    static TIMEOUTS: OnceLock<(Duration, Duration)> = OnceLock::new();
+    *TIMEOUTS.get_or_init(|| {
+        (
+            duration_from_env_secs(
+                "GRIFFR_DOWNLOAD_SEND_TIMEOUT_SECS",
+                DEFAULT_DOWNLOAD_SEND_TIMEOUT_SECS,
+            ),
+            duration_from_env_secs(
+                "GRIFFR_DOWNLOAD_BODY_TIMEOUT_SECS",
+                DEFAULT_DOWNLOAD_BODY_TIMEOUT_SECS,
+            ),
+        )
+    })
 }
 
 pub(crate) enum DownloadPreparation {
@@ -86,7 +103,7 @@ pub(crate) fn prepare_download(
         }
         if partial_len == expected_size {
             let actual_md5 = super::verify::file_md5(&part_path)?;
-            if actual_md5 == expected_md5.to_ascii_lowercase() {
+            if actual_md5.eq_ignore_ascii_case(expected_md5) {
                 let expectation =
                     ArtifactExpectation::new(logical_path, expected_md5, Some(expected_size));
                 let digest = ArtifactDigest::new(partial_len, actual_md5);
@@ -130,14 +147,7 @@ pub(crate) async fn do_prepared_download(
     progress_buffer_bytes: usize,
     on_progress: Option<impl Fn(DownloadProgress) + Send + 'static>,
 ) -> Result<ArtifactProof> {
-    let send_timeout = duration_from_env_secs(
-        "GRIFFR_DOWNLOAD_SEND_TIMEOUT_SECS",
-        DEFAULT_DOWNLOAD_SEND_TIMEOUT_SECS,
-    );
-    let body_timeout = duration_from_env_secs(
-        "GRIFFR_DOWNLOAD_BODY_TIMEOUT_SECS",
-        DEFAULT_DOWNLOAD_BODY_TIMEOUT_SECS,
-    );
+    let (send_timeout, body_timeout) = download_timeouts();
     let part_path = super::fs_ops::make_partial_download_path(dest)?;
     let resume_offset = resume.offset;
     let prepared_hasher = resume.take_hasher();
@@ -321,7 +331,7 @@ pub(crate) async fn do_prepared_download(
         Ok::<(u64, String), Error>((total_written, actual_md5))
     }?;
 
-    if actual_md5 != expected_md5.to_ascii_lowercase() {
+    if !actual_md5.eq_ignore_ascii_case(expected_md5) {
         return Err(Error::Message {
             context: "Download error: ",
             detail: format!(

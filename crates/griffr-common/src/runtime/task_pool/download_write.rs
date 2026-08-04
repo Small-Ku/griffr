@@ -33,7 +33,6 @@ where
     W: FnMut(u64),
 {
     let (write_tx, write_rx) = flume::bounded::<(Bytes, u64)>(WRITE_QUEUE_DEPTH);
-    let item = item.to_string();
     let producer = async move {
         let mut stream = Box::pin(stream);
         let mut write_offset = start_offset;
@@ -66,7 +65,7 @@ where
                 write_tx
                     .send_async((ready, write_offset))
                     .await
-                    .map_err(|_| writer_stopped(&item))?;
+                    .map_err(|_| writer_stopped(item))?;
                 write_offset = write_offset.saturating_add(ready_len);
             }
 
@@ -75,7 +74,7 @@ where
                 write_tx
                     .send_async((chunk, write_offset))
                     .await
-                    .map_err(|_| writer_stopped(&item))?;
+                    .map_err(|_| writer_stopped(item))?;
                 write_offset = write_offset.saturating_add(chunk_len);
             } else {
                 batch.extend_from_slice(chunk.as_ref());
@@ -88,13 +87,12 @@ where
             write_tx
                 .send_async((ready, write_offset))
                 .await
-                .map_err(|_| writer_stopped(&item))?;
+                .map_err(|_| writer_stopped(item))?;
             write_offset = write_offset.saturating_add(ready_len);
         }
         Ok::<u64, Error>(write_offset)
     };
 
-    let path = path.to_path_buf();
     let writer = async move {
         let mut file = file;
         while let Ok((chunk, write_offset)) = write_rx.recv_async().await {
@@ -102,7 +100,7 @@ where
             let BufResult(write_result, _) = file.write_all_at(chunk, write_offset).await;
             write_result.map_err(|source| Error::IoAt {
                 action: "write to file",
-                path: path.clone(),
+                path: path.to_path_buf(),
                 source,
             })?;
             on_written(write_offset.saturating_add(chunk_len));
