@@ -84,6 +84,7 @@ fn save_archive_volume(
     )
     .is_none()
     {
+        work.layout.register_full_volume(volume_index)?;
         report_verified(part, event_tx);
         work.mark_volume_saved(volume_index);
         return Ok(());
@@ -101,6 +102,7 @@ fn save_archive_volume(
         ));
         return Err(error);
     }
+    work.layout.register_full_volume(volume_index)?;
     report_verified(part, event_tx);
     work.mark_volume_saved(volume_index);
     Ok(())

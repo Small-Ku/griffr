@@ -290,43 +290,34 @@ impl ArchiveRepairSession {
     ) -> Option<ArchiveFileRepairTask> {
         let normalized = logical_path.replace('\\', "/").to_ascii_lowercase();
         let state = self.state.lock().unwrap();
-        state.groups.iter().find_map(|group_state| {
-            let ArchiveRepairGroupState::Ready(group) = group_state else {
-                return None;
-            };
-            let entry_index = *group.archive_index.entry_indices.get(&normalized)?;
-            let source = group.archive_index.entry_sources.get(entry_index)?;
-            let source_bytes = group
-                .work
-                .layout
-                .missing_range_requests([source.range.clone()])
-                .ok()?
-                .iter()
-                .fold(0u64, |total, request| {
-                    total.saturating_add(
-                        request
-                            .local_range
-                            .end
-                            .saturating_sub(request.local_range.start),
-                    )
-                });
-            (source_bytes < direct_bytes).then(|| ArchiveFileRepairTask {
-                work: group.work.clone(),
-                archive_index: group.archive_index.clone(),
-                staging_dir: group.staging_dir.clone(),
-                entry_index,
-                source_range: source.range.clone(),
-                volume_indices: source.volume_indices.clone(),
-                source_bytes,
-                dest: dest.clone(),
-                logical_path: logical_path.clone(),
-                expected_md5: expected_md5.clone(),
-                expected_size,
-                download_url: download_url.clone(),
-                retry_count,
-                transfer_class,
+        state
+            .groups
+            .iter()
+            .filter_map(|group_state| {
+                let ArchiveRepairGroupState::Ready(group) = group_state else {
+                    return None;
+                };
+                let entry_index = *group.archive_index.entry_indices.get(&normalized)?;
+                let source = group.archive_index.entry_sources.get(entry_index)?;
+                let source_bytes = group.work.layout.missing_bytes(source.range.clone()).ok()?;
+                (source_bytes < direct_bytes).then(|| ArchiveFileRepairTask {
+                    work: group.work.clone(),
+                    archive_index: group.archive_index.clone(),
+                    staging_dir: group.staging_dir.clone(),
+                    entry_index,
+                    source_range: source.range.clone(),
+                    volume_indices: source.volume_indices.clone(),
+                    source_bytes,
+                    dest: dest.clone(),
+                    logical_path: logical_path.clone(),
+                    expected_md5: expected_md5.clone(),
+                    expected_size,
+                    download_url: download_url.clone(),
+                    retry_count,
+                    transfer_class,
+                })
             })
-        })
+            .min_by_key(|repair| repair.source_bytes)
     }
 
     pub(crate) fn cleanup(&self) {

@@ -11,7 +11,9 @@ pub struct MultiVolumeStream {
     pub(super) layout: MultiVolumeLayout,
     current_path: Option<PathBuf>,
     current_file: Option<std::fs::File>,
+    current_volume_index: Option<usize>,
     current_range: Range<u64>,
+    current_local_offset: u64,
     position: u64,
 }
 
@@ -27,7 +29,9 @@ impl MultiVolumeStream {
             layout,
             current_path: None,
             current_file: None,
+            current_volume_index: None,
             current_range: 0..0,
+            current_local_offset: 0,
             position: 0,
         })
     }
@@ -37,15 +41,28 @@ impl MultiVolumeStream {
         volume_index: usize,
         local_offset: u64,
     ) -> std::io::Result<(u64, u64)> {
+        if self.current_volume_index == Some(volume_index)
+            && self.current_range.start <= local_offset
+            && self.current_range.end > local_offset
+        {
+            if let Some(file) = self.current_file.as_mut() {
+                if self.current_local_offset != local_offset {
+                    let segment_offset = local_offset - self.current_range.start;
+                    file.seek(SeekFrom::Start(segment_offset))?;
+                    self.current_local_offset = local_offset;
+                }
+                return Ok((self.current_range.start, self.current_range.end));
+            }
+        }
+
         let cached = {
-            let ranges = self.layout.ranges.lock().unwrap();
+            let ranges = self.layout.ranges.read().unwrap();
             ranges.get(volume_index).and_then(|ranges| {
-                ranges
+                let end = ranges.partition_point(|range| range.range.start <= local_offset);
+                ranges[..end]
                     .iter()
-                    .filter(|range| {
-                        range.range.start <= local_offset && range.range.end > local_offset
-                    })
-                    .min_by_key(|range| range.range.end - range.range.start)
+                    .rev()
+                    .find(|range| range.range.end > local_offset)
                     .cloned()
             })
         }
@@ -61,13 +78,15 @@ impl MultiVolumeStream {
         if self.current_path.as_ref() != Some(&cached.path) || self.current_file.is_none() {
             self.current_file = Some(std::fs::File::open(&cached.path)?);
             self.current_path = Some(cached.path.clone());
-            self.current_range = cached.range.clone();
         }
+        self.current_volume_index = Some(volume_index);
+        self.current_range = cached.range.clone();
         let segment_offset = local_offset - cached.range.start;
         self.current_file
             .as_mut()
             .expect("selected archive range is open")
             .seek(SeekFrom::Start(segment_offset))?;
+        self.current_local_offset = local_offset;
         Ok((cached.range.start, cached.range.end))
     }
 }
@@ -78,7 +97,9 @@ impl Clone for MultiVolumeStream {
             layout: self.layout.clone(),
             current_path: None,
             current_file: None,
+            current_volume_index: None,
             current_range: 0..0,
+            current_local_offset: 0,
             position: self.position,
         }
     }
@@ -119,6 +140,7 @@ impl Read for MultiVolumeStream {
             ));
         }
         self.position = self.position.saturating_add(read as u64);
+        self.current_local_offset = self.current_local_offset.saturating_add(read as u64);
         Ok(read)
     }
 }

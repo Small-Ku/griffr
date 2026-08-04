@@ -576,6 +576,103 @@ fn verified_file_callback_can_commit_before_a_later_entry_fails() -> Result<()> 
 }
 
 #[test]
+fn full_remote_volume_is_registered_after_promotion() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let full_path = temp_dir.path().join("payload.zip.001");
+    let layout = MultiVolumeLayout::from_remote(
+        vec![(
+            full_path.clone(),
+            "https://example.invalid/payload.zip.001".to_string(),
+            4,
+        )],
+        temp_dir.path().join("ranges"),
+    )?;
+
+    std::fs::write(&full_path, b"data")?;
+    assert!(!layout.range_is_available(&(0..4)));
+
+    layout.register_full_volume(0)?;
+    assert!(layout.range_is_available(&(0..4)));
+    assert_eq!(layout.read_range(0..4)?, b"data");
+    Ok(())
+}
+
+#[test]
+fn missing_archive_bytes_are_counted_without_building_requests() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let cache = temp_dir.path().join("ranges");
+    let layout = MultiVolumeLayout::from_remote(
+        vec![(
+            temp_dir.path().join("payload.zip.001"),
+            "https://example.invalid/payload.zip.001".to_string(),
+            8,
+        )],
+        cache.clone(),
+    )?;
+    for (start, end, bytes) in [(0, 3, b"abc".as_slice()), (5, 6, b"f".as_slice())] {
+        let request = ArchiveRangeRequest {
+            volume_index: 0,
+            local_range: start..end,
+            global_range: start..end,
+            url: "https://example.invalid/payload.zip.001".to_string(),
+            cache_path: cache.join(format!("v0000-{start}-{end}.range")),
+        };
+        std::fs::write(&request.cache_path, bytes)?;
+        layout.register_range(&request)?;
+    }
+
+    assert_eq!(layout.missing_bytes(0..8)?, 4);
+    assert_eq!(layout.missing_bytes(1..6)?, 2);
+    assert_eq!(layout.missing_bytes(3..5)?, 2);
+    Ok(())
+}
+
+#[test]
+fn archive_stream_reads_across_overlapping_ranges_and_seeks_backwards() -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let temp_dir = tempfile::tempdir()?;
+    let cache = temp_dir.path().join("ranges");
+    let layout = MultiVolumeLayout::from_remote(
+        vec![(
+            temp_dir.path().join("payload.zip.001"),
+            "https://example.invalid/payload.zip.001".to_string(),
+            8,
+        )],
+        cache.clone(),
+    )?;
+    let first = ArchiveRangeRequest {
+        volume_index: 0,
+        local_range: 0..6,
+        global_range: 0..6,
+        url: "https://example.invalid/payload.zip.001".to_string(),
+        cache_path: cache.join("v0000-0-6.range"),
+    };
+    let second = ArchiveRangeRequest {
+        volume_index: 0,
+        local_range: 4..8,
+        global_range: 4..8,
+        url: "https://example.invalid/payload.zip.001".to_string(),
+        cache_path: cache.join("v0000-4-8.range"),
+    };
+    std::fs::write(&first.cache_path, b"abcdef")?;
+    std::fs::write(&second.cache_path, b"efgh")?;
+    layout.register_range(&first)?;
+    layout.register_range(&second)?;
+
+    let mut stream = layout.open_stream()?;
+    let mut all = Vec::new();
+    stream.read_to_end(&mut all)?;
+    assert_eq!(all, b"abcdefgh");
+
+    stream.seek(SeekFrom::Start(2))?;
+    let mut middle = [0u8; 5];
+    stream.read_exact(&mut middle)?;
+    assert_eq!(&middle, b"cdefg");
+    Ok(())
+}
+
+#[test]
 fn range_cache_prunes_only_segments_without_pending_readers() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let cache = temp_dir.path().join("ranges");

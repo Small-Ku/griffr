@@ -25,12 +25,24 @@ pub(crate) struct VolumeLayout {
 #[derive(Debug, Clone)]
 pub struct MultiVolumeLayout {
     pub(crate) layouts: Arc<Vec<VolumeLayout>>,
-    pub(crate) ranges: Arc<std::sync::Mutex<Vec<Vec<CachedVolumeRange>>>>,
+    pub(crate) ranges: Arc<std::sync::RwLock<Vec<Vec<CachedVolumeRange>>>>,
     pub(crate) cache_dir: Option<PathBuf>,
     pub(crate) total_size: u64,
 }
 
 impl MultiVolumeLayout {
+    fn insert_cached_range(ranges: &mut Vec<CachedVolumeRange>, cached: CachedVolumeRange) {
+        if ranges
+            .iter()
+            .any(|existing| existing.range == cached.range && existing.path == cached.path)
+        {
+            return;
+        }
+        let index = ranges.partition_point(|existing| {
+            (existing.range.start, existing.range.end) <= (cached.range.start, cached.range.end)
+        });
+        ranges.insert(index, cached);
+    }
     pub(crate) fn from_expected(volumes: Vec<(PathBuf, u64)>) -> Result<Self> {
         if volumes.is_empty() {
             return Err(Error::Message {
@@ -67,7 +79,7 @@ impl MultiVolumeLayout {
         }
         Ok(Self {
             layouts: Arc::new(layouts),
-            ranges: Arc::new(std::sync::Mutex::new(ranges)),
+            ranges: Arc::new(std::sync::RwLock::new(ranges)),
             cache_dir: None,
             total_size: start,
         })
@@ -151,16 +163,19 @@ impl MultiVolumeLayout {
                     .ok()
                     .is_some_and(|metadata| metadata.len() == range_end - range_start)
                 {
-                    ranges[volume].push(CachedVolumeRange {
-                        range: range_start..range_end,
-                        path,
-                    });
+                    Self::insert_cached_range(
+                        &mut ranges[volume],
+                        CachedVolumeRange {
+                            range: range_start..range_end,
+                            path,
+                        },
+                    );
                 }
             }
         }
         Ok(Self {
             layouts: Arc::new(layouts),
-            ranges: Arc::new(std::sync::Mutex::new(ranges)),
+            ranges: Arc::new(std::sync::RwLock::new(ranges)),
             cache_dir: Some(cache_dir),
             total_size: start,
         })
@@ -213,35 +228,50 @@ impl MultiVolumeLayout {
     }
 
     pub(crate) fn is_remote(&self) -> bool {
-        self.layouts.iter().any(|layout| layout.url.is_some())
+        self.cache_dir.is_some()
     }
 
     pub(crate) fn tail_probe_range(&self) -> Range<u64> {
         self.total_size.saturating_sub(EOCD_MAX_SEARCH)..self.total_size
     }
 
-    fn refresh_full_files(&self) {
-        let mut ranges = self.ranges.lock().unwrap();
-        for (index, layout) in self.layouts.iter().enumerate() {
-            let size = layout.end - layout.start;
-            let is_matching = std::fs::metadata(&layout.path)
-                .map(|metadata| metadata.len() == size)
-                .unwrap_or(false);
-            if !is_matching {
-                ranges[index]
-                    .retain(|cached| cached.path != layout.path || cached.range != (0..size));
+    fn refresh_local_full_volumes(&self, indices: impl IntoIterator<Item = usize>) {
+        if self.is_remote() {
+            return;
+        }
+
+        let mut inspected = Vec::new();
+        for index in indices {
+            let Some(layout) = self.layouts.get(index) else {
                 continue;
-            }
-            if ranges[index]
-                .iter()
-                .any(|cached| cached.range == (0..size) && cached.path == layout.path)
-            {
+            };
+            let expected = layout.end - layout.start;
+            let available = std::fs::metadata(&layout.path)
+                .ok()
+                .is_some_and(|metadata| metadata.len() == expected);
+            inspected.push((index, expected, available));
+        }
+        if inspected.is_empty() {
+            return;
+        }
+
+        let mut ranges = self.ranges.write().unwrap();
+        for (index, expected, available) in inspected {
+            let Some(volume) = ranges.get_mut(index) else {
                 continue;
+            };
+            let layout = &self.layouts[index];
+            if available {
+                Self::insert_cached_range(
+                    volume,
+                    CachedVolumeRange {
+                        range: 0..expected,
+                        path: layout.path.clone(),
+                    },
+                );
+            } else {
+                volume.retain(|cached| cached.path != layout.path || cached.range != (0..expected));
             }
-            ranges[index].push(CachedVolumeRange {
-                range: 0..size,
-                path: layout.path.clone(),
-            });
         }
     }
 
@@ -250,11 +280,12 @@ impl MultiVolumeLayout {
             return true;
         }
         let mut cursor = requested.start;
-        let mut sorted = ranges.iter().collect::<Vec<_>>();
-        sorted.sort_by_key(|range| range.range.start);
-        for cached in sorted {
-            if cached.range.end <= cursor || cached.range.start > cursor {
+        for cached in ranges {
+            if cached.range.end <= cursor {
                 continue;
+            }
+            if cached.range.start > cursor {
+                return false;
             }
             cursor = cursor.max(cached.range.end);
             if cursor >= requested.end {
@@ -265,41 +296,42 @@ impl MultiVolumeLayout {
     }
 
     pub(crate) fn range_is_available(&self, range: &Range<u64>) -> bool {
-        self.refresh_full_files();
         if range.start > range.end || range.end > self.total_size {
             return false;
         }
-        let ranges = self.ranges.lock().unwrap();
-        self.layouts.iter().enumerate().all(|(index, layout)| {
+        let bounds = self.volume_index_bounds(range);
+        self.refresh_local_full_volumes(bounds.clone());
+        let ranges = self.ranges.read().unwrap();
+        bounds.into_iter().all(|index| {
+            let layout = &self.layouts[index];
             let start = range.start.max(layout.start);
             let end = range.end.min(layout.end);
-            start >= end
-                || Self::range_covered(&ranges[index], &(start - layout.start..end - layout.start))
+            Self::range_covered(&ranges[index], &(start - layout.start..end - layout.start))
         })
     }
 
-    pub(crate) fn volume_indices_for_range(&self, range: Range<u64>) -> Vec<usize> {
+    fn volume_index_bounds(&self, range: &Range<u64>) -> Range<usize> {
         if range.start >= range.end {
-            return Vec::new();
+            return 0..0;
         }
-        self.layouts
-            .iter()
-            .enumerate()
-            .filter_map(|(index, layout)| {
-                (layout.start < range.end && layout.end > range.start).then_some(index)
-            })
-            .collect()
+        let start = self
+            .layouts
+            .partition_point(|layout| layout.end <= range.start);
+        let end = self
+            .layouts
+            .partition_point(|layout| layout.start < range.end);
+        start..end
+    }
+
+    pub(crate) fn volume_indices_for_range(&self, range: Range<u64>) -> Vec<usize> {
+        self.volume_index_bounds(&range).collect()
     }
 
     fn subtract_cached(requested: Range<u64>, cached: &[CachedVolumeRange]) -> Vec<Range<u64>> {
-        let mut covered = cached
-            .iter()
-            .map(|range| range.range.clone())
-            .collect::<Vec<_>>();
-        covered.sort_by_key(|range| range.start);
         let mut cursor = requested.start;
         let mut missing = Vec::new();
-        for range in covered {
+        for cached in cached {
+            let range = &cached.range;
             if range.end <= cursor || range.start >= requested.end {
                 continue;
             }
@@ -317,14 +349,56 @@ impl MultiVolumeLayout {
         missing
     }
 
+    fn missing_bytes_in_range(requested: Range<u64>, cached: &[CachedVolumeRange]) -> u64 {
+        let mut cursor = requested.start;
+        let mut missing = 0u64;
+        for cached in cached {
+            let range = &cached.range;
+            if range.end <= cursor || range.start >= requested.end {
+                continue;
+            }
+            if range.start > cursor {
+                missing = missing.saturating_add(range.start.min(requested.end) - cursor);
+            }
+            cursor = cursor.max(range.end);
+            if cursor >= requested.end {
+                return missing;
+            }
+        }
+        missing.saturating_add(requested.end.saturating_sub(cursor))
+    }
+
+    /// Return the uncached byte count without allocating concrete range
+    /// requests. Repair source selection calls this for every candidate archive.
+    pub(crate) fn missing_bytes(&self, range: Range<u64>) -> Result<u64> {
+        if range.start > range.end || range.end > self.total_size {
+            return Err(Error::Message {
+                context: "Extraction error: ",
+                detail: format!(
+                    "Archive byte range {}..{} exceeds stream size {}",
+                    range.start, range.end, self.total_size
+                ),
+            });
+        }
+        let cached = self.ranges.read().unwrap();
+        Ok(self
+            .volume_index_bounds(&range)
+            .map(|index| {
+                let layout = &self.layouts[index];
+                let start = range.start.max(layout.start) - layout.start;
+                let end = range.end.min(layout.end) - layout.start;
+                Self::missing_bytes_in_range(start..end, &cached[index])
+            })
+            .fold(0u64, u64::saturating_add))
+    }
+
     pub(crate) fn missing_range_requests(
         &self,
         ranges: impl IntoIterator<Item = Range<u64>>,
     ) -> Result<Vec<ArchiveRangeRequest>> {
-        self.refresh_full_files();
-        let cached = self.ranges.lock().unwrap();
-        let mut per_volume = vec![Vec::<Range<u64>>::new(); self.layouts.len()];
-        for range in ranges {
+        let ranges = ranges.into_iter().collect::<Vec<_>>();
+        let mut touched = Vec::new();
+        for range in &ranges {
             if range.start > range.end || range.end > self.total_size {
                 return Err(Error::Message {
                     context: "Extraction error: ",
@@ -334,12 +408,20 @@ impl MultiVolumeLayout {
                     ),
                 });
             }
-            for (index, layout) in self.layouts.iter().enumerate() {
+            touched.extend(self.volume_index_bounds(range));
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        self.refresh_local_full_volumes(touched);
+
+        let cached = self.ranges.read().unwrap();
+        let mut per_volume = vec![Vec::<Range<u64>>::new(); self.layouts.len()];
+        for range in ranges {
+            for index in self.volume_index_bounds(&range) {
+                let layout = &self.layouts[index];
                 let start = range.start.max(layout.start);
                 let end = range.end.min(layout.end);
-                if start < end {
-                    per_volume[index].push(start - layout.start..end - layout.start);
-                }
+                per_volume[index].push(start - layout.start..end - layout.start);
             }
         }
 
@@ -418,17 +500,60 @@ impl MultiVolumeLayout {
                 ),
             });
         }
-        let mut ranges = self.ranges.lock().unwrap();
+        let mut ranges = self.ranges.write().unwrap();
         let volume = ranges
             .get_mut(request.volume_index)
             .ok_or_else(|| Error::Message {
                 context: "Extraction error: ",
                 detail: "Archive range references an unknown volume".to_string(),
             })?;
-        volume.push(CachedVolumeRange {
-            range: request.local_range.clone(),
-            path: request.cache_path.clone(),
-        });
+        Self::insert_cached_range(
+            volume,
+            CachedVolumeRange {
+                range: request.local_range.clone(),
+                path: request.cache_path.clone(),
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn register_full_volume(&self, volume_index: usize) -> Result<()> {
+        let layout = self
+            .layouts
+            .get(volume_index)
+            .ok_or_else(|| Error::Message {
+                context: "Extraction error: ",
+                detail: "Archive volume index is out of range".to_string(),
+            })?;
+        let expected = layout.end - layout.start;
+        let actual = std::fs::metadata(&layout.path)
+            .map_err(|source| Error::IoAt {
+                action: "query file metadata/stat for",
+                path: layout.path.clone(),
+                source,
+            })?
+            .len();
+        if actual != expected {
+            return Err(Error::Message {
+                context: "Extraction error: ",
+                detail: format!(
+                    "Archive volume {} has {actual} bytes, expected {expected}",
+                    layout.path.display()
+                ),
+            });
+        }
+        let mut ranges = self.ranges.write().unwrap();
+        let volume = ranges.get_mut(volume_index).ok_or_else(|| Error::Message {
+            context: "Extraction error: ",
+            detail: "Archive volume index is out of range".to_string(),
+        })?;
+        Self::insert_cached_range(
+            volume,
+            CachedVolumeRange {
+                range: 0..expected,
+                path: layout.path.clone(),
+            },
+        );
         Ok(())
     }
 
@@ -451,7 +576,7 @@ impl MultiVolumeLayout {
             return;
         }
 
-        let mut ranges = self.ranges.lock().unwrap();
+        let mut ranges = self.ranges.write().unwrap();
         for (index, cached_ranges) in ranges.iter_mut().enumerate() {
             let layout = &self.layouts[index];
             cached_ranges.retain(|cached| {
@@ -482,7 +607,6 @@ impl MultiVolumeLayout {
     }
 
     pub(crate) fn open_stream(&self) -> Result<super::stream::MultiVolumeStream> {
-        self.refresh_full_files();
         super::stream::MultiVolumeStream::from_layout(self.clone())
     }
 
