@@ -486,9 +486,19 @@ async fn verify_one(
 
     let pool_cfg = opts.task_pool_config();
     let volume_policy = pool_cfg.default_volume_policy;
+    let effective_verify_parallelism = pool_cfg
+        .cpu_slots
+        .min(volume_policy.read_limit)
+        .min(volume_policy.streaming_pressure_limit);
     opts.verbose(format!(
-        "Volume policy: mode={:?} reads={} writes={} metadata={} pressure={} reuse_queue_limit={}",
+        "Volume policy: mode={:?} verify_parallelism={} cpu={} blocking={} network={} dispatcher={} frontier={} reads={} writes={} metadata={} pressure={} reuse_queue_limit={}",
         volume_policy.streaming_mode,
+        effective_verify_parallelism,
+        pool_cfg.cpu_slots,
+        pool_cfg.blocking_slots,
+        pool_cfg.network_slots,
+        pool_cfg.dispatcher_threads,
+        pool_cfg.ready_frontier_limit(),
         volume_policy.read_limit,
         volume_policy.write_limit,
         volume_policy.metadata_limit,

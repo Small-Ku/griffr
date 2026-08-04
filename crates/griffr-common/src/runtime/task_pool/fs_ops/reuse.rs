@@ -156,11 +156,13 @@ pub(crate) fn storage_volume_id(path: &Path) -> Option<String> {
         GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
     };
 
-    const BUFFER_LEN: usize = 32_768;
     let probe = existing_volume_probe(path)?;
     let mut wide = probe.as_os_str().encode_wide().collect::<Vec<_>>();
     wide.push(0);
-    let mut mount_path = vec![0u16; BUFFER_LEN];
+    // The mount path is a prefix of the input path, so the input's UTF-16
+    // length is already a sufficient upper bound. Avoid two 32K-element
+    // allocations for every cache miss.
+    let mut mount_path = vec![0u16; wide.len().max(4)];
     if unsafe {
         GetVolumePathNameW(
             wide.as_ptr(),
@@ -176,7 +178,10 @@ pub(crate) fn storage_volume_id(path: &Path) -> Option<String> {
         .position(|value| *value == 0)
         .unwrap_or(mount_path.len());
 
-    let mut volume_name = vec![0u16; BUFFER_LEN];
+    // A canonical volume GUID path is currently under 50 UTF-16 code units.
+    // Keep a little headroom and fall back to the mount path if Windows ever
+    // returns a longer form.
+    let mut volume_name = [0u16; 64];
     let identity = if unsafe {
         GetVolumeNameForVolumeMountPointW(
             mount_path.as_ptr(),

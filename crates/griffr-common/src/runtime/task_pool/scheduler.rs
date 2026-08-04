@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
@@ -30,7 +31,9 @@ mod routing;
 use metrics::SchedulerMetrics;
 use progress::TaskProgressReducer;
 use queue::{ScheduledTask, SchedulerQueue};
-use routing::{task_path, task_resources_cached, ResourceRequest, RunClass, VolumeKeyCache};
+use routing::{
+    run_class, task_path, task_resources_cached, ResourceRequest, RunClass, VolumeKeyCache,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskPriority {
@@ -50,6 +53,76 @@ struct TaskFinish {
 enum DispatchAttempt {
     Submitted,
     BlockingPoolBusy(Box<ScheduledTask>),
+}
+
+#[derive(Debug)]
+struct ReadyBacklog {
+    continuation: [VecDeque<ReadyTask>; 3],
+    bulk: [VecDeque<ReadyTask>; 3],
+    continuation_cursor: usize,
+    bulk_cursor: usize,
+    len: usize,
+    peak_len: usize,
+}
+
+impl Default for ReadyBacklog {
+    fn default() -> Self {
+        Self {
+            continuation: std::array::from_fn(|_| VecDeque::new()),
+            bulk: std::array::from_fn(|_| VecDeque::new()),
+            continuation_cursor: 0,
+            bulk_cursor: 0,
+            len: 0,
+            peak_len: 0,
+        }
+    }
+}
+
+impl ReadyBacklog {
+    fn extend(&mut self, ready: Vec<ReadyTask>) {
+        for ready in ready {
+            let class = run_class_index(run_class(&ready.task));
+            if ready.continuation {
+                self.continuation[class].push_back(ready);
+            } else {
+                self.bulk[class].push_back(ready);
+            }
+            self.len = self.len.saturating_add(1);
+        }
+        self.peak_len = self.peak_len.max(self.len);
+    }
+
+    fn pop(&mut self) -> Option<ReadyTask> {
+        let task = pop_ready_class(&mut self.continuation, &mut self.continuation_cursor)
+            .or_else(|| pop_ready_class(&mut self.bulk, &mut self.bulk_cursor));
+        if task.is_some() {
+            self.len = self.len.saturating_sub(1);
+        }
+        task
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+fn run_class_index(class: RunClass) -> usize {
+    match class {
+        RunClass::AsyncIo => 0,
+        RunClass::Cpu => 1,
+        RunClass::Blocking => 2,
+    }
+}
+
+fn pop_ready_class(queues: &mut [VecDeque<ReadyTask>; 3], cursor: &mut usize) -> Option<ReadyTask> {
+    for offset in 0..queues.len() {
+        let index = cursor.saturating_add(offset) % queues.len();
+        if let Some(task) = queues[index].pop_front() {
+            *cursor = (index + 1) % queues.len();
+            return Some(task);
+        }
+    }
+    None
 }
 
 fn record_worker_event(
@@ -74,7 +147,7 @@ fn complete_task(
     metrics: &SchedulerMetrics,
     graph: &mut TaskGraph,
     event_tx: &flume::Sender<WorkerEvent>,
-    volume_keys: &mut VolumeKeyCache,
+    ready_backlog: &mut ReadyBacklog,
 ) -> Result<()> {
     *in_flight = (*in_flight).saturating_sub(1);
     queue.release(&finish.resources);
@@ -85,7 +158,7 @@ fn complete_task(
         }
     }
     let ready = graph.finish(finish.node_id, finish.run)?;
-    enqueue_ready_tasks(queue, ready, volume_keys);
+    ready_backlog.extend(ready);
     Ok(())
 }
 
@@ -97,7 +170,7 @@ fn complete_task_batch(
     metrics: &SchedulerMetrics,
     graph: &mut TaskGraph,
     event_tx: &flume::Sender<WorkerEvent>,
-    volume_keys: &mut VolumeKeyCache,
+    ready_backlog: &mut ReadyBacklog,
 ) -> Result<()> {
     complete_task(
         first,
@@ -106,7 +179,7 @@ fn complete_task_batch(
         metrics,
         graph,
         event_tx,
-        volume_keys,
+        ready_backlog,
     )?;
     for _ in 1..MAX_TASK_FINISHES_PER_TICK {
         let Ok(finish) = finish_rx.try_recv() else {
@@ -119,7 +192,7 @@ fn complete_task_batch(
             metrics,
             graph,
             event_tx,
-            volume_keys,
+            ready_backlog,
         )?;
     }
     Ok(())
@@ -197,19 +270,51 @@ impl TaskPoolRunner {
         progress: TaskProgress,
     ) -> Result<TaskPoolResult> {
         while self.event_rx.try_recv().is_ok() {}
+        let run_started_at = Instant::now();
         let metrics = SchedulerMetrics::default();
         let mut queue = SchedulerQueue::default();
         let mut volume_keys = VolumeKeyCache::default();
-        enqueue_ready_tasks(&mut queue, graph.start(), &mut volume_keys);
+        let mut ready_backlog = ReadyBacklog::default();
+        let graph_start_started_at = Instant::now();
+        ready_backlog.extend(graph.start());
+        let initial_graph_time = graph_start_started_at.elapsed();
+        let ready_frontier_limit = self.config.ready_frontier_limit();
+        let initial_routing_started_at = Instant::now();
+        route_ready_tasks(
+            &mut queue,
+            &mut ready_backlog,
+            &mut volume_keys,
+            ready_frontier_limit,
+        );
+        let initial_routing_time = initial_routing_started_at.elapsed();
+        let (initial_volume_cache_hits, initial_volume_cache_misses) = volume_keys.stats();
+        debug!(
+            graph_nodes = graph.node_count(),
+            ready_frontier_limit,
+            initial_graph_ms = initial_graph_time.as_millis(),
+            initial_routing_ms = initial_routing_time.as_millis(),
+            initial_volume_cache_hits,
+            initial_volume_cache_misses,
+            ready_backlog = ready_backlog.len,
+            "task graph initial routing"
+        );
 
         let (finish_tx, finish_rx) = flume::unbounded::<TaskFinish>();
         let mut in_flight = 0usize;
+        let mut first_task_start = None;
         let mut progress = TaskProgressReducer::new(progress);
         let mut outcomes = Vec::new();
         let mut last_heartbeat_at = Instant::now();
         let mut idle_blocking_dispatch_retries = 0usize;
 
         while graph.has_unresolved() {
+            refill_ready_frontier(
+                &mut queue,
+                &mut ready_backlog,
+                &mut volume_keys,
+                ready_frontier_limit,
+                in_flight,
+            );
             let mut worker_events_handled = 0usize;
             for _ in 0..MAX_WORKER_EVENTS_PER_TICK {
                 let Ok(event) = self.event_rx.try_recv() else {
@@ -234,6 +339,7 @@ impl TaskPoolRunner {
                     DispatchAttempt::Submitted => {
                         graph.mark_running(node_id)?;
                         in_flight = in_flight.saturating_add(1);
+                        first_task_start.get_or_insert_with(|| run_started_at.elapsed());
                         idle_blocking_dispatch_retries = 0;
                     }
                     DispatchAttempt::BlockingPoolBusy(scheduled) => {
@@ -249,6 +355,16 @@ impl TaskPoolRunner {
             }
 
             if in_flight == 0 {
+                if !ready_backlog.is_empty()
+                    && route_ready_tasks(
+                        &mut queue,
+                        &mut ready_backlog,
+                        &mut volume_keys,
+                        ready_frontier_limit,
+                    ) > 0
+                {
+                    continue;
+                }
                 if blocking_pool_busy {
                     idle_blocking_dispatch_retries =
                         idle_blocking_dispatch_retries.saturating_add(1);
@@ -284,7 +400,7 @@ impl TaskPoolRunner {
                     &metrics,
                     &mut graph,
                     &self.event_tx,
-                    &mut volume_keys,
+                    &mut ready_backlog,
                 )?;
                 continue;
             }
@@ -302,7 +418,7 @@ impl TaskPoolRunner {
                         &metrics,
                         &mut graph,
                         &self.event_tx,
-                        &mut volume_keys,
+                        &mut ready_backlog,
                     )?;
                 }
                 Err(flume::RecvTimeoutError::Timeout)
@@ -333,6 +449,12 @@ impl TaskPoolRunner {
         let graph_summary = graph.summary();
         let mut metrics = metrics.snapshot();
         metrics.graph = graph_summary.clone();
+        metrics.initial_graph_time = initial_graph_time;
+        metrics.initial_routing_time = initial_routing_time;
+        metrics.first_task_start = first_task_start.unwrap_or_default();
+        metrics.ready_frontier_limit = ready_frontier_limit;
+        metrics.ready_backlog_peak = ready_backlog.peak_len;
+        (metrics.volume_cache_hits, metrics.volume_cache_misses) = volume_keys.stats();
         debug!(
             finished_tasks = metrics.finished_tasks,
             graph_nodes = graph_summary.total_nodes,
@@ -348,6 +470,13 @@ impl TaskPoolRunner {
             queue_wait_p95_ms = metrics.queue_wait_p95.as_millis(),
             task_duration_p50_ms = metrics.task_duration_p50.as_millis(),
             task_duration_p95_ms = metrics.task_duration_p95.as_millis(),
+            initial_graph_ms = metrics.initial_graph_time.as_millis(),
+            initial_routing_ms = metrics.initial_routing_time.as_millis(),
+            first_task_start_ms = metrics.first_task_start.as_millis(),
+            ready_frontier_limit = metrics.ready_frontier_limit,
+            ready_backlog_peak = metrics.ready_backlog_peak,
+            volume_cache_hits = metrics.volume_cache_hits,
+            volume_cache_misses = metrics.volume_cache_misses,
             volume_count = metrics.volumes.len(),
             "task graph batch metrics"
         );
@@ -532,12 +661,33 @@ pub fn run_tasks(root_tasks: Vec<Task>, config: TaskPoolConfig) -> Result<TaskPo
     run_tasks_with_progress(root_tasks, config, TaskProgress::disabled())
 }
 
-fn enqueue_ready_tasks(
+fn refill_ready_frontier(
     queue: &mut SchedulerQueue,
-    ready: Vec<ReadyTask>,
+    ready: &mut ReadyBacklog,
     volume_keys: &mut VolumeKeyCache,
-) {
-    for ready in ready {
+    frontier_limit: usize,
+    in_flight: usize,
+) -> usize {
+    let routed = queue.queued_len().saturating_add(in_flight);
+    route_ready_tasks(
+        queue,
+        ready,
+        volume_keys,
+        frontier_limit.saturating_sub(routed),
+    )
+}
+
+fn route_ready_tasks(
+    queue: &mut SchedulerQueue,
+    ready: &mut ReadyBacklog,
+    volume_keys: &mut VolumeKeyCache,
+    max_tasks: usize,
+) -> usize {
+    let mut routed = 0usize;
+    while routed < max_tasks {
+        let Some(ready) = ready.pop() else {
+            break;
+        };
         let resources = task_resources_cached(&ready.task, volume_keys);
         let priority = if ready.continuation {
             TaskPriority::Continuation
@@ -545,6 +695,64 @@ fn enqueue_ready_tasks(
             TaskPriority::Bulk
         };
         queue.push(ready.id, ready.task, resources, priority);
+        routed = routed.saturating_add(1);
+    }
+    routed
+}
+
+#[cfg(test)]
+mod frontier_tests {
+    use super::*;
+    use crate::runtime::task_pool::{Task, TaskGraph};
+    use std::path::PathBuf;
+
+    fn verify_task(path: PathBuf) -> Task {
+        Task::Verify {
+            logical_path: path.display().to_string(),
+            path,
+            expected_md5: "00".repeat(16),
+            expected_size: Some(1),
+            on_fail: None,
+        }
+    }
+
+    #[test]
+    fn ready_frontier_routes_only_the_requested_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut backlog = ReadyBacklog::default();
+        let tasks = (0..300)
+            .map(|index| verify_task(temp.path().join(format!("{index}.bin"))))
+            .collect();
+        let mut graph = TaskGraph::from_tasks(tasks);
+        backlog.extend(graph.start());
+        let mut queue = SchedulerQueue::default();
+        let mut volumes = VolumeKeyCache::default();
+
+        let routed = route_ready_tasks(&mut queue, &mut backlog, &mut volumes, 256);
+
+        assert_eq!(routed, 256);
+        assert_eq!(queue.queued_len(), 256);
+        assert_eq!(backlog.len, 44);
+        assert_eq!(volumes.stats(), (255, 1));
+    }
+
+    #[test]
+    fn ready_backlog_round_robins_run_classes() {
+        let mut backlog = ReadyBacklog::default();
+        let mut graph = TaskGraph::from_tasks(vec![
+            verify_task(PathBuf::from("cpu.bin")),
+            Task::ApplyExtractedVfsPatchManifest {
+                install_root: PathBuf::from("blocking"),
+            },
+            Task::ApplyDeleteManifest {
+                install_root: PathBuf::from("async"),
+            },
+        ]);
+        backlog.extend(graph.start());
+
+        assert_eq!(run_class(&backlog.pop().unwrap().task), RunClass::AsyncIo);
+        assert_eq!(run_class(&backlog.pop().unwrap().task), RunClass::Cpu);
+        assert_eq!(run_class(&backlog.pop().unwrap().task), RunClass::Blocking);
     }
 }
 

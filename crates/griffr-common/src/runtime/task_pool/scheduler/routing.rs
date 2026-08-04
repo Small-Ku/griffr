@@ -48,16 +48,37 @@ pub(super) struct ResourceRequest {
 #[derive(Debug, Default)]
 pub(super) struct VolumeKeyCache {
     entries: HashMap<PathBuf, String>,
+    hits: usize,
+    misses: usize,
 }
 
 impl VolumeKeyCache {
     fn resolve(&mut self, path: &Path) -> String {
         if let Some(volume) = self.entries.get(path) {
+            self.hits = self.hits.saturating_add(1);
             return volume.clone();
         }
+        self.misses = self.misses.saturating_add(1);
         let volume = crate::runtime::task_pool::fs_ops::storage_volume_group_key(path);
         self.entries.insert(path.to_path_buf(), volume.clone());
         volume
+    }
+
+    /// Verify tasks are regular manifest files in the common case. Routing by
+    /// their parent directory preserves mount-point boundaries while collapsing
+    /// thousands of sibling files into one physical-volume lookup. A file-level
+    /// symlink may still resolve elsewhere, but this identity is only an I/O
+    /// admission hint; verification continues to open the requested path.
+    fn resolve_verify_file(&mut self, path: &Path) -> String {
+        let directory = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(path);
+        self.resolve(directory)
+    }
+
+    pub(super) fn stats(&self) -> (usize, usize) {
+        (self.hits, self.misses)
     }
 }
 
@@ -139,7 +160,7 @@ pub(super) fn task_resources_cached(task: &Task, volumes: &mut VolumeKeyCache) -
             request.mutation_paths.push(path_key(&repair.dest));
             request.extract = true;
         }
-        Task::Verify { path, .. } => request.read_volumes.push(volume_key(volumes, path)),
+        Task::Verify { path, .. } => request.read_volumes.push(volumes.resolve_verify_file(path)),
         Task::Download {
             dest,
             expected_size,
@@ -836,7 +857,7 @@ fn task_estimated_bytes(task: &Task) -> u64 {
     }
 }
 
-fn run_class(task: &Task) -> RunClass {
+pub(super) fn run_class(task: &Task) -> RunClass {
     match task {
         Task::Download { resume, .. } => {
             if resume.is_some() {
@@ -1036,6 +1057,33 @@ mod tests {
             transfer_class: TransferClass::General,
             archive_repair: None,
         }
+    }
+
+    #[test]
+    fn verify_routing_reuses_parent_directory_volume_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cache = VolumeKeyCache::default();
+        let first = Task::Verify {
+            path: temp.path().join("first.bin"),
+            logical_path: "first.bin".to_string(),
+            expected_md5: "00".repeat(16),
+            expected_size: Some(1),
+            on_fail: None,
+        };
+        let second = Task::Verify {
+            path: temp.path().join("second.bin"),
+            logical_path: "second.bin".to_string(),
+            expected_md5: "00".repeat(16),
+            expected_size: Some(1),
+            on_fail: None,
+        };
+
+        let first_resources = task_resources_cached(&first, &mut cache);
+        let second_resources = task_resources_cached(&second, &mut cache);
+
+        assert_eq!(first_resources.read_volumes, second_resources.read_volumes);
+        assert_eq!(cache.stats(), (1, 1));
+        assert_eq!(cache.entries.len(), 1);
     }
 
     #[test]

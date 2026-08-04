@@ -122,6 +122,13 @@ pub struct TaskPoolMetrics {
     pub queue_wait_p95: Duration,
     pub task_duration_p50: Duration,
     pub task_duration_p95: Duration,
+    pub initial_graph_time: Duration,
+    pub initial_routing_time: Duration,
+    pub first_task_start: Duration,
+    pub ready_frontier_limit: usize,
+    pub ready_backlog_peak: usize,
+    pub volume_cache_hits: usize,
+    pub volume_cache_misses: usize,
     pub volumes: BTreeMap<String, VolumeTaskMetrics>,
 }
 

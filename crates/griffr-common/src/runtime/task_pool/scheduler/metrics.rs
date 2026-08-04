@@ -71,12 +71,12 @@ impl SchedulerMetrics {
         }
         TaskPoolMetrics {
             finished_tasks: samples.len(),
-            graph: Default::default(),
             queue_wait_p50: percentile(&mut queue_waits, 50),
             queue_wait_p95: percentile(&mut queue_waits, 95),
             task_duration_p50: percentile(&mut run_times, 50),
             task_duration_p95: percentile(&mut run_times, 95),
             volumes,
+            ..TaskPoolMetrics::default()
         }
     }
 }

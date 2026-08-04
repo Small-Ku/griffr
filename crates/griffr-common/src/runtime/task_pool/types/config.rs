@@ -22,6 +22,9 @@ const MAX_EXTRACT_SLOTS: usize = 2;
 const MIN_EXTRACT_SHARDS: usize = 1;
 const MAX_EXTRACT_SHARDS: usize = 4;
 const READY_SHARDS_PER_SLOT: usize = 2;
+const READY_FRONTIER_PER_SLOT: usize = 32;
+const MIN_READY_FRONTIER: usize = 256;
+const MAX_READY_FRONTIER: usize = 1024;
 const DEFAULT_VOLUME_WRITE_RESERVATION_DELAY: Duration = Duration::from_millis(15);
 
 pub const DEFAULT_PROGRESS_BUFFER_BYTES: usize = 256 * 1024;
@@ -169,6 +172,17 @@ impl TaskPoolConfig {
             .max(MIN_BLOCKING_POOL_LIMIT);
     }
 
+    /// Maximum number of ready graph nodes routed into the admission queue at once.
+    /// Keeping the frontier bounded lets workers start before large manifests have
+    /// resolved every path and prevents queue-wait metrics from including unrouted work.
+    pub fn ready_frontier_limit(&self) -> usize {
+        self.cpu_slots
+            .max(self.blocking_slots)
+            .max(self.network_slots)
+            .saturating_mul(READY_FRONTIER_PER_SLOT)
+            .clamp(MIN_READY_FRONTIER, MAX_READY_FRONTIER)
+    }
+
     pub fn with_volume_policy(mut self, path: impl AsRef<Path>, policy: VolumeIoPolicy) -> Self {
         let key = super::super::fs_ops::storage_volume_group_key(path.as_ref());
         self.volume_policies.insert(key, policy);
@@ -234,4 +248,28 @@ fn available_parallelism() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(DEFAULT_PARALLELISM_FALLBACK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_frontier_is_bounded_and_scales_with_slots() {
+        let small = TaskPoolConfig {
+            cpu_slots: 1,
+            blocking_slots: 1,
+            network_slots: 1,
+            ..TaskPoolConfig::default()
+        };
+        let large = TaskPoolConfig {
+            cpu_slots: 64,
+            blocking_slots: 64,
+            network_slots: 64,
+            ..TaskPoolConfig::default()
+        };
+
+        assert_eq!(small.ready_frontier_limit(), MIN_READY_FRONTIER);
+        assert_eq!(large.ready_frontier_limit(), MAX_READY_FRONTIER);
+    }
 }
