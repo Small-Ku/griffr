@@ -1,5 +1,9 @@
 use std::io::ErrorKind;
 
+use compio::buf::BufResult;
+use compio::bytes::Bytes;
+use compio::io::AsyncReadAt;
+
 use crate::api::protocol::{byte_range_from, RANGE_HEADER, USER_AGENT_HEADER};
 use crate::error::{Error, Result};
 use md5::{Digest, Md5};
@@ -12,12 +16,51 @@ use crate::runtime::{launcher_metadata_url, GAME_FILES_NAME};
 #[derive(Debug, Clone)]
 pub struct ResIndexDocument {
     pub index: ResIndex,
-    pub encrypted_bytes: Vec<u8>,
+    pub encrypted_bytes: Bytes,
     pub md5: String,
 }
 
-pub(crate) fn parse_game_files(encrypted_data: &[u8]) -> Result<Vec<GameFileEntry>> {
-    let decrypted = crypto::decrypt_game_files(encrypted_data)?;
+const HASH_BUFFER_BYTES: usize = 1024 * 1024;
+
+async fn hash_file_prefix(path: &std::path::Path, len: u64, hasher: &mut Md5) -> Result<()> {
+    let input = compio::fs::File::open(path)
+        .await
+        .map_err(|source| Error::IoAt {
+            action: "open file",
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let mut offset = 0u64;
+    let mut buffer = vec![0u8; HASH_BUFFER_BYTES];
+    while offset < len {
+        let requested = usize::try_from((len - offset).min(HASH_BUFFER_BYTES as u64))
+            .unwrap_or(HASH_BUFFER_BYTES);
+        buffer.truncate(requested);
+        let BufResult(read_result, mut returned_buffer) = input.read_at(buffer, offset).await;
+        let read = read_result.map_err(|source| Error::IoAt {
+            action: "read file",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if read == 0 {
+            return Err(Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!(
+                    "Download resume prefix ended at byte {offset}, expected {len}: {}",
+                    path.display()
+                ),
+            });
+        }
+        hasher.update(&returned_buffer[..read]);
+        offset = offset.saturating_add(read as u64);
+        returned_buffer.resize(HASH_BUFFER_BYTES, 0);
+        buffer = returned_buffer;
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_game_files_owned(encrypted_data: Vec<u8>) -> Result<Vec<GameFileEntry>> {
+    let decrypted = crypto::decrypt_game_files_owned(encrypted_data)?;
     let mut entries = Vec::new();
     for line in decrypted.lines() {
         let line = line.trim();
@@ -83,7 +126,11 @@ impl ApiClient {
             }
         }
 
-        parse_game_files(&encrypted_data)
+        let encrypted_data = match encrypted_data.try_into_mut() {
+            Ok(buffer) => Vec::from(buffer),
+            Err(buffer) => buffer.to_vec(),
+        };
+        parse_game_files_owned(encrypted_data)
     }
 
     /// Fetch the exact encrypted resource index document and its parsed content.
@@ -129,7 +176,6 @@ impl ApiClient {
             detail: format!("Failed to parse decrypted resource index JSON: {e}"),
         })?;
 
-        let encrypted_bytes = encrypted_bytes.to_vec();
         let md5 = crate::to_hex(&Md5::digest(&encrypted_bytes));
         Ok(ResIndexDocument {
             index,
@@ -178,13 +224,42 @@ impl ApiClient {
         Ok(patch)
     }
 
-    /// Download a file with optional resume support
+    /// Download a file with optional resume support.
+    ///
+    /// The response body is streamed directly into the destination and hashed
+    /// as it is written. Only a fixed-size buffer is used to hash an existing
+    /// prefix when resuming; the complete file is never staged in memory.
     pub async fn download_file(
         &self,
         url: &str,
         output_path: &std::path::Path,
         resume: bool,
     ) -> Result<String> {
+        let existing_len = if resume {
+            match compio::fs::metadata(output_path).await {
+                Ok(metadata) if metadata.is_file() => metadata.len(),
+                Ok(_) => {
+                    return Err(Error::Message {
+                        context: "API client wrapper error: ",
+                        detail: format!(
+                            "Download destination is not a file: {}",
+                            output_path.display()
+                        ),
+                    });
+                }
+                Err(err) if err.kind() == ErrorKind::NotFound => 0,
+                Err(err) => {
+                    return Err(Error::IoAt {
+                        action: "query file metadata/stat for",
+                        path: output_path.to_path_buf(),
+                        source: err,
+                    });
+                }
+            }
+        } else {
+            0
+        };
+
         let mut request = self
             .client
             .get(url)?
@@ -193,40 +268,25 @@ impl ApiClient {
                 context: "API client wrapper error: ",
                 detail: format!("Failed to set User-Agent header: {e}"),
             })?;
+        if existing_len > 0 {
+            request = request
+                .header(RANGE_HEADER, byte_range_from(existing_len))
+                .map_err(|e| Error::Message {
+                    context: "API client wrapper error: ",
+                    detail: format!("Failed to set Range header: {e}"),
+                })?;
+        }
 
-        let existing = if resume {
-            match compio::fs::read(output_path).await {
-                Ok(bytes) => {
-                    if !bytes.is_empty() {
-                        request = request
-                            .header(RANGE_HEADER, byte_range_from(bytes.len() as u64))
-                            .map_err(|e| Error::Message {
-                                context: "API client wrapper error: ",
-                                detail: format!("Failed to set Range header: {e}"),
-                            })?;
-                    }
-                    bytes
-                }
-                Err(err) if err.kind() == ErrorKind::NotFound => Vec::new(),
-                Err(err) => {
-                    return Err(Error::IoAt {
-                        action: "open file",
-                        path: output_path.to_path_buf(),
-                        source: err,
-                    });
-                }
-            }
-        } else {
-            Vec::new()
-        };
-
-        let response = request.send().await.map_err(|e| Error::Message {
-            context: "API client wrapper error: ",
-            detail: format!("Failed to download from {url}: {e}"),
-        })?;
+        let (send_timeout, body_timeout) = crate::runtime::task_pool::download::download_timeouts();
+        let response = compio::time::timeout(send_timeout, request.send())
+            .await?
+            .map_err(|e| Error::Message {
+                context: "API client wrapper error: ",
+                detail: format!("Failed to download from {url}: {e}"),
+            })?;
 
         let status = response.status();
-        if !status.is_success() && status.as_u16() != 206 {
+        if !status.is_success() {
             return Err(Error::Message {
                 context: "API client wrapper error: ",
                 detail: format!("Download returned error status: {status}"),
@@ -243,27 +303,46 @@ impl ApiClient {
                 })?;
         }
 
-        let downloaded = response.bytes().await.map_err(|e| Error::Message {
-            context: "API client wrapper error: ",
-            detail: format!("Failed to download bytes: {e}"),
-        })?;
-        let final_bytes = if !existing.is_empty() && status.as_u16() == 206 {
-            let mut merged = existing;
-            merged.extend_from_slice(downloaded.as_ref());
-            merged
+        let resume_effective = existing_len > 0 && status.as_u16() == 206;
+        let mut hasher = Md5::new();
+        let start_offset = if resume_effective {
+            hash_file_prefix(output_path, existing_len, &mut hasher).await?;
+            existing_len
         } else {
-            downloaded.to_vec()
+            0
         };
 
-        let write_result = compio::fs::write(output_path, final_bytes.clone()).await;
-        write_result.0.map_err(|e| Error::IoAt {
+        let mut open_options = compio::fs::OpenOptions::new();
+        open_options
+            .create(true)
+            .write(true)
+            .truncate(!resume_effective);
+        let output = open_options
+            .open(output_path)
+            .await
+            .map_err(|e| Error::IoAt {
+                action: "open file",
+                path: output_path.to_path_buf(),
+                source: e,
+            })?;
+
+        let (output, _) = crate::runtime::task_pool::download_write::write_http_body(
+            response.bytes_stream(),
+            output,
+            output_path,
+            url,
+            start_offset,
+            body_timeout,
+            |chunk| hasher.update(chunk),
+            |_| {},
+        )
+        .await?;
+        output.sync_data().await.map_err(|e| Error::IoAt {
             action: "write to file",
             path: output_path.to_path_buf(),
             source: e,
         })?;
 
-        let mut hasher = Md5::new();
-        hasher.update(&final_bytes);
         Ok(crate::to_hex(&hasher.finalize()))
     }
 
@@ -284,5 +363,111 @@ impl ApiClient {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn serve_once(
+        body: Vec<u8>,
+        range_start: usize,
+        honor_range: bool,
+    ) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind download fixture");
+        let url = format!(
+            "http://{}/payload.bin",
+            listener.local_addr().expect("download fixture address")
+        );
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept download fixture request");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 2048];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).expect("read fixture request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8(request).expect("fixture request UTF-8");
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line.eq_ignore_ascii_case(&format!("Range: bytes={range_start}-"))),
+                "resume request did not contain the expected Range header:\n{request}"
+            );
+
+            if honor_range {
+                let suffix = &body[range_start..];
+                write!(
+                    stream,
+                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+                    suffix.len(),
+                    range_start,
+                    body.len() - 1,
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(suffix).unwrap();
+            } else {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+            request
+        });
+        (url, handle)
+    }
+
+    #[compio::test]
+    async fn download_file_resumes_without_rebuilding_the_complete_file_in_memory() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("payload.bin");
+        let body = b"prefix-and-streamed-suffix".to_vec();
+        let range_start = 7;
+        std::fs::write(&output, &body[..range_start]).unwrap();
+        let (url, server) = serve_once(body.clone(), range_start, true);
+
+        let actual_md5 = ApiClient::new()
+            .unwrap()
+            .download_file(&url, &output, true)
+            .await
+            .unwrap();
+
+        server.join().expect("download fixture thread");
+        assert_eq!(std::fs::read(&output).unwrap(), body);
+        assert_eq!(actual_md5, crate::to_hex(&Md5::digest(&body)));
+    }
+
+    #[compio::test]
+    async fn download_file_truncates_when_a_server_ignores_the_resume_range() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("payload.bin");
+        let body = b"authoritative-complete-payload".to_vec();
+        let range_start = 8;
+        std::fs::write(&output, b"obsolete").unwrap();
+        let (url, server) = serve_once(body.clone(), range_start, false);
+
+        let actual_md5 = ApiClient::new()
+            .unwrap()
+            .download_file(&url, &output, true)
+            .await
+            .unwrap();
+
+        server.join().expect("download fixture thread");
+        assert_eq!(std::fs::read(&output).unwrap(), body);
+        assert_eq!(actual_md5, crate::to_hex(&Md5::digest(&body)));
     }
 }

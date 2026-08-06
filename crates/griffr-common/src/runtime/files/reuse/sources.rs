@@ -106,7 +106,7 @@ pub async fn read_local_game_files(install_path: &Path) -> Result<Option<Vec<Gam
             })
         }
     };
-    crate::api::client::parse_game_files(&encrypted).map(Some)
+    crate::api::client::parse_game_files_owned(encrypted).map(Some)
 }
 
 fn obsolete_game_files<'a>(

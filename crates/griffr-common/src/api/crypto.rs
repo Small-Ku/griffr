@@ -22,19 +22,24 @@ pub const RES_INDEX_KEY: &str = "Assets/Beyond/DynamicAssets/Gameplay/UI/Fonts/"
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 
-/// Decrypt the game_files manifest using AES-256-CBC
-pub fn decrypt_game_files(data: &[u8]) -> Result<String> {
-    let mut buf = data.to_vec();
-    let pt = Aes256CbcDec::new(GAME_FILES_AES_KEY.into(), GAME_FILES_AES_IV.into())
-        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+/// Decrypt an owned game_files manifest buffer using AES-256-CBC.
+///
+/// The plaintext replaces the ciphertext in the same allocation.
+pub fn decrypt_game_files_owned(mut data: Vec<u8>) -> Result<String> {
+    let plaintext_len = Aes256CbcDec::new(GAME_FILES_AES_KEY.into(), GAME_FILES_AES_IV.into())
+        .decrypt_padded_mut::<Pkcs7>(&mut data)
         .map_err(|e| Error::Message {
             context: "Crypto error: ",
             detail: format!("AES decryption failed: {e}"),
-        })?;
+        })?
+        .len();
+    data.truncate(plaintext_len);
+    Ok(String::from_utf8(data)?)
+}
 
-    let decrypted = String::from_utf8(pt.to_vec())?;
-
-    Ok(decrypted)
+/// Decrypt a borrowed game_files manifest using AES-256-CBC.
+pub fn decrypt_game_files(data: &[u8]) -> Result<String> {
+    decrypt_game_files_owned(data.to_vec())
 }
 
 /// Encrypt data using AES-256-CBC (inverse of decrypt_game_files)
@@ -47,35 +52,33 @@ pub fn encrypt_game_files(data: &[u8]) -> Result<Vec<u8>> {
     let mut buf = vec![0u8; padded_len];
     buf[..pt.len()].copy_from_slice(pt);
 
-    let encrypted = Aes256CbcEnc::new(GAME_FILES_AES_KEY.into(), GAME_FILES_AES_IV.into())
+    let encrypted_len = Aes256CbcEnc::new(GAME_FILES_AES_KEY.into(), GAME_FILES_AES_IV.into())
         .encrypt_padded_mut::<Pkcs7>(&mut buf, pt.len())
         .map_err(|e| Error::Message {
             context: "Crypto error: ",
             detail: format!("AES encryption failed: {e}"),
-        })?;
-
-    Ok(encrypted.to_vec())
+        })?
+        .len();
+    buf.truncate(encrypted_len);
+    Ok(buf)
 }
 
 /// Decrypt resource index files using modular subtraction cipher
 pub fn decrypt_res_index(data_base64: &str, key: &str) -> Result<String> {
-    let encrypted = STANDARD.decode(data_base64)?;
-
+    let mut decrypted = STANDARD.decode(data_base64)?;
     let key_bytes = key.as_bytes();
-    let key_len = key_bytes.len();
-
-    let mut decrypted = Vec::with_capacity(encrypted.len());
-
-    for (i, &enc_byte) in encrypted.iter().enumerate() {
-        let key_byte = key_bytes[i % key_len];
-        // plain_byte[i] = (enc_byte[i] - key_byte[i % key_length] + 256) % 256
-        let plain_byte = ((enc_byte as i16 - key_byte as i16 + 256) % 256) as u8;
-        decrypted.push(plain_byte);
+    if key_bytes.is_empty() {
+        return Err(Error::Message {
+            context: "Crypto error: ",
+            detail: "Resource index key cannot be empty".to_string(),
+        });
     }
 
-    let result = String::from_utf8(decrypted)?;
+    for (index, byte) in decrypted.iter_mut().enumerate() {
+        *byte = byte.wrapping_sub(key_bytes[index % key_bytes.len()]);
+    }
 
-    Ok(result)
+    Ok(String::from_utf8(decrypted)?)
 }
 
 #[cfg(test)]
@@ -138,6 +141,23 @@ mod tests {
         let base64_input = STANDARD.encode([] as [u8; 0]);
         let decrypted = decrypt_res_index(&base64_input, "key").unwrap();
         assert_eq!(decrypted, "");
+    }
+
+    #[test]
+    fn test_decrypt_res_index_rejects_empty_key() {
+        let base64_input = STANDARD.encode([1u8]);
+        let error = decrypt_res_index(&base64_input, "").unwrap_err();
+        assert!(error.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_game_files_round_trip() {
+        let plaintext = b"version=1.2.3\nentry=Endfield.exe\n";
+        let encrypted = encrypt_game_files(plaintext).unwrap();
+        assert_eq!(
+            decrypt_game_files(&encrypted).unwrap().as_bytes(),
+            plaintext
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use super::sync::is_compatible_res_index_version;
 use crate::error::{Error, Result};
+use compio::bytes::Bytes;
 use futures_util::{stream, StreamExt, TryStreamExt};
 use md5::Digest;
 use std::collections::BTreeMap;
@@ -53,7 +54,7 @@ pub struct VfsUpdateResult {
 pub struct VfsManifestCommit {
     pub dest: std::path::PathBuf,
     pub logical_path: String,
-    pub encrypted_bytes: Vec<u8>,
+    pub encrypted_bytes: Bytes,
     pub expected_md5: String,
 }
 
@@ -253,7 +254,7 @@ async fn read_local_res_index_document(
     let md5 = crate::to_hex(&md5::Md5::digest(&encrypted_bytes));
     Ok(Some(crate::api::client::ResIndexDocument {
         index,
-        encrypted_bytes,
+        encrypted_bytes: Bytes::from(encrypted_bytes),
         md5,
     }))
 }

@@ -26,7 +26,7 @@ fn duration_from_env_secs(var: &str, default_secs: u64) -> Duration {
     Duration::from_secs(secs)
 }
 
-fn download_timeouts() -> (Duration, Duration) {
+pub(crate) fn download_timeouts() -> (Duration, Duration) {
     static TIMEOUTS: OnceLock<(Duration, Duration)> = OnceLock::new();
     *TIMEOUTS.get_or_init(|| {
         (

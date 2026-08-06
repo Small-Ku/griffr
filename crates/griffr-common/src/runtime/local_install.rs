@@ -198,7 +198,7 @@ pub async fn decrypt_config_ini(path: &Path) -> Result<ParsedConfigIni> {
             path: config_path.clone(),
             source,
         })?;
-    let raw = crypto::decrypt_game_files(&encrypted).map_err(|error| Error::Message {
+    let raw = crypto::decrypt_game_files_owned(encrypted).map_err(|error| Error::Message {
         context: "Crypto error: ",
         detail: format!("Failed to decrypt {}: {error}", config_path.display()),
     })?;
