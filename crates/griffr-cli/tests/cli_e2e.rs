@@ -733,14 +733,18 @@ fn local_launcher_service_drives_install_repair_stage_update_and_uninstall() {
         push_path(&mut launch_args, "--path", &install);
         push_path(&mut launch_args, "--wine", &runner);
         command(launch_args);
+        let mut launch_output = String::new();
         for _ in 0..100 {
-            if launch_log.exists() {
+            launch_output = fs::read_to_string(&launch_log).unwrap_or_default();
+            if launch_output.contains(EXE_NAME) {
                 break;
             }
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(launch_log.exists());
-        assert!(fs::read_to_string(launch_log).unwrap().contains(EXE_NAME));
+        assert!(
+            launch_output.contains(EXE_NAME),
+            "Wine runner did not receive the game executable; log={launch_output:?}"
+        );
     }
 
     let sdk_source = temp.path().join("sdk_data_e2e_source");
