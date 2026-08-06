@@ -1,0 +1,95 @@
+# Testing
+
+## Deterministic platform lifecycle
+
+`crates/griffr-cli/tests/cli_e2e.rs` starts a loopback launcher/CDN service and
+executes the built `griffr` process. The same content-management lifecycle runs
+on Linux and Windows; game launch is intentionally outside this test.
+
+```bash
+cargo test -p griffr-cli --test cli_e2e --locked -- --nocapture
+```
+
+The lifecycle covers install, local/remote info, verify and repair, explicit
+same-filesystem reuse, hardlink-safe staged update, reuse-assisted update,
+concurrent multi-path verify, account capture/activate, remote debug/media
+calls, Persistent resource sync, snapshots, detach, and uninstall.
+
+Hardlink assertions are physical identity checks rather than content checks:
+
+- Linux and other Unix hosts compare filesystem device, inode, and link count.
+- Windows compares volume serial number, file index, and link count through
+  `std::os::windows::fs::MetadataExt`.
+
+`.github/workflows/platform-e2e.yml` runs this suite on Ubuntu 24.04 and Windows
+Server 2025 with Rust 1.97.1. The equivalent local Windows entry point is:
+
+```powershell
+scripts/test_windows_e2e.ps1
+```
+
+## Official-server content lifecycle
+
+`crates/griffr-cli/tests/live_cli_e2e.rs` is ignored by default because it
+performs a full current-version download and deletes its own test installs. It
+runs the native Linux or Windows `griffr` executable; Wine and game launch are
+not involved.
+
+Linux example:
+
+```bash
+scripts/test_live_cli_e2e.sh /mnt/test-volume/griffr-live endfield cn 1
+```
+
+Windows example:
+
+```powershell
+scripts/test_live_cli_e2e.ps1 `
+  -Root G:\griffr-live-e2e `
+  -Game endfield `
+  -Region cn `
+  -Channel 1
+```
+
+The root must be a dedicated directory on the filesystem being tested. A unique
+`run-*` child is created; a failed run is retained for diagnosis, while a
+successful run exercises detach and uninstall and removes the empty child.
+
+The official-server lifecycle performs:
+
+1. Production news, latest-game, latest-resources, and game-files requests.
+2. Current full install with package-only resource policy.
+3. Core verification and remote/local metadata inspection.
+4. A second install materialized from the first through explicit hardlink reuse.
+5. Physical hardlink identity and link-count verification.
+6. Removal of one linked path followed by CDN repair, proving the peer remains
+   intact and the repaired path receives a distinct physical file.
+7. Explicit relink, batched current-version update, and concurrent verification.
+8. Persistent resource sync (`base` by default) and all-scope verification.
+9. Predownload inspection, recover negative contract, detach, and uninstall.
+
+Set `GRIFFR_LIVE_E2E_RESOURCES=off` to omit Persistent resources or `all` to
+synchronize both resource groups. `GRIFFR_LIVE_E2E_FETCH_PREDOWNLOAD=1` downloads
+an advertised predownload payload but does not apply a future release.
+
+A current installation cannot prove a real version transition. To test an
+actual official patch/full update, pass an explicitly disposable old install:
+
+```powershell
+scripts/test_live_cli_e2e.ps1 `
+  -Root G:\griffr-live-e2e `
+  -Game endfield -Region cn -Channel 1 `
+  -DisposableUpdatePath G:\griffr-disposable-old-install
+```
+
+The equivalent Linux invocation is:
+
+```bash
+scripts/test_live_cli_e2e.sh \
+  /mnt/test-volume/griffr-live endfield cn 1 "" base \
+  /mnt/test-volume/griffr-disposable-old-install
+```
+
+That path is updated and verified but is not deleted by the harness. Without
+such a seed, the update stage is correctly reported as a current-version/no-op
+path rather than claimed as a delta-update test.

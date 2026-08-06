@@ -103,9 +103,9 @@ cargo run -p griffr-cli -- launch --path <GAME_PATH> \
 selected install by their process name and `/proc` path information. The
 runner can also be set through `GRIFFR_WINE`.
 
-The deterministic Linux integration test uses a Wine-compatible shim and a
-real child process. A real Wine smoke test generates a small PE executable and
-can be run on a host with Wine, clang, and lld-link:
+Wine/process behavior is tested separately from the cross-platform content
+lifecycle. A real Wine smoke test generates a small PE executable and can be
+run on a host with Wine, clang, and lld-link:
 
 ```bash
 cargo test -p griffr-common real_wine_launch_smoke -- --ignored --nocapture
@@ -115,3 +115,4 @@ cargo test -p griffr-common real_wine_launch_smoke -- --ignored --nocapture
 - API/protocol docs: [`docs/API.md`](docs/API.md)
 - Design & architecture docs: [`docs/DESIGN.md`](docs/DESIGN.md)
 - Resource ownership and scope: [`docs/DESIGN_resources.md`](docs/DESIGN_resources.md)
+- Deterministic and official-server testing: [`docs/TESTING.md`](docs/TESTING.md)

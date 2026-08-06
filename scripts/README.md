@@ -75,7 +75,28 @@ The test starts a loopback launcher/CDN service, creates encrypted `config.ini`,
 `game_files`, resource indexes, and real ZIP/patch packages, then invokes the
 built `griffr` executable as a child process. It covers every command's help
 contract plus install, verify/repair, same-volume hardlink reuse, hardlink-safe
-updates, two-target concurrent verify, Wine launch, account capture/activate,
-remote debug and news calls, predownload inspect/fetch/apply, recover/resume
-error contracts, Persistent VFS sync and snapshot/diff, detach, and uninstall.
-It does not contact production services.
+updates, two-target concurrent verify, account capture/activate, remote debug
+and news calls, predownload inspect/fetch/apply, recover/resume error contracts,
+Persistent VFS sync and snapshot/diff, detach, and uninstall. Linux checks
+filesystem device/inode/link count; Windows checks volume serial/file index/link
+count. Game launch is tested separately. The deterministic lifecycle does not
+contact production services.
+
+Run the same suite on a local Windows host with:
+
+```powershell
+scripts/test_windows_e2e.ps1
+```
+
+The ignored official-server lifecycle is available on both native platforms:
+
+```bash
+scripts/test_live_cli_e2e.sh /mnt/test-volume/griffr-live endfield cn 1
+```
+
+```powershell
+scripts/test_live_cli_e2e.ps1 -Root G:\griffr-live-e2e -Game endfield -Region cn -Channel 1
+```
+
+See `docs/TESTING.md` for deletion safeguards, resource modes, and the optional
+disposable old-install input required to prove a real version transition.
