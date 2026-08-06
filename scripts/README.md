@@ -38,11 +38,22 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-## Optional nightly Cranelift checks
+## Stable and nightly Linux toolchain matrix
 
 The repository defaults to the stable LLVM backend so every Cargo command works
-with the minimum supported stable toolchain. To use the faster development
-backend with a nightly toolchain that contains `rustc-codegen-cranelift`, run:
+with the minimum supported stable toolchain. For standalone toolchains unpacked
+from the official Linux tarballs, run the complete stable suite and the
+nightly/Cranelift CLI E2E suite with:
+
+```bash
+scripts/test_linux_toolchains.sh /path/to/stable /path/to/nightly
+```
+
+The script uses separate target directories, which prevents Cargo build-lock
+contention between LLVM and Cranelift artifacts. Set `GRIFFR_STABLE_TARGET_DIR`
+or `GRIFFR_NIGHTLY_TARGET_DIR` to override them.
+
+With a rustup-managed nightly, the corresponding manual check is:
 
 ```powershell
 cargo +nightly -Zcodegen-backend --config 'profile.dev.codegen-backend="cranelift"' check --workspace --all-targets
@@ -61,8 +72,10 @@ cargo test -p griffr-cli --test cli_e2e -- --nocapture
 ```
 
 The test starts a loopback launcher/CDN service, creates encrypted `config.ini`,
-`game_files`, resource indexes, and real ZIP packages, then invokes the built
-`griffr` executable as a child process. It covers command help contracts plus
-install, verify/repair, Wine launch, account capture/activate, remote debug and
-news calls, predownload staging, full-package update, Persistent VFS sync and
-snapshot/diff, detach, and uninstall. It does not contact production services.
+`game_files`, resource indexes, and real ZIP/patch packages, then invokes the
+built `griffr` executable as a child process. It covers every command's help
+contract plus install, verify/repair, same-volume hardlink reuse, hardlink-safe
+updates, two-target concurrent verify, Wine launch, account capture/activate,
+remote debug and news calls, predownload inspect/fetch/apply, recover/resume
+error contracts, Persistent VFS sync and snapshot/diff, detach, and uninstall.
+It does not contact production services.
