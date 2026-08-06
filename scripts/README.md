@@ -37,3 +37,32 @@ cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+## Optional nightly Cranelift checks
+
+The repository defaults to the stable LLVM backend so every Cargo command works
+with the minimum supported stable toolchain. To use the faster development
+backend with a nightly toolchain that contains `rustc-codegen-cranelift`, run:
+
+```powershell
+cargo +nightly -Zcodegen-backend --config 'profile.dev.codegen-backend="cranelift"' check --workspace --all-targets
+```
+
+Do not commit an unconditional `profile.dev.codegen-backend` setting to
+`.cargo/config.toml`: stable Cargo rejects that configuration before it can run
+any command.
+
+## Deterministic CLI end-to-end test
+
+Run the real-process CLI lifecycle test with:
+
+```bash
+cargo test -p griffr-cli --test cli_e2e -- --nocapture
+```
+
+The test starts a loopback launcher/CDN service, creates encrypted `config.ini`,
+`game_files`, resource indexes, and real ZIP packages, then invokes the built
+`griffr` executable as a child process. It covers command help contracts plus
+install, verify/repair, Wine launch, account capture/activate, remote debug and
+news calls, predownload staging, full-package update, Persistent VFS sync and
+snapshot/diff, detach, and uninstall. It does not contact production services.

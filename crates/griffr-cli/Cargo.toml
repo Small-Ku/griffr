@@ -36,6 +36,7 @@ rapidhash = { workspace = true }
 dirs = { workspace = true }
 
 [dev-dependencies]
+base64 = "0.22"
 tempfile = "3.14"
 zip = { workspace = true }
 

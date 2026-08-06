@@ -227,6 +227,9 @@ pub(crate) enum StageCommands {
     Inspect {
         #[command(flatten)]
         path: PathArg,
+
+        #[command(flatten)]
+        overrides: InstallTargetOverrideArgs,
     },
     /// Download and verify staged predownload archives without applying them
     Fetch {
@@ -235,6 +238,9 @@ pub(crate) enum StageCommands {
 
         #[command(flatten)]
         path: PathArg,
+
+        #[command(flatten)]
+        overrides: InstallTargetOverrideArgs,
 
         /// Directory for downloaded staged archives
         #[arg(long = "stage-dir", alias = "output-dir")]
@@ -261,7 +267,12 @@ pub(crate) enum StageCommands {
         defer_verification: bool,
 
         /// Choose how launcher resource-index files are sourced
-        #[arg(long, value_enum, conflicts_with = "skip_vfs")]
+        #[arg(
+            long = "resources",
+            alias = "resource-policy",
+            value_enum,
+            conflicts_with = "skip_vfs"
+        )]
         resource_policy: Option<crate::ResourcePolicyArg>,
 
         /// Skip launcher resource-index sync. Package and game_files resource entries are still installed and verified.

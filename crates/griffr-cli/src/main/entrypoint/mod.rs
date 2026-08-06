@@ -187,14 +187,15 @@ pub(crate) async fn run() -> Result<()> {
         }
 
         Commands::Stage { command } => match command {
-            StageCommands::Inspect { path } => {
+            StageCommands::Inspect { path, overrides } => {
                 let PathArg { path } = path;
                 opts.verbose(format!("Predownload check path: {:?}", path));
-                commands::predownload_check(path, opts).await?;
+                commands::predownload_check(path, overrides, opts).await?;
             }
             StageCommands::Fetch {
                 mutation,
                 path,
+                overrides,
                 stage_dir,
             } => {
                 let opts = opts.with_dry_run(mutation.dry_run);
@@ -203,7 +204,7 @@ pub(crate) async fn run() -> Result<()> {
                     "Stage fetch path: {:?}, stage_dir={:?}",
                     path, stage_dir
                 ));
-                commands::predownload_fetch(path, stage_dir, opts).await?;
+                commands::predownload_fetch(path, overrides, stage_dir, opts).await?;
             }
             StageCommands::Apply {
                 mutation,

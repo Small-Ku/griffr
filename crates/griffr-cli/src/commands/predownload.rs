@@ -13,7 +13,7 @@ use griffr_common::runtime::{
 
 use crate::progress::{ArchiveProgress, CountAndByteProgress};
 use crate::ui;
-use crate::GlobalOptions;
+use crate::{GlobalOptions, InstallTargetOverrideArgs};
 use griffr_common::runtime::{detect_local_install, LocalInstall};
 
 pub(crate) fn default_stage_dir(
@@ -111,6 +111,7 @@ fn build_predownload_tasks(stage_dir: &Path, patches: &[PackFile]) -> Result<Vec
 
 async fn resolve_predownload_payload(
     path: &Path,
+    overrides: InstallTargetOverrideArgs,
 ) -> Result<(
     LocalInstall,
     ApiClient,
@@ -128,7 +129,7 @@ async fn resolve_predownload_payload(
         &game_id,
         region_id,
         &channel_id,
-        &Default::default(),
+        &overrides.into(),
     )?;
     let api_client = ApiClient::new()?;
     let version_info = api_client
@@ -147,9 +148,10 @@ async fn resolve_predownload_payload(
 
 async fn print_predownload_status(
     path: &Path,
+    overrides: InstallTargetOverrideArgs,
 ) -> Result<(LocalInstall, GetLatestGameResponse, PrePatchInfo, String)> {
     let (local, _api_client, version_info, pre_patch, current_version) =
-        resolve_predownload_payload(path).await?;
+        resolve_predownload_payload(path, overrides).await?;
     let game_id = local.require_known_game()?;
     let region_id = local.require_known_region()?;
     let channel_id = local.require_known_channel()?;
@@ -183,13 +185,23 @@ async fn print_predownload_status(
     Ok((local, version_info, pre_patch, current_version))
 }
 
-pub async fn check(path: PathBuf, _opts: GlobalOptions) -> Result<()> {
-    let _ = print_predownload_status(&path).await?;
+pub async fn check(
+    path: PathBuf,
+    overrides: InstallTargetOverrideArgs,
+    _opts: GlobalOptions,
+) -> Result<()> {
+    let _ = print_predownload_status(&path, overrides).await?;
     Ok(())
 }
 
-pub async fn fetch(path: PathBuf, output_dir: Option<PathBuf>, opts: GlobalOptions) -> Result<()> {
-    let (local, version_info, pre_patch, current_version) = print_predownload_status(&path).await?;
+pub async fn fetch(
+    path: PathBuf,
+    overrides: InstallTargetOverrideArgs,
+    output_dir: Option<PathBuf>,
+    opts: GlobalOptions,
+) -> Result<()> {
+    let (local, version_info, pre_patch, current_version) =
+        print_predownload_status(&path, overrides).await?;
     let stage_dir = output_dir.unwrap_or_else(|| {
         stage_dir_for_request(
             &local.install_path,

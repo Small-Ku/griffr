@@ -1267,6 +1267,7 @@ name = "griffr-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "clap",
  "compio 0.19.1",
