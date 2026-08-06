@@ -18,6 +18,10 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 
+mod support;
+
+use support::{assert_distinct_files, assert_same_hardlink};
+
 const EXE_NAME: &str = "Endfield.exe";
 const APPCODE: &str = "6LL0KJuqHBVz33WK";
 
@@ -702,50 +706,11 @@ fn local_launcher_service_drives_install_repair_stage_update_and_uninstall() {
         v1.files["core.bin"]
     );
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        assert_eq!(
-            fs::metadata(install.join("core.bin")).unwrap().ino(),
-            fs::metadata(reuse_install.join("core.bin")).unwrap().ino(),
-            "same-volume explicit reuse should hardlink matching files"
-        );
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let launch_log = temp.path().join("wine.log");
-        let runner = temp.path().join("fake-wine.sh");
-        fs::write(
-            &runner,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
-                launch_log.display()
-            ),
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&runner).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&runner, permissions).unwrap();
-
-        let mut launch_args = args(&["--quiet", "launch"]);
-        push_path(&mut launch_args, "--path", &install);
-        push_path(&mut launch_args, "--wine", &runner);
-        command(launch_args);
-        let mut launch_output = String::new();
-        for _ in 0..100 {
-            launch_output = fs::read_to_string(&launch_log).unwrap_or_default();
-            if launch_output.contains(EXE_NAME) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(
-            launch_output.contains(EXE_NAME),
-            "Wine runner did not receive the game executable; log={launch_output:?}"
-        );
-    }
+    assert_same_hardlink(
+        &install.join("core.bin"),
+        &reuse_install.join("core.bin"),
+        "same-volume explicit reuse should hardlink matching files",
+    );
 
     let sdk_source = temp.path().join("sdk_data_e2e_source");
     let sdk_target = temp.path().join("sdk_data_e2e_target");
@@ -846,6 +811,11 @@ fn local_launcher_service_drives_install_repair_stage_update_and_uninstall() {
         v1.files["core.bin"],
         "updating a hardlinked peer must replace files instead of mutating shared inodes"
     );
+    assert_distinct_files(
+        &install.join("core.bin"),
+        &reuse_install.join("core.bin"),
+        "updating one hardlinked peer must publish a new physical file",
+    );
 
     let mut update_args = args(&[
         "--quiet",
@@ -861,6 +831,11 @@ fn local_launcher_service_drives_install_repair_stage_update_and_uninstall() {
     assert_eq!(
         fs::read(reuse_install.join("core.bin")).unwrap(),
         v2.files["core.bin"]
+    );
+    assert_same_hardlink(
+        &install.join("core.bin"),
+        &reuse_install.join("core.bin"),
+        "reuse-assisted update should relink matching current files",
     );
 
     let mut verify_v2 = args(&[

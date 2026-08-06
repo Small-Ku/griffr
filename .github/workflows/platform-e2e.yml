@@ -1,0 +1,41 @@
+name: Platform CLI E2E
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-cli-lifecycle:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust 1.97.1
+        shell: bash
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.1
+
+      - name: Check repository policy
+        run: python scripts/check_repo.py .
+
+      - name: Run checker regression tests
+        run: python -m unittest discover -s scripts/tests -v
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Compile CLI tests
+        run: cargo check -p griffr-cli --tests --locked
+
+      - name: Run deterministic real-process lifecycle
+        run: cargo test -p griffr-cli --test cli_e2e --locked -- --nocapture
