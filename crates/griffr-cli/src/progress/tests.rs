@@ -86,3 +86,22 @@ fn archive_progress_keeps_download_and_extract_separate() {
     assert_eq!(progress.extract.bar.position(), 20);
     assert_eq!(progress.extract.bar.length(), Some(200));
 }
+
+#[test]
+fn incomplete_progress_uses_floor_percentage() {
+    assert_eq!(display_percent(13_310, 13_315), 99);
+    assert_eq!(display_percent(13_314, 13_315), 99);
+    assert_eq!(display_percent(13_315, 13_315), 100);
+}
+
+#[test]
+fn rendered_prefix_never_rounds_an_incomplete_count_to_100() {
+    let progress = StepProgress::new("verify", false);
+    progress.update_count(13_310, 13_315, "");
+    assert_eq!(progress.bar.position(), 13_310);
+    assert_eq!(progress.bar.length(), Some(13_315));
+    assert_eq!(progress.bar.prefix(), " 99%");
+
+    progress.update_count(13_315, 13_315, "");
+    assert_eq!(progress.bar.prefix(), "100%");
+}

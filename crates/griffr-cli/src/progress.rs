@@ -55,7 +55,7 @@ impl StepProgress {
     ) -> Self {
         bar.set_style(
             ProgressStyle::default_bar()
-                .template("{msg} [{bar:40.cyan/blue}] {pos}/{len} {percent:>3}%")
+                .template("{msg} [{bar:40.cyan/blue}] {pos}/{len} {prefix}")
                 .unwrap()
                 .progress_chars("#>-"),
         );
@@ -77,6 +77,10 @@ impl StepProgress {
         }
         let finished = finished.min(total);
         self.ensure_started(total as u64);
+        self.bar.set_prefix(format!(
+            "{:>3}%",
+            display_percent(finished as u64, total as u64)
+        ));
 
         let should_refresh = self.verbose
             || total <= 20
@@ -126,6 +130,8 @@ impl StepProgress {
         self.ensure_started(total);
 
         let clamped = finished.min(total);
+        self.bar
+            .set_prefix(format!("{:>3}%", display_percent(clamped, total)));
         if self.plain {
             let bucket = ((clamped.saturating_mul(100) / total) / 5) * 5;
             if self.last_plain.swap(bucket, Ordering::AcqRel) != bucket {
@@ -200,6 +206,19 @@ impl StepProgress {
         if self.bar.length() != Some(total) {
             self.bar.set_length(total);
         }
+    }
+}
+
+/// Return a display percentage without rounding an incomplete operation up to
+/// 100%. The terminal must not claim completion before the final item or byte
+/// has been committed.
+fn display_percent(finished: u64, total: u64) -> u64 {
+    let total = total.max(1);
+    let finished = finished.min(total);
+    if finished == total {
+        100
+    } else {
+        finished.saturating_mul(100) / total
     }
 }
 
