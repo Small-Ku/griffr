@@ -53,6 +53,15 @@ pub(crate) enum DownloadProgress {
     Reset(u64),
 }
 
+/// Result of one bounded streaming download that was verified and discarded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamingDownloadReport {
+    /// Number of bytes verified before the temporary destination was removed.
+    pub bytes: u64,
+    /// Wall-clock duration of the download and verification.
+    pub elapsed: Duration,
+}
+
 /// Inspects a partial download and computes the incremental MD5 prefix in a
 /// CPU admission before the async transfer task is submitted to Dispatcher.
 pub(crate) fn prepare_download(
@@ -350,4 +359,56 @@ pub(crate) async fn do_prepared_download(
         ArtifactSource::Download,
         &digest,
     )
+}
+
+/// Stream one payload through the production HTTP writer, verify its size and
+/// MD5, then remove the committed file immediately.
+///
+/// This is intentionally a small, opt-in live-test primitive. It proves CDN
+/// transfer and atomic commit behavior without pretending to be a retained
+/// install tree: callers must use a dedicated temporary root and must perform
+/// any install, verify, repair, or hardlink assertions separately.
+pub async fn download_and_discard(
+    user_agent: &str,
+    url: &str,
+    logical_path: &str,
+    expected_md5: &str,
+    expected_size: u64,
+    work_root: &Path,
+    progress_buffer_bytes: usize,
+) -> Result<StreamingDownloadReport> {
+    compio::fs::create_dir_all(work_root)
+        .await
+        .map_err(|source| Error::IoAt {
+            action: "create directory",
+            path: work_root.to_path_buf(),
+            source,
+        })?;
+
+    let destination = work_root.join("payload.bin");
+    let partial = super::fs_ops::make_partial_download_path(&destination)?;
+    let started = Instant::now();
+    let result = do_prepared_download(
+        user_agent,
+        url,
+        &destination,
+        logical_path,
+        expected_md5,
+        Some(expected_size),
+        DownloadResumeState::new(0, Md5::new()),
+        progress_buffer_bytes,
+        None::<fn(DownloadProgress)>,
+    )
+    .await;
+
+    // A soak run must not accumulate either committed payloads or partial
+    // downloads, including after a failed checksum or connection.
+    let _ = compio::fs::remove_file(&destination).await;
+    let _ = compio::fs::remove_file(&partial).await;
+
+    let proof = result?;
+    Ok(StreamingDownloadReport {
+        bytes: proof.observed_size(),
+        elapsed: started.elapsed(),
+    })
 }

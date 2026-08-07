@@ -3,10 +3,13 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use griffr_common::api::client::ApiClient;
 use griffr_common::api::crypto::decrypt_game_files_owned;
 use griffr_common::api::types::GameFileEntry;
+use griffr_common::config::{resolve_api_target, ChannelPair, GameId, RegionId};
+use griffr_common::runtime::task_pool::{download_and_discard, DEFAULT_PROGRESS_BUFFER_BYTES};
 use md5::{Digest, Md5};
 
 mod support;
@@ -528,4 +531,76 @@ fn official_server_content_lifecycle_without_launch() {
         );
     }
     fs::remove_dir(&config.run_root).expect("remove empty live E2E run directory");
+}
+
+#[compio::test]
+#[ignore = "streams current official package payloads and discards each verified file"]
+async fn official_server_streaming_package_soak() {
+    let config = LiveConfig::from_env();
+    let game: GameId = config.game.parse().expect("valid live game id");
+    let region: RegionId = config.region.parse().expect("valid live region");
+    let channels = ChannelPair::parse(region, config.channel.clone(), config.sub_channel.clone())
+        .expect("valid live channel pair");
+    let target = resolve_api_target(&game, region, &channels, &Default::default())
+        .expect("resolve live API target");
+    let client = ApiClient::with_user_agent(ApiClient::OFFICIAL_USER_AGENT)
+        .expect("create official API client");
+    let latest = client
+        .get_latest_game(&target, None)
+        .await
+        .expect("fetch latest official package metadata");
+    let package = latest
+        .pkg
+        .expect("official streaming soak requires a full package payload");
+    assert!(
+        !package.packs.is_empty(),
+        "official package has no payload parts"
+    );
+
+    let stream_root = config.run_root.join("stream");
+    let started = Instant::now();
+    let mut verified_bytes = 0u64;
+    for (index, part) in package.packs.iter().enumerate() {
+        let expected_size = part.size();
+        assert!(expected_size > 0, "package part {index} has no valid size");
+        let logical_path = part.filename().unwrap_or("package.bin").to_string();
+        let report = download_and_discard(
+            ApiClient::OFFICIAL_USER_AGENT,
+            &part.url,
+            &logical_path,
+            &part.md5,
+            expected_size,
+            &stream_root,
+            DEFAULT_PROGRESS_BUFFER_BYTES,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("streaming package part {index} failed: {error}"));
+        assert_eq!(report.bytes, expected_size, "package part {index} size");
+        verified_bytes = verified_bytes.saturating_add(report.bytes);
+        let mib_per_second =
+            report.bytes as f64 / 1_048_576.0 / report.elapsed.as_secs_f64().max(0.001);
+        println!(
+            "streaming package {}/{}: {} bytes, {:.2} MiB/s, {:.3}s",
+            index + 1,
+            package.packs.len(),
+            report.bytes,
+            mib_per_second,
+            report.elapsed.as_secs_f64()
+        );
+    }
+
+    assert!(
+        fs::read_dir(&stream_root)
+            .expect("read streaming work root")
+            .next()
+            .is_none(),
+        "streaming work root retained a payload after verification"
+    );
+    println!(
+        "streaming package complete: {} bytes in {:.3}s ({:.2} MiB/s aggregate)",
+        verified_bytes,
+        started.elapsed().as_secs_f64(),
+        verified_bytes as f64 / 1_048_576.0 / started.elapsed().as_secs_f64().max(0.001)
+    );
+    fs::remove_dir_all(&config.run_root).expect("remove empty streaming E2E run directory");
 }

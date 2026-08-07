@@ -98,5 +98,17 @@ scripts/test_live_cli_e2e.sh /mnt/test-volume/griffr-live endfield cn 1
 scripts/test_live_cli_e2e.ps1 -Root G:\griffr-live-e2e -Game endfield -Region cn -Channel 1
 ```
 
+When disk capacity cannot hold a complete game tree, run the bounded package
+streaming soak instead:
+
+```bash
+scripts/test_live_streaming.sh /mnt/test-volume/griffr-stream endfield cn 1
+```
+
+Each official package part is downloaded through Griffr's production bounded
+writer, size/MD5 verified, atomically committed, and immediately discarded.
+This validates CDN transfer and integrity only; it is not a retained install,
+repair, reuse, or hardlink test.
+
 See `docs/TESTING.md` for deletion safeguards, resource modes, and the optional
 disposable old-install input required to prove a real version transition.

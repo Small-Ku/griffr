@@ -93,3 +93,24 @@ scripts/test_live_cli_e2e.sh \
 That path is updated and verified but is not deleted by the harness. Without
 such a seed, the update stage is correctly reported as a current-version/no-op
 path rather than claimed as a delta-update test.
+
+## Bounded streaming payload soak
+
+If the test volume cannot retain a complete installation, use the separate
+streaming harness:
+
+```bash
+scripts/test_live_streaming.sh /mnt/test-volume/griffr-stream endfield cn 1
+```
+
+The harness fetches the current full-package metadata, then processes one
+payload at a time through the same bounded HTTP-body writer used by the task
+pool. Each payload must pass its declared size and MD5 checks and its atomic
+commit before the harness removes it. The report includes per-payload and
+aggregate wall-clock throughput, while the temporary root is kept bounded by
+one active payload.
+
+This mode deliberately does not claim a full install lifecycle: it does not
+retain an install tree and therefore cannot prove final-tree verify, repair,
+reuse, or hardlink behavior. Use `test_live_cli_e2e.sh` when those assertions
+are required.

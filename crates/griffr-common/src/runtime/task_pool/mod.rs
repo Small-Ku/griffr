@@ -10,6 +10,7 @@ pub mod types;
 pub(crate) mod verify;
 
 pub use archive_plan::{plan_archive_groups, ArchiveGroup};
+pub use download::{download_and_discard, StreamingDownloadReport};
 pub use graph::{NodeId, NodeState, TaskGraph, TaskGraphBuilder, TaskGraphSummary};
 pub use scheduler::{
     run_task_graph, run_task_graph_with_progress, run_tasks, run_tasks_with_progress,

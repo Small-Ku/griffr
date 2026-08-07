@@ -22,6 +22,7 @@ compio = { version = "0.19", features = [
   "fs",
   "macros",
   "dispatcher",
+  "polling",
 ] }
 cyper = { version = "0.9", features = ["stream", "json"] }
 flume = "0.12"
