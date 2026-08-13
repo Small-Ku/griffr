@@ -4,9 +4,8 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 
-use crate::api::yostar::{
-    YostarGameConfig, YostarManifest, YostarManifestEntry, YOSTAR_ARKNIGHTS_TAG,
-};
+use crate::api::yostar::{YostarGameConfig, YostarManifest, YostarManifestEntry};
+use crate::config::{yostar_arknights_target, yostar_region_from_game_tag, RegionId};
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::fs_ops::{
     path_safety::parse_safe_relative_path, write_atomic_bytes,
@@ -56,6 +55,11 @@ pub struct YostarLocalMetadata {
 }
 
 impl YostarLocalMetadata {
+    pub fn region(&self) -> RegionId {
+        yostar_region_from_game_tag(&self.config.tag)
+            .expect("validated YoStar metadata always has a supported game tag")
+    }
+
     pub fn version(&self) -> &str {
         &self.config.version
     }
@@ -213,11 +217,17 @@ pub async fn read_yostar_metadata(install_path: &Path) -> Result<YostarLocalMeta
             ))
         })?;
 
-    if config.tag != YOSTAR_ARKNIGHTS_TAG {
-        return Err(invalid(format!(
+    yostar_region_from_game_tag(&config.tag).ok_or_else(|| {
+        invalid(format!(
             "unsupported YoStar game tag {:?} in {}",
             config.tag,
             config_path.display()
+        ))
+    })?;
+    if manifest.name != config.tag {
+        return Err(invalid(format!(
+            "launcher tag {:?} does not match manifest name {:?}",
+            config.tag, manifest.name
         )));
     }
     if config.version != manifest.version {
@@ -268,14 +278,20 @@ pub async fn read_yostar_metadata(install_path: &Path) -> Result<YostarLocalMeta
 }
 
 pub fn build_yostar_metadata(
+    region: RegionId,
     game_config: &YostarGameConfig,
     manifest: &YostarManifest,
 ) -> Result<(YostarLauncherConfig, YostarLocalManifest)> {
     validate_remote_yostar_manifest(manifest)?;
     safe_yostar_executable_path(&game_config.game_start_exe_name)?;
+    let target = yostar_arknights_target(region).ok_or_else(|| {
+        invalid(format!(
+            "region {region} is not a supported YoStar Arknights deployment"
+        ))
+    })?;
 
     let mut config = YostarLauncherConfig {
-        tag: YOSTAR_ARKNIGHTS_TAG.to_string(),
+        tag: target.game_tag.to_string(),
         name: game_config.game_start_exe_name.clone(),
         params: game_config.game_start_params.clone(),
         version: game_config.game_latest_version.clone(),
@@ -296,7 +312,7 @@ pub fn build_yostar_metadata(
         files.push(entry);
     }
     let mut local_manifest = YostarLocalManifest {
-        name: YOSTAR_ARKNIGHTS_TAG.to_string(),
+        name: target.game_tag.to_string(),
         version: game_config.game_latest_version.clone(),
         basis: game_config.game_latest_file_path.clone(),
         vc: String::new(),
@@ -308,10 +324,11 @@ pub fn build_yostar_metadata(
 
 pub fn write_yostar_metadata(
     install_path: &Path,
+    region: RegionId,
     game_config: &YostarGameConfig,
     manifest: &YostarManifest,
 ) -> Result<()> {
-    let (config, local_manifest) = build_yostar_metadata(game_config, manifest)?;
+    let (config, local_manifest) = build_yostar_metadata(region, game_config, manifest)?;
     let config_bytes = serde_json::to_vec(&config)
         .map_err(|error| invalid(format!("failed to serialize launcher config: {error}")))?;
     let manifest_bytes = serde_json::to_vec(&local_manifest)
@@ -386,17 +403,40 @@ mod tests {
 
     #[test]
     fn metadata_roundtrips_with_observed_vc_scheme() {
-        let (config, manifest) = build_yostar_metadata(&config(), &manifest()).unwrap();
+        let (config, manifest) =
+            build_yostar_metadata(RegionId::En, &config(), &manifest()).unwrap();
         assert_eq!(config.vc, config_vc(&config));
         assert_eq!(manifest.vc, manifest_vc(&manifest));
         assert_eq!(manifest.files[0].vc, file_vc(&manifest.files[0]));
     }
 
     #[test]
+    fn metadata_uses_region_specific_native_tag() {
+        for (region, tag) in [
+            (RegionId::Kr, "Arknights_KR"),
+            (RegionId::En, "Arknights_EN"),
+            (RegionId::Jp, "Arknights_JP"),
+        ] {
+            let (config, local_manifest) =
+                build_yostar_metadata(region, &config(), &manifest()).unwrap();
+            let metadata = YostarLocalMetadata {
+                config_path: PathBuf::new(),
+                manifest_path: PathBuf::new(),
+                config,
+                manifest: local_manifest,
+            };
+            assert_eq!(metadata.config.tag, tag);
+            assert_eq!(metadata.manifest.name, tag);
+            assert_eq!(metadata.region(), region);
+        }
+    }
+
+    #[test]
     fn executable_metadata_matches_launcher_suffix_rule_and_stays_relative() {
         let mut game = config();
         game.game_start_exe_name = "Arknights".to_string();
-        let (config, local_manifest) = build_yostar_metadata(&game, &manifest()).unwrap();
+        let (config, local_manifest) =
+            build_yostar_metadata(RegionId::En, &game, &manifest()).unwrap();
         let metadata = YostarLocalMetadata {
             config_path: PathBuf::new(),
             manifest_path: PathBuf::new(),
@@ -409,12 +449,13 @@ mod tests {
         );
 
         game.game_start_exe_name = "../escape".to_string();
-        assert!(build_yostar_metadata(&game, &manifest()).is_err());
+        assert!(build_yostar_metadata(RegionId::En, &game, &manifest()).is_err());
     }
 
     #[test]
     fn uninstall_script_rule_matches_official_launcher_guard() {
-        let (config, local_manifest) = build_yostar_metadata(&config(), &manifest()).unwrap();
+        let (config, local_manifest) =
+            build_yostar_metadata(RegionId::En, &config(), &manifest()).unwrap();
         let mut metadata = YostarLocalMetadata {
             config_path: PathBuf::new(),
             manifest_path: PathBuf::new(),
@@ -447,12 +488,15 @@ mod tests {
     }
 
     #[compio::test]
-    async fn written_metadata_is_detectably_valid() {
-        let temp = tempfile::tempdir().unwrap();
-        write_yostar_metadata(temp.path(), &config(), &manifest()).unwrap();
-        let metadata = read_yostar_metadata(temp.path()).await.unwrap();
-        assert_eq!(metadata.version(), "2.7.1");
-        assert_eq!(metadata.basis(), "basis-271");
-        assert_eq!(metadata.entry(), "Arknights.exe");
+    async fn written_metadata_is_detectably_valid_for_every_yostar_region() {
+        for region in [RegionId::Kr, RegionId::En, RegionId::Jp] {
+            let temp = tempfile::tempdir().unwrap();
+            write_yostar_metadata(temp.path(), region, &config(), &manifest()).unwrap();
+            let metadata = read_yostar_metadata(temp.path()).await.unwrap();
+            assert_eq!(metadata.region(), region);
+            assert_eq!(metadata.version(), "2.7.1");
+            assert_eq!(metadata.basis(), "basis-271");
+            assert_eq!(metadata.entry(), "Arknights.exe");
+        }
     }
 }

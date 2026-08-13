@@ -327,11 +327,12 @@ pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
 
     if yostar_exists {
         let metadata = read_yostar_metadata(&install_path).await?;
+        let region_id = metadata.region();
         return Ok(LocalInstall {
             install_path,
             metadata: LocalInstallMetadata::Yostar(Box::new(metadata)),
             game_id: Some(GameId::ARKNIGHTS),
-            region_id: Some(RegionId::En),
+            region_id: Some(region_id),
             channel_id: None,
         });
     }

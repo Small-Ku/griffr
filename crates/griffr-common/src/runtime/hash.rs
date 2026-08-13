@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 /// Canonical content digest carried by manifests and task-pool integrity work.
 ///
 /// Hypergryph/Gryphline manifests use lowercase hexadecimal MD5. The observed
-/// YoStar Arknights EN launcher uses CRC-64/XZ and serializes it as an unsigned
+/// YoStar Arknights KR/EN/JP launchers use CRC-64/XZ and serializes it as an unsigned
 /// decimal integer string.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "algorithm", content = "value", rename_all = "snake_case")]

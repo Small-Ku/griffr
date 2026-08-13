@@ -1,10 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use griffr_common::api::yostar::{
-    YostarApiClient, YostarReleaseSnapshot, YOSTAR_ARKNIGHTS_TAG, YOSTAR_GATEWAY,
-    YOSTAR_LAUNCHER_VERSION,
-};
+use griffr_common::api::yostar::{YostarApiClient, YostarReleaseSnapshot};
 use griffr_common::config::{GameId, RegionId};
 use griffr_common::runtime::task_pool::TaskPoolRunner;
 use griffr_common::runtime::{
@@ -18,32 +15,31 @@ use crate::progress::CountAndByteProgress;
 use crate::{ui, GlobalOptions, InstallTargetOverrideArgs, OutputFormat};
 
 fn validate_target(game: &GameId, region: RegionId) -> Result<()> {
-    if game != &GameId::ARKNIGHTS || region != RegionId::En {
-        anyhow::bail!("YoStar backend currently supports only --game arknights --region en");
+    if game != &GameId::ARKNIGHTS || !region.is_yostar() {
+        anyhow::bail!(
+            "YoStar backend supports Arknights regions kr, en, and jp; got --game {game} --region {region}"
+        );
     }
     Ok(())
 }
 
-fn client(overrides: &InstallTargetOverrideArgs) -> Result<YostarApiClient> {
+fn client(region: RegionId, overrides: &InstallTargetOverrideArgs) -> Result<YostarApiClient> {
     if overrides.api.game_appcode.is_some() || overrides.api.launcher_appcode.is_some() {
         anyhow::bail!(
-            "YoStar EN does not use Hypergryph --game-appcode/--launcher-appcode overrides"
+            "YoStar {region} does not use Hypergryph --game-appcode/--launcher-appcode overrides"
         );
     }
     if overrides.exe_name.is_some() || overrides.data_root.is_some() {
         anyhow::bail!(
-            "YoStar EN obtains the executable from native launcher metadata; --exe/--data-root are not applicable"
+            "YoStar {region} obtains the executable from native launcher metadata; --exe/--data-root are not applicable"
         );
     }
-    YostarApiClient::new(
-        overrides.api.gateway.as_deref().unwrap_or(YOSTAR_GATEWAY),
-        YOSTAR_ARKNIGHTS_TAG,
-        YOSTAR_LAUNCHER_VERSION,
-    )
-    .map_err(Into::into)
+    YostarApiClient::arknights_with_gateway(region, overrides.api.gateway.as_deref())
+        .map_err(Into::into)
 }
 
 fn change_state(
+    region: RegionId,
     kind: InstallChangeKind,
     from_version: Option<String>,
     target_version: &str,
@@ -57,9 +53,9 @@ fn change_state(
             InstallChangeSource::Manifest
         },
         GameId::ARKNIGHTS.to_string(),
-        RegionId::En.to_string(),
-        RegionId::En.official_channel_id(),
-        RegionId::En.official_channel_id(),
+        region.to_string(),
+        region.official_channel_id(),
+        region.official_channel_id(),
         from_version,
         target_version.to_string(),
         None,
@@ -115,8 +111,9 @@ pub async fn install(
     }
     if opts.is_dry_run() {
         opts.dry_run(format!(
-            "Would install YoStar {} region=en into {} with CRC64-XZ verification",
+            "Would install YoStar {} region={} into {} with CRC64-XZ verification",
             game_id,
+            region_id,
             install_path.display()
         ));
         return Ok(());
@@ -126,7 +123,7 @@ pub async fn install(
         .await
         .with_context(|| format!("Failed to create {}", install_path.display()))?;
 
-    let client = client(&overrides)?;
+    let client = client(region_id, &overrides)?;
     let release = client
         .latest_release()
         .await
@@ -134,8 +131,9 @@ pub async fn install(
     griffr_common::runtime::validate_remote_yostar_manifest(&release.manifest)?;
 
     ui::print_phase(format!(
-        "Installing {} (YoStar EN) into {}",
+        "Installing {} (YoStar {}) into {}",
         game_id,
+        region_id,
         install_path.display()
     ));
     ui::print_info(format!(
@@ -147,6 +145,7 @@ pub async fn install(
     ));
 
     let change = change_state(
+        region_id,
         InstallChangeKind::Install,
         None,
         &release.config.game_latest_version,
@@ -187,7 +186,7 @@ pub async fn install(
         );
     }
 
-    write_yostar_metadata(&install_path, &release.config, &release.manifest)
+    write_yostar_metadata(&install_path, region_id, &release.config, &release.manifest)
         .context("Failed to commit YoStar launcher metadata")?;
     finish_install_change(&install_path, &change)
         .context("Failed to finalize YoStar install change")?;
@@ -212,11 +211,13 @@ pub async fn update(
     let metadata = local
         .yostar_metadata()
         .context("YoStar update requires YoStar local metadata")?;
+    let region = local.require_known_region()?;
+    validate_target(&GameId::ARKNIGHTS, region)?;
     if stage_requested || require_staged || opts.force_full_package || opts.keep_pack_archives {
-        anyhow::bail!("YoStar EN does not expose the Hypergryph archive/patch staging controls used by this update invocation");
+        anyhow::bail!("YoStar {region} does not expose the Hypergryph archive/patch staging controls used by this update invocation");
     }
 
-    let client = client(&overrides)?;
+    let client = client(region, &overrides)?;
     let (release_result, current_result) = futures_util::join!(
         client.latest_release(),
         client.manifest_for(metadata.version(), metadata.basis())
@@ -237,7 +238,8 @@ pub async fn update(
     };
 
     ui::print_phase(format!(
-        "Updating Arknights (YoStar EN) at {}",
+        "Updating Arknights (YoStar {}) at {}",
+        region,
         local.install_path.display()
     ));
     ui::print_info(format!(
@@ -273,6 +275,7 @@ pub async fn update(
     }
 
     let change = change_state(
+        region,
         InstallChangeKind::Update,
         Some(metadata.version().to_string()),
         &release.config.game_latest_version,
@@ -339,8 +342,13 @@ pub async fn update(
             cleanup.retained_modified_files
         ));
     }
-    write_yostar_metadata(&local.install_path, &release.config, &release.manifest)
-        .context("Failed to commit YoStar target metadata")?;
+    write_yostar_metadata(
+        &local.install_path,
+        region,
+        &release.config,
+        &release.manifest,
+    )
+    .context("Failed to commit YoStar target metadata")?;
     finish_install_change(&local.install_path, &change)
         .context("Failed to finalize YoStar update change")?;
     ui::print_success(format!(
@@ -373,19 +381,21 @@ pub async fn verify(
     {
         anyhow::bail!("YoStar install is Arknights; incompatible --game override");
     }
-    if region_override.is_some_and(|region| region != RegionId::En) {
-        anyhow::bail!("YoStar install uses region en; incompatible --region override");
+    let region = local.require_known_region()?;
+    if region_override.is_some_and(|override_region| override_region != region) {
+        anyhow::bail!("YoStar install uses region {region}; incompatible --region override");
     }
     if scope == Some(crate::VerifyScopeArg::Resources) {
-        anyhow::bail!("YoStar EN has no Hypergryph launcher resource-index/VFS scope; use --scope core or all");
+        anyhow::bail!("YoStar {region} has no Hypergryph launcher resource-index/VFS scope; use --scope core or all");
     }
     let metadata = local.yostar_metadata().context("missing YoStar metadata")?;
-    let api = client(&overrides)?;
+    let api = client(region, &overrides)?;
 
     let text = opts.output != OutputFormat::Json;
     if text {
         ui::print_phase(format!(
-            "Verifying Arknights (YoStar EN) at {}",
+            "Verifying Arknights (YoStar {}) at {}",
+            region,
             local.install_path.display()
         ));
         ui::print_info(format!(
@@ -397,7 +407,7 @@ pub async fn verify(
     if opts.is_dry_run() && repair {
         opts.dry_run("Would CRC64-XZ verify every target file and repair failures from reuse/CDN");
         return Ok(
-            json!({"backend":"yostar","version":metadata.version(),"repair":true,"dry_run":true}),
+            json!({"backend":"yostar","region":region.to_string(),"version":metadata.version(),"repair":true,"dry_run":true}),
         );
     }
 
@@ -422,6 +432,7 @@ pub async fn verify(
 
     let repair_change = if repair {
         let state = change_state(
+            region,
             InstallChangeKind::Repair,
             Some(metadata.version().to_string()),
             metadata.version(),
@@ -489,6 +500,7 @@ pub async fn verify(
 
     Ok(json!({
         "backend": "yostar",
+        "region": region.to_string(),
         "version": metadata.version(),
         "repair": repair,
         "issues": summary.issues,

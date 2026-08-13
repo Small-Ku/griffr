@@ -121,7 +121,7 @@ async fn resolve_predownload_payload(
 )> {
     let local = detect_local_install(path).await?;
     if local.is_yostar() {
-        anyhow::bail!("No YoStar EN pre-patch/predownload API was observed; staging is unsupported for this backend");
+        anyhow::bail!("No YoStar pre-patch/predownload API was observed; staging is unsupported for this backend");
     }
     let current_version = local.require_config_ini_version()?.to_string();
 

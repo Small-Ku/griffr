@@ -156,7 +156,7 @@ pub(crate) struct GameArg {
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct RegionArg {
-    /// Launcher/API region (`cn`, `sg`, or YoStar `en`; aliases accepted)
+    /// Launcher/API region (`cn`, `sg`, or YoStar `kr`/`en`/`jp`; aliases accepted)
     #[arg(long, requires = "game")]
     pub(crate) region: Option<String>,
 }

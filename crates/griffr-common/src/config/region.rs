@@ -2,12 +2,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::{Error, Result};
 
-/// Launcher/API deployment region as written by official `config.ini` files.
+/// Launcher/API deployment region used by the supported official backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RegionId {
     Cn,
     Sg,
+    Kr,
     En,
+    Jp,
 }
 
 impl RegionId {
@@ -15,15 +17,21 @@ impl RegionId {
         match self {
             Self::Cn => "cn",
             Self::Sg => "sg",
+            Self::Kr => "kr",
             Self::En => "en",
+            Self::Jp => "jp",
         }
+    }
+
+    pub const fn is_yostar(self) -> bool {
+        matches!(self, Self::Kr | Self::En | Self::Jp)
     }
 
     pub const fn official_channel_id(self) -> &'static str {
         match self {
             Self::Cn => "1",
             Self::Sg => "6",
-            Self::En => "0",
+            Self::Kr | Self::En | Self::Jp => "0",
         }
     }
 }
@@ -41,9 +49,11 @@ impl std::str::FromStr for RegionId {
         match value.trim().to_ascii_lowercase().as_str() {
             "cn" | "china" | "mainland" => Ok(Self::Cn),
             "sg" | "global" | "os" | "overseas" => Ok(Self::Sg),
-            "en" | "yostar" | "arknights-en" => Ok(Self::En),
+            "kr" | "korea" | "arknights-kr" => Ok(Self::Kr),
+            "en" | "arknights-en" => Ok(Self::En),
+            "jp" | "japan" | "arknights-jp" => Ok(Self::Jp),
             value => Err(Error::Message { context: "Configuration error: ", detail: format!(
-                "invalid region {value:?}: expected cn, sg, or en (aliases: china/mainland, global/os/overseas, yostar/arknights-en)"
+                "invalid region {value:?}: expected cn, sg, kr, en, or jp (aliases: china/mainland, global/os/overseas, korea/arknights-kr, arknights-en, japan/arknights-jp)"
             ) }),
         }
     }
@@ -81,12 +91,15 @@ mod tests {
             ("sg", RegionId::Sg),
             ("global", RegionId::Sg),
             ("OS", RegionId::Sg),
+            ("kr", RegionId::Kr),
+            ("Korea", RegionId::Kr),
             ("en", RegionId::En),
-            ("YoStar", RegionId::En),
+            ("jp", RegionId::Jp),
+            ("Japan", RegionId::Jp),
         ] {
             let parsed = input.parse::<RegionId>().unwrap();
             assert_eq!(parsed, expected);
-            assert!(matches!(parsed.as_str(), "cn" | "sg" | "en"));
+            assert!(matches!(parsed.as_str(), "cn" | "sg" | "kr" | "en" | "jp"));
         }
     }
 }

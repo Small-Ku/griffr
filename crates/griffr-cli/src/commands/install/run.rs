@@ -56,7 +56,7 @@ pub async fn install(
         );
     }
 
-    if region_id == RegionId::En {
+    if region_id.is_yostar() {
         return crate::commands::yostar::install(
             game_id,
             region_id,

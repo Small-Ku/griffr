@@ -55,7 +55,7 @@ impl LocalReport {
                     "yostar",
                     yostar.config_path.display().to_string(),
                     None,
-                    Some("en".to_string()),
+                    Some(yostar.region().to_string()),
                     None,
                     None,
                     Some(yostar.basis().to_string()),
@@ -220,7 +220,7 @@ pub async fn show(
         remote_target = Some((
             game.parse::<GameId>()?,
             region,
-            (region != RegionId::En).then_some(channels),
+            (!region.is_yostar()).then_some(channels),
         ));
         None
     } else {
@@ -237,14 +237,14 @@ pub async fn show(
         let (game_id, region_id, channel_id) = remote_target.context(
             "Could not determine game/region for remote lookup; provide explicit remote arguments",
         )?;
-        if region_id == RegionId::En {
+        if region_id.is_yostar() {
             if game_id != GameId::ARKNIGHTS {
-                anyhow::bail!("YoStar EN currently supports only Arknights");
+                anyhow::bail!("YoStar regions currently support only Arknights");
             }
             if include_media {
-                anyhow::bail!("YoStar EN media/news API support has not been observed and is not exposed by Griffr");
+                anyhow::bail!("YoStar media/news API support has not been observed and is not exposed by Griffr");
             }
-            let client = griffr_common::api::yostar::YostarApiClient::arknights_en()?;
+            let client = griffr_common::api::yostar::YostarApiClient::arknights(region_id)?;
             match client.latest_release().await {
                 Ok(release) => {
                     remote = Some(RemoteReport {

@@ -210,9 +210,10 @@ async fn verify_one(
     opts: GlobalOptions,
 ) -> Result<serde_json::Value> {
     if local.is_yostar() {
-        if skip_local_detect && region_override != Some(RegionId::En) {
+        let detected_region = local.require_known_region()?;
+        if skip_local_detect && region_override != Some(detected_region) {
             anyhow::bail!(
-                "A detected YoStar install requires --region en when --skip-local-detect is used"
+                "A detected YoStar install requires --region {detected_region} when --skip-local-detect is used"
             );
         }
         return crate::commands::yostar::verify(

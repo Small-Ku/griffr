@@ -3,11 +3,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use md5::{Digest, Md5};
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 
+use crate::config::{yostar_arknights_target, RegionId};
 use crate::error::{Error, Result};
 use crate::runtime::build_cdn_file_url;
 
-pub const YOSTAR_GATEWAY: &str = "https://api-launcher-en.yo-star.com";
-pub const YOSTAR_ARKNIGHTS_TAG: &str = "Arknights_EN";
 pub const YOSTAR_LAUNCHER_VERSION: &str = "1.8.1";
 const YOSTAR_AUTH_SALT: &str = "DE7108E9B2842FD460F4777702727869";
 const AUTHORIZATION_HEADER: &str = "Authorization";
@@ -44,7 +43,7 @@ struct ApiEnvelope {
     msg: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct YostarGameConfig {
     pub game_latest_version: String,
     pub game_lowest_version: String,
@@ -63,7 +62,7 @@ struct ManifestLocator {
     url: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct YostarCdnConfig {
     pub primary_cdn: String,
     #[serde(default)]
@@ -93,10 +92,18 @@ pub struct YostarReleaseSnapshot {
 }
 
 impl YostarApiClient {
-    pub fn arknights_en() -> Result<Self> {
+    pub fn arknights(region: RegionId) -> Result<Self> {
+        Self::arknights_with_gateway(region, None)
+    }
+
+    pub fn arknights_with_gateway(region: RegionId, gateway: Option<&str>) -> Result<Self> {
+        let target = yostar_arknights_target(region).ok_or_else(|| Error::Message {
+            context: "YoStar API error: ",
+            detail: format!("region {region} is not a YoStar Arknights deployment"),
+        })?;
         Self::new(
-            YOSTAR_GATEWAY,
-            YOSTAR_ARKNIGHTS_TAG,
+            gateway.unwrap_or(target.gateway),
+            target.game_tag,
             YOSTAR_LAUNCHER_VERSION,
         )
     }
@@ -382,6 +389,41 @@ mod tests {
         assert_eq!(value["head"]["game_tag"], "Arknights_EN");
         assert_eq!(value["head"]["version"], "1.8.1");
         assert_eq!(value["sign"].as_str().unwrap().len(), 32);
+    }
+
+    #[test]
+    fn arknights_regions_share_protocol_but_select_native_gateway_and_tag() {
+        for (region, gateway, game_tag) in [
+            (
+                RegionId::Kr,
+                crate::config::YOSTAR_KR_GATEWAY,
+                crate::config::YOSTAR_ARKNIGHTS_KR_TAG,
+            ),
+            (
+                RegionId::En,
+                crate::config::YOSTAR_EN_GATEWAY,
+                crate::config::YOSTAR_ARKNIGHTS_EN_TAG,
+            ),
+            (
+                RegionId::Jp,
+                crate::config::YOSTAR_JP_GATEWAY,
+                crate::config::YOSTAR_ARKNIGHTS_JP_TAG,
+            ),
+        ] {
+            let target = yostar_arknights_target(region).unwrap();
+            assert_eq!(target.gateway, gateway);
+            assert_eq!(target.game_tag, game_tag);
+            assert_eq!(
+                crate::config::yostar_region_from_game_tag(game_tag),
+                Some(region)
+            );
+        }
+        assert!(yostar_arknights_target(RegionId::Cn).is_none());
+        assert!(yostar_arknights_target(RegionId::Sg).is_none());
+        assert_eq!(
+            crate::config::yostar_region_from_game_tag("Arknights_UNKNOWN"),
+            None
+        );
     }
 
     #[test]

@@ -140,10 +140,12 @@ impl ChannelPair {
         channel: Option<String>,
         sub_channel: Option<String>,
     ) -> Result<Self> {
-        if region == RegionId::En && (channel.is_some() || sub_channel.is_some()) {
+        if region.is_yostar() && (channel.is_some() || sub_channel.is_some()) {
             return Err(Error::Message {
                 context: "Configuration error: ",
-                detail: "YoStar EN does not expose launcher channel/sub-channel IDs; omit --channel and --sub-channel".to_string(),
+                detail: format!(
+                    "YoStar {region} does not expose launcher channel/sub-channel IDs; omit --channel and --sub-channel"
+                ),
             });
         }
         let channel = parse_channel(region, channel)?;
@@ -213,6 +215,14 @@ mod tests {
             ChannelPair::parse(RegionId::Sg, Some("123".into()), Some("456".into())).unwrap();
         assert_eq!(pair.channel().as_str(), "123");
         assert_eq!(pair.sub_channel().as_str(), "456");
+    }
+
+    #[test]
+    fn yostar_regions_reject_explicit_channel_selectors() {
+        for region in [RegionId::Kr, RegionId::En, RegionId::Jp] {
+            assert!(ChannelPair::parse(region, Some("official".into()), None).is_err());
+            assert!(ChannelPair::parse(region, None, Some("official".into())).is_err());
+        }
     }
 
     #[test]
