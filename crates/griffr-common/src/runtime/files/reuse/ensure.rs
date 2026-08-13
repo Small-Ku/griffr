@@ -242,7 +242,9 @@ async fn ensure_game_files_impl(
             transfer_class: TransferClass::General,
             archive_repair: archive_session.clone(),
         };
-        tasks.push(if metadata_only {
+        tasks.push(if config.skip_destination_check {
+            Task::materialize_file(spec)
+        } else if metadata_only {
             Task::ensure_file_metadata(spec)
         } else {
             Task::ensure_file(spec)
@@ -258,6 +260,7 @@ async fn ensure_game_files_impl(
             reused_files: dry_run_reused,
             downloaded_files: dry_run_downloaded,
             issues: Vec::new(),
+            verified_artifacts: Vec::new(),
         });
     }
 
@@ -285,6 +288,7 @@ async fn ensure_game_files_impl(
         .failed_nodes
         .saturating_add(result.metrics.graph.cancelled_nodes);
     let mut issues_by_path = HashMap::default();
+    let mut verified_artifacts = Vec::new();
     let mut failed_paths = Vec::new();
     let mut outcomes = PathOutcomeTracker::new();
     for event in result.outcomes {
@@ -292,6 +296,7 @@ async fn ensure_game_files_impl(
             crate::runtime::task_pool::TaskOutcome::Committed { proof } => {
                 outcomes.record_committed(&proof);
                 issues_by_path.remove(proof.logical_path());
+                verified_artifacts.push(proof);
             }
             crate::runtime::task_pool::TaskOutcome::Verified { path, ok, issue } => {
                 outcomes.record_verified(&path, ok);
@@ -347,6 +352,7 @@ async fn ensure_game_files_impl(
         reused_files: summary.reused_files,
         downloaded_files: summary.downloaded_files,
         issues,
+        verified_artifacts,
     })
 }
 

@@ -67,6 +67,7 @@ pub(super) async fn update_via_manifest(
             dry_run: opts.is_dry_run(),
             source_roots: source_roots.to_vec(),
             archive_packs: pkg.packs.clone(),
+            skip_destination_check: false,
         },
         Some(task_pool_runner),
         ensure_session.sender(),

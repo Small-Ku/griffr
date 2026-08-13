@@ -46,11 +46,10 @@ pub async fn install(
         }
     };
 
-    if install_path_exists
-        && !force
-        && !can_resume_install
-        && directory_has_entries(install_path.clone()).await?
-    {
+    let install_path_had_entries =
+        install_path_exists && directory_has_entries(install_path.clone()).await?;
+
+    if install_path_had_entries && !force && !can_resume_install {
         anyhow::bail!(
             "Install path is not empty: {} (pass --force to reuse it)",
             install_path.display()
@@ -130,10 +129,10 @@ pub async fn install(
 
     let mut change_state = InstallChangeState::new(
         InstallChangeKind::Install,
-        if reuse_paths.is_empty() {
+        if opts.keep_pack_archives {
             InstallChangeSource::FullArchive
         } else {
-            InstallChangeSource::Reuse
+            InstallChangeSource::Manifest
         },
         game_id.to_string(),
         region_id.to_string(),
@@ -142,7 +141,7 @@ pub async fn install(
         None,
         version_info.version.clone(),
         pkg.game_files_md5.clone(),
-        if reuse_paths.is_empty() {
+        if opts.keep_pack_archives {
             pkg.packs.iter().map(|part| part.md5.clone()).collect()
         } else {
             Vec::new()
@@ -277,8 +276,8 @@ pub async fn install(
     }
 
     let mut already_verified_paths = Vec::new();
-    if reuse_paths.is_empty() {
-        ui::print_phase("Downloading and extracting archives");
+    if opts.keep_pack_archives {
+        ui::print_phase("Downloading, extracting, and retaining full archives");
         let download_dir = griffr_archives_path(&install_path);
         compio::fs::create_dir_all(&download_dir)
             .await
@@ -397,7 +396,7 @@ pub async fn install(
             );
         }
     } else {
-        ui::print_phase("Ensuring files from reuse sources");
+        ui::print_phase("Materializing target files");
         let source_roots = resolve_file_reuse_roots(&game_id, &install_path, &reuse_paths).await?;
         let ensure_progress = CountAndByteProgress::new(
             "install.ensure_files",
@@ -423,6 +422,7 @@ pub async fn install(
                 dry_run: false,
                 source_roots,
                 archive_packs: content_plan.snapshot().package.packs.clone(),
+                skip_destination_check: !install_path_had_entries,
             },
             Some(&mut task_pool),
             ensure_session.sender(),
@@ -441,6 +441,7 @@ pub async fn install(
                 ensured.issues.len()
             );
         }
+        already_verified_paths.extend(ensured.verified_artifacts);
     }
 
     let verify_progress =

@@ -35,7 +35,6 @@ impl std::fmt::Display for InstallChangeKind {
 pub enum InstallChangeSource {
     FullArchive,
     PatchArchive,
-    Reuse,
     Manifest,
     Repair,
 }
@@ -45,7 +44,6 @@ impl std::fmt::Display for InstallChangeSource {
         let value = match self {
             Self::FullArchive => "full_archive",
             Self::PatchArchive => "patch_archive",
-            Self::Reuse => "reuse",
             Self::Manifest => "manifest",
             Self::Repair => "repair",
         };
@@ -182,7 +180,7 @@ impl InstallChangeState {
         let source_is_valid = match self.kind {
             InstallChangeKind::Install => matches!(
                 self.source,
-                InstallChangeSource::FullArchive | InstallChangeSource::Reuse
+                InstallChangeSource::FullArchive | InstallChangeSource::Manifest
             ),
             InstallChangeKind::Update => true,
             InstallChangeKind::Repair => self.source == InstallChangeSource::Repair,

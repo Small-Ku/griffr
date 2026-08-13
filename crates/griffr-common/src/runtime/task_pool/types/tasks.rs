@@ -620,6 +620,29 @@ impl Task {
         Self::ensure_file_with_check(spec, true)
     }
 
+    /// Materializes a file whose destination is known not to contain reusable
+    /// content, avoiding a redundant destination verification on fresh install.
+    pub fn materialize_file(spec: FileEnsureTask) -> Self {
+        Self::repair_file_task(spec)
+    }
+
+    fn repair_file_task(spec: FileEnsureTask) -> Self {
+        Self::RepairFile {
+            dest: spec.dest,
+            logical_path: spec.logical_path,
+            expected_md5: spec.expected_md5,
+            expected_size: spec.expected_size,
+            source_candidates: spec.source_candidates,
+            download_url: spec.download_url,
+            allow_copy_fallback: spec.allow_copy_fallback,
+            copy_only: spec.copy_only,
+            verify_destination_fallback: spec.prefer_reuse,
+            retry_count: spec.retry_count,
+            transfer_class: spec.transfer_class,
+            archive_repair: spec.archive_repair,
+        }
+    }
+
     fn ensure_file_with_check(spec: FileEnsureTask, metadata_only: bool) -> Self {
         let repair = Self::RepairFile {
             dest: spec.dest.clone(),

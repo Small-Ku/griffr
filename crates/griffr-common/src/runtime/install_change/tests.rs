@@ -106,11 +106,11 @@ fn same_update_edge_can_switch_source() {
 }
 
 #[test]
-fn same_install_target_can_switch_from_reuse_to_archive() {
+fn same_install_target_can_switch_from_manifest_to_archive() {
     let temp = tempfile::tempdir().unwrap();
-    let reuse = state(
+    let manifest = state(
         InstallChangeKind::Install,
-        InstallChangeSource::Reuse,
+        InstallChangeSource::Manifest,
         None,
         "1.1",
     );
@@ -120,7 +120,7 @@ fn same_install_target_can_switch_from_reuse_to_archive() {
         None,
         "1.1",
     );
-    start_install_change(temp.path(), &reuse).unwrap();
+    start_install_change(temp.path(), &manifest).unwrap();
 
     assert_eq!(
         start_install_change(temp.path(), &archive).unwrap(),

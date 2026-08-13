@@ -87,6 +87,15 @@ This design uses six code stages followed by packaging metadata.
 - Explicit `--full-package`, staged predownload application, and archive-only fallback still select an archive package directly because those workflows explicitly require archive semantics.
 - This keeps `pre_patch` useful for preloading while avoiding the previous `patch exists => patch pipeline` rule for ordinary updates.
 
+## 11. Manifest-First Fresh Installation
+
+- A normal fresh install no longer chooses a whole installation pipeline based on whether reuse roots were supplied. The target manifest is the desired state and every core game file enters the same materialization planner.
+- Reuse/hardlink, compressed full-package ranges, and direct CDN files therefore compete per file even when the user did not provide a reuse source.
+- When the destination was known empty before the install marker was created, file tasks start directly at materialization instead of issuing a guaranteed-missing destination hash check. Forced installs into non-empty directories keep the destination verification barrier.
+- Materialization returns `ArtifactProof` values for files it committed. The final integrity closure reuses those proofs and hashes only paths that were not already proven, avoiding a second read of freshly written game data.
+- `--keep-pack-archives` remains an explicit archive-retention workflow: it uses the full archive DAG because retaining verified complete volumes is itself part of the requested output, independent of reuse availability.
+- Install change state records ordinary installs as `manifest`; the obsolete `reuse` install source was removed because reuse is now only a provider.
+
 ## Validation
 
 Validation uses `cargo fmt`, workspace `cargo check`, Clippy with warnings denied,
