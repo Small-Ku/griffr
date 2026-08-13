@@ -24,7 +24,9 @@ pub use debug::{
     fetch_game_files as debug_fetch_game_files, fetch_media as debug_fetch_media,
     game_files as debug_game_files, list_resource_files as debug_list_resource_files,
     res_index as debug_res_index, snapshot_resource_state as debug_snapshot_resource_state,
-    vfs_diff as debug_vfs_diff,
+    vfs_diff as debug_vfs_diff, yostar_cdn as debug_yostar_cdn,
+    yostar_config as debug_yostar_config, yostar_file_url as debug_yostar_file_url,
+    yostar_manifest as debug_yostar_manifest,
 };
 pub use info::show as info_show;
 pub use install::install;

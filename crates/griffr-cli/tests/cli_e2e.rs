@@ -796,6 +796,11 @@ fn every_command_surface_has_a_working_help_contract() {
         &["debug", "get-file", "--help"],
         &["debug", "get-raw-media", "--help"],
         &["debug", "get-media", "--help"],
+        &["debug", "yostar", "--help"],
+        &["debug", "yostar", "config", "--help"],
+        &["debug", "yostar", "cdn", "--help"],
+        &["debug", "yostar", "manifest", "--help"],
+        &["debug", "yostar", "file-url", "--help"],
         &["account", "--help"],
         &["account", "capture", "--help"],
         &["account", "activate", "--help"],
@@ -1310,13 +1315,90 @@ fn yostar_fixture_drives_install_verify_repair_and_manifest_update() {
     push_path(&mut unsupported_stage, "--path", &install);
     command_fails(
         unsupported_stage,
-        "No YoStar EN pre-patch/predownload API was observed",
+        "No YoStar pre-patch/predownload API was observed",
     );
 
     let mut uninstall_args = args(&["--quiet", "uninstall", "--yes"]);
     push_path(&mut uninstall_args, "--path", &install);
     command(uninstall_args);
     assert!(!install.exists());
+}
+
+#[test]
+fn yostar_regions_and_debug_commands_share_one_protocol_family() {
+    let temp = TempDir::new().expect("test tempdir");
+    let v1 = YostarReleaseFixture::new("76.0.0", "basis-v1", "release/v1", b"region-core\n");
+    let v2 = v1.clone();
+    let server = YostarFixtureServer::start(v1, v2);
+
+    for (region, tag) in [
+        ("kr", "Arknights_KR"),
+        ("en", "Arknights_EN"),
+        ("jp", "Arknights_JP"),
+    ] {
+        for debug_command in ["config", "cdn", "manifest"] {
+            let output = command(args(&[
+                "debug",
+                "yostar",
+                debug_command,
+                "--region",
+                region,
+                "--gateway",
+                &server.base,
+            ]));
+            let payload: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(payload["backend"], "yostar");
+            assert_eq!(payload["region"], region);
+            assert_eq!(payload["game_tag"], tag);
+        }
+
+        let file_url = command(args(&[
+            "debug",
+            "yostar",
+            "file-url",
+            "--region",
+            region,
+            "--gateway",
+            &server.base,
+            "--file",
+            "core.bin",
+        ]));
+        let payload: Value = serde_json::from_slice(&file_url.stdout).unwrap();
+        assert_eq!(payload["response"]["path"], "core.bin");
+        assert_eq!(
+            payload["response"]["urls"].as_array().map(Vec::len),
+            Some(2)
+        );
+
+        let install = temp.path().join(format!("yostar-{region}"));
+        let mut install_args = args(&[
+            "--quiet",
+            "install",
+            "--game",
+            "arknights",
+            "--region",
+            region,
+            "--gateway",
+            &server.base,
+        ]);
+        push_path(&mut install_args, "--path", &install);
+        command(install_args);
+
+        let launcher_config: Value =
+            serde_json::from_slice(&fs::read(install.join("game-launcher-config.json")).unwrap())
+                .unwrap();
+        assert_eq!(launcher_config["tag"], tag);
+
+        let mut info_args = args(&["info", "--local-only", "--output", "json"]);
+        push_path(&mut info_args, "--path", &install);
+        let info = command(info_args);
+        let info_json: Value = serde_json::from_slice(&info.stdout).unwrap();
+        assert_eq!(info_json["local"]["region"], region);
+
+        let mut uninstall_args = args(&["--quiet", "uninstall", "--yes"]);
+        push_path(&mut uninstall_args, "--path", &install);
+        command(uninstall_args);
+    }
 }
 
 #[test]

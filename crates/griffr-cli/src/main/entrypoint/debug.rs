@@ -1,5 +1,5 @@
 use super::parse_remote_args;
-use crate::debug_cli::DebugCommands;
+use crate::debug_cli::{DebugCommands, YostarDebugCommands};
 use crate::{commands, GlobalOptions};
 use anyhow::Result;
 
@@ -136,6 +136,36 @@ pub(super) async fn dispatch_debug(command: DebugCommands, opts: GlobalOptions) 
             )
             .await?;
         }
+        DebugCommands::Yostar { command } => match command {
+            YostarDebugCommands::Config {
+                region,
+                gateway,
+                output,
+            } => commands::debug_yostar_config(region, gateway, output).await?,
+            YostarDebugCommands::Cdn {
+                region,
+                gateway,
+                output,
+            } => commands::debug_yostar_cdn(region, gateway, output).await?,
+            YostarDebugCommands::Manifest {
+                region,
+                gateway,
+                version,
+                basis,
+                output,
+            } => commands::debug_yostar_manifest(region, gateway, version, basis, output).await?,
+            YostarDebugCommands::FileUrl {
+                region,
+                gateway,
+                version,
+                basis,
+                file,
+                output,
+            } => {
+                commands::debug_yostar_file_url(region, gateway, version, basis, file, output)
+                    .await?
+            }
+        },
     }
     Ok(())
 }

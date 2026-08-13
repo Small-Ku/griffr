@@ -218,6 +218,91 @@ pub(crate) enum DebugCommands {
         #[arg(long = "output-file", id = "fetch_media_output")]
         output: Option<std::path::PathBuf>,
     },
+    /// Inspect the YoStar Arknights launcher protocol directly
+    Yostar {
+        #[command(subcommand)]
+        command: YostarDebugCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum YostarDebugCommands {
+    /// Fetch `/api/launcher/game/config`
+    Config {
+        /// YoStar Arknights region (`kr`, `en`, or `jp`)
+        #[arg(long)]
+        region: RegionId,
+
+        /// Override the native region gateway
+        #[arg(long)]
+        gateway: Option<String>,
+
+        /// Optional output file path for JSON payload
+        #[arg(long = "output-file")]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Fetch `/api/launcher/advanced/game/download/cdn`
+    Cdn {
+        /// YoStar Arknights region (`kr`, `en`, or `jp`)
+        #[arg(long)]
+        region: RegionId,
+
+        /// Override the native region gateway
+        #[arg(long)]
+        gateway: Option<String>,
+
+        /// Optional output file path for JSON payload
+        #[arg(long = "output-file")]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Resolve and fetch a YoStar game manifest
+    Manifest {
+        /// YoStar Arknights region (`kr`, `en`, or `jp`)
+        #[arg(long)]
+        region: RegionId,
+
+        /// Override the native region gateway
+        #[arg(long)]
+        gateway: Option<String>,
+
+        /// Exact manifest version; requires --basis
+        #[arg(long, requires = "basis")]
+        version: Option<String>,
+
+        /// Exact manifest basis/file_path; requires --version
+        #[arg(long, requires = "version")]
+        basis: Option<String>,
+
+        /// Optional output file path for JSON payload
+        #[arg(long = "output-file")]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Resolve one manifest entry to its primary/backup CDN URLs
+    FileUrl {
+        /// YoStar Arknights region (`kr`, `en`, or `jp`)
+        #[arg(long)]
+        region: RegionId,
+
+        /// Override the native region gateway
+        #[arg(long)]
+        gateway: Option<String>,
+
+        /// Exact manifest version; requires --basis
+        #[arg(long, requires = "basis")]
+        version: Option<String>,
+
+        /// Exact manifest basis/file_path; requires --version
+        #[arg(long, requires = "version")]
+        basis: Option<String>,
+
+        /// Manifest-relative file path
+        #[arg(long)]
+        file: String,
+
+        /// Optional output file path for JSON payload
+        #[arg(long = "output-file")]
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]

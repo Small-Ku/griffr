@@ -68,7 +68,7 @@ fn expected_cdn_fragment(region: RegionId) -> &'static str {
     match region {
         RegionId::Cn => ".hycdn.cn",
         RegionId::Sg => ".hg-cdn.com",
-        RegionId::En => ".yo-star.com",
+        RegionId::Kr | RegionId::En | RegionId::Jp => ".yo-star.com",
     }
 }
 
@@ -464,6 +464,41 @@ async fn test_real_api_game_files_matrix() {
 
     for (game, region, channel) in matrix {
         assert_game_files_for_channel(&client, game, region, channel).await;
+    }
+}
+
+#[compio::test]
+#[ignore = "Makes real network request"]
+async fn test_real_yostar_arknights_region_matrix() {
+    for region in [RegionId::Kr, RegionId::En, RegionId::Jp] {
+        let client = crate::api::yostar::YostarApiClient::arknights(region)
+            .expect("create YoStar API client");
+        let release = client.latest_release().await.unwrap_or_else(|error| {
+            panic!("failed YoStar latest release for region={region}: {error}")
+        });
+
+        assert_non_empty("game_latest_version", &release.config.game_latest_version);
+        assert_non_empty(
+            "game_latest_file_path",
+            &release.config.game_latest_file_path,
+        );
+        assert_non_empty("manifest.source", &release.manifest.source);
+        assert!(
+            !release.manifest.files.is_empty(),
+            "YoStar manifest should contain files for region={region}"
+        );
+        assert_non_empty("primary_cdn", &release.cdn.primary_cdn);
+        let first = &release.manifest.files[0];
+        assert_non_empty("manifest.file.path", &first.path);
+        assert_non_empty("manifest.file.hash", &first.hash);
+        assert!(first.size > 0, "manifest file size should be positive");
+        assert!(
+            release
+                .manifest
+                .file_url(&release.cdn.primary_cdn, first)
+                .starts_with("http"),
+            "YoStar file URL should be absolute for region={region}"
+        );
     }
 }
 
