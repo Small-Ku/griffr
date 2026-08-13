@@ -147,3 +147,22 @@ The protocol observed by Griffr differs substantially from YoStar's delivery mod
 The useful design lesson is not to imitate YoStar's downloader. Griffr already has stronger providers such as multipart ZIP range extraction, hardlink/copy reuse, direct CDN repair, patch DAGs, and VFS synchronization. The useful lesson is to keep **desired content state** separate from **delivery providers**.
 
 A target manifest should define what the installation must contain. Full archives, official patches, local reuse, direct CDN files, and VFS patch inputs are alternative ways to materialize that desired state, selected according to correctness constraints and cost rather than treated as mutually exclusive update modes.
+
+
+## Griffr implementation status
+
+Griffr treats YoStar as a protocol backend rather than translating it into the Hypergryph channel/package model. `arknights + en` resolves to the YoStar backend; explicit channel/sub-channel selectors are rejected because the observed YoStar API routes this title by `game_tag=Arknights_EN`.
+
+The implemented lifecycle is:
+
+- `install`: resolve the latest `(version, basis)` manifest, materialize files from the primary/backup CDN (or validated local reuse), verify CRC64-XZ while producing files, then commit native YoStar metadata.
+- `update`: resolve both installed and target canonical manifests when possible, stat-check unchanged hash/size entries, fully verify/materialize changed entries, conservatively handle obsolete paths, and commit metadata last. If the installed canonical manifest can no longer be resolved, Griffr falls back to a safe target-materialization pass and does not delete paths whose old server ownership cannot be proven.
+- `verify`: works offline from validated local YoStar metadata and hashes every selected core file with CRC64-XZ. `--repair` additionally resolves the canonical manifest/CDN and rematerializes failures.
+- `launch`: honors Griffr's `.griffr/state.json` change barrier and performs the official-style existence/size quick check before starting the local executable with persisted launcher arguments. This quick check intentionally does not detect same-size corruption; full `verify` does.
+- `info` and `uninstall`: understand native YoStar metadata. On Windows, uninstall runs a present, safely named launcher uninstall batch hook before Griffr removes the owned install root; hook failure is reported but does not prevent cleanup.
+
+YoStar install/update/repair participate in the same persisted Griffr change-marker contract as the other backends, so an interrupted content mutation cannot be silently launched as a complete installation. Native YoStar metadata is only committed after the content operation succeeds.
+
+The observed YoStar protocol does not expose Hypergryph-style `pre_patch` staging or Endfield resource-index/Persistent-VFS APIs. Griffr therefore rejects `stage`/predownload and Persistent/VFS resource commands for YoStar instead of inventing compatibility semantics.
+
+One observed official-launcher behavior is not currently made a hard online launch dependency: `game_lowest_version` is surfaced by the remote YoStar information/update model, but Griffr launch remains capable of operating from validated local metadata plus its quick file preflight. This avoids making every launch depend on YoStar API reachability.

@@ -1,6 +1,6 @@
 # griffr
 
-Rust workspace for a Hypergryph game launcher/downloader CLI.
+Rust workspace for a Hypergryph, Gryphline, and YoStar game launcher/downloader CLI.
 
 ## Workspace
 - `crates/griffr-common`: shared library crate
@@ -62,6 +62,20 @@ Verify core files only:
 ```bash
 cargo run -p griffr-cli -- verify --path <GAME_PATH> --scope core
 ```
+
+### YoStar Arknights EN
+
+Arknights EN uses the YoStar launcher protocol and native launcher metadata. It does not take Hypergryph channel/sub-channel arguments:
+
+```bash
+cargo run -p griffr-cli -- install --game arknights --region en --path <GAME_PATH>
+cargo run -p griffr-cli -- update --path <GAME_PATH>
+cargo run -p griffr-cli -- verify --path <GAME_PATH> --scope core
+cargo run -p griffr-cli -- verify --path <GAME_PATH> --scope core --repair
+cargo run -p griffr-cli -- launch --path <GAME_PATH>
+```
+
+The YoStar backend currently supports install, update, offline full verify, repair, launch, info, and uninstall. Normal updates trust unchanged manifest entries after existence/size checks, while full `verify` computes CRC64-XZ. YoStar has no observed equivalent of the Hypergryph predownload or Persistent/VFS resource-index APIs, so `stage`/predownload and resource synchronization are not available for this backend.
 
 Synchronize the game-selected Persistent working set (copy-only; add `--prune` to clean unchanged recorded baseline):
 ```bash

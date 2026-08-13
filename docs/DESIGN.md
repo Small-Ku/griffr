@@ -27,7 +27,7 @@ The primary runtime is optimized for Windows large-file I/O, leveraging `compio`
 The workload separates asynchronous I/O and synchronous CPU tasks to prevent scheduler thread blocking and network starvation:
 
 *   **I/O Queue (`compio`):** Run on a single-thread runtime driven by an I/O completion port (IOCP). Handles downloading, local copying, folder creation, and hardlink binding.
-*   **CPU Queue (compio blocking pool):** Handles file hash computation (MD5 verification), zip entry parsing, and HDiff patch generation.
+*   **CPU Queue (compio blocking pool):** Handles content-hash computation (MD5 for Hypergryph/Gryphline, CRC64-XZ for YoStar), zip entry parsing, and HDiff patch generation.
 *   **Bridge:** Task bodies send thread-safe messages through bounded channels. Frontend clients read one progress protocol through the `ProgressReceiver` wrapper.
 
 ### 2. Patch Apply Rules
@@ -36,9 +36,9 @@ Griffr implements a forward-only update model with no rollback capability:
 
 1.  **Check:** Scan the destination, verify inputs, and probe sources. Patch archives extract only selected payloads and estimate per-volume peak space before writing.
 2.  **Persisted Patch Plan:** Save patch state to `.griffr/patch/plan.json` before file mutations start. Extract only selected payloads. Full archives recover directly from target manifests and range caches.
-3.  **Verified Per-File Commit:** Write replacements to temporary paths, verify size and MD5, close handles, and replace target files atomically.
+3.  **Verified Per-File Commit:** Write replacements to temporary paths, verify size and the backend-declared content hash, close handles, and replace target files atomically.
 4.  **Dependency Release:** Release patch base files only after their last consumer node finishes.
-5.  **Deferred Markers:** Write launcher metadata (`config.ini`, `game_files`, `package_files`) atomically after game-file verification and VFS/delete follow-up. Commit `config.ini` last.
+5.  **Deferred Markers:** Write backend-native launcher metadata atomically after game-file verification and resource/delete follow-up. Hypergryph/Gryphline commit `config.ini` last; YoStar commits `manifest.json` before `game-launcher-config.json`, making the launcher config/version the final native metadata marker.
 
 ### 3. Private Install State and Change Marker
 
@@ -60,7 +60,7 @@ Griffr owns the `.griffr/` private directory inside each install:
 
 Griffr writes `.griffr/state.json` before any file write starts. The marker records change type, game/channel identity, source/target versions, payload digests, resource policy, resource identity, release manifest identity, and start time. Resume commands read `.griffr/state.json` to resume interrupted work or advance to a new release manifest.
 
-Griffr removes `.griffr/state.json` after final integrity checks, VFS follow-up, and `config.ini` commit succeed. An unfinished marker blocks `launch`.
+Griffr removes `.griffr/state.json` only after final integrity checks, backend-specific follow-up, and native launcher metadata commit succeed. This barrier is shared by Hypergryph/Gryphline and YoStar; an unfinished marker blocks `launch`.
 
 Archive extraction, manifest loading, and delete plans reject paths inside `.griffr/`.
 
@@ -69,10 +69,10 @@ Archive extraction, manifest loading, and delete plans reject paths inside `.gri
 All write paths (archive extraction, patch apply, resource sync, reuse, repair) follow one final-file contract:
 
 ```text
-resolve source -> create temp output -> verify size & MD5 -> atomic replace -> emit ArtifactProof
+resolve source -> create temp output -> verify size & content hash -> atomic replace -> emit ArtifactProof
 ```
 
-- `ArtifactExpectation`: Target file path, size, and MD5.
+- `ArtifactExpectation`: Target file path, size, and algorithm-tagged content hash.
 - `ArtifactSource`: Byte origin (archive, CDN, patch, reuse, etc.).
 - `ArtifactProof`: Destination path, size, source, and post-commit metadata stamp.
 - `TaskOutcome::Committed { proof }`: Output returned by all successful file writers. Read-only checks return `TaskOutcome::Verified`.

@@ -2,9 +2,10 @@
 
 ## Deterministic platform lifecycle
 
-`crates/griffr-cli/tests/cli_e2e.rs` starts a loopback launcher/CDN service and
-executes the built `griffr` process. The same content-management lifecycle runs
-on Linux and Windows; game launch is intentionally outside this test.
+`crates/griffr-cli/tests/cli_e2e.rs` starts deterministic loopback launcher/CDN services and
+executes the built `griffr` process. The fixture covers both Hypergryph/Gryphline and
+YoStar protocol backends without depending on production servers. The same content-management
+lifecycle runs on Linux and Windows; real game process launch remains outside this test.
 
 ```bash
 cargo test -p griffr-cli --test cli_e2e --locked -- --nocapture
@@ -14,6 +15,14 @@ The lifecycle covers install, local/remote info, verify and repair, explicit
 same-filesystem reuse, hardlink-safe staged update, reuse-assisted update,
 concurrent multi-path verify, account capture/activate, remote debug/media
 calls, Persistent resource sync, snapshots, detach, and uninstall.
+
+The YoStar Arknights EN fixture separately exercises dry-run and real install, native
+`manifest.json` / `game-launcher-config.json` metadata, CRC64-XZ full verify and
+repair, primary/backup CDN failover, manifest-driven normal update, `.griffr/state.json`
+launch barriers, launch-time existence/size quick checks, unsupported predownload
+contracts, and uninstall. It deliberately verifies the YoStar distinction between a
+wrong-size corruption (blocked by launch preflight) and same-size corruption (detected
+only by full verify).
 
 Hardlink assertions are physical identity checks rather than content checks:
 
