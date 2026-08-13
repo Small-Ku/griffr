@@ -25,7 +25,7 @@ pub(crate) struct Cli {
     pub(crate) quiet: bool,
 
     #[command(subcommand)]
-    pub(crate) command: Commands,
+    pub(crate) command: Box<Commands>,
 }
 
 #[derive(Args)]

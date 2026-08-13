@@ -272,6 +272,49 @@ impl YostarManifest {
     }
 }
 
+fn parse_human_byte_size(input: &str) -> std::result::Result<u64, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("empty size string".to_string());
+    }
+
+    if let Ok(val) = s.parse::<u64>() {
+        return Ok(val);
+    }
+
+    let end_of_num = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
+
+    let (num_part, unit_part) = s.split_at(end_of_num);
+    let num_part = num_part.trim();
+    let unit_part = unit_part.trim().to_ascii_uppercase();
+
+    if num_part.is_empty() {
+        return Err(format!("missing numeric value in size '{s}'"));
+    }
+
+    let number: f64 = num_part
+        .parse()
+        .map_err(|_| format!("invalid numeric value in byte size '{s}'"))?;
+
+    let multiplier: u64 = match unit_part.as_str() {
+        "" | "B" | "BYTES" => 1,
+        "K" | "KB" | "KIB" => 1024,
+        "M" | "MB" | "MIB" => 1024 * 1024,
+        "G" | "GB" | "GIB" => 1024 * 1024 * 1024,
+        "T" | "TB" | "TIB" => 1024 * 1024 * 1024 * 1024,
+        _ => return Err(format!("unknown size unit '{unit_part}' in '{s}'")),
+    };
+
+    let total = number * (multiplier as f64);
+    if total < 0.0 || total > (u64::MAX as f64) {
+        return Err(format!("byte size out of range: '{s}'"));
+    }
+
+    Ok(total as u64)
+}
+
 fn deserialize_u64<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
 where
     D: Deserializer<'de>,
@@ -280,11 +323,13 @@ where
     #[serde(untagged)]
     enum Number {
         Integer(u64),
+        Float(f64),
         Text(String),
     }
     match Number::deserialize(deserializer)? {
         Number::Integer(value) => Ok(value),
-        Number::Text(value) => value.parse().map_err(serde::de::Error::custom),
+        Number::Float(value) => Ok(value as u64),
+        Number::Text(value) => parse_human_byte_size(&value).map_err(serde::de::Error::custom),
     }
 }
 
@@ -296,13 +341,17 @@ where
     #[serde(untagged)]
     enum OptionalNumber {
         Integer(u64),
+        Float(f64),
         Text(String),
         Null,
     }
     match OptionalNumber::deserialize(deserializer)? {
         OptionalNumber::Integer(value) => Ok(Some(value)),
+        OptionalNumber::Float(value) => Ok(Some(value as u64)),
         OptionalNumber::Text(value) if value.trim().is_empty() => Ok(None),
-        OptionalNumber::Text(value) => value.parse().map(Some).map_err(serde::de::Error::custom),
+        OptionalNumber::Text(value) => parse_human_byte_size(&value)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
         OptionalNumber::Null => Ok(None),
     }
 }
@@ -333,5 +382,36 @@ mod tests {
         assert_eq!(value["head"]["game_tag"], "Arknights_EN");
         assert_eq!(value["head"]["version"], "1.8.1");
         assert_eq!(value["sign"].as_str().unwrap().len(), 32);
+    }
+
+    #[test]
+    fn game_config_deserializes_human_readable_decompression_size() {
+        let json = r#"{
+            "game_lowest_version": "041.2.0",
+            "game_latest_version": "041.2.0",
+            "game_latest_file_path": "prod/ZIP_TEMP/Arknights_EN_TEMP/Arknights_EN-041.2.0-game.zip",
+            "game_start_exe_name": "Arknights",
+            "decompression_size": "30GB",
+            "game_start_params": [],
+            "game_uninstall_script": ""
+        }"#;
+        let config: YostarGameConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.decompression_size, Some(30 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn parse_human_byte_size_handles_units_floats_and_integers() {
+        assert_eq!(parse_human_byte_size("32212254720").unwrap(), 32212254720);
+        assert_eq!(
+            parse_human_byte_size("30GB").unwrap(),
+            30 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            parse_human_byte_size("30.5GB").unwrap(),
+            (30.5 * 1024.0 * 1024.0 * 1024.0) as u64
+        );
+        assert_eq!(parse_human_byte_size("500MB").unwrap(), 500 * 1024 * 1024);
+        assert_eq!(parse_human_byte_size("100KB").unwrap(), 100 * 1024);
+        assert_eq!(parse_human_byte_size("1024 B").unwrap(), 1024);
     }
 }

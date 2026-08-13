@@ -15,7 +15,7 @@ fn clap_accepts_native_region_defaults_and_sub_channel_alias() {
         r"C:\Games\Endfield",
     ])
     .unwrap();
-    let Commands::Install { remote, .. } = cli.command else {
+    let Commands::Install { remote, .. } = *cli.command else {
         panic!("expected install command");
     };
 
@@ -100,7 +100,7 @@ fn output_format_is_scoped_to_report_commands() {
         "json",
     ])
     .unwrap();
-    let Commands::Verify { report, .. } = verify.command else {
+    let Commands::Verify { report, .. } = *verify.command else {
         panic!("expected verify command");
     };
     assert_eq!(report.output, OutputFormat::Json);
@@ -129,7 +129,7 @@ fn update_accepts_repeated_target_paths() {
         r"C:\Games\Endfield-OS",
     ])
     .unwrap();
-    let Commands::Update { paths, .. } = cli.command else {
+    let Commands::Update { paths, .. } = *cli.command else {
         panic!("expected update command");
     };
 
@@ -154,7 +154,7 @@ fn verify_batch_peers_can_satisfy_relink_parse_requirements() {
         repair,
         relink_reuse,
         ..
-    } = cli.command
+    } = *cli.command
     else {
         panic!("expected verify command");
     };
@@ -182,7 +182,7 @@ fn skip_vfs_keeps_install_and_verify_cli_parity() {
         resource_policy,
         skip_vfs,
         ..
-    } = install.command
+    } = *install.command
     else {
         panic!("expected install command");
     };
@@ -203,7 +203,7 @@ fn skip_vfs_keeps_install_and_verify_cli_parity() {
     .unwrap();
     let Commands::Verify {
         scope, skip_vfs, ..
-    } = verify.command
+    } = *verify.command
     else {
         panic!("expected verify command");
     };
@@ -249,7 +249,7 @@ fn launch_accepts_wine_runner_and_prefix() {
         wine,
         wine_prefix,
         ..
-    } = cli.command
+    } = *cli.command
     else {
         panic!("expected launch command");
     };
@@ -275,7 +275,7 @@ fn stage_recover_and_resource_commands_use_result_oriented_names() {
         r"D:\Staging\Endfield",
     ])
     .unwrap();
-    let Commands::Stage { command } = stage.command else {
+    let Commands::Stage { command } = *stage.command else {
         panic!("expected stage command");
     };
     let StageCommands::Fetch { stage_dir, .. } = command else {
@@ -288,7 +288,7 @@ fn stage_recover_and_resource_commands_use_result_oriented_names() {
 
     let recover =
         Cli::try_parse_from(["griffr", "recover", "--path", r"C:\Games\Endfield"]).unwrap();
-    assert!(matches!(recover.command, Commands::Recover { .. }));
+    assert!(matches!(*recover.command, Commands::Recover { .. }));
 
     let resources = Cli::try_parse_from([
         "griffr",
@@ -299,7 +299,7 @@ fn stage_recover_and_resource_commands_use_result_oriented_names() {
         "--allow-download",
     ])
     .unwrap();
-    let Commands::Resources { command } = resources.command else {
+    let Commands::Resources { command } = *resources.command else {
         panic!("expected resources command");
     };
     assert!(matches!(command, ResourceCommands::Sync { .. }));
@@ -321,7 +321,7 @@ fn update_stage_contract_is_explicit() {
         stage_dir,
         require_staged,
         ..
-    } = cli.command
+    } = *cli.command
     else {
         panic!("expected update command");
     };
@@ -360,7 +360,7 @@ fn dry_run_is_scoped_to_mutating_commands() {
         r"C:\Games\Endfield",
     ])
     .unwrap();
-    let Commands::Install { mutation, .. } = install.command else {
+    let Commands::Install { mutation, .. } = *install.command else {
         panic!("expected install command");
     };
     assert!(mutation.dry_run);
@@ -374,7 +374,7 @@ fn dry_run_is_scoped_to_mutating_commands() {
         r"C:\Games\Endfield",
     ])
     .unwrap();
-    let Commands::Verify { mutation, .. } = verify.command else {
+    let Commands::Verify { mutation, .. } = *verify.command else {
         panic!("expected verify command");
     };
     assert!(mutation.dry_run);
@@ -405,7 +405,7 @@ fn batch_controls_default_to_keep_going_and_bound_jobs() {
         "--keep-going",
     ])
     .unwrap();
-    let Commands::Verify { batch, .. } = cli.command else {
+    let Commands::Verify { batch, .. } = *cli.command else {
         panic!("expected verify command");
     };
     assert_eq!(batch.jobs, 2);
@@ -419,7 +419,7 @@ fn batch_controls_default_to_keep_going_and_bound_jobs() {
         "--fail-fast",
     ])
     .unwrap();
-    let Commands::Update { batch, .. } = cli.command else {
+    let Commands::Update { batch, .. } = *cli.command else {
         panic!("expected update command");
     };
     assert!(batch.fail_fast);

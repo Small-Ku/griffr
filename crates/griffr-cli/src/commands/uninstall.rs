@@ -151,11 +151,11 @@ async fn run_yostar_uninstall_hook(root: &Path) {
     #[cfg(windows)]
     {
         let root = root.to_path_buf();
-        let script = script.clone();
+        let script_path = script.clone();
         let outcome = compio::runtime::spawn_blocking(move || {
             std::process::Command::new("cmd.exe")
                 .arg("/c")
-                .arg(&script)
+                .arg(&script_path)
                 .current_dir(&root)
                 .output()
         })

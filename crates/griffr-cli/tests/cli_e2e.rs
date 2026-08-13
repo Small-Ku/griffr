@@ -1,3 +1,5 @@
+#![feature(windows_by_handle)]
+
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -407,7 +409,7 @@ impl YostarReleaseFixture {
             .iter()
             .map(|(path, bytes)| {
                 json!({
-                    "path": path,
+                    "path": format!("/{path}"),
                     "size": bytes.len().to_string(),
                     "hash": crc64_xz(bytes).to_string(),
                 })
@@ -579,6 +581,7 @@ fn crc64_xz(bytes: &[u8]) -> u64 {
 }
 
 fn read_request(stream: &mut TcpStream) -> Option<String> {
+    stream.set_nonblocking(false).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];

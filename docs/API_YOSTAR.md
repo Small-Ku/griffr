@@ -30,7 +30,7 @@ Observed consumers establish at least these response fields:
 | `game_start_exe_name` | Executable persisted into local launcher metadata. |
 | `game_start_params` | Launch arguments persisted into local launcher metadata. |
 | `game_uninstall_script` | Launcher-owned uninstall script path/name. |
-| `decompression_size` | Space estimate shown by the launcher UI. |
+| `decompression_size` | Space estimate shown by the launcher UI (unit string such as `"30GB"`). |
 
 `game_latest_version` and `game_lowest_version` have different semantics. The launcher permits a locally installed version when it is greater than or equal to `game_lowest_version`; the settings UI can still report that it is behind `game_latest_version`. A newly published version therefore does not have to be an immediate mandatory update.
 

@@ -145,7 +145,8 @@ pub fn is_launcher_metadata_path(path: &str) -> bool {
 
 pub fn build_cdn_file_url(base_url: &str, logical_path: &str) -> String {
     let base = base_url.trim_end_matches('/');
-    let encoded = logical_path
+    let logical = logical_path.trim_start_matches(['/', '\\']);
+    let encoded = logical
         .replace('\\', "/")
         .split('/')
         .map(percent_encode_path_segment)

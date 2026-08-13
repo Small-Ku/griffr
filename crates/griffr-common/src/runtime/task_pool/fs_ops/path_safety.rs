@@ -8,10 +8,23 @@ pub(crate) fn parse_safe_relative_path(label: &str, raw: &str) -> Result<PathBuf
         return Err(invalid_path(label, "contains an empty path"));
     }
 
-    // Launcher and patch manifests use both separator styles. Normalize before
-    // component parsing so the same traversal rules apply on Windows and in
-    // non-Windows tests.
-    let normalized = trimmed.replace('\\', "/");
+    let normalized_slashes = trimmed.replace('\\', "/");
+    if normalized_slashes.starts_with("//") {
+        return Err(invalid_path(
+            label,
+            &format!("contains unsupported path: {trimmed}"),
+        ));
+    }
+
+    // Launcher and patch manifests use both separator styles and occasionally include
+    // a leading slash (e.g. "/Arknights.exe"). Strip a single leading slash before normalization
+    // so manifest root references resolve to relative paths inside the install root.
+    let stripped = trimmed.strip_prefix(['/', '\\']).unwrap_or(trimmed);
+    if stripped.is_empty() {
+        return Err(invalid_path(label, "contains an empty path"));
+    }
+
+    let normalized = stripped.replace('\\', "/");
     if normalized.starts_with('/')
         || normalized
             .as_bytes()
@@ -65,9 +78,9 @@ mod tests {
         for raw in [
             "..\\outside.ab",
             "../outside.ab",
+            "/../outside.ab",
             "C:\\outside.ab",
             "\\\\server\\share\\outside.ab",
-            "/outside.ab",
             "file.bin:stream",
         ] {
             let error = parse_safe_relative_path("manifest path", raw).unwrap_err();
@@ -76,10 +89,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_safe_relative_path_normalizes_manifest_separators() {
+    fn parse_safe_relative_path_normalizes_manifest_separators_and_leading_slashes() {
         assert_eq!(
             parse_safe_relative_path("manifest path", "Data\\sub/file.bin").unwrap(),
             PathBuf::from("Data").join("sub").join("file.bin")
+        );
+        assert_eq!(
+            parse_safe_relative_path("manifest path", "/Arknights.exe").unwrap(),
+            PathBuf::from("Arknights.exe")
+        );
+        assert_eq!(
+            parse_safe_relative_path("manifest path", "\\Arknights_Data/boot.config").unwrap(),
+            PathBuf::from("Arknights_Data").join("boot.config")
         );
     }
 }

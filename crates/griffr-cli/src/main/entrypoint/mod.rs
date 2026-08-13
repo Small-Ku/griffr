@@ -54,7 +54,13 @@ async fn dispatch_resource_sync(args: PersistentResourceArgs, opts: GlobalOption
 }
 
 pub(crate) async fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = std::thread::Builder::new()
+        .name("cli-parse".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(Cli::parse)
+        .map_err(|e| anyhow::anyhow!("failed to spawn cli parser thread: {e}"))?
+        .join()
+        .map_err(|_| anyhow::anyhow!("cli parser thread panicked"))?;
 
     crate::ui::set_quiet(cli.quiet);
     let default_level = if cli.verbose {
@@ -80,7 +86,7 @@ pub(crate) async fn run() -> Result<()> {
         debug!("Verbose: {}", opts.verbose);
     }
 
-    match cli.command {
+    match *cli.command {
         Commands::Install {
             mutation,
             remote,
