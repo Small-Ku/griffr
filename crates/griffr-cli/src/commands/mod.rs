@@ -13,6 +13,7 @@ pub mod setup_persistent_resources;
 pub mod uninstall;
 pub mod update;
 pub mod verify;
+pub(crate) mod yostar;
 
 pub use account::{activate as account_activate, capture as account_capture};
 pub use debug::{

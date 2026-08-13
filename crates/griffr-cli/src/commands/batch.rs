@@ -302,17 +302,17 @@ fn path_key(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use griffr_common::runtime::ParsedConfigIni;
+    use griffr_common::runtime::{LocalInstallMetadata, ParsedConfigIni};
     use std::collections::BTreeMap;
 
     fn local(path: &str, game: GameId) -> LocalInstall {
         LocalInstall {
             install_path: PathBuf::from(path),
-            config_ini: ParsedConfigIni {
+            metadata: LocalInstallMetadata::Hypergryph(ParsedConfigIni {
                 path: PathBuf::from(path).join("config.ini"),
                 raw: String::new(),
                 fields: BTreeMap::new(),
-            },
+            }),
             game_id: Some(game),
             region_id: None,
             channel_id: None,

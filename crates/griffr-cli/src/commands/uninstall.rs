@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use griffr_common::runtime::{
-    read_asset_storage_layout, remove_dir_all, resolve_install_path, ASSET_STORAGE_METADATA_NAME,
-    CONFIG_INI_NAME, GRIFFR_DIR,
+    read_asset_storage_layout, read_yostar_metadata, remove_dir_all, resolve_install_path,
+    ASSET_STORAGE_METADATA_NAME, CONFIG_INI_NAME, GRIFFR_DIR, YOSTAR_LAUNCHER_CONFIG_NAME,
+    YOSTAR_MANIFEST_NAME,
 };
 use serde::{Deserialize, Serialize};
 
@@ -92,6 +93,7 @@ pub async fn uninstall(path: PathBuf, detach: bool, yes: bool, opts: GlobalOptio
     }
 
     persist_uninstall_plan(&target).await?;
+    run_yostar_uninstall_hook(&target.root).await;
 
     if let Some(external) = target.owned_external_root.as_ref() {
         if !external.starts_with(&target.root) {
@@ -115,6 +117,72 @@ pub async fn uninstall(path: PathBuf, detach: bool, yes: bool, opts: GlobalOptio
     progress.finish();
     ui::print_success(format!("Deleted {}", target.root.display()));
     Ok(())
+}
+
+async fn run_yostar_uninstall_hook(root: &Path) {
+    if !root.join(YOSTAR_LAUNCHER_CONFIG_NAME).is_file()
+        || !root.join(YOSTAR_MANIFEST_NAME).is_file()
+    {
+        return;
+    }
+    let metadata = match read_yostar_metadata(root).await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            ui::print_warning(format!(
+                "Could not validate YoStar launcher metadata before uninstall; native uninstall hook will be skipped: {error}"
+            ));
+            return;
+        }
+    };
+    let Some(relative) = metadata.uninstall_script_relative_path() else {
+        if !metadata.config.game_uninstall_script.trim().is_empty() {
+            ui::print_warning(format!(
+                "Skipping unsafe YoStar uninstall hook name {:?}",
+                metadata.config.game_uninstall_script
+            ));
+        }
+        return;
+    };
+    let script = root.join(relative);
+    if !script.is_file() {
+        return;
+    }
+
+    #[cfg(windows)]
+    {
+        let root = root.to_path_buf();
+        let script = script.clone();
+        let outcome = compio::runtime::spawn_blocking(move || {
+            std::process::Command::new("cmd.exe")
+                .arg("/c")
+                .arg(&script)
+                .current_dir(&root)
+                .output()
+        })
+        .await;
+        match outcome {
+            Ok(Ok(output)) if output.status.success() => {}
+            Ok(Ok(output)) => ui::print_warning(format!(
+                "YoStar uninstall hook {} exited with {}",
+                script.display(),
+                output.status
+            )),
+            Ok(Err(error)) => ui::print_warning(format!(
+                "Could not execute YoStar uninstall hook {}: {error}",
+                script.display()
+            )),
+            Err(_) => ui::print_warning(format!(
+                "YoStar uninstall hook task panicked for {}",
+                script.display()
+            )),
+        }
+    }
+
+    #[cfg(not(windows))]
+    ui::print_warning(format!(
+        "YoStar native uninstall hook {} is a Windows batch file and was not executed on this host",
+        script.display()
+    ));
 }
 
 async fn inspect_uninstall_target(path: &Path) -> Result<UninstallTarget> {
@@ -165,13 +233,14 @@ fn validate_uninstall_root(candidate: &Path) -> Result<PathBuf> {
     validate_destructive_root(&root, "install root")?;
 
     let has_marker = root.join(CONFIG_INI_NAME).is_file()
+        || (root.join(YOSTAR_LAUNCHER_CONFIG_NAME).is_file()
+            && root.join(YOSTAR_MANIFEST_NAME).is_file())
         || root.join(GRIFFR_DIR).is_dir()
         || root.join(ASSET_STORAGE_METADATA_NAME).is_file();
     if !has_marker {
         anyhow::bail!(
-            "Refusing to delete {} because it has no {}, {} directory, or {} ownership metadata",
+            "Refusing to delete {} because it has no supported launcher metadata, {} directory, or {} ownership metadata",
             root.display(),
-            CONFIG_INI_NAME,
             GRIFFR_DIR,
             ASSET_STORAGE_METADATA_NAME
         );
@@ -267,7 +336,21 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
 
         let error = validate_uninstall_root(&target).unwrap_err();
-        assert!(error.to_string().contains("no config.ini"));
+        assert!(error.to_string().contains("no supported launcher metadata"));
+    }
+
+    #[test]
+    fn yostar_install_directory_is_accepted() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("game");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join(YOSTAR_LAUNCHER_CONFIG_NAME), b"{}").unwrap();
+        std::fs::write(target.join(YOSTAR_MANIFEST_NAME), b"{}").unwrap();
+
+        assert_eq!(
+            validate_uninstall_root(&target).unwrap(),
+            std::fs::canonicalize(target).unwrap()
+        );
     }
 
     #[test]

@@ -135,7 +135,11 @@ pub fn is_resource_baseline_path(path: &str) -> bool {
 pub fn is_launcher_metadata_path(path: &str) -> bool {
     matches!(
         normalize_logical_path(path).as_str(),
-        CONFIG_INI_NAME | GAME_FILES_NAME | PACKAGE_FILES_NAME
+        CONFIG_INI_NAME
+            | GAME_FILES_NAME
+            | PACKAGE_FILES_NAME
+            | "game-launcher-config.json"
+            | "manifest.json"
     )
 }
 

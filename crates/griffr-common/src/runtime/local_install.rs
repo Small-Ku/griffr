@@ -48,7 +48,7 @@ impl ParsedConfigIni {
 #[derive(Debug, Clone)]
 pub enum LocalInstallMetadata {
     Hypergryph(ParsedConfigIni),
-    Yostar(YostarLocalMetadata),
+    Yostar(Box<YostarLocalMetadata>),
 }
 
 #[derive(Debug, Clone)]
@@ -102,10 +102,10 @@ impl LocalInstall {
         }
     }
 
-    pub const fn yostar_metadata(&self) -> Option<&YostarLocalMetadata> {
+    pub fn yostar_metadata(&self) -> Option<&YostarLocalMetadata> {
         match &self.metadata {
             LocalInstallMetadata::Hypergryph(_) => None,
-            LocalInstallMetadata::Yostar(metadata) => Some(metadata),
+            LocalInstallMetadata::Yostar(metadata) => Some(metadata.as_ref()),
         }
     }
 
@@ -329,7 +329,7 @@ pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
         let metadata = read_yostar_metadata(&install_path).await?;
         return Ok(LocalInstall {
             install_path,
-            metadata: LocalInstallMetadata::Yostar(metadata),
+            metadata: LocalInstallMetadata::Yostar(Box::new(metadata)),
             game_id: Some(GameId::ARKNIGHTS),
             region_id: Some(RegionId::En),
             channel_id: None,

@@ -19,13 +19,15 @@ struct InfoReport {
 #[derive(Debug, Serialize)]
 struct LocalReport {
     path: String,
-    config_ini: String,
+    backend: String,
+    metadata: String,
     appcode: Option<String>,
     region: Option<String>,
     channel: Option<String>,
     sub_channel: Option<String>,
     version: Option<String>,
     entry: Option<String>,
+    basis: Option<String>,
     known_game: Option<String>,
     known_region: Option<String>,
     known_channel: Option<String>,
@@ -34,15 +36,42 @@ struct LocalReport {
 
 impl LocalReport {
     fn from_install(local: &LocalInstall) -> Self {
+        let (backend, metadata, appcode, region, channel, sub_channel, basis) =
+            if let Some(config) = local.hypergryph_config() {
+                (
+                    "hypergryph",
+                    config.path.display().to_string(),
+                    config.appcode().map(str::to_owned),
+                    config.region().map(str::to_owned),
+                    config.channel().map(str::to_owned),
+                    config.sub_channel().map(str::to_owned),
+                    None,
+                )
+            } else {
+                let yostar = local
+                    .yostar_metadata()
+                    .expect("local metadata backend is known");
+                (
+                    "yostar",
+                    yostar.config_path.display().to_string(),
+                    None,
+                    Some("en".to_string()),
+                    None,
+                    None,
+                    Some(yostar.basis().to_string()),
+                )
+            };
         Self {
             path: local.install_path.display().to_string(),
-            config_ini: local.config_ini.path.display().to_string(),
-            appcode: local.config_ini.appcode().map(str::to_owned),
-            region: local.config_ini.region().map(str::to_owned),
-            channel: local.config_ini.channel().map(str::to_owned),
-            sub_channel: local.config_ini.sub_channel().map(str::to_owned),
-            version: local.config_ini.version().map(str::to_owned),
-            entry: local.config_ini.entry().map(str::to_owned),
+            backend: backend.to_string(),
+            metadata,
+            appcode,
+            region,
+            channel,
+            sub_channel,
+            version: local.version().map(str::to_owned),
+            entry: local.entry().map(str::to_owned),
+            basis,
             known_game: local.game_id.as_ref().map(ToString::to_string),
             known_region: local.region_id.map(|region| region.to_string()),
             known_channel: local
@@ -59,13 +88,15 @@ impl LocalReport {
     fn rows(&self) -> Vec<(String, String)> {
         vec![
             row("path", &self.path),
-            row("config_ini", &self.config_ini),
+            row("backend", &self.backend),
+            row("metadata", &self.metadata),
             optional_row("appcode", self.appcode.as_deref()),
             optional_row("region", self.region.as_deref()),
             optional_row("channel", self.channel.as_deref()),
             optional_row("sub_channel", self.sub_channel.as_deref()),
             optional_row("version", self.version.as_deref()),
             optional_row("entry", self.entry.as_deref()),
+            optional_row("basis", self.basis.as_deref()),
             optional_row("known_game", self.known_game.as_deref()),
             optional_row("known_region", self.known_region.as_deref()),
             optional_row("known_channel", self.known_channel.as_deref()),
@@ -76,6 +107,7 @@ impl LocalReport {
 
 #[derive(Debug, Serialize)]
 struct RemoteReport {
+    backend: String,
     game: String,
     region: String,
     channel: String,
@@ -86,11 +118,15 @@ struct RemoteReport {
     has_full_package: bool,
     has_patch_package: bool,
     package: Option<PackageReport>,
+    minimum_version: Option<String>,
+    basis: Option<String>,
+    files: Option<usize>,
 }
 
 impl RemoteReport {
     fn rows(&self) -> Vec<(String, String)> {
         let mut rows = vec![
+            row("backend", &self.backend),
             row("game", &self.game),
             row("region", &self.region),
             row("channel", &self.channel),
@@ -101,6 +137,16 @@ impl RemoteReport {
             row("has_full_package", self.has_full_package),
             row("has_patch_package", self.has_patch_package),
         ];
+
+        if let Some(value) = self.minimum_version.as_deref() {
+            rows.push(row("minimum_version", value));
+        }
+        if let Some(value) = self.basis.as_deref() {
+            rows.push(row("basis", value));
+        }
+        if let Some(value) = self.files {
+            rows.push(row("files", value));
+        }
 
         if let Some(package) = &self.package {
             rows.extend([
@@ -160,24 +206,21 @@ pub async fn show(
     language: &str,
     opts: GlobalOptions,
 ) -> Result<()> {
-    let mut remote_target: Option<(GameId, RegionId, ChannelPair)> = None;
+    let mut remote_target: Option<(GameId, RegionId, Option<ChannelPair>)> = None;
     let requested_by_path = path.is_some();
     let local_install = if let Some(path) = path {
         let local = detect_local_install(&path).await?;
-        if let (Some(game_id), Some(region_id), Some(channel_id)) = (
-            local.game_id.clone(),
-            local.region_id,
-            local.channel_id.clone(),
-        ) {
-            remote_target = Some((game_id, region_id, channel_id));
+        if let (Some(game_id), Some(region_id)) = (local.game_id.clone(), local.region_id) {
+            remote_target = Some((game_id, region_id, local.channel_id.clone()));
         }
         Some(local)
     } else if let (Some(game), Some(region)) = (game, region) {
         let region = region.parse::<RegionId>()?;
+        let channels = ChannelPair::parse(region, channel, sub_channel)?;
         remote_target = Some((
             game.parse::<GameId>()?,
             region,
-            ChannelPair::parse(region, channel, sub_channel)?,
+            (region != RegionId::En).then_some(channels),
         ));
         None
     } else {
@@ -192,79 +235,123 @@ pub async fn show(
 
     if should_fetch_remote {
         let (game_id, region_id, channel_id) = remote_target.context(
-            "Could not determine game/region/channel for remote lookup; provide explicit remote arguments",
+            "Could not determine game/region for remote lookup; provide explicit remote arguments",
         )?;
-        let target = griffr_common::config::resolve_api_target(
-            &game_id,
-            region_id,
-            &channel_id,
-            &Default::default(),
-        )?;
-        let api_client = ApiClient::new()?;
-
-        match api_client.get_latest_game(&target, None).await {
-            Ok(info) => {
-                let has_full_package = info.has_full_package();
-                let has_patch_package = info.has_patch_package();
-                let package = info.pkg.as_ref().map(|package| PackageReport {
-                    file_path: package.file_path.clone(),
-                    packs: package.packs.len(),
-                    game_files_md5: package.game_files_md5.clone(),
-                });
-                remote = Some(RemoteReport {
-                    game: game_id.to_string(),
-                    region: region_id.to_string(),
-                    channel: channel_id.channel().to_string(),
-                    sub_channel: channel_id.sub_channel().to_string(),
-                    version: info.version,
-                    action: info.action,
-                    request_version: info.request_version,
-                    has_full_package,
-                    has_patch_package,
-                    package,
-                });
-
-                if include_media {
-                    let response = api_client
-                        .get_media(&target, language)
-                        .await
-                        .context("Failed to fetch requested remote media summary")?;
-                    media = Some(MediaReport {
-                        language: language.to_owned(),
-                        banners: response
-                            .banners
-                            .as_ref()
-                            .map(|value| value.banners.len())
-                            .unwrap_or_default(),
-                        announcement_tabs: response
-                            .announcements
-                            .as_ref()
-                            .map(|value| value.tabs.len())
-                            .unwrap_or_default(),
-                        sidebar: response
-                            .sidebar
-                            .as_ref()
-                            .map(|value| value.sidebars.len())
-                            .unwrap_or_default(),
+        if region_id == RegionId::En {
+            if game_id != GameId::ARKNIGHTS {
+                anyhow::bail!("YoStar EN currently supports only Arknights");
+            }
+            if include_media {
+                anyhow::bail!("YoStar EN media/news API support has not been observed and is not exposed by Griffr");
+            }
+            let client = griffr_common::api::yostar::YostarApiClient::arknights_en()?;
+            match client.latest_release().await {
+                Ok(release) => {
+                    remote = Some(RemoteReport {
+                        backend: "yostar".to_string(),
+                        game: game_id.to_string(),
+                        region: region_id.to_string(),
+                        channel: String::new(),
+                        sub_channel: String::new(),
+                        version: release.config.game_latest_version.clone(),
+                        action: 0,
+                        request_version: String::new(),
+                        has_full_package: false,
+                        has_patch_package: false,
+                        package: None,
+                        minimum_version: Some(release.config.game_lowest_version),
+                        basis: Some(release.config.game_latest_file_path),
+                        files: Some(release.manifest.files.len()),
                     });
                 }
+                Err(error) if requested_by_path => {
+                    let message = format!(
+                        "Failed to fetch matching YoStar remote state; local information is still available: {error}"
+                    );
+                    ui::print_warning(&message);
+                    remote_error = Some(message);
+                }
+                Err(error) => return Err(error.into()),
             }
-            Err(error) if requested_by_path => {
-                let message = format!(
-                    "Failed to fetch matching remote state; local information is still available: {error}"
-                );
-                ui::print_warning(&message);
-                remote_error = Some(message);
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "Failed to fetch remote info for {:?} channel={} sub-channel={}",
-                        game_id,
-                        channel_id.channel(),
-                        channel_id.sub_channel()
-                    )
-                })
+        } else {
+            let channel_id = channel_id
+                .context("Hypergryph/Gryphline remote lookup requires channel metadata")?;
+            let target = griffr_common::config::resolve_api_target(
+                &game_id,
+                region_id,
+                &channel_id,
+                &Default::default(),
+            )?;
+            let api_client = ApiClient::new()?;
+
+            match api_client.get_latest_game(&target, None).await {
+                Ok(info) => {
+                    let has_full_package = info.has_full_package();
+                    let has_patch_package = info.has_patch_package();
+                    let package = info.pkg.as_ref().map(|package| PackageReport {
+                        file_path: package.file_path.clone(),
+                        packs: package.packs.len(),
+                        game_files_md5: package.game_files_md5.clone(),
+                    });
+                    remote = Some(RemoteReport {
+                        backend: "hypergryph".to_string(),
+                        game: game_id.to_string(),
+                        region: region_id.to_string(),
+                        channel: channel_id.channel().to_string(),
+                        sub_channel: channel_id.sub_channel().to_string(),
+                        version: info.version,
+                        action: info.action,
+                        request_version: info.request_version,
+                        has_full_package,
+                        has_patch_package,
+                        package,
+                        minimum_version: None,
+                        basis: None,
+                        files: None,
+                    });
+
+                    if include_media {
+                        let response = api_client
+                            .get_media(&target, language)
+                            .await
+                            .context("Failed to fetch requested remote media summary")?;
+                        media = Some(MediaReport {
+                            language: language.to_owned(),
+                            banners: response
+                                .banners
+                                .as_ref()
+                                .map(|value| value.banners.len())
+                                .unwrap_or_default(),
+                            announcement_tabs: response
+                                .announcements
+                                .as_ref()
+                                .map(|value| value.tabs.len())
+                                .unwrap_or_default(),
+                            sidebar: response
+                                .sidebar
+                                .as_ref()
+                                .map(|value| value.sidebars.len())
+                                .unwrap_or_default(),
+                        });
+                    }
+                }
+                Err(error) if requested_by_path => {
+                    let message = format!(
+                        "Failed to fetch matching remote state; local information is still available: {error}"
+                    );
+                    ui::print_warning(&message);
+                    remote_error = Some(message);
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "Failed to fetch remote info for {:?} channel={} sub-channel={}",
+                            game_id,
+                            channel_id.channel(),
+                            channel_id.sub_channel()
+                        )
+                    })
+                }
             }
         }
     }

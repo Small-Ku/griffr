@@ -199,7 +199,7 @@ async fn ensure_game_files_impl(
                 crate::runtime::task_pool::verify::build_metadata_issue(
                     &install_path.join(&relative),
                     &entry.path,
-                    &crate::runtime::ContentHash::from(&entry.md5),
+                    crate::runtime::ContentHash::from(&entry.md5),
                     entry.size,
                 )
                 .is_none()
@@ -207,7 +207,7 @@ async fn ensure_game_files_impl(
                 crate::runtime::task_pool::verify::build_issue(
                     &install_path.join(&relative),
                     &entry.path,
-                    &crate::runtime::ContentHash::from(&entry.md5),
+                    crate::runtime::ContentHash::from(&entry.md5),
                     Some(entry.size),
                 )
                 .is_none()
@@ -216,7 +216,7 @@ async fn ensure_game_files_impl(
                 crate::runtime::task_pool::verify::build_issue(
                     path,
                     &entry.path,
-                    &crate::runtime::ContentHash::from(&entry.md5),
+                    crate::runtime::ContentHash::from(&entry.md5),
                     Some(entry.size),
                 )
                 .is_none()

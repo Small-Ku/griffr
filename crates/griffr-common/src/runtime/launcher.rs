@@ -83,7 +83,8 @@ pub struct GameProcess {
 #[derive(Debug)]
 pub struct Launcher {
     game_id: GameId,
-    target: InstallTarget,
+    exe_name: PathBuf,
+    args: Vec<String>,
     install_path: PathBuf,
     wine: Option<WineConfig>,
 }
@@ -91,12 +92,28 @@ pub struct Launcher {
 impl Launcher {
     /// Create a launcher for a game, target, and install path
     pub fn new(game_id: GameId, target: InstallTarget, install_path: impl Into<PathBuf>) -> Self {
+        Self::from_executable(game_id, target.exe_name, install_path)
+    }
+
+    /// Create a launcher from launcher-native executable metadata without an API target.
+    pub fn from_executable(
+        game_id: GameId,
+        exe_name: impl Into<PathBuf>,
+        install_path: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             game_id,
-            target,
+            exe_name: exe_name.into(),
+            args: Vec::new(),
             install_path: install_path.into(),
             wine: (!cfg!(windows)).then(WineConfig::default),
         }
+    }
+
+    /// Attach launcher-managed process arguments.
+    pub fn with_args(mut self, args: impl IntoIterator<Item = String>) -> Self {
+        self.args = args.into_iter().collect();
+        self
     }
 
     /// Override the Wine runner used on non-Windows hosts.
@@ -112,7 +129,7 @@ impl Launcher {
 
     /// Get the main game program file name
     fn main_exe_name(&self) -> &Path {
-        &self.target.exe_name
+        &self.exe_name
     }
 
     /// Get the full path of the main game program file
@@ -437,7 +454,8 @@ impl Launcher {
             const CREATE_UNICODE_ENVIRONMENT: u32 = 0x0000_0400;
 
             let mut cmd = Command::new(&exe_path);
-            cmd.current_dir(&working_dir)
+            cmd.args(&self.args)
+                .current_dir(&working_dir)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .creation_flags(CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT);
@@ -458,7 +476,7 @@ impl Launcher {
                 detail: "Wine is not configured for this non-Windows host".to_owned(),
             })?;
             let mut cmd = Command::new(&wine.runner);
-            cmd.arg(&exe_path);
+            cmd.arg(&exe_path).args(&self.args);
             if let Some(prefix) = &wine.prefix {
                 cmd.env("WINEPREFIX", prefix);
             }

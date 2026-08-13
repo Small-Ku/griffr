@@ -35,6 +35,26 @@ pub(super) async fn update_internal(
     opts: GlobalOptions,
 ) -> Result<()> {
     let mut local = detect_local_install(&path).await?;
+    if local.is_yostar() {
+        let mut reuse = explicit_reuse_paths;
+        reuse.extend(peer_reuse_paths);
+        reuse.sort_unstable();
+        reuse.dedup();
+        return crate::commands::yostar::update(
+            &local,
+            reuse,
+            force_copy,
+            use_predownload
+                || predownload_dir_override.is_some()
+                || patch_options.work_dir.is_some()
+                || patch_options.external_asset_root.is_some(),
+            require_staged_predownload,
+            overrides,
+            opts,
+            task_pool_runner,
+        )
+        .await;
+    }
     let pending_change = read_install_change(&local.install_path)?;
     let mut resumed_pending_patch = false;
     match griffr_common::runtime::get_patch_recovery_state(&local.install_path, None)? {

@@ -24,6 +24,11 @@ pub async fn setup_persistent_resources(
     opts: GlobalOptions,
 ) -> Result<()> {
     let local = detect_local_install(&path).await?;
+    if local.is_yostar() {
+        anyhow::bail!(
+            "YoStar EN does not use the Hypergryph Persistent/VFS resource-index workflow"
+        );
+    }
     let game_id = local.require_known_game()?;
     let region_id = local.require_known_region()?;
     let channel_id = local.require_known_channel()?;

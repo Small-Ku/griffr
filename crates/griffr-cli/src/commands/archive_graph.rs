@@ -125,7 +125,9 @@ mod tests {
         Task::Verify {
             path: path.to_path_buf(),
             logical_path: logical_path.to_string(),
-            expected_md5: "00000000000000000000000000000000".to_string(),
+            expected_hash: griffr_common::runtime::ContentHash::from(
+                "00000000000000000000000000000000",
+            ),
             expected_size: Some(1),
             on_fail: None,
         }
@@ -243,7 +245,9 @@ mod tests {
             url: "https://example.invalid/archive".to_string(),
             dest: root.join("archive"),
             logical_path: "archive".to_string(),
-            expected_md5: String::new(),
+            expected_hash: griffr_common::runtime::ContentHash::from(
+                "00000000000000000000000000000000",
+            ),
             expected_size: None,
             retry_count: 0,
             transfer_class: TransferClass::General,

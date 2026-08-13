@@ -371,6 +371,213 @@ fn static_route(
     None
 }
 
+#[derive(Clone)]
+struct YostarReleaseFixture {
+    version: &'static str,
+    basis: &'static str,
+    source: &'static str,
+    files: HashMap<String, Vec<u8>>,
+}
+
+impl YostarReleaseFixture {
+    fn new(
+        version: &'static str,
+        basis: &'static str,
+        source: &'static str,
+        core: &'static [u8],
+    ) -> Self {
+        let mut files = HashMap::new();
+        files.insert(
+            "Arknights.exe".to_string(),
+            format!("arknights-{version}\n").into_bytes(),
+        );
+        files.insert("core.bin".to_string(), core.to_vec());
+        files.insert("unchanged.bin".to_string(), b"123456789".to_vec());
+        Self {
+            version,
+            basis,
+            source,
+            files,
+        }
+    }
+
+    fn manifest_json(&self) -> Value {
+        let mut files = self
+            .files
+            .iter()
+            .map(|(path, bytes)| {
+                json!({
+                    "path": path,
+                    "size": bytes.len().to_string(),
+                    "hash": crc64_xz(bytes).to_string(),
+                })
+            })
+            .collect::<Vec<_>>();
+        files.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
+        json!({"source": self.source, "file": files})
+    }
+}
+
+struct YostarFixtureServer {
+    base: String,
+    selected_release: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl YostarFixtureServer {
+    fn start(v1: YostarReleaseFixture, v2: YostarReleaseFixture) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind YoStar fixture server");
+        listener
+            .set_nonblocking(true)
+            .expect("set YoStar fixture server nonblocking");
+        let base = format!(
+            "http://{}",
+            listener.local_addr().expect("YoStar fixture address")
+        );
+        let thread_base = base.clone();
+        let selected_release = Arc::new(AtomicUsize::new(1));
+        let selected_thread = Arc::clone(&selected_release);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            while !stop_thread.load(Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        handle_yostar_connection(
+                            stream,
+                            &thread_base,
+                            &v1,
+                            &v2,
+                            selected_thread.load(Ordering::Acquire),
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            base,
+            selected_release,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn select_v2(&self) {
+        self.selected_release.store(2, Ordering::Release);
+    }
+}
+
+impl Drop for YostarFixtureServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = TcpStream::connect(self.base.trim_start_matches("http://"));
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn handle_yostar_connection(
+    mut stream: TcpStream,
+    base: &str,
+    v1: &YostarReleaseFixture,
+    v2: &YostarReleaseFixture,
+    selected: usize,
+) {
+    let Some(request) = read_request(&mut stream) else {
+        return;
+    };
+    let first = request.lines().next().unwrap_or_default();
+    let mut first_parts = first.split_whitespace();
+    let method = first_parts.next().unwrap_or("GET");
+    let target = first_parts.next().unwrap_or("/");
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let latest = if selected == 1 { v1 } else { v2 };
+
+    match path {
+        "/api/launcher/game/config" => {
+            write_json(
+                &mut stream,
+                &json!({
+                    "code": 200,
+                    "data": {
+                        "game_latest_version": latest.version,
+                        "game_lowest_version": v1.version,
+                        "game_latest_file_path": latest.basis,
+                        "game_start_exe_name": "Arknights",
+                        "game_start_params": ["--e2e"],
+                        "game_uninstall_script": "uninstall.bat",
+                        "decompression_size": latest.files.values().map(Vec::len).sum::<usize>().to_string(),
+                    }
+                }),
+            );
+        }
+        "/api/launcher/game/config/json" => {
+            let version = query
+                .split('&')
+                .filter_map(|part| part.split_once('='))
+                .find_map(|(key, value)| (key == "version").then_some(value))
+                .unwrap_or_default();
+            let manifest = if version == v1.version { v1 } else { v2 };
+            write_json(
+                &mut stream,
+                &json!({"code": 200, "data": {"url": format!("{base}/manifests/{}.json", manifest.version)}}),
+            );
+        }
+        "/api/launcher/advanced/game/download/cdn" => {
+            write_json(
+                &mut stream,
+                &json!({"code": 200, "data": {"primary_cdn": format!("{base}/cdn"), "back_up_cdn": format!("{base}/backup")}}),
+            );
+        }
+        path if path == format!("/manifests/{}.json", v1.version) => {
+            write_json(&mut stream, &v1.manifest_json());
+        }
+        path if path == format!("/manifests/{}.json", v2.version) => {
+            write_json(&mut stream, &v2.manifest_json());
+        }
+        _ => {
+            let mut found = None;
+            for release in [v1, v2] {
+                for (logical, bytes) in &release.files {
+                    for cdn in ["cdn", "backup"] {
+                        if path
+                            == format!("/{cdn}/{}/{}", release.source.trim_matches('/'), logical)
+                        {
+                            found = Some(bytes.as_slice());
+                        }
+                    }
+                }
+            }
+            match found {
+                Some(body) => write_bytes(&mut stream, method, &request, body),
+                None => write_response(&mut stream, "404 Not Found", b"not found", &[]),
+            }
+        }
+    }
+}
+
+fn crc64_xz(bytes: &[u8]) -> u64 {
+    const POLY: u64 = 0xc96c_5795_d787_0f42;
+    let mut crc = u64::MAX;
+    for &byte in bytes {
+        crc ^= u64::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ POLY
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
 fn read_request(stream: &mut TcpStream) -> Option<String> {
     stream.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
     let mut bytes = Vec::new();
@@ -943,6 +1150,170 @@ fn local_launcher_service_drives_install_repair_stage_update_and_uninstall() {
         command(uninstall_args);
         assert!(!target.exists());
     }
+}
+
+#[test]
+fn yostar_fixture_drives_install_verify_repair_and_manifest_update() {
+    let temp = TempDir::new().expect("test tempdir");
+    let v1 = YostarReleaseFixture::new("76.0.0", "basis-v1", "release/v1", b"yostar-core-v1\n");
+    let v2 = YostarReleaseFixture::new(
+        "77.0.0",
+        "basis-v2",
+        "release/v2",
+        b"yostar-core-v2-with-change\n",
+    );
+    let server = YostarFixtureServer::start(v1.clone(), v2.clone());
+    let install = temp.path().join("yostar-install");
+
+    let mut dry_run = args(&[
+        "--quiet",
+        "install",
+        "--dry-run",
+        "--game",
+        "arknights",
+        "--region",
+        "en",
+        "--gateway",
+        &server.base,
+    ]);
+    push_path(&mut dry_run, "--path", &install);
+    command(dry_run);
+    assert!(
+        !install.exists(),
+        "YoStar dry-run must not create install path"
+    );
+
+    let mut install_args = args(&[
+        "--quiet",
+        "install",
+        "--game",
+        "arknights",
+        "--region",
+        "en",
+        "--gateway",
+        &server.base,
+    ]);
+    push_path(&mut install_args, "--path", &install);
+    command(install_args);
+    assert_eq!(
+        fs::read(install.join("core.bin")).unwrap(),
+        v1.files["core.bin"]
+    );
+    assert!(install.join("game-launcher-config.json").is_file());
+    assert!(install.join("manifest.json").is_file());
+    assert!(!install.join(".griffr/state.json").exists());
+
+    let mut launch_dry_run = args(&["--quiet", "launch", "--dry-run"]);
+    push_path(&mut launch_dry_run, "--path", &install);
+    command(launch_dry_run);
+
+    let mut info_args = args(&["info", "--local-only", "--output", "json"]);
+    push_path(&mut info_args, "--path", &install);
+    let info = command(info_args);
+    let info_json: Value = serde_json::from_slice(&info.stdout).expect("YoStar info JSON");
+    assert_eq!(info_json["local"]["backend"], "yostar");
+    assert_eq!(info_json["local"]["version"], "76.0.0");
+
+    let mut verify_args = args(&[
+        "--quiet",
+        "verify",
+        "--scope",
+        "core",
+        "--output",
+        "json",
+        "--gateway",
+        &server.base,
+    ]);
+    push_path(&mut verify_args, "--path", &install);
+    command(verify_args);
+
+    fs::write(install.join("core.bin"), b"corrupt").unwrap();
+    let mut blocked_launch = args(&["--quiet", "launch", "--dry-run"]);
+    push_path(&mut blocked_launch, "--path", &install);
+    command_fails(
+        blocked_launch,
+        "YoStar launch preflight found 1 missing/wrong-size file",
+    );
+
+    let mut repair_args = args(&[
+        "--quiet",
+        "verify",
+        "--repair",
+        "--scope",
+        "core",
+        "--gateway",
+        &server.base,
+    ]);
+    push_path(&mut repair_args, "--path", &install);
+    command(repair_args);
+    assert_eq!(
+        fs::read(install.join("core.bin")).unwrap(),
+        v1.files["core.bin"]
+    );
+    assert!(!install.join(".griffr/state.json").exists());
+
+    fs::write(install.join("unchanged.bin"), b"987654321").unwrap();
+    server.select_v2();
+    let mut update_args = args(&["--quiet", "update", "--gateway", &server.base]);
+    push_path(&mut update_args, "--path", &install);
+    command(update_args);
+    assert_eq!(
+        fs::read(install.join("core.bin")).unwrap(),
+        v2.files["core.bin"]
+    );
+    assert_eq!(
+        fs::read(install.join("unchanged.bin")).unwrap(),
+        b"987654321",
+        "normal YoStar update should stat-trust unchanged manifest entries"
+    );
+    assert!(!install.join(".griffr/state.json").exists());
+    let mut same_size_launch = args(&["--quiet", "launch", "--dry-run"]);
+    push_path(&mut same_size_launch, "--path", &install);
+    command(same_size_launch);
+
+    let mut verify_bad = args(&[
+        "--quiet",
+        "verify",
+        "--scope",
+        "core",
+        "--output",
+        "json",
+        "--gateway",
+        &server.base,
+    ]);
+    push_path(&mut verify_bad, "--path", &install);
+    let output = command(verify_bad);
+    let json: Value = serde_json::from_slice(&output.stdout).expect("YoStar verify JSON");
+    assert_eq!(json["issues"].as_array().map(Vec::len), Some(1));
+
+    let mut repair_v2 = args(&[
+        "--quiet",
+        "verify",
+        "--repair",
+        "--scope",
+        "core",
+        "--gateway",
+        &server.base,
+    ]);
+    push_path(&mut repair_v2, "--path", &install);
+    command(repair_v2);
+    assert_eq!(
+        fs::read(install.join("unchanged.bin")).unwrap(),
+        v2.files["unchanged.bin"]
+    );
+    assert!(!install.join(".griffr/state.json").exists());
+
+    let mut unsupported_stage = args(&["--quiet", "stage", "fetch"]);
+    push_path(&mut unsupported_stage, "--path", &install);
+    command_fails(
+        unsupported_stage,
+        "No YoStar EN pre-patch/predownload API was observed",
+    );
+
+    let mut uninstall_args = args(&["--quiet", "uninstall", "--yes"]);
+    push_path(&mut uninstall_args, "--path", &install);
+    command(uninstall_args);
+    assert!(!install.exists());
 }
 
 #[test]

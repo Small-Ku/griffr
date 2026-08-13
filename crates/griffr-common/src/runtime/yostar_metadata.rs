@@ -67,6 +67,63 @@ impl YostarLocalMetadata {
     pub fn basis(&self) -> &str {
         &self.manifest.basis
     }
+
+    /// Resolve the executable path exactly as the observed official launcher does:
+    /// append `.exe` when the persisted launcher name omits it, then enforce a
+    /// safe install-relative path before any process execution.
+    pub fn executable_relative_path(&self) -> Result<PathBuf> {
+        safe_yostar_executable_path(&self.config.name)
+    }
+
+    /// Return the launcher-owned uninstall hook only when it matches the
+    /// official launcher's observed conservative batch-file rule.
+    pub fn uninstall_script_relative_path(&self) -> Option<PathBuf> {
+        safe_yostar_uninstall_script_path(&self.config.game_uninstall_script)
+    }
+}
+
+impl YostarLocalManifest {
+    /// Convert the persisted canonical file receipt back into the runtime
+    /// manifest shape. `source` is only needed when files may be downloaded;
+    /// verification-only callers can pass an empty string and stay offline.
+    pub fn as_content_manifest(&self, source: impl Into<String>) -> YostarManifest {
+        YostarManifest {
+            source: source.into(),
+            files: self
+                .files
+                .iter()
+                .map(|entry| YostarManifestEntry {
+                    path: entry.path.clone(),
+                    size: entry.size,
+                    hash: entry.hash.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn safe_yostar_executable_path(name: &str) -> Result<PathBuf> {
+    let normalized = if name.to_ascii_lowercase().ends_with(".exe") {
+        name.to_string()
+    } else {
+        format!("{name}.exe")
+    };
+    parse_safe_relative_path("YoStar game executable", &normalized)
+}
+
+fn safe_yostar_uninstall_script_path(name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.len() > 255 || !name.to_ascii_lowercase().ends_with(".bat") {
+        return None;
+    }
+    let stem = &name[..name.len().saturating_sub(4)];
+    if stem.is_empty()
+        || !stem
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    Some(PathBuf::from(name))
 }
 
 fn vc(values: &[&str]) -> String {
@@ -169,6 +226,7 @@ pub async fn read_yostar_metadata(install_path: &Path) -> Result<YostarLocalMeta
             config.version, manifest.version
         )));
     }
+    safe_yostar_executable_path(&config.name)?;
     if config.vc != config_vc(&config) {
         return Err(invalid(format!(
             "{} has an invalid vc",
@@ -214,6 +272,7 @@ pub fn build_yostar_metadata(
     manifest: &YostarManifest,
 ) -> Result<(YostarLauncherConfig, YostarLocalManifest)> {
     validate_remote_yostar_manifest(manifest)?;
+    safe_yostar_executable_path(&game_config.game_start_exe_name)?;
 
     let mut config = YostarLauncherConfig {
         tag: YOSTAR_ARKNIGHTS_TAG.to_string(),
@@ -331,6 +390,45 @@ mod tests {
         assert_eq!(config.vc, config_vc(&config));
         assert_eq!(manifest.vc, manifest_vc(&manifest));
         assert_eq!(manifest.files[0].vc, file_vc(&manifest.files[0]));
+    }
+
+    #[test]
+    fn executable_metadata_matches_launcher_suffix_rule_and_stays_relative() {
+        let mut game = config();
+        game.game_start_exe_name = "Arknights".to_string();
+        let (config, local_manifest) = build_yostar_metadata(&game, &manifest()).unwrap();
+        let metadata = YostarLocalMetadata {
+            config_path: PathBuf::new(),
+            manifest_path: PathBuf::new(),
+            config,
+            manifest: local_manifest,
+        };
+        assert_eq!(
+            metadata.executable_relative_path().unwrap(),
+            PathBuf::from("Arknights.exe")
+        );
+
+        game.game_start_exe_name = "../escape".to_string();
+        assert!(build_yostar_metadata(&game, &manifest()).is_err());
+    }
+
+    #[test]
+    fn uninstall_script_rule_matches_official_launcher_guard() {
+        let (config, local_manifest) = build_yostar_metadata(&config(), &manifest()).unwrap();
+        let mut metadata = YostarLocalMetadata {
+            config_path: PathBuf::new(),
+            manifest_path: PathBuf::new(),
+            config,
+            manifest: local_manifest,
+        };
+        assert_eq!(
+            metadata.uninstall_script_relative_path(),
+            Some(PathBuf::from("uninstall.bat"))
+        );
+        metadata.config.game_uninstall_script = "../cleanup.bat".to_string();
+        assert_eq!(metadata.uninstall_script_relative_path(), None);
+        metadata.config.game_uninstall_script = "cleanup.cmd".to_string();
+        assert_eq!(metadata.uninstall_script_relative_path(), None);
     }
 
     #[test]

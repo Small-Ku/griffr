@@ -107,7 +107,7 @@ impl PatchCheckWork {
         let _ = self.verification_cache.build_issue(
             &probe.path,
             &probe.logical_path,
-            &ContentHash::from(&probe.expected_md5),
+            ContentHash::from(&probe.expected_md5),
             Some(probe.expected_size),
         );
         Ok(())

@@ -7,7 +7,7 @@ use crate::debug_cli::{AccountCommands, DebugCommands, StageCommands};
 /// Griffr - Hypergryph Game Launcher CLI
 #[derive(Parser)]
 #[command(name = "griffr")]
-#[command(about = "A CLI launcher for Hypergryph games (Arknights / Endfield)")]
+#[command(about = "A CLI launcher for Hypergryph/Gryphline/YoStar games (Arknights / Endfield)")]
 #[command(version)]
 pub(crate) struct Cli {
     /// Enable diagnostic logging on stderr
@@ -30,14 +30,14 @@ pub(crate) struct Cli {
 
 #[derive(Args)]
 pub(crate) struct PathArg {
-    /// Install root or config.ini path
+    /// Install root or native launcher metadata path
     #[arg(long)]
     pub(crate) path: std::path::PathBuf,
 }
 
 #[derive(Args)]
 pub(crate) struct TargetPathsArg {
-    /// Install root or config.ini path; repeat --path to process a batch
+    /// Install root or native launcher metadata path; repeat --path to process a batch
     #[arg(long = "path", required = true)]
     pub(crate) paths: Vec<std::path::PathBuf>,
 }
@@ -156,7 +156,7 @@ pub(crate) struct GameArg {
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct RegionArg {
-    /// Launcher config/API region (`cn` or `sg`; aliases accepted)
+    /// Launcher/API region (`cn`, `sg`, or YoStar `en`; aliases accepted)
     #[arg(long, requires = "game")]
     pub(crate) region: Option<String>,
 }
@@ -190,7 +190,7 @@ pub(crate) struct RequiredGameRegionChannelArgs {
     #[arg(long)]
     pub(crate) game: String,
 
-    /// Launcher config/API region (`cn` or `sg`; aliases accepted)
+    /// Launcher/API region (`cn`, `sg`, or YoStar `en`; aliases accepted)
     #[arg(long)]
     pub(crate) region: String,
 
@@ -216,7 +216,7 @@ impl RequiredGameRegionChannelArgs {
         .args(["path", "game"])
 ))]
 pub(crate) struct InfoSelectorArgs {
-    /// Install root or config.ini path
+    /// Install root or native launcher metadata path
     #[arg(long, conflicts_with_all = ["game", "region", "channel", "sub_channel"])]
     pub(crate) path: Option<std::path::PathBuf>,
 
@@ -343,7 +343,7 @@ pub(crate) enum Commands {
         yes: bool,
     },
 
-    /// Update one or more existing installs identified by encrypted config.ini files
+    /// Update one or more existing installs identified by native launcher metadata
     Update {
         #[command(flatten)]
         mutation: MutationArgs,
@@ -427,7 +427,7 @@ pub(crate) enum Commands {
         #[command(flatten)]
         mutation: MutationArgs,
 
-        /// Install root or config.ini path
+        /// Install root or native launcher metadata path
         #[arg(long)]
         path: std::path::PathBuf,
 
@@ -444,7 +444,7 @@ pub(crate) enum Commands {
         wine_prefix: Option<std::path::PathBuf>,
     },
 
-    /// Verify one or more local installs against their game_files manifests
+    /// Verify one or more local installs against their native launcher manifests
     Verify {
         #[command(flatten)]
         mutation: MutationArgs,
@@ -500,7 +500,7 @@ pub(crate) enum Commands {
         args: PersistentResourceArgs,
     },
 
-    /// Print local metadata from config.ini and optionally the matching remote state
+    /// Print native local launcher metadata and optionally the matching remote state
     Info {
         #[command(flatten)]
         selector: InfoSelectorArgs,

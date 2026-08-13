@@ -4,9 +4,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 #[cfg(windows)]
 use griffr_common::runtime::admin::ensure_admin;
+use griffr_common::runtime::task_pool::TaskPoolRunner;
 #[cfg(not(windows))]
 use griffr_common::runtime::WineConfig;
-use griffr_common::runtime::{ensure_install_ready, Launcher};
+use griffr_common::runtime::{
+    check_yostar_file_metadata_with_pool, ensure_install_ready, Launcher, ProgressSender,
+};
 
 use crate::ui;
 use crate::GlobalOptions;
@@ -23,15 +26,55 @@ pub async fn launch(
     ensure_install_ready(&local.install_path)?;
 
     let game_id = local.require_known_game()?;
-    let region_id = local.require_known_region()?;
-    let channel_id = local.require_known_channel()?;
-    let install_target = griffr_common::config::resolve_install_target(
-        &game_id,
-        region_id,
-        &channel_id,
-        &Default::default(),
-    )?;
-    let launcher = Launcher::new(game_id.clone(), install_target, &local.install_path);
+    if let Some(metadata) = local.yostar_metadata() {
+        let mut runner = TaskPoolRunner::new(opts.task_pool_config())?;
+        let summary = check_yostar_file_metadata_with_pool(
+            &local.install_path,
+            &metadata.manifest.as_content_manifest(""),
+            &mut runner,
+            ProgressSender::disabled(),
+        )
+        .await
+        .context("YoStar launch preflight failed")?;
+        if !summary.issues.is_empty() {
+            let sample = summary
+                .issues
+                .iter()
+                .take(3)
+                .map(|issue| issue.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "YoStar launch preflight found {} missing/wrong-size file(s){}; run `griffr verify --path ... --repair` first",
+                summary.issues.len(),
+                if sample.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {sample}")
+                }
+            );
+        }
+    }
+    let launcher = if let Some(metadata) = local.yostar_metadata() {
+        Launcher::from_executable(
+            game_id.clone(),
+            metadata
+                .executable_relative_path()
+                .context("Invalid YoStar launcher executable metadata")?,
+            &local.install_path,
+        )
+        .with_args(metadata.config.params.clone())
+    } else {
+        let region_id = local.require_known_region()?;
+        let channel_id = local.require_known_channel()?;
+        let install_target = griffr_common::config::resolve_install_target(
+            &game_id,
+            region_id,
+            &channel_id,
+            &Default::default(),
+        )?;
+        Launcher::new(game_id.clone(), install_target, &local.install_path)
+    };
     #[cfg(windows)]
     let launcher = {
         if wine.is_some() || wine_prefix.is_some() {

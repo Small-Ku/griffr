@@ -209,6 +209,26 @@ async fn verify_one(
     scope: Option<crate::VerifyScopeArg>,
     opts: GlobalOptions,
 ) -> Result<serde_json::Value> {
+    if local.is_yostar() {
+        if skip_local_detect && region_override != Some(RegionId::En) {
+            anyhow::bail!(
+                "A detected YoStar install requires --region en when --skip-local-detect is used"
+            );
+        }
+        return crate::commands::yostar::verify(
+            &local,
+            game_override,
+            region_override,
+            repair,
+            reuse_paths,
+            force_copy,
+            scope,
+            overrides,
+            opts,
+            pool_runner,
+        )
+        .await;
+    }
     let text_output = opts.output != OutputFormat::Json;
     let detected_game = local.game_id.as_ref();
     let detected_region = local.region_id;
@@ -570,8 +590,8 @@ async fn verify_one(
                 issue.kind,
                 issue.expected_size,
                 issue.actual_size,
-                issue.expected_md5,
-                issue.actual_md5
+                issue.expected_hash,
+                issue.actual_hash
             ));
         }
     }
@@ -614,8 +634,8 @@ async fn verify_one(
                 "kind": format!("{:?}", issue.kind),
                 "expected_size": issue.expected_size,
                 "actual_size": issue.actual_size,
-                "expected_md5": issue.expected_md5,
-                "actual_md5": issue.actual_md5,
+                "expected_md5": issue.expected_hash.manifest_value(),
+                "actual_md5": issue.actual_hash.as_ref().map(|hash| hash.manifest_value()),
                 "is_metadata": is_launcher_metadata_path(&issue.path),
             })
         })
@@ -932,10 +952,12 @@ mod transaction_tests {
     fn issue(path: &str) -> FileIssue {
         FileIssue {
             path: path.to_string(),
-            expected_md5: "0".repeat(32),
+            expected_hash: griffr_common::runtime::ContentHash::from(
+                "00000000000000000000000000000000",
+            ),
             expected_size: 1,
             actual_size: None,
-            actual_md5: None,
+            actual_hash: None,
             kind: FileIssueKind::Missing,
         }
     }

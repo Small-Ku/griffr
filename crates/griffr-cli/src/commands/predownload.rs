@@ -91,13 +91,13 @@ fn build_predownload_tasks(stage_dir: &Path, patches: &[PackFile]) -> Result<Vec
         tasks.push(Task::Verify {
             path: dest.clone(),
             logical_path: filename.clone(),
-            expected_md5: patch.md5.clone(),
+            expected_hash: griffr_common::runtime::ContentHash::from(&patch.md5),
             expected_size: Some(patch.size()),
             on_fail: Some(Box::new(Task::Download {
                 url: patch.url.clone(),
                 dest,
                 logical_path: filename,
-                expected_md5: patch.md5.clone(),
+                expected_hash: griffr_common::runtime::ContentHash::from(&patch.md5),
                 expected_size: Some(patch.size()),
                 retry_count: 0,
                 transfer_class: griffr_common::runtime::task_pool::TransferClass::General,
@@ -120,6 +120,9 @@ async fn resolve_predownload_payload(
     String,
 )> {
     let local = detect_local_install(path).await?;
+    if local.is_yostar() {
+        anyhow::bail!("No YoStar EN pre-patch/predownload API was observed; staging is unsupported for this backend");
+    }
     let current_version = local.require_config_ini_version()?.to_string();
 
     let game_id = local.require_known_game()?;

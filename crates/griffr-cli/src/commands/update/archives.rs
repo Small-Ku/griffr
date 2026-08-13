@@ -124,7 +124,9 @@ pub(super) async fn download_and_extract_archives_from_dir(
                     graph.add_root(Task::Verify {
                         path: part.dest.clone(),
                         logical_path: part.logical_path.clone(),
-                        expected_md5: part.expected_md5.clone(),
+                        expected_hash: griffr_common::runtime::ContentHash::from(
+                            &part.expected_md5,
+                        ),
                         expected_size: Some(part.expected_size),
                         on_fail: None,
                     })

@@ -56,6 +56,20 @@ pub async fn install(
         );
     }
 
+    if region_id == RegionId::En {
+        return crate::commands::yostar::install(
+            game_id,
+            region_id,
+            install_path,
+            install_path_had_entries,
+            reuse_paths,
+            force_copy,
+            overrides,
+            opts,
+        )
+        .await;
+    }
+
     if opts.is_dry_run() {
         opts.dry_run(format!(
             "Would install {:?} region={} {:?} into {}",
@@ -481,8 +495,8 @@ pub async fn install(
                 issue.kind,
                 issue.expected_size,
                 issue.actual_size,
-                issue.expected_md5,
-                issue.actual_md5
+                issue.expected_hash,
+                issue.actual_hash
             ));
         }
         anyhow::bail!(

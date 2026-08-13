@@ -34,9 +34,10 @@ struct Authorization<'a> {
 }
 
 #[derive(Debug, Deserialize)]
-struct ApiEnvelope<T> {
+struct ApiEnvelope {
     code: i64,
-    data: T,
+    #[serde(default)]
+    data: serde_json::Value,
     #[serde(default)]
     message: Option<String>,
     #[serde(default)]
@@ -65,6 +66,7 @@ struct ManifestLocator {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct YostarCdnConfig {
     pub primary_cdn: String,
+    #[serde(default)]
     pub back_up_cdn: String,
 }
 
@@ -167,7 +169,7 @@ impl YostarApiClient {
             });
         }
         let envelope = response
-            .json::<ApiEnvelope<T>>()
+            .json::<ApiEnvelope>()
             .await
             .map_err(|error| Error::Message {
                 context: "YoStar API error: ",
@@ -183,7 +185,10 @@ impl YostarApiClient {
                 detail: format!("{url} returned API code {}: {detail}", envelope.code),
             });
         }
-        Ok(envelope.data)
+        serde_json::from_value(envelope.data).map_err(|error| Error::Message {
+            context: "YoStar API error: ",
+            detail: format!("failed to decode data from {url}: {error}"),
+        })
     }
 
     pub async fn game_config(&self) -> Result<YostarGameConfig> {

@@ -18,6 +18,7 @@ pub mod task_pool;
 #[cfg(test)]
 mod test_checkpoint;
 mod update_plan;
+mod yostar_files;
 mod yostar_metadata;
 
 pub use admin::{ensure_admin, is_running_as_admin, restart_as_admin};
@@ -94,6 +95,10 @@ pub use update_plan::{
     estimate_manifest_delta, patch_group_beats_manifest_sources, resolve_staged_patch_recovery_dir,
     select_archive_package, selected_archive_download, staged_patch_request_version,
     ArchiveDownloadSummary, ArchivePackageKind, ManifestDeltaEstimate,
+};
+pub use yostar_files::{
+    check_yostar_file_metadata_with_pool, cleanup_yostar_obsolete_files,
+    ensure_yostar_files_with_pool, verify_yostar_files_with_pool, YostarCleanupSummary,
 };
 pub use yostar_metadata::{
     build_yostar_metadata, read_yostar_metadata, validate_remote_yostar_manifest,
