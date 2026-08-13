@@ -43,15 +43,15 @@ pub(super) fn describe_update_package_selection(
     }
 }
 
-pub(super) fn should_use_reuse_update(
-    reuse_requested: bool,
+pub(super) fn should_use_manifest_update(
     has_current_manifest: bool,
+    has_target_manifest: bool,
     require_staged_predownload: bool,
     force_full_package: bool,
     staged_patch_requested: bool,
 ) -> bool {
-    reuse_requested
-        && has_current_manifest
+    has_current_manifest
+        && has_target_manifest
         && !require_staged_predownload
         && !force_full_package
         && !staged_patch_requested
@@ -63,8 +63,8 @@ pub(super) fn build_update_dry_run_plan(
     current_version: &str,
     version_info: &GetLatestGameResponse,
     package_kind: UpdatePackageKind,
-    reuse_update_paths: &[PathBuf],
-    fallback_reuse_paths: &[PathBuf],
+    use_manifest_update: bool,
+    reuse_paths: &[PathBuf],
     use_predownload: bool,
     predownload_stage_dir: Option<&Path>,
     skip_verify: bool,
@@ -73,7 +73,7 @@ pub(super) fn build_update_dry_run_plan(
     force_full_package: bool,
 ) -> Vec<String> {
     let mut lines = Vec::new();
-    if reuse_update_paths.is_empty() {
+    if !use_manifest_update {
         lines.push(format!(
             "Would update {} from {} to {} using {:?}",
             install_path.display(),
@@ -124,24 +124,27 @@ pub(super) fn build_update_dry_run_plan(
             current_version,
             version_info.version
         ));
-        lines.push(format!(
-            "Would apply manifest-driven local file reuse from: {}",
-            reuse_update_paths
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+        if reuse_paths.is_empty() {
+            lines.push(
+                "Would materialize missing or mismatched target files from the direct file CDN."
+                    .to_string(),
+            );
+        } else {
+            lines.push(format!(
+                "Would use {} compatible source install(s) as optional per-file reuse providers before CDN fallback.",
+                reuse_paths.len()
+            ));
+        }
         lines.push(
             "Would remove previous-manifest-owned files only when their old size and MD5 still match; modified or unowned files would be kept."
                 .to_string(),
         );
     }
 
-    if !fallback_reuse_paths.is_empty() && reuse_update_paths.is_empty() {
+    if !reuse_paths.is_empty() && !use_manifest_update {
         lines.push(format!(
             "Would keep {} compatible source install(s) as VFS and post-update repair fallbacks.",
-            fallback_reuse_paths.len()
+            reuse_paths.len()
         ));
     }
 

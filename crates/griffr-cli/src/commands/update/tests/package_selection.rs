@@ -78,7 +78,7 @@ fn dry_run_plan_includes_archive_verify_and_vfs_steps() {
         "1.0.13",
         &response,
         UpdatePackageKind::Full,
-        &[],
+        false,
         &[],
         false,
         None,
@@ -107,8 +107,8 @@ fn dry_run_plan_reports_manifest_reuse_without_archive_selection() {
         "1.0.13",
         &response,
         UpdatePackageKind::Patch,
+        true,
         &[PathBuf::from(r"C:\Games\Endfield-Source")],
-        &[],
         false,
         None,
         false,
@@ -119,7 +119,8 @@ fn dry_run_plan_reports_manifest_reuse_without_archive_selection() {
 
     assert!(lines
         .iter()
-        .any(|line| line.contains("manifest-driven local file reuse")));
+        .any(|line| line
+            .contains("compatible source install(s) as optional per-file reuse providers")));
     assert!(!lines.iter().any(|line| line.contains("archive parts")));
     assert!(lines
         .iter()
@@ -134,7 +135,7 @@ fn dry_run_plan_keeps_old_peers_as_archive_fallbacks() {
         "1.0.13",
         &response,
         UpdatePackageKind::Patch,
-        &[],
+        false,
         &[PathBuf::from(r"C:\Games\Endfield-Peer")],
         false,
         None,
@@ -153,15 +154,19 @@ fn dry_run_plan_keeps_old_peers_as_archive_fallbacks() {
 }
 
 #[test]
-fn reuse_update_policy_requires_intent_and_local_ownership_metadata() {
-    assert!(should_use_reuse_update(true, true, false, false, false));
-    assert!(!should_use_reuse_update(false, true, false, false, false));
-    assert!(!should_use_reuse_update(true, false, false, false, false));
+fn manifest_update_policy_requires_local_and_target_manifests() {
+    assert!(should_use_manifest_update(true, true, false, false, false));
+    assert!(!should_use_manifest_update(
+        false, true, false, false, false
+    ));
+    assert!(!should_use_manifest_update(
+        true, false, false, false, false
+    ));
 }
 
 #[test]
-fn archive_and_staged_options_override_reuse_update() {
-    assert!(!should_use_reuse_update(true, true, false, true, false));
-    assert!(!should_use_reuse_update(true, true, true, false, false));
-    assert!(!should_use_reuse_update(true, true, false, false, true));
+fn archive_and_staged_options_override_manifest_update() {
+    assert!(!should_use_manifest_update(true, true, false, true, false));
+    assert!(!should_use_manifest_update(true, true, true, false, false));
+    assert!(!should_use_manifest_update(true, true, false, false, true));
 }

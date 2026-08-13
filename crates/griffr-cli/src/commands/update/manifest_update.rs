@@ -13,11 +13,11 @@ use crate::progress::CountAndByteProgress;
 use crate::ui;
 use crate::GlobalOptions;
 
-pub(super) async fn update_via_reuse(
+pub(super) async fn update_via_manifest(
     local: &LocalInstall,
     version_info: &GetLatestGameResponse,
     content_plan: &ContentPlan,
-    reuse_paths: &[PathBuf],
+    source_roots: &[PathBuf],
     current_manifest: &[GameFileEntry],
     force_copy: bool,
     opts: &GlobalOptions,
@@ -26,7 +26,7 @@ pub(super) async fn update_via_reuse(
     let pkg = version_info
         .pkg
         .as_ref()
-        .context("No full package information available for reuse update")?;
+        .context("No full package information available for manifest update")?;
     let target_manifest = content_plan.core_game_entries();
     let current_manifest = current_manifest
         .iter()
@@ -36,8 +36,8 @@ pub(super) async fn update_via_reuse(
         .cloned()
         .collect::<Vec<_>>();
     opts.verbose(format!(
-        "Applying file reuse from {} compatible source install(s)",
-        reuse_paths.len()
+        "Applying manifest update with {} compatible reuse source(s)",
+        source_roots.len()
     ));
     let early_cleanup = remove_blocking_obsolete_game_files(
         &local.install_path,
@@ -46,7 +46,7 @@ pub(super) async fn update_via_reuse(
         task_pool_runner,
     )
     .await
-    .context("Failed to prepare file/directory transitions for reuse update")?;
+    .context("Failed to prepare file/directory transitions for manifest update")?;
 
     let ensure_progress = CountAndByteProgress::new(
         "update.ensure_files",
@@ -64,7 +64,7 @@ pub(super) async fn update_via_reuse(
         &FileReuseConfig {
             allow_copy_fallback: force_copy,
             dry_run: opts.is_dry_run(),
-            source_roots: reuse_paths.to_vec(),
+            source_roots: source_roots.to_vec(),
         },
         Some(task_pool_runner),
         ensure_session.sender(),

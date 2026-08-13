@@ -36,6 +36,7 @@ pub enum InstallChangeSource {
     FullArchive,
     PatchArchive,
     Reuse,
+    Manifest,
     Repair,
 }
 
@@ -45,6 +46,7 @@ impl std::fmt::Display for InstallChangeSource {
             Self::FullArchive => "full_archive",
             Self::PatchArchive => "patch_archive",
             Self::Reuse => "reuse",
+            Self::Manifest => "manifest",
             Self::Repair => "repair",
         };
         f.write_str(value)

@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use futures_util::{stream, StreamExt, TryStreamExt};
 use griffr_common::api::client::ApiClient;
 use griffr_common::api::types::GetLatestGameResponse;
 use griffr_common::config::InstallTarget;
@@ -19,8 +18,6 @@ use super::*;
 use crate::ui;
 use crate::GlobalOptions;
 use griffr_common::runtime::detect_local_install;
-
-const PEER_INSPECTION_CONCURRENCY: usize = 8;
 
 pub(super) async fn update_internal(
     api_client: &ApiClient,
@@ -207,20 +204,6 @@ pub(super) async fn update_internal(
     }
 
     let reuse_roots = merge_reuse_paths(&explicit_reuse_paths, &peer_reuse_paths);
-    let refreshed_peers = stream::iter(peer_reuse_paths.iter())
-        .map(|source_path| async move {
-            detect_local_install(source_path)
-                .await
-                .with_context(|| format!("Failed to refresh reuse peer {}", source_path.display()))
-        })
-        .buffered(PEER_INSPECTION_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
-    let target_version_peer_roots = refreshed_peers
-        .into_iter()
-        .filter(|source| install_can_source_target(source, &version_info.version))
-        .map(|source| source.install_path)
-        .collect::<Vec<_>>();
 
     ui::print_phase(format!(
         "Updating {} (region={}, channel={}, sub-channel={}) at {}",
@@ -345,54 +328,27 @@ pub(super) async fn update_internal(
     } else {
         select_update_package(&version_info, Some(&package_request_version))?
     };
-    let reuse_update_requested =
-        !explicit_reuse_paths.is_empty() || !target_version_peer_roots.is_empty();
-    let current_reuse_manifest = if reuse_update_requested {
-        match read_local_game_files(&local.install_path).await {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                if opts.output != crate::OutputFormat::Json {
-                    ui::print_warning(format!(
-                        "Local game_files metadata cannot be used for safe reuse cleanup ({error}); falling back to the selected archive update."
-                    ));
-                }
-                None
+    let current_manifest = match read_local_game_files(&local.install_path).await {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            if opts.output != crate::OutputFormat::Json {
+                ui::print_warning(format!(
+                    "Local game_files metadata is unavailable ({error}); falling back to the selected archive update."
+                ));
             }
+            None
         }
-    } else {
-        None
     };
     let staged_patch_requested = use_predownload && package_kind == UpdatePackageKind::Patch;
-    let use_reuse_update = should_use_reuse_update(
-        reuse_update_requested,
-        current_reuse_manifest.is_some(),
+    let use_manifest_update = should_use_manifest_update(
+        current_manifest.is_some(),
+        version_info.pkg.is_some(),
         require_staged_predownload,
         opts.force_full_package,
         staged_patch_requested,
     );
-    let reuse_update_roots = if use_reuse_update {
-        reuse_roots.clone()
-    } else {
-        Vec::new()
-    };
-    if !reuse_roots.is_empty() && !use_reuse_update && opts.output != crate::OutputFormat::Json {
-        let reason = if opts.force_full_package
-            || (force_full_for_mixed_recovery && !reuse_update_requested)
-        {
-            "The full package is required"
-        } else if staged_patch_requested || require_staged_predownload {
-            "Staged predownload archives were requested"
-        } else if reuse_update_requested && current_reuse_manifest.is_none() {
-            "The current launcher game_files manifest is unavailable for safe obsolete-file cleanup"
-        } else {
-            "No automatic peer is already at the target version"
-        };
-        ui::print_info(format!(
-            "{reason}; keep the selected archive update and use reuse sources only for VFS and repair fallbacks."
-        ));
-    }
     let predownload_stage_dir =
-        if !use_reuse_update && use_predownload && package_kind == UpdatePackageKind::Patch {
+        if !use_manifest_update && use_predownload && package_kind == UpdatePackageKind::Patch {
             Some(
                 recovery_stage_dir
                     .or(predownload_dir_override)
@@ -409,10 +365,11 @@ pub(super) async fn update_internal(
             None
         };
 
-    if use_reuse_update {
-        ui::print_info(
-            "Using manifest-driven local file reuse; archive package selection is bypassed.",
-        );
+    if use_manifest_update {
+        ui::print_info(format!(
+            "Using target-manifest update with {} optional reuse source(s); archive package selection is bypassed.",
+            reuse_roots.len()
+        ));
     } else {
         ui::print_info(describe_update_package_selection(
             &version_info,
@@ -420,7 +377,14 @@ pub(super) async fn update_internal(
             package_kind,
             opts.force_full_package || force_full_for_mixed_recovery,
         ));
+        if !reuse_roots.is_empty() && opts.output != crate::OutputFormat::Json {
+            ui::print_info(format!(
+                "Keeping {} compatible source install(s) for VFS and post-update repair fallbacks.",
+                reuse_roots.len()
+            ));
+        }
     }
+
     if require_staged_predownload && package_kind != UpdatePackageKind::Patch {
         anyhow::bail!(
             "Predownload apply requires a live patch update for the installed version; got {:?}",
@@ -447,7 +411,7 @@ pub(super) async fn update_internal(
             &package_request_version,
             &version_info,
             package_kind,
-            &reuse_update_roots,
+            use_manifest_update,
             &reuse_roots,
             use_predownload,
             predownload_stage_dir.as_deref(),
@@ -464,7 +428,7 @@ pub(super) async fn update_internal(
         return Ok(());
     }
 
-    let selected_parts = if use_reuse_update {
+    let selected_parts = if use_manifest_update {
         Vec::new()
     } else {
         match package_kind {
@@ -492,8 +456,8 @@ pub(super) async fn update_internal(
 
     let mut change_state = InstallChangeState::new(
         InstallChangeKind::Update,
-        if use_reuse_update {
-            InstallChangeSource::Reuse
+        if use_manifest_update {
+            InstallChangeSource::Manifest
         } else if package_kind == UpdatePackageKind::Patch {
             InstallChangeSource::PatchArchive
         } else {
@@ -513,7 +477,7 @@ pub(super) async fn update_internal(
         opts.resource_policy.uses_resource_index(),
     );
     let target_manifest = &manifest_snapshot;
-    let expected_archive_files = if !use_reuse_update {
+    let expected_archive_files = if !use_manifest_update {
         archive_expected_files(target_manifest.entries.clone())
     } else {
         archive_expected_files(Vec::new())
@@ -541,7 +505,7 @@ pub(super) async fn update_internal(
     )
     .context("Failed to build the update content plan")?;
 
-    if !use_reuse_update && package_kind == UpdatePackageKind::Patch {
+    if !use_manifest_update && package_kind == UpdatePackageKind::Patch {
         validate_patch_target(&install_target.exe_name, &local.install_path).await?;
     }
 
@@ -560,16 +524,16 @@ pub(super) async fn update_internal(
     }
 
     let mut archive_result = ArchiveRunResult::default();
-    if use_reuse_update {
-        ui::print_phase("Applying update via local file reuse");
-        update_via_reuse(
+    if use_manifest_update {
+        ui::print_phase("Applying target-manifest update");
+        update_via_manifest(
             &local,
             &version_info,
             &content_plan,
-            &reuse_update_roots,
-            current_reuse_manifest
+            &reuse_roots,
+            current_manifest
                 .as_deref()
-                .expect("reuse update requires a local manifest"),
+                .expect("manifest update requires a local manifest"),
             force_copy,
             &opts,
             task_pool_runner,
@@ -577,7 +541,7 @@ pub(super) async fn update_internal(
         .await?;
     }
 
-    if !use_reuse_update {
+    if !use_manifest_update {
         match package_kind {
             UpdatePackageKind::Patch => {
                 let patch = version_info
@@ -649,7 +613,9 @@ pub(super) async fn update_internal(
         }
     }
 
-    let verification_selection = if !use_reuse_update && package_kind == UpdatePackageKind::Full {
+    let verification_selection = if use_manifest_update {
+        IntegritySelection::Paths(Vec::new())
+    } else if package_kind == UpdatePackageKind::Full {
         // Full-package extraction verifies and commits every archive entry as it
         // is written. The manifest closure still checks paths that were absent
         // from the archive or owned by independent file tasks, while cached
@@ -693,17 +659,6 @@ fn merge_reuse_paths(explicit: &[PathBuf], peers: &[PathBuf]) -> Vec<PathBuf> {
         .filter(|path| seen.insert((*path).clone()))
         .cloned()
         .collect()
-}
-
-fn install_can_source_target(
-    source: &griffr_common::runtime::LocalInstall,
-    target_version: &str,
-) -> bool {
-    source.require_config_ini_version().ok() == Some(target_version)
-        || read_install_change(&source.install_path)
-            .ok()
-            .flatten()
-            .is_some_and(|state| state.target_version == target_version)
 }
 
 async fn plan_update_vfs_tasks(
