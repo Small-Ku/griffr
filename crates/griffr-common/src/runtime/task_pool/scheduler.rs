@@ -710,7 +710,7 @@ mod frontier_tests {
         Task::Verify {
             logical_path: path.display().to_string(),
             path,
-            expected_md5: "00".repeat(16),
+            expected_hash: "00".repeat(16).into(),
             expected_size: Some(1),
             on_fail: None,
         }

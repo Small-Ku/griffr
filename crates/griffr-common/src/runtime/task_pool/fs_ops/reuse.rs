@@ -10,8 +10,8 @@ use crate::error::{Error, Result};
 use crate::runtime::task_pool::blocking_buffer::with_blocking_io_buffer;
 use crate::runtime::{
     preallocate_file, ArtifactDigest, ArtifactExpectation, ArtifactProof, ArtifactSource,
+    ContentHash, ContentHasher,
 };
-use md5::Md5;
 
 pub(crate) fn make_partial_download_path(path: &Path) -> Result<PathBuf> {
     let parent = path.parent().ok_or_else(|| Error::Message {
@@ -31,7 +31,7 @@ pub(crate) fn make_partial_download_path(path: &Path) -> Result<PathBuf> {
 pub(crate) fn hash_file_prefix_into_hasher(
     path: &Path,
     prefix_len: u64,
-    hasher: &mut Md5,
+    hasher: &mut ContentHasher,
 ) -> Result<()> {
     if prefix_len == 0 {
         return Ok(());
@@ -57,7 +57,7 @@ pub(crate) fn hash_file_prefix_into_hasher(
                     ),
                 });
             }
-            md5::Digest::update(hasher, &buffer[..n]);
+            hasher.update(&buffer[..n]);
             remaining -= n as u64;
         }
         Ok(())
@@ -252,7 +252,7 @@ pub(crate) async fn copy_verified_file_async(
     src: &Path,
     dest: &Path,
     logical_path: &str,
-    expected_md5: &str,
+    expected_hash: &ContentHash,
     expected_size: u64,
 ) -> Result<ArtifactProof> {
     const COPY_BUFFER_BYTES: usize = 1024 * 1024;
@@ -304,7 +304,7 @@ pub(crate) async fn copy_verified_file_async(
 
     let copy_result = async {
         preallocate_file(&output, &temp, expected_size)?;
-        let mut hasher = <Md5 as md5::Digest>::new();
+        let mut hasher = expected_hash.hasher();
         let mut copied = 0u64;
         let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
         loop {
@@ -319,7 +319,7 @@ pub(crate) async fn copy_verified_file_async(
                 break;
             }
             returned_buffer.truncate(read);
-            md5::Digest::update(&mut hasher, &returned_buffer);
+            hasher.update(&returned_buffer);
             let BufResult(write_result, mut returned_buffer) =
                 output.write_all_at(returned_buffer, copied).await;
             write_result.map_err(|source| Error::IoBetween {
@@ -338,18 +338,18 @@ pub(crate) async fn copy_verified_file_async(
             path: temp.clone(),
             source,
         })?;
-        let actual_md5 = crate::to_hex(&md5::Digest::finalize(hasher));
-        if copied != expected_size || actual_md5 != expected_md5.to_lowercase() {
+        let actual_hash = hasher.finalize();
+        if copied != expected_size || actual_hash != *expected_hash {
             return Err(Error::Message {
                 context: "Integrity error: ",
                 detail: format!(
-                    "Copy verification failed for {} -> {}: expected size/md5 {}/{}, got {}/{}",
+                    "Copy verification failed for {} -> {}: expected size/hash {}/{}, got {}/{}",
                     src.display(),
                     dest.display(),
                     expected_size,
-                    expected_md5,
+                    expected_hash,
                     copied,
-                    actual_md5
+                    actual_hash
                 ),
             });
         }
@@ -358,7 +358,7 @@ pub(crate) async fn copy_verified_file_async(
             // and must not invalidate an otherwise verified byte-for-byte copy.
             let _ = compio::fs::set_permissions(&temp, permissions).await;
         }
-        Ok(ArtifactDigest::new(copied, actual_md5))
+        Ok(ArtifactDigest::new(copied, actual_hash))
     }
     .await;
 
@@ -382,7 +382,8 @@ pub(crate) async fn copy_verified_file_async(
         let _ = compio::fs::remove_file(&temp).await;
         return Err(error);
     }
-    let expectation = ArtifactExpectation::new(logical_path, expected_md5, Some(expected_size));
+    let expectation =
+        ArtifactExpectation::new(logical_path, expected_hash.clone(), Some(expected_size));
     super::artifact::commit_observed_artifact(
         &temp,
         dest,

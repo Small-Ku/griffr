@@ -41,7 +41,7 @@ fn ensure_file_can_relink_verified_target_when_prefer_reuse_enabled() {
     let tasks = vec![Task::ensure_file(FileEnsureTask {
         dest: target.clone(),
         logical_path: "target.bin".to_string(),
-        expected_md5,
+        expected_hash: crate::runtime::ContentHash::from(expected_md5),
         expected_size: 10,
         source_candidates: vec![source.clone()],
         download_url: None,
@@ -75,7 +75,7 @@ fn relink_mode_keeps_valid_destination_when_no_source_can_be_reused() {
     let tasks = vec![Task::ensure_file(FileEnsureTask {
         dest: target,
         logical_path: "target.bin".to_string(),
-        expected_md5,
+        expected_hash: crate::runtime::ContentHash::from(expected_md5),
         expected_size: 16,
         source_candidates: vec![tmp.path().join("missing-source.bin")],
         download_url: Some("http://127.0.0.1:1/must-not-download".to_string()),
@@ -145,7 +145,8 @@ fn do_download(
         do_prepared_download, prepare_download, DownloadPreparation,
     };
 
-    match prepare_download(dest, "test.bin", expected_md5, expected_size)? {
+    let expected_hash = crate::runtime::ContentHash::from(expected_md5);
+    match prepare_download(dest, "test.bin", &expected_hash, expected_size)? {
         DownloadPreparation::Done(proof) => Ok(proof.observed_size()),
         DownloadPreparation::Resume(resume) => {
             let runtime =
@@ -159,7 +160,7 @@ fn do_download(
                     url,
                     dest,
                     "test.bin",
-                    expected_md5,
+                    &expected_hash,
                     expected_size,
                     resume,
                     progress_buffer_bytes,

@@ -199,7 +199,7 @@ async fn ensure_game_files_impl(
                 crate::runtime::task_pool::verify::build_metadata_issue(
                     &install_path.join(&relative),
                     &entry.path,
-                    &entry.md5,
+                    &crate::runtime::ContentHash::from(&entry.md5),
                     entry.size,
                 )
                 .is_none()
@@ -207,7 +207,7 @@ async fn ensure_game_files_impl(
                 crate::runtime::task_pool::verify::build_issue(
                     &install_path.join(&relative),
                     &entry.path,
-                    &entry.md5,
+                    &crate::runtime::ContentHash::from(&entry.md5),
                     Some(entry.size),
                 )
                 .is_none()
@@ -216,7 +216,7 @@ async fn ensure_game_files_impl(
                 crate::runtime::task_pool::verify::build_issue(
                     path,
                     &entry.path,
-                    &entry.md5,
+                    &crate::runtime::ContentHash::from(&entry.md5),
                     Some(entry.size),
                 )
                 .is_none()
@@ -231,7 +231,7 @@ async fn ensure_game_files_impl(
         let spec = FileEnsureTask {
             dest: install_path.join(&relative),
             logical_path: entry.path.clone(),
-            expected_md5: entry.md5.clone(),
+            expected_hash: crate::runtime::ContentHash::from(&entry.md5),
             expected_size: entry.size,
             source_candidates: candidates,
             download_url: Some(build_cdn_file_url(files_url_base, &entry.path)),

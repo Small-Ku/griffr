@@ -67,7 +67,7 @@ async fn async_copy_hashes_while_writing_and_commits_verified_bytes() {
         &source,
         &destination,
         "destination.bin",
-        &expected_md5,
+        &crate::runtime::ContentHash::from(&expected_md5),
         payload.len() as u64,
     )
     .await
@@ -96,7 +96,7 @@ async fn async_copy_mismatch_keeps_existing_destination() {
         &source,
         &destination,
         "destination.bin",
-        "00000000000000000000000000000000",
+        &crate::runtime::ContentHash::Md5("00000000000000000000000000000000".to_string()),
         8,
     )
     .await

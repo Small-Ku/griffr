@@ -36,7 +36,7 @@ fn plan_vfs_file_task(
         Task::ensure_file(FileEnsureTask {
             dest,
             logical_path,
-            expected_md5,
+            expected_hash: crate::runtime::ContentHash::from(&expected_md5),
             expected_size,
             source_candidates,
             download_url: Some(download_url),
@@ -51,7 +51,7 @@ fn plan_vfs_file_task(
         Task::Verify {
             path: dest,
             logical_path,
-            expected_md5,
+            expected_hash: crate::runtime::ContentHash::from(&expected_md5),
             expected_size: Some(expected_size),
             on_fail: None,
         }
@@ -164,7 +164,7 @@ pub async fn plan_vfs_tasks(
             tasks.push(Task::Verify {
                 path: manifest_dest,
                 logical_path: manifest_filename,
-                expected_md5: manifest_commit.expected_md5.clone(),
+                expected_hash: crate::runtime::ContentHash::from(&manifest_commit.expected_md5),
                 expected_size: Some(manifest_commit.encrypted_bytes.len() as u64),
                 on_fail: None,
             });

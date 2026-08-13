@@ -1032,7 +1032,6 @@ mod tests {
     use crate::runtime::task_pool::types::{ArchiveRepairSession, DownloadResumeState};
     use crate::runtime::task_pool::{Task, TransferClass};
     use crate::runtime::{griffr_patch_path, PatchPlan, PATCH_DEFERRED_DIR, PATCH_STAGE_DIR};
-    use md5::{Digest, Md5};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -1054,7 +1053,7 @@ mod tests {
             remaining_source_candidates: Vec::new(),
             dest: PathBuf::from("volume-a/dest.bin"),
             logical_path: "volume-a/dest.bin".to_string(),
-            expected_md5: "00000000000000000000000000000000".to_string(),
+            expected_hash: "00000000000000000000000000000000".to_string().into(),
             expected_size: 1,
             download_url: None,
             allow_copy_fallback: true,
@@ -1072,14 +1071,14 @@ mod tests {
         let first = Task::Verify {
             path: temp.path().join("first.bin"),
             logical_path: "first.bin".to_string(),
-            expected_md5: "00".repeat(16),
+            expected_hash: "00".repeat(16).into(),
             expected_size: Some(1),
             on_fail: None,
         };
         let second = Task::Verify {
             path: temp.path().join("second.bin"),
             logical_path: "second.bin".to_string(),
-            expected_md5: "00".repeat(16),
+            expected_hash: "00".repeat(16).into(),
             expected_size: Some(1),
             on_fail: None,
         };
@@ -1151,7 +1150,7 @@ mod tests {
             url: "https://example.invalid/file.bin".to_string(),
             dest: PathBuf::from("game/file.bin"),
             logical_path: "file.bin".to_string(),
-            expected_md5: "00".repeat(16),
+            expected_hash: "00".repeat(16).into(),
             expected_size: Some(4),
             retry_count: 0,
             transfer_class: TransferClass::General,
@@ -1160,7 +1159,10 @@ mod tests {
                 PathBuf::from("game"),
                 Arc::new(BTreeMap::new()),
             )),
-            resume: Some(DownloadResumeState::new(0, Md5::new())),
+            resume: Some(DownloadResumeState::new(
+                0,
+                crate::runtime::ContentHash::Md5(String::new()).hasher(),
+            )),
         });
 
         assert_eq!(resources.run, RunClass::AsyncIo);
@@ -1199,12 +1201,15 @@ mod tests {
             url: "https://example.invalid/file.bin".to_string(),
             dest: PathBuf::from("game/file.bin"),
             logical_path: "file.bin".to_string(),
-            expected_md5: "00".repeat(16),
+            expected_hash: "00".repeat(16).into(),
             expected_size: Some(10),
             retry_count: 0,
             transfer_class: TransferClass::General,
             archive_repair: None,
-            resume: Some(DownloadResumeState::new(4, Md5::new())),
+            resume: Some(DownloadResumeState::new(
+                4,
+                crate::runtime::ContentHash::Md5(String::new()).hasher(),
+            )),
         });
 
         assert_eq!(resources.storage_reservations.len(), 1);

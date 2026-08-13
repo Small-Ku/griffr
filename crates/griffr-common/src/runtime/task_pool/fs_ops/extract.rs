@@ -6,8 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::blocking_buffer::with_blocking_io_buffer;
 use crate::runtime::task_pool::verify::file_md5;
-use crate::runtime::{preallocate_file, ArtifactDigest};
-use md5::{Digest, Md5};
+use crate::runtime::{preallocate_file, ArtifactDigest, ContentHash};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
@@ -214,9 +213,13 @@ pub(crate) struct CopiedFileDigest {
     pub(crate) md5: String,
 }
 
-/// Copies a file while calculating MD5 from the same buffers written to the
-/// destination. Callers with an expected digest can avoid a second full read.
-pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDigest> {
+/// Copies a file while calculating the selected content hash from the same
+/// buffers written to the destination.
+pub(crate) fn copy_file_with_hash(
+    src: &Path,
+    dest: &Path,
+    expected_hash: &ContentHash,
+) -> Result<ArtifactDigest> {
     let mut input = File::open(src).map_err(|source| Error::IoAt {
         action: "open file",
         path: src.to_path_buf(),
@@ -231,7 +234,7 @@ pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDi
             path: dest.to_path_buf(),
             source,
         })?;
-    let copy_result = (|| -> Result<CopiedFileDigest> {
+    let copy_result = (|| -> Result<ArtifactDigest> {
         let expected_size = input
             .metadata()
             .map_err(|source| Error::IoAt {
@@ -241,7 +244,7 @@ pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDi
             })?
             .len();
         preallocate_file(&output, dest, expected_size)?;
-        let mut hasher = Md5::new();
+        let mut hasher = expected_hash.hasher();
         let mut copied = 0u64;
         with_blocking_io_buffer(|buffer| -> Result<()> {
             loop {
@@ -266,16 +269,26 @@ pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDi
             path: dest.to_path_buf(),
             source,
         })?;
-        Ok(CopiedFileDigest {
-            bytes: copied,
-            md5: crate::to_hex(&hasher.finalize()),
-        })
+        Ok(ArtifactDigest::new(copied, hasher.finalize()))
     })();
     if copy_result.is_err() {
         drop(output);
         let _ = std::fs::remove_file(dest);
     }
     copy_result
+}
+
+/// MD5-specific compatibility wrapper for patch/archive code whose wire schema
+/// is defined in terms of MD5.
+pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDigest> {
+    let digest = copy_file_with_hash(src, dest, &ContentHash::Md5(String::new()))?;
+    let ContentHash::Md5(md5) = digest.hash else {
+        unreachable!("MD5 copy selected the MD5 hasher");
+    };
+    Ok(CopiedFileDigest {
+        bytes: digest.bytes,
+        md5,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,7 +348,11 @@ fn move_path_replace_cross_volume_inner(
     }
     let temp = super::reuse::make_temp_write_path(dest)?;
     let _ = std::fs::remove_file(&temp);
-    let copied = match copy_file_with_md5(src, &temp) {
+    let fallback_hash = ContentHash::Md5(String::new());
+    let hash_template = expected
+        .map(|digest| &digest.hash)
+        .unwrap_or(&fallback_hash);
+    let copied = match copy_file_with_hash(src, &temp, hash_template) {
         Ok(copied) => copied,
         Err(error) => {
             let _ = std::fs::remove_file(&temp);
@@ -343,9 +360,9 @@ fn move_path_replace_cross_volume_inner(
         }
     };
     let digest_matches = match expected {
-        Some(expected) => copied.bytes == expected.bytes && copied.md5 == expected.md5,
+        Some(expected) => copied.bytes == expected.bytes && copied.hash == expected.hash,
         None => match file_md5(&temp) {
-            Ok(temp_md5) => copied.md5 == temp_md5,
+            Ok(temp_md5) => copied.hash == ContentHash::Md5(temp_md5),
             Err(error) => {
                 let _ = std::fs::remove_file(&temp);
                 return Err(error);

@@ -37,7 +37,7 @@ pub enum IntegritySelection {
 }
 
 fn deduplicate_target_tasks(tasks: Vec<Task>) -> Result<Vec<Task>> {
-    let mut targets = HashMap::<String, (String, Option<u64>)>::default();
+    let mut targets = HashMap::<String, (crate::runtime::ContentHash, Option<u64>)>::default();
     let mut unique = Vec::with_capacity(tasks.len());
     for task in tasks {
         let Some(file) = task.final_file() else {
@@ -45,10 +45,7 @@ fn deduplicate_target_tasks(tasks: Vec<Task>) -> Result<Vec<Task>> {
             continue;
         };
         let target = crate::runtime::artifact::physical_path_key(file.target());
-        let expected = (
-            file.expected_md5().to_ascii_lowercase(),
-            file.expected_size(),
-        );
+        let expected = (file.expected_hash().clone(), file.expected_size());
         if let Some(previous) = targets.get(&target) {
             if previous != &expected {
                 return Err(Error::Message {
@@ -79,13 +76,14 @@ fn remove_already_verified_entries(
     if proofs.is_empty() {
         return;
     }
-    let mut current_proofs = HashMap::<String, Vec<(&str, Option<u64>)>>::default();
+    let mut current_proofs =
+        HashMap::<String, Vec<(&crate::runtime::ContentHash, Option<u64>)>>::default();
     current_proofs.reserve(proofs.len());
     for proof in proofs.iter().filter(|proof| proof.is_current()) {
         current_proofs
             .entry(crate::runtime::artifact::physical_path_key(proof.path()))
             .or_default()
-            .push((proof.expected_md5(), proof.expected_size()));
+            .push((proof.expected_hash(), proof.expected_size()));
     }
     if current_proofs.is_empty() {
         return;
@@ -93,11 +91,11 @@ fn remove_already_verified_entries(
 
     entries.retain(|entry| {
         let key = crate::runtime::artifact::physical_path_key(&install_root.join(&entry.path));
-        let expected_md5 = entry.md5.to_ascii_lowercase();
+        let expected_hash = crate::runtime::ContentHash::from(&entry.md5);
         !current_proofs.get(&key).is_some_and(|expectations| {
             expectations
                 .iter()
-                .any(|(md5, size)| *md5 == expected_md5.as_str() && *size == Some(entry.size))
+                .any(|(hash, size)| *hash == &expected_hash && *size == Some(entry.size))
         })
     });
 }
@@ -250,7 +248,7 @@ pub async fn run_integrity_pool(
                 Task::ensure_file(FileEnsureTask {
                     dest: install_path.join(&entry.path),
                     logical_path: entry.path.clone(),
-                    expected_md5: entry.md5.clone(),
+                    expected_hash: crate::runtime::ContentHash::from(&entry.md5),
                     expected_size: entry.size,
                     source_candidates,
                     download_url: files_url_base
@@ -267,7 +265,7 @@ pub async fn run_integrity_pool(
                 Task::Verify {
                     path: install_path.join(&entry.path),
                     logical_path: entry.path.clone(),
-                    expected_md5: entry.md5.clone(),
+                    expected_hash: crate::runtime::ContentHash::from(&entry.md5),
                     expected_size: Some(entry.size),
                     on_fail: None,
                 }
@@ -377,7 +375,7 @@ mod tests {
         Task::Verify {
             path: PathBuf::from(path),
             logical_path: path.replace('\\', "/"),
-            expected_md5: md5.to_string(),
+            expected_hash: crate::runtime::ContentHash::Md5(md5.to_string()),
             expected_size: Some(size),
             on_fail: None,
         }

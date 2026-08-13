@@ -117,7 +117,7 @@ fn direct_fallback(
         url,
         dest: repair.dest,
         logical_path: repair.logical_path,
-        expected_md5: repair.expected_md5,
+        expected_hash: repair.expected_hash,
         expected_size: Some(repair.expected_size),
         retry_count: repair.retry_count,
         transfer_class: repair.transfer_class,
@@ -192,7 +192,7 @@ pub(crate) fn run_extract_archive_repair_file(
     let extractor = MultiVolumeExtractor::from_layout(repair.work.layout.clone());
     let expectation = ArtifactExpectation::new(
         repair.logical_path.clone(),
-        repair.expected_md5.clone(),
+        repair.expected_hash.clone(),
         Some(repair.expected_size),
     );
     let mut committed_proof = None;

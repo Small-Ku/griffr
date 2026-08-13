@@ -323,7 +323,7 @@ async fn remove_verified_obsolete_game_files(
             |(entry, relative)| crate::runtime::task_pool::Task::Verify {
                 path: install_path.join(relative),
                 logical_path: entry.path.clone(),
-                expected_md5: entry.md5.clone(),
+                expected_hash: crate::runtime::ContentHash::from(&entry.md5),
                 expected_size: Some(entry.size),
                 on_fail: None,
             },

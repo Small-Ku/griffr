@@ -4,6 +4,7 @@ mod compat_fs;
 mod content_plan;
 mod file_allocation;
 pub mod files;
+mod hash;
 mod install_change;
 mod integrity;
 pub mod issues;
@@ -45,6 +46,8 @@ pub use files::vfs::{
     ResourceIdentity, ResourceManifestIdentity, VfsFilePlanOptions, VfsManifestCommit, VfsTaskPlan,
     VfsUpdateResult,
 };
+pub use hash::ContentHash;
+pub(crate) use hash::ContentHasher;
 pub use install_change::{
     ensure_install_ready, finish_install_change, read_install_change, start_install_change,
     InstallChangeKind, InstallChangeSource, InstallChangeStart, InstallChangeState,

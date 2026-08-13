@@ -2,7 +2,7 @@ use crate::api::types::GameFileEntry;
 use crate::download::extractor::{ArchiveIndex, MultiVolumeLayout};
 use crate::error::{Error, Result};
 use crate::runtime::{
-    dir_size_sync, PatchApplyOptions, PatchArtifactProbe, PatchCheckReport, PatchPlan,
+    dir_size_sync, ContentHash, PatchApplyOptions, PatchArtifactProbe, PatchCheckReport, PatchPlan,
     PatchProbePlan, PlannedPatchEntry,
 };
 use std::collections::BTreeMap;
@@ -107,7 +107,7 @@ impl PatchCheckWork {
         let _ = self.verification_cache.build_issue(
             &probe.path,
             &probe.logical_path,
-            &probe.expected_md5,
+            &ContentHash::from(&probe.expected_md5),
             Some(probe.expected_size),
         );
         Ok(())
@@ -281,7 +281,7 @@ impl ArchiveRepairSession {
         &self,
         dest: PathBuf,
         logical_path: String,
-        expected_md5: String,
+        expected_hash: ContentHash,
         expected_size: u64,
         direct_bytes: u64,
         download_url: Option<String>,
@@ -310,7 +310,7 @@ impl ArchiveRepairSession {
                     source_bytes,
                     dest: dest.clone(),
                     logical_path: logical_path.clone(),
-                    expected_md5: expected_md5.clone(),
+                    expected_hash: expected_hash.clone(),
                     expected_size,
                     download_url: download_url.clone(),
                     retry_count,
@@ -367,7 +367,7 @@ pub struct ArchiveFileRepairTask {
     pub(crate) source_bytes: u64,
     pub(crate) dest: PathBuf,
     pub(crate) logical_path: String,
-    pub(crate) expected_md5: String,
+    pub(crate) expected_hash: ContentHash,
     pub(crate) expected_size: u64,
     pub(crate) download_url: Option<String>,
     pub(crate) retry_count: u32,

@@ -18,12 +18,12 @@ fn digest_error(
     Error::Message {
         context,
         detail: format!(
-            "Artifact {} failed verification: expected size/md5 {:?}/{}, got {}/{}",
+            "Artifact {} failed verification: expected size/hash {:?}/{}, got {}/{}",
             expectation.logical_path(),
             expectation.expected_size(),
-            expectation.expected_md5(),
+            expectation.expected_hash(),
             digest.bytes,
-            digest.md5
+            digest.hash
         ),
     }
 }
@@ -36,7 +36,7 @@ pub(crate) fn verify_artifact(
     if let Some(issue) = crate::runtime::task_pool::verify::build_issue(
         path,
         expectation.logical_path(),
-        expectation.expected_md5(),
+        expectation.expected_hash(),
         expectation.expected_size(),
     ) {
         return Err(Error::Message {
@@ -106,7 +106,10 @@ pub(crate) fn commit_verified_artifact(
     source: ArtifactSource,
 ) -> Result<ArtifactProof> {
     let verified = verify_artifact(source_path, expectation, source)?;
-    let digest = ArtifactDigest::new(verified.observed_size(), expectation.expected_md5());
+    let digest = ArtifactDigest::new(
+        verified.observed_size(),
+        expectation.expected_hash().clone(),
+    );
     match move_path_replace_cross_volume_observed(source_path, destination, &digest)? {
         MovePathReplaceOutcome::Renamed => verify_artifact(destination, expectation, source),
         MovePathReplaceOutcome::Copied => {
@@ -193,8 +196,12 @@ mod tests {
         std::fs::write(&source, payload).unwrap();
         std::fs::write(&destination, b"old-data").unwrap();
         let md5 = crate::to_hex(&Md5::digest(payload));
-        let expectation = ArtifactExpectation::new("file.bin", &md5, Some(payload.len() as u64));
-        let digest = ArtifactDigest::new(payload.len() as u64, md5.as_str());
+        let expectation =
+            ArtifactExpectation::md5("file.bin", &md5, Some(payload.len() as u64)).unwrap();
+        let digest = ArtifactDigest::new(
+            payload.len() as u64,
+            crate::runtime::ContentHash::md5(&md5).unwrap(),
+        );
 
         let proof = commit_observed_artifact(
             &source,
@@ -219,8 +226,12 @@ mod tests {
         std::fs::write(&source, b"new-data").unwrap();
         std::fs::write(&destination, b"old-data").unwrap();
         let expectation =
-            ArtifactExpectation::new("file.bin", "00000000000000000000000000000000", Some(8));
-        let digest = ArtifactDigest::new(8, crate::to_hex(&Md5::digest(b"new-data")));
+            ArtifactExpectation::md5("file.bin", "00000000000000000000000000000000", Some(8))
+                .unwrap();
+        let digest = ArtifactDigest::new(
+            8,
+            crate::runtime::ContentHash::md5(crate::to_hex(&Md5::digest(b"new-data"))).unwrap(),
+        );
 
         let error = commit_observed_artifact(
             &source,

@@ -4,6 +4,7 @@ use super::{
     TaskOutcome, TaskPoolConfig, TransferClass, WorkerEvent,
 };
 use crate::download::extractor::MultiVolumeLayout;
+use crate::runtime::ContentHash;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,7 +38,7 @@ fn normal_file_ensure_starts_with_cpu_verification() {
     let task = Task::ensure_file(FileEnsureTask {
         dest: PathBuf::from("game/file.bin"),
         logical_path: "file.bin".to_string(),
-        expected_md5: "00".repeat(16),
+        expected_hash: "00".repeat(16).into(),
         expected_size: 4,
         source_candidates: vec![PathBuf::from("reuse/file.bin")],
         download_url: Some("https://example.invalid/file.bin".to_string()),
@@ -63,7 +64,7 @@ fn copy_only_file_ensure_preserves_copy_policy_in_repair_task() {
     let task = Task::ensure_file(FileEnsureTask {
         dest: PathBuf::from("game/file.bin"),
         logical_path: "file.bin".to_string(),
-        expected_md5: "00".repeat(16),
+        expected_hash: "00".repeat(16).into(),
         expected_size: 4,
         source_candidates: vec![PathBuf::from("reuse/file.bin")],
         download_url: None,
@@ -90,7 +91,7 @@ fn final_file_view_normalizes_static_file_task_fields() {
         url: "https://example.invalid/file.bin".to_string(),
         dest: PathBuf::from("game/Data/file.bin"),
         logical_path: "Data/file.bin".to_string(),
-        expected_md5: "00".repeat(16),
+        expected_hash: "00".repeat(16).into(),
         expected_size: Some(4),
         retry_count: 0,
         transfer_class: TransferClass::General,
@@ -103,7 +104,10 @@ fn final_file_view_normalizes_static_file_task_fields() {
         .expect("download task must expose final file");
     assert_eq!(file.target(), std::path::Path::new("game/Data/file.bin"));
     assert_eq!(file.logical_path(), "Data/file.bin");
-    assert_eq!(file.expected_md5(), "00000000000000000000000000000000");
+    assert_eq!(
+        file.expected_hash(),
+        &ContentHash::Md5("00000000000000000000000000000000".to_string())
+    );
     assert_eq!(file.expected_size(), Some(4));
     assert_eq!(file.expectation().logical_path(), "Data/file.bin");
 }
@@ -113,7 +117,7 @@ fn explicit_relink_skips_target_verification() {
     let task = Task::ensure_file(FileEnsureTask {
         dest: PathBuf::from("game/file.bin"),
         logical_path: "file.bin".to_string(),
-        expected_md5: "00".repeat(16),
+        expected_hash: "00".repeat(16).into(),
         expected_size: 4,
         source_candidates: vec![PathBuf::from("reuse/file.bin")],
         download_url: None,
@@ -150,7 +154,7 @@ fn archive_repair_reuses_download_preparation_before_network_admission() {
     let tasks = destination_or_repair_tasks(
         PathBuf::from("game/file.bin"),
         "file.bin".to_string(),
-        "00".repeat(16),
+        ContentHash::Md5("00".repeat(16)),
         4,
         Some("https://example.invalid/file.bin".to_string()),
         false,
@@ -177,7 +181,7 @@ fn relink_verifies_destination_before_repair_preparation() {
     let tasks = destination_or_repair_tasks(
         PathBuf::from("game/file.bin"),
         "file.bin".to_string(),
-        "00".repeat(16),
+        ContentHash::Md5("00".repeat(16)),
         4,
         Some("https://example.invalid/file.bin".to_string()),
         true,
@@ -248,7 +252,7 @@ fn reuse_group_claims_first_verified_source_immediately() {
         vec![source.clone(), other],
         PathBuf::from("game/file.bin"),
         "file.bin".to_string(),
-        "00".repeat(16),
+        ContentHash::Md5("00".repeat(16)),
         4,
         None,
         true,
@@ -276,7 +280,7 @@ fn reuse_group_defers_cross_volume_copy_until_hardlink_probes_fail() {
         vec![copy_source],
         PathBuf::from("game/file.bin"),
         "file.bin".to_string(),
-        "00".repeat(16),
+        ContentHash::Md5("00".repeat(16)),
         4,
         None,
         true,

@@ -307,7 +307,7 @@ fn res_index_to_ensure_tasks(
         tasks.push(Task::ensure_file(FileEnsureTask {
             dest: persistent_root.join(&relative),
             logical_path: file.name.clone(),
-            expected_md5,
+            expected_hash: crate::runtime::ContentHash::from(&expected_md5),
             expected_size: file.size,
             source_candidates: source_candidates
                 .iter()

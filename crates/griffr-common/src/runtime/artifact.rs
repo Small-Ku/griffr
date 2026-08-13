@@ -3,11 +3,13 @@ use std::time::UNIX_EPOCH;
 
 use crate::api::types::GameFileEntry;
 
+use super::ContentHash;
+
 /// Expected final content for one path in the install tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactExpectation {
     logical_path: String,
-    expected_md5: String,
+    expected_hash: ContentHash,
     expected_size: Option<u64>,
 }
 
@@ -38,33 +40,58 @@ impl ArtifactClaim {
     }
 
     pub fn expects_game_file(&self, entry: &GameFileEntry) -> bool {
-        self.expectation.expected_md5 == entry.md5.to_ascii_lowercase()
+        self.expectation.expected_hash
+            == ContentHash::from(&entry.md5)
             && self.expectation.expected_size == Some(entry.size)
     }
 }
 impl ArtifactExpectation {
     pub fn new(
         logical_path: impl AsRef<str>,
-        expected_md5: impl AsRef<str>,
+        expected_hash: impl Into<ContentHash>,
         expected_size: Option<u64>,
     ) -> Self {
         Self {
             logical_path: logical_path.as_ref().replace('\\', "/"),
-            expected_md5: expected_md5.as_ref().to_ascii_lowercase(),
+            expected_hash: expected_hash.into(),
             expected_size,
         }
     }
 
+    pub fn md5(
+        logical_path: impl AsRef<str>,
+        expected_md5: impl AsRef<str>,
+        expected_size: Option<u64>,
+    ) -> crate::error::Result<Self> {
+        Ok(Self::new(
+            logical_path,
+            ContentHash::md5(expected_md5)?,
+            expected_size,
+        ))
+    }
+
     pub fn from_game_file(entry: &GameFileEntry) -> Self {
-        Self::new(&entry.path, &entry.md5, Some(entry.size))
+        Self::new(
+            &entry.path,
+            ContentHash::from(&entry.md5),
+            Some(entry.size),
+        )
     }
 
     pub fn logical_path(&self) -> &str {
         &self.logical_path
     }
 
+    pub fn expected_hash(&self) -> &ContentHash {
+        &self.expected_hash
+    }
+
+    /// Compatibility accessor for Hypergryph/Gryphline manifest-only code.
     pub fn expected_md5(&self) -> &str {
-        &self.expected_md5
+        match &self.expected_hash {
+            ContentHash::Md5(value) => value,
+            ContentHash::Crc64Xz(_) => panic!("expected MD5 artifact, found CRC64-XZ"),
+        }
     }
 
     pub fn expected_size(&self) -> Option<u64> {
@@ -74,21 +101,21 @@ impl ArtifactExpectation {
     pub(crate) fn accepts_digest(&self, digest: &ArtifactDigest) -> bool {
         self.expected_size
             .is_none_or(|expected| expected == digest.bytes)
-            && self.expected_md5 == digest.md5
+            && self.expected_hash == digest.hash
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ArtifactDigest {
     pub(crate) bytes: u64,
-    pub(crate) md5: String,
+    pub(crate) hash: ContentHash,
 }
 
 impl ArtifactDigest {
-    pub(crate) fn new(bytes: u64, md5: impl Into<String>) -> Self {
+    pub(crate) fn new(bytes: u64, hash: impl Into<ContentHash>) -> Self {
         Self {
             bytes,
-            md5: md5.into().to_ascii_lowercase(),
+            hash: hash.into(),
         }
     }
 }
@@ -166,6 +193,10 @@ impl ArtifactProof {
         self.expectation.logical_path()
     }
 
+    pub fn expected_hash(&self) -> &ContentHash {
+        self.expectation.expected_hash()
+    }
+
     pub fn expected_md5(&self) -> &str {
         self.expectation.expected_md5()
     }
@@ -185,7 +216,8 @@ impl ArtifactProof {
     pub fn matches_game_file(&self, install_root: &Path, entry: &GameFileEntry) -> bool {
         let manifest_path = install_root.join(&entry.path);
         paths_resolve_to_same_file(&self.path, &manifest_path)
-            && self.expectation.expected_md5 == entry.md5.to_ascii_lowercase()
+            && self.expectation.expected_hash
+                == ContentHash::from(&entry.md5)
             && self.expectation.expected_size == Some(entry.size)
     }
 
@@ -288,7 +320,7 @@ mod tests {
         std::fs::write(&path, b"old").unwrap();
         let proof = ArtifactProof::from_verified_path(
             &path,
-            ArtifactExpectation::new("file.bin", "unused", Some(3)),
+            ArtifactExpectation::new("file.bin", ContentHash::Md5("unused".to_string()), Some(3)),
             ArtifactSource::Archive,
         )
         .unwrap();

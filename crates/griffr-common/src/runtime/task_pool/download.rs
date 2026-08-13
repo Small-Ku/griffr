@@ -7,8 +7,8 @@ use crate::api::protocol::{byte_range_from, RANGE_HEADER, USER_AGENT_HEADER};
 use crate::error::{Error, Result};
 use crate::runtime::{
     preallocate_file, ArtifactDigest, ArtifactExpectation, ArtifactProof, ArtifactSource,
+    ContentHash,
 };
-use md5::{Digest, Md5};
 use tracing::debug;
 
 use super::types::DownloadResumeState;
@@ -62,12 +62,12 @@ pub struct StreamingDownloadReport {
     pub elapsed: Duration,
 }
 
-/// Inspects a partial download and computes the incremental MD5 prefix in a
+/// Inspects a partial download and computes the incremental content-hash prefix in a
 /// CPU admission before the async transfer task is submitted to Dispatcher.
 pub(crate) fn prepare_download(
     dest: &Path,
     logical_path: &str,
-    expected_md5: &str,
+    expected_hash: &ContentHash,
     expected_size: Option<u64>,
 ) -> Result<DownloadPreparation> {
     let part_path = super::fs_ops::make_partial_download_path(dest)?;
@@ -76,7 +76,7 @@ pub(crate) fn prepare_download(
         Err(source) if source.kind() == ErrorKind::NotFound => {
             return Ok(DownloadPreparation::Resume(DownloadResumeState::new(
                 0,
-                Md5::new(),
+                expected_hash.hasher(),
             )));
         }
         Err(source) => {
@@ -107,15 +107,18 @@ pub(crate) fn prepare_download(
             })?;
             return Ok(DownloadPreparation::Resume(DownloadResumeState::new(
                 0,
-                Md5::new(),
+                expected_hash.hasher(),
             )));
         }
         if partial_len == expected_size {
-            let actual_md5 = super::verify::file_md5(&part_path)?;
-            if actual_md5.eq_ignore_ascii_case(expected_md5) {
-                let expectation =
-                    ArtifactExpectation::new(logical_path, expected_md5, Some(expected_size));
-                let digest = ArtifactDigest::new(partial_len, actual_md5);
+            let actual_hash = super::verify::file_hash(&part_path, expected_hash)?;
+            if actual_hash == *expected_hash {
+                let expectation = ArtifactExpectation::new(
+                    logical_path,
+                    expected_hash.clone(),
+                    Some(expected_size),
+                );
+                let digest = ArtifactDigest::new(partial_len, actual_hash);
                 let proof = super::fs_ops::commit_observed_artifact(
                     &part_path,
                     dest,
@@ -132,12 +135,12 @@ pub(crate) fn prepare_download(
             })?;
             return Ok(DownloadPreparation::Resume(DownloadResumeState::new(
                 0,
-                Md5::new(),
+                expected_hash.hasher(),
             )));
         }
     }
 
-    let mut hasher = Md5::new();
+    let mut hasher = expected_hash.hasher();
     super::fs_ops::hash_file_prefix_into_hasher(&part_path, partial_len, &mut hasher)?;
     Ok(DownloadPreparation::Resume(DownloadResumeState::new(
         partial_len,
@@ -150,7 +153,7 @@ pub(crate) async fn do_prepared_download(
     url: &str,
     dest: &Path,
     logical_path: &str,
-    expected_md5: &str,
+    expected_hash: &ContentHash,
     expected_size: Option<u64>,
     resume: DownloadResumeState,
     progress_buffer_bytes: usize,
@@ -163,7 +166,7 @@ pub(crate) async fn do_prepared_download(
     let url_owned = url.to_string();
     let user_agent_owned = user_agent.to_string();
     let part_path_for_write = part_path.clone();
-    let (written, actual_md5) = {
+    let (written, actual_hash) = {
         thread_local! {
             static CLIENT: cyper::Client = cyper::Client::new().expect("Failed to create thread-local HTTP client");
         }
@@ -282,7 +285,7 @@ pub(crate) async fn do_prepared_download(
         let mut hasher = if resume_effective {
             prepared_hasher
         } else {
-            Md5::new()
+            expected_hash.hasher()
         };
         let start_offset = if resume_effective { resume_offset } else { 0 };
         let mut last_reported_bytes = start_offset;
@@ -296,7 +299,7 @@ pub(crate) async fn do_prepared_download(
             &url_owned,
             start_offset,
             body_timeout,
-            |chunk| md5::Digest::update(&mut hasher, chunk),
+            |chunk| hasher.update(chunk),
             |written| {
                 if let Some(callback) = progress.as_ref() {
                     let byte_threshold_reached =
@@ -336,22 +339,24 @@ pub(crate) async fn do_prepared_download(
             }
         }
 
-        let actual_md5 = crate::to_hex(&md5::Digest::finalize(hasher));
-        Ok::<(u64, String), Error>((total_written, actual_md5))
+        let actual_hash = hasher.finalize();
+        Ok::<(u64, ContentHash), Error>((total_written, actual_hash))
     }?;
 
-    if !actual_md5.eq_ignore_ascii_case(expected_md5) {
+    if actual_hash != *expected_hash {
         return Err(Error::Message {
             context: "Download error: ",
             detail: format!(
-                "MD5 mismatch: expected {}, got {}",
-                expected_md5, actual_md5
+                "{} mismatch: expected {}, got {}",
+                expected_hash.algorithm_name(),
+                expected_hash,
+                actual_hash
             ),
         });
     }
 
-    let expectation = ArtifactExpectation::new(logical_path, expected_md5, expected_size);
-    let digest = ArtifactDigest::new(written, actual_md5);
+    let expectation = ArtifactExpectation::new(logical_path, expected_hash.clone(), expected_size);
+    let digest = ArtifactDigest::new(written, actual_hash);
     super::fs_ops::commit_observed_artifact(
         &part_path,
         dest,
@@ -393,9 +398,9 @@ pub async fn download_and_discard(
         url,
         &destination,
         logical_path,
-        expected_md5,
+        &ContentHash::md5(expected_md5)?,
         Some(expected_size),
-        DownloadResumeState::new(0, Md5::new()),
+        DownloadResumeState::new(0, ContentHash::md5(expected_md5)?.hasher()),
         progress_buffer_bytes,
         None::<fn(DownloadProgress)>,
     )

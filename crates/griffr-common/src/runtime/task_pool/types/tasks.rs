@@ -1,8 +1,7 @@
 use crate::api::types::GameFileEntry;
 use crate::download::extractor::{ArchiveDirectory, ArchiveIndex, ArchiveRangeRequest};
 use crate::error::{Error, Result};
-use crate::runtime::{ArtifactExpectation, PatchApplyOptions};
-use md5::Md5;
+use crate::runtime::{ArtifactExpectation, ContentHash, ContentHasher, PatchApplyOptions};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -28,17 +27,17 @@ pub enum ArchiveRangePriority {
     RetentionBackground,
 }
 
-/// Prepared incremental-MD5 state passed from a CPU preparation task to the
+/// Prepared incremental content-hash state passed from a CPU preparation task to the
 /// network transfer task. The hasher is intentionally opaque to callers.
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct DownloadResumeState {
     pub(crate) offset: u64,
-    hasher: Arc<Mutex<Option<Md5>>>,
+    hasher: Arc<Mutex<Option<ContentHasher>>>,
 }
 
 impl DownloadResumeState {
-    pub(crate) fn new(offset: u64, hasher: Md5) -> Self {
+    pub(crate) fn new(offset: u64, hasher: ContentHasher) -> Self {
         Self {
             offset,
             hasher: Arc::new(Mutex::new(Some(hasher))),
@@ -49,7 +48,7 @@ impl DownloadResumeState {
         expected_size.saturating_sub(self.offset)
     }
 
-    pub(crate) fn take_hasher(self) -> Md5 {
+    pub(crate) fn take_hasher(self) -> ContentHasher {
         let mut hasher = self.hasher.lock().unwrap();
         hasher
             .take()
@@ -73,7 +72,7 @@ impl std::fmt::Debug for DownloadResumeState {
 pub struct FinalFileRef<'a> {
     target: &'a Path,
     logical_path: &'a str,
-    expected_md5: &'a str,
+    expected_hash: &'a ContentHash,
     expected_size: Option<u64>,
 }
 
@@ -86,8 +85,8 @@ impl<'a> FinalFileRef<'a> {
         self.logical_path
     }
 
-    pub fn expected_md5(self) -> &'a str {
-        self.expected_md5
+    pub fn expected_hash(self) -> &'a ContentHash {
+        self.expected_hash
     }
 
     pub fn expected_size(self) -> Option<u64> {
@@ -95,7 +94,11 @@ impl<'a> FinalFileRef<'a> {
     }
 
     pub fn expectation(self) -> ArtifactExpectation {
-        ArtifactExpectation::new(self.logical_path, self.expected_md5, self.expected_size)
+        ArtifactExpectation::new(
+            self.logical_path,
+            self.expected_hash.clone(),
+            self.expected_size,
+        )
     }
 }
 
@@ -103,7 +106,7 @@ impl<'a> FinalFileRef<'a> {
 pub struct FileEnsureTask {
     pub dest: PathBuf,
     pub logical_path: String,
-    pub expected_md5: String,
+    pub expected_hash: ContentHash,
     pub expected_size: u64,
     pub source_candidates: Vec<PathBuf>,
     pub download_url: Option<String>,
@@ -125,7 +128,7 @@ pub struct ReuseCandidateGroup {
     all_sources: Vec<PathBuf>,
     dest: PathBuf,
     logical_path: String,
-    expected_md5: String,
+    expected_hash: ContentHash,
     expected_size: u64,
     download_url: Option<String>,
     allow_copy_fallback: bool,
@@ -143,7 +146,7 @@ impl ReuseCandidateGroup {
         all_sources: Vec<PathBuf>,
         dest: PathBuf,
         logical_path: String,
-        expected_md5: String,
+        expected_hash: ContentHash,
         expected_size: u64,
         download_url: Option<String>,
         allow_copy_fallback: bool,
@@ -161,7 +164,7 @@ impl ReuseCandidateGroup {
             all_sources,
             dest,
             logical_path,
-            expected_md5,
+            expected_hash,
             expected_size,
             download_url,
             allow_copy_fallback,
@@ -201,7 +204,7 @@ impl ReuseCandidateGroup {
                 remaining_source_candidates,
                 dest: self.dest.clone(),
                 logical_path: self.logical_path.clone(),
-                expected_md5: self.expected_md5.clone(),
+                expected_hash: self.expected_hash.clone(),
                 expected_size: self.expected_size,
                 download_url: self.download_url.clone(),
                 allow_copy_fallback: self.allow_copy_fallback,
@@ -228,7 +231,7 @@ impl ReuseCandidateGroup {
                 self.all_sources.clone(),
                 self.dest.clone(),
                 self.logical_path.clone(),
-                self.expected_md5.clone(),
+                self.expected_hash.clone(),
                 self.expected_size,
                 self.download_url.clone(),
                 self.allow_copy_fallback,
@@ -243,7 +246,7 @@ impl ReuseCandidateGroup {
                     copy_only: true,
                     candidates,
                     logical_path: self.logical_path.clone(),
-                    expected_md5: self.expected_md5.clone(),
+                    expected_hash: self.expected_hash.clone(),
                     expected_size: self.expected_size,
                     group: group.clone(),
                 })
@@ -253,7 +256,7 @@ impl ReuseCandidateGroup {
         destination_or_repair_tasks(
             self.dest.clone(),
             self.logical_path.clone(),
-            self.expected_md5.clone(),
+            self.expected_hash.clone(),
             self.expected_size,
             self.download_url.clone(),
             self.verify_destination_fallback,
@@ -268,7 +271,7 @@ impl ReuseCandidateGroup {
 pub(crate) fn destination_or_repair_tasks(
     dest: PathBuf,
     logical_path: String,
-    expected_md5: String,
+    expected_hash: ContentHash,
     expected_size: u64,
     download_url: Option<String>,
     verify_destination_fallback: bool,
@@ -280,7 +283,7 @@ pub(crate) fn destination_or_repair_tasks(
         url,
         dest: dest.clone(),
         logical_path: logical_path.clone(),
-        expected_md5: expected_md5.clone(),
+        expected_hash: expected_hash.clone(),
         expected_size: Some(expected_size),
         retry_count,
         transfer_class,
@@ -291,7 +294,7 @@ pub(crate) fn destination_or_repair_tasks(
         return Ok(vec![Task::Verify {
             path: dest,
             logical_path,
-            expected_md5,
+            expected_hash,
             expected_size: Some(expected_size),
             on_fail: repair.map(Box::new),
         }]);
@@ -361,7 +364,7 @@ pub enum Task {
         url: String,
         dest: PathBuf,
         logical_path: String,
-        expected_md5: String,
+        expected_hash: ContentHash,
         expected_size: Option<u64>,
         retry_count: u32,
         transfer_class: TransferClass,
@@ -373,7 +376,7 @@ pub enum Task {
     Verify {
         path: PathBuf,
         logical_path: String,
-        expected_md5: String,
+        expected_hash: ContentHash,
         expected_size: Option<u64>,
         on_fail: Option<Box<Task>>,
     },
@@ -382,14 +385,14 @@ pub enum Task {
     VerifyMetadata {
         path: PathBuf,
         logical_path: String,
-        expected_md5: String,
+        expected_hash: ContentHash,
         expected_size: u64,
         on_fail: Option<Box<Task>>,
     },
     RepairFile {
         dest: PathBuf,
         logical_path: String,
-        expected_md5: String,
+        expected_hash: ContentHash,
         expected_size: u64,
         source_candidates: Vec<PathBuf>,
         download_url: Option<String>,
@@ -404,7 +407,7 @@ pub enum Task {
         copy_only: bool,
         candidates: Vec<PathBuf>,
         logical_path: String,
-        expected_md5: String,
+        expected_hash: ContentHash,
         expected_size: u64,
         group: Arc<ReuseCandidateGroup>,
     },
@@ -414,7 +417,7 @@ pub enum Task {
         remaining_source_candidates: Vec<PathBuf>,
         dest: PathBuf,
         logical_path: String,
-        expected_md5: String,
+        expected_hash: ContentHash,
         expected_size: u64,
         download_url: Option<String>,
         allow_copy_fallback: bool,
@@ -525,60 +528,60 @@ impl Task {
     /// replace a concrete destination. Composite archive and patch tasks expose
     /// their final files through their dynamic child outcomes instead.
     pub fn final_file(&self) -> Option<FinalFileRef<'_>> {
-        let (target, logical_path, expected_md5, expected_size) = match self {
+        let (target, logical_path, expected_hash, expected_size) = match self {
             Self::Download {
                 dest,
                 logical_path,
-                expected_md5,
+                expected_hash,
                 expected_size,
                 ..
             } => (
                 dest.as_path(),
                 logical_path.as_str(),
-                expected_md5.as_str(),
+                expected_hash,
                 *expected_size,
             ),
             Self::Verify {
                 path,
                 logical_path,
-                expected_md5,
+                expected_hash,
                 expected_size,
                 ..
             } => (
                 path.as_path(),
                 logical_path.as_str(),
-                expected_md5.as_str(),
+                expected_hash,
                 *expected_size,
             ),
             Self::VerifyMetadata {
                 path,
                 logical_path,
-                expected_md5,
+                expected_hash,
                 expected_size,
                 ..
             } => (
                 path.as_path(),
                 logical_path.as_str(),
-                expected_md5.as_str(),
+                expected_hash,
                 Some(*expected_size),
             ),
             Self::RepairFile {
                 dest,
                 logical_path,
-                expected_md5,
+                expected_hash,
                 expected_size,
                 ..
             }
             | Self::ReuseFile {
                 dest,
                 logical_path,
-                expected_md5,
+                expected_hash,
                 expected_size,
                 ..
             } => (
                 dest.as_path(),
                 logical_path.as_str(),
-                expected_md5.as_str(),
+                expected_hash,
                 Some(*expected_size),
             ),
             _ => return None,
@@ -586,7 +589,7 @@ impl Task {
         Some(FinalFileRef {
             target,
             logical_path,
-            expected_md5,
+            expected_hash,
             expected_size,
         })
     }
@@ -630,7 +633,7 @@ impl Task {
         Self::RepairFile {
             dest: spec.dest,
             logical_path: spec.logical_path,
-            expected_md5: spec.expected_md5,
+            expected_hash: spec.expected_hash,
             expected_size: spec.expected_size,
             source_candidates: spec.source_candidates,
             download_url: spec.download_url,
@@ -647,7 +650,7 @@ impl Task {
         let repair = Self::RepairFile {
             dest: spec.dest.clone(),
             logical_path: spec.logical_path.clone(),
-            expected_md5: spec.expected_md5.clone(),
+            expected_hash: spec.expected_hash.clone(),
             expected_size: spec.expected_size,
             source_candidates: spec.source_candidates,
             download_url: spec.download_url,
@@ -664,7 +667,7 @@ impl Task {
             Self::VerifyMetadata {
                 path: spec.dest,
                 logical_path: spec.logical_path,
-                expected_md5: spec.expected_md5,
+                expected_hash: spec.expected_hash,
                 expected_size: spec.expected_size,
                 on_fail: Some(Box::new(repair)),
             }
@@ -672,7 +675,7 @@ impl Task {
             Self::Verify {
                 path: spec.dest,
                 logical_path: spec.logical_path,
-                expected_md5: spec.expected_md5,
+                expected_hash: spec.expected_hash,
                 expected_size: Some(spec.expected_size),
                 on_fail: Some(Box::new(repair)),
             }

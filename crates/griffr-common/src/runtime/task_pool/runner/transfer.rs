@@ -7,7 +7,7 @@ use super::super::fs_ops::{
 };
 use super::super::graph::{GraphExpansion, TaskRun};
 use super::super::types::{destination_or_repair_tasks, ReuseCandidateGroup, Task, WorkerEvent};
-use crate::runtime::{ArtifactExpectation, ArtifactProof, ArtifactSource};
+use crate::runtime::{ArtifactExpectation, ArtifactProof, ArtifactSource, ContentHash};
 
 pub(super) fn run_prepare_download(
     task: Task,
@@ -18,7 +18,7 @@ pub(super) fn run_prepare_download(
         url,
         dest,
         logical_path,
-        expected_md5,
+        expected_hash,
         expected_size,
         retry_count,
         transfer_class,
@@ -32,7 +32,7 @@ pub(super) fn run_prepare_download(
     match super::super::download::prepare_download(
         &dest,
         &logical_path,
-        &expected_md5,
+        &expected_hash,
         expected_size,
     ) {
         Ok(super::super::download::DownloadPreparation::Done(proof)) => {
@@ -45,7 +45,7 @@ pub(super) fn run_prepare_download(
                 url,
                 dest,
                 logical_path,
-                expected_md5,
+                expected_hash,
                 expected_size,
                 retry_count,
                 transfer_class,
@@ -66,7 +66,7 @@ pub(super) fn run_prepare_download(
             url,
             dest,
             logical_path,
-            expected_md5,
+            expected_hash,
             expected_size,
             retry_count,
             transfer_class,
@@ -90,7 +90,7 @@ pub(super) async fn run_transfer_download(
         url,
         dest,
         logical_path,
-        expected_md5,
+        expected_hash,
         expected_size,
         retry_count,
         transfer_class,
@@ -106,7 +106,7 @@ pub(super) async fn run_transfer_download(
         if let Some(repair) = session.select_file(
             dest.clone(),
             logical_path.clone(),
-            expected_md5.clone(),
+            expected_hash.clone(),
             expected_size,
             direct_bytes,
             Some(url.clone()),
@@ -131,7 +131,7 @@ pub(super) async fn run_transfer_download(
         &url,
         &dest,
         &logical_path,
-        &expected_md5,
+        &expected_hash,
         expected_size,
         resume,
         download_progress_buffer_bytes,
@@ -167,7 +167,7 @@ pub(super) async fn run_transfer_download(
             url,
             dest,
             logical_path,
-            expected_md5,
+            expected_hash,
             expected_size,
             retry_count,
             transfer_class,
@@ -184,7 +184,7 @@ fn retry_or_fail_download(
     url: String,
     dest: PathBuf,
     logical_path: String,
-    expected_md5: String,
+    expected_hash: ContentHash,
     expected_size: Option<u64>,
     retry_count: u32,
     transfer_class: super::super::types::TransferClass,
@@ -202,7 +202,7 @@ fn retry_or_fail_download(
             url,
             dest,
             logical_path,
-            expected_md5,
+            expected_hash,
             expected_size,
             retry_count: retry_count + 1,
             transfer_class,
@@ -218,7 +218,7 @@ pub(super) fn run_repair_file(task: Task) -> TaskRun {
     let Task::RepairFile {
         dest,
         logical_path,
-        expected_md5,
+        expected_hash,
         expected_size,
         source_candidates,
         download_url,
@@ -284,7 +284,7 @@ pub(super) fn run_repair_file(task: Task) -> TaskRun {
         let tasks = destination_or_repair_tasks(
             dest,
             logical_path,
-            expected_md5,
+            expected_hash,
             expected_size,
             download_url,
             verify_destination_fallback,
@@ -310,7 +310,7 @@ pub(super) fn run_repair_file(task: Task) -> TaskRun {
         all_sources,
         dest,
         logical_path.clone(),
-        expected_md5.clone(),
+        expected_hash.clone(),
         expected_size,
         download_url,
         allow_copy_fallback,
@@ -325,7 +325,7 @@ pub(super) fn run_repair_file(task: Task) -> TaskRun {
             copy_only: first_copy_only,
             candidates,
             logical_path: logical_path.clone(),
-            expected_md5: expected_md5.clone(),
+            expected_hash: expected_hash.clone(),
             expected_size,
             group: group.clone(),
         })
@@ -339,7 +339,7 @@ pub(super) fn run_verify_reuse_volume(
     copy_only: bool,
     candidates: Vec<PathBuf>,
     _logical_path: String,
-    expected_md5: String,
+    expected_hash: ContentHash,
     expected_size: u64,
     group: std::sync::Arc<ReuseCandidateGroup>,
 ) -> TaskRun {
@@ -353,7 +353,7 @@ pub(super) fn run_verify_reuse_volume(
         matches!(
             super::super::verify::verify_candidate_cancellable(
                 source,
-                &expected_md5,
+                &expected_hash,
                 expected_size,
                 || group.is_resolved(),
             ),
@@ -372,7 +372,7 @@ pub(super) fn run_hardlink_reuse_file(
         copy_only,
         dest,
         logical_path,
-        expected_md5,
+        expected_hash,
         expected_size,
         ..
     } = &task
@@ -382,7 +382,7 @@ pub(super) fn run_hardlink_reuse_file(
     assert!(!copy_only, "copy reuse routed to hardlink runner");
     let result = create_hardlink(source, dest).and_then(|()| {
         let expectation =
-            ArtifactExpectation::new(logical_path, expected_md5, Some(*expected_size));
+            ArtifactExpectation::new(logical_path, expected_hash, Some(*expected_size));
         super::super::fs_ops::verify_artifact(dest, &expectation, ArtifactSource::ReuseHardlink)
     });
     finish_reuse_file(task, result, event_tx)
@@ -397,7 +397,7 @@ pub(super) async fn run_copy_reuse_file(
         copy_only,
         dest,
         logical_path,
-        expected_md5,
+        expected_hash,
         expected_size,
         ..
     } = &task
@@ -406,7 +406,7 @@ pub(super) async fn run_copy_reuse_file(
     };
     assert!(*copy_only, "hardlink reuse routed to copy runner");
     let result =
-        copy_verified_file_async(source, dest, logical_path, expected_md5, *expected_size).await;
+        copy_verified_file_async(source, dest, logical_path, expected_hash, *expected_size).await;
     finish_reuse_file(task, result, event_tx)
 }
 
@@ -421,7 +421,7 @@ fn finish_reuse_file(
         remaining_source_candidates,
         dest,
         logical_path,
-        expected_md5,
+        expected_hash,
         expected_size,
         download_url,
         allow_copy_fallback,
@@ -451,7 +451,7 @@ fn finish_reuse_file(
                 remaining_source_candidates,
                 dest,
                 logical_path,
-                expected_md5,
+                expected_hash,
                 expected_size,
                 download_url,
                 allow_copy_fallback,
@@ -470,7 +470,7 @@ fn finish_reuse_file(
                 TaskRun::then(Task::RepairFile {
                     dest,
                     logical_path,
-                    expected_md5,
+                    expected_hash,
                     expected_size,
                     source_candidates: remaining_source_candidates,
                     download_url,
@@ -485,7 +485,7 @@ fn finish_reuse_file(
                 task_list_run(destination_or_repair_tasks(
                     dest,
                     logical_path,
-                    expected_md5,
+                    expected_hash,
                     expected_size,
                     download_url,
                     verify_destination_fallback,
