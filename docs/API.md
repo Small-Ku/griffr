@@ -22,6 +22,8 @@ Documented API structure for Arknights (明日方舟) and Arknights: Endfield (�
 
 | [`API_PROTOCOL.md`](API_PROTOCOL.md) | Download protocol — split zip volumes, multi-volume extraction, MD5 verification, individual file repair, HTTP resume, CDN mapping, `ak` ↔ `beyond` interchangeability |
 
+| [`API_YOSTAR.md`](API_YOSTAR.md) | Reverse-engineered YoStar Arknights EN launcher/game update protocol and comparison with Hypergryph/Gryphline delivery semantics |
+
 ---
 
 ## Quick Reference
