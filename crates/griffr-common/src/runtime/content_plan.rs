@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 use crate::runtime::{
     is_griffr_private_path, normalize_logical_path, ArtifactClaim, ArtifactExpectation,
 };
+use compio::bytes::Bytes;
 
 use super::artifact::physical_path_key;
 
@@ -44,6 +45,8 @@ pub struct GameManifestSnapshot {
     pub release: ReleaseIdentity,
     pub package: PackageInfo,
     pub entries: Vec<GameFileEntry>,
+    /// Exact encrypted launcher `game_files` payload already verified by its release MD5.
+    pub encrypted_game_files: Bytes,
 }
 
 fn normalize_manifest_entries(entries: &mut [GameFileEntry]) -> Result<()> {
@@ -105,14 +108,16 @@ impl GameManifestSnapshot {
             context: "API client wrapper error: ",
             detail: "No package information available".to_string(),
         })?;
-        let mut entries = api_client
-            .fetch_game_files(&package.file_path, package.game_files_md5.as_deref())
+        let document = api_client
+            .fetch_game_files_document(&package.file_path, package.game_files_md5.as_deref())
             .await?;
+        let mut entries = document.entries;
         normalize_manifest_entries(&mut entries)?;
         Ok(Self {
             release: ReleaseIdentity::from_package(&release.version, &package),
             package,
             entries,
+            encrypted_game_files: document.encrypted_bytes,
         })
     }
 
@@ -318,6 +323,7 @@ mod tests {
                 game_files_md5: None,
             },
             entries: vec![entry],
+            encrypted_game_files: Bytes::new(),
         }
     }
 

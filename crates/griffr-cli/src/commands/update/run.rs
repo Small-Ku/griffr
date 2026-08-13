@@ -244,7 +244,12 @@ pub(super) async fn update_internal(
             "Checking unfinished {} target {}",
             state.kind, state.target_version
         ));
-        let vfs_plan = plan_update_vfs_tasks(
+        let manifest_future = async {
+            GameManifestSnapshot::fetch(api_client, &version_info)
+                .await
+                .context("Failed to fetch the unfinished update manifest snapshot")
+        };
+        let vfs_future = plan_update_vfs_tasks(
             api_client,
             &install_target,
             &version_info,
@@ -252,8 +257,8 @@ pub(super) async fn update_internal(
             &reuse_roots,
             force_copy,
             !state.sync_vfs,
-        )
-        .await?;
+        );
+        let (manifest_snapshot, vfs_plan) = futures_util::try_join!(manifest_future, vfs_future)?;
         if state.sync_vfs && vfs_plan.identity != state.resource_identity {
             anyhow::bail!(
                 "Unfinished {} target {} no longer matches its saved resource identity",
@@ -261,9 +266,6 @@ pub(super) async fn update_internal(
                 state.target_version
             );
         }
-        let manifest_snapshot = GameManifestSnapshot::fetch(api_client, &version_info)
-            .await
-            .context("Failed to fetch the unfinished update manifest snapshot")?;
         let mut content_plan =
             ContentPlan::from_snapshot(&local.install_path, manifest_snapshot, &vfs_plan.claims)
                 .context("Failed to build the update content plan")?;
@@ -335,9 +337,21 @@ pub(super) async fn update_internal(
             None
         }
     };
-    let manifest_snapshot = GameManifestSnapshot::fetch(api_client, &version_info)
-        .await
-        .context("Failed to fetch the update manifest snapshot")?;
+    let manifest_future = async {
+        GameManifestSnapshot::fetch(api_client, &version_info)
+            .await
+            .context("Failed to fetch the update manifest snapshot")
+    };
+    let vfs_future = plan_update_vfs_tasks(
+        api_client,
+        &install_target,
+        &version_info,
+        &local.install_path,
+        &reuse_roots,
+        force_copy,
+        !opts.resource_policy.uses_resource_index(),
+    );
+    let (manifest_snapshot, mut vfs_plan) = futures_util::try_join!(manifest_future, vfs_future)?;
 
     let force_full_archive = opts.force_full_package || force_full_for_mixed_recovery;
     let manifest_eligible = current_manifest.is_some()
@@ -532,17 +546,6 @@ pub(super) async fn update_internal(
     } else {
         archive_expected_files(Vec::new())
     };
-
-    let mut vfs_plan = plan_update_vfs_tasks(
-        api_client,
-        &install_target,
-        &version_info,
-        &local.install_path,
-        &reuse_roots,
-        force_copy,
-        !opts.resource_policy.uses_resource_index(),
-    )
-    .await?;
 
     change_state = change_state
         .with_game_files_path(manifest_snapshot.release.file_path.clone())

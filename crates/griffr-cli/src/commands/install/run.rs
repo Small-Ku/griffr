@@ -104,9 +104,53 @@ pub async fn install(
         .pkg
         .as_ref()
         .context("No package information available")?;
-    let manifest_snapshot = GameManifestSnapshot::fetch(&api_client, &version_info)
-        .await
-        .context("Failed to fetch the install manifest snapshot")?;
+    let manifest_future = async {
+        GameManifestSnapshot::fetch(&api_client, &version_info)
+            .await
+            .context("Failed to fetch the install manifest snapshot")
+    };
+    let vfs_future = async {
+        if opts.resource_policy.uses_resource_index() {
+            ui::print_phase("Planning VFS resources for the install DAG");
+            ui::print_info(
+                "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
+            );
+            let streaming_assets =
+                streaming_assets_path(&install_path.join(install_target.data_root.clone()));
+            let source_streaming_assets = reuse_paths
+                .iter()
+                .filter(|path| **path != install_path)
+                .map(|path| streaming_assets_path(&path.join(install_target.data_root.clone())))
+                .collect::<Vec<_>>();
+            let rand_str = version_info.rand_str();
+            match plan_vfs_tasks(
+                &api_client,
+                &install_target.api,
+                &version_info.version,
+                &rand_str,
+                &streaming_assets,
+                &VfsFilePlanOptions {
+                    source_streaming_assets,
+                    allow_repair: true,
+                    allow_copy_fallback: force_copy,
+                    prefer_reuse: false,
+                },
+            )
+            .await
+            .context("Failed to plan VFS tasks")?
+            {
+                Some(plan) => Ok(plan),
+                None => {
+                    ui::print_info("The selected target does not provide the launcher resource-index API. Skip VFS sync.");
+                    Ok(VfsTaskPlan::default())
+                }
+            }
+        } else {
+            Ok(VfsTaskPlan::default())
+        }
+    };
+    let (manifest_snapshot, mut vfs_plan) = futures_util::try_join!(manifest_future, vfs_future)
+        .context("Failed to plan install target metadata")?;
     let total_size: u64 = pkg.packs.iter().map(|p| p.size()).sum();
 
     ui::print_phase(format!(
@@ -150,46 +194,6 @@ pub async fn install(
     );
     let task_pool_cfg = opts.task_pool_config();
     let mut task_pool = TaskPoolRunner::new(task_pool_cfg)?;
-
-    let mut vfs_plan = if opts.resource_policy.uses_resource_index() {
-        ui::print_phase("Planning VFS resources for the install DAG");
-        ui::print_info(
-            "VFS scope: StreamingAssets index-full (Persistent VFS setup is a separate command).",
-        );
-        let streaming_assets =
-            streaming_assets_path(&install_path.join(install_target.data_root.clone()));
-        let source_streaming_assets = reuse_paths
-            .iter()
-            .filter(|path| **path != install_path)
-            .map(|path| streaming_assets_path(&path.join(install_target.data_root.clone())))
-            .collect::<Vec<_>>();
-        let rand_str = version_info.rand_str();
-        match plan_vfs_tasks(
-            &api_client,
-            &install_target.api,
-            &version_info.version,
-            &rand_str,
-            &streaming_assets,
-            &VfsFilePlanOptions {
-                source_streaming_assets,
-                allow_repair: true,
-                allow_copy_fallback: force_copy,
-                prefer_reuse: false,
-            },
-        )
-        .await
-        .context("Failed to plan VFS tasks")?
-        {
-            Some(plan) => plan,
-            None => {
-                ui::print_info("The selected target does not provide the launcher resource-index API. Skip VFS sync.");
-                VfsTaskPlan::default()
-            }
-        }
-    } else {
-        ui::print_phase("Verifying install integrity");
-        VfsTaskPlan::default()
-    };
 
     change_state = change_state
         .with_game_files_path(manifest_snapshot.release.file_path.clone())

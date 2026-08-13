@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::api::ApiClient;
 use crate::error::{Error, Result};
 use crate::runtime::task_pool::fs_ops::{
-    commit_unchecked_artifact, commit_verified_artifact, make_temp_write_path,
+    commit_unchecked_artifact, commit_verified_artifact, make_temp_write_path, write_atomic_bytes,
 };
 use crate::runtime::{
     launcher_metadata_url, ArtifactExpectation, ArtifactSource, CONFIG_INI_NAME, GAME_FILES_NAME,
@@ -72,18 +72,15 @@ pub async fn sync_launcher_metadata(
 ) -> Result<()> {
     let pkg = &snapshot.package;
 
-    let game_files_url = launcher_metadata_url(&pkg.file_path, GAME_FILES_NAME)?;
+    // The snapshot was created from this exact encrypted payload after MD5
+    // verification. Commit the retained bytes instead of issuing a second
+    // request for immutable release metadata.
     let game_files_path = install_path.join(GAME_FILES_NAME);
-    download_metadata_file(
-        api_client,
-        &game_files_url,
-        &game_files_path,
-        pkg.game_files_md5.as_deref(),
-    )
-    .await
-    .map_err(|e| Error::Message {
-        context: "Download error: ",
-        detail: format!("Failed to sync launcher game_files metadata: {e}"),
+    write_atomic_bytes(&game_files_path, &snapshot.encrypted_game_files).map_err(|e| {
+        Error::Message {
+            context: "Metadata commit error: ",
+            detail: format!("Failed to commit launcher game_files metadata: {e}"),
+        }
     })?;
 
     let package_files_url = launcher_metadata_url(&pkg.file_path, PACKAGE_FILES_NAME)?;

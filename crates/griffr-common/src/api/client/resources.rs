@@ -14,6 +14,12 @@ use crate::api::types::{GameFileEntry, ResIndex, ResourcePatch};
 use crate::runtime::{launcher_metadata_url, GAME_FILES_NAME};
 
 #[derive(Debug, Clone)]
+pub struct GameFilesDocument {
+    pub entries: Vec<GameFileEntry>,
+    pub encrypted_bytes: Bytes,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResIndexDocument {
     pub index: ResIndex,
     pub encrypted_bytes: Bytes,
@@ -82,6 +88,19 @@ impl ApiClient {
         base_url: &str,
         expected_md5: Option<&str>,
     ) -> Result<Vec<GameFileEntry>> {
+        Ok(self
+            .fetch_game_files_document(base_url, expected_md5)
+            .await?
+            .entries)
+    }
+
+    /// Fetches and verifies one canonical encrypted `game_files` document while
+    /// retaining the exact ciphertext bytes for the later launcher metadata commit.
+    pub async fn fetch_game_files_document(
+        &self,
+        base_url: &str,
+        expected_md5: Option<&str>,
+    ) -> Result<GameFilesDocument> {
         let url = launcher_metadata_url(base_url, GAME_FILES_NAME)?;
 
         let response = self
@@ -107,15 +126,14 @@ impl ApiClient {
             });
         }
 
-        let encrypted_data = response.bytes().await.map_err(|e| Error::Message {
+        let encrypted_bytes = response.bytes().await.map_err(|e| Error::Message {
             context: "API client wrapper error: ",
             detail: format!("Failed to read game_files response bytes: {e}"),
         })?;
 
-        // Verify MD5 if provided
         if let Some(expected) = expected_md5 {
-            let actual = crate::to_hex(&Md5::digest(&encrypted_data));
-            if actual != expected.to_lowercase() {
+            let actual = crate::to_hex(&Md5::digest(&encrypted_bytes));
+            if !actual.eq_ignore_ascii_case(expected) {
                 return Err(Error::Message {
                     context: "API client wrapper error: ",
                     detail: format!(
@@ -126,11 +144,11 @@ impl ApiClient {
             }
         }
 
-        let encrypted_data = match encrypted_data.try_into_mut() {
-            Ok(buffer) => Vec::from(buffer),
-            Err(buffer) => buffer.to_vec(),
-        };
-        parse_game_files_owned(encrypted_data)
+        let entries = parse_game_files_owned(encrypted_bytes.to_vec())?;
+        Ok(GameFilesDocument {
+            entries,
+            encrypted_bytes,
+        })
     }
 
     /// Fetch the exact encrypted resource index document and its parsed content.

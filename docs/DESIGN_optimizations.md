@@ -96,6 +96,14 @@ This design uses six code stages followed by packaging metadata.
 - `--keep-pack-archives` remains an explicit archive-retention workflow: it uses the full archive DAG because retaining verified complete volumes is itself part of the requested output, independent of reuse availability.
 - Install change state records ordinary installs as `manifest`; the obsolete `reuse` install source was removed because reuse is now only a provider.
 
+## 12. Single-Fetch Target Metadata and Parallel Planning
+
+- `GameManifestSnapshot` retains the exact encrypted `game_files` response alongside its normalized parsed entries. The response MD5 is checked once when the snapshot is fetched.
+- Launcher metadata commit writes those already-verified encrypted bytes atomically instead of downloading the immutable `game_files` payload again after content verification. `package_files` and `config.ini` still use refreshed delivery URLs, with `config.ini` committed last as the installed-version marker.
+- `refresh_delivery` continues to reject a live response whose `(version, file_path, game_files_md5)` release identity differs from the snapshot, so cached manifest bytes cannot be paired with a different release.
+- Install planning fetches the target game manifest concurrently with launcher resource-index/VFS planning. Normal update and unfinished-update recovery do the same. These requests describe independent content domains and join before `ContentPlan` construction.
+- The optimization removes one redundant metadata request and one serial network-latency barrier without weakening payload verification or the metadata commit order.
+
 ## Validation
 
 Validation uses `cargo fmt`, workspace `cargo check`, Clippy with warnings denied,
