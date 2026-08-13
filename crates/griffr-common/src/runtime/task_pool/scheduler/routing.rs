@@ -161,6 +161,9 @@ pub(super) fn task_resources_cached(task: &Task, volumes: &mut VolumeKeyCache) -
             request.extract = true;
         }
         Task::Verify { path, .. } => request.read_volumes.push(volumes.resolve_verify_file(path)),
+        Task::VerifyMetadata { path, .. } => {
+            request.metadata_volumes.push(volume_key(volumes, path));
+        }
         Task::Download {
             dest,
             expected_size,
@@ -809,6 +812,7 @@ fn task_estimated_bytes(task: &Task) -> u64 {
         Task::Download { expected_size, .. } | Task::Verify { expected_size, .. } => {
             expected_size.unwrap_or(0)
         }
+        Task::VerifyMetadata { .. } => 0,
         Task::RepairFile { expected_size, .. }
         | Task::VerifyReuseVolume { expected_size, .. }
         | Task::ReuseFile { expected_size, .. } => *expected_size,
@@ -887,7 +891,8 @@ pub(super) fn run_class(task: &Task) -> RunClass {
                 | crate::runtime::PlannedPatchSource::Hdiff { .. } => RunClass::Cpu,
             })
             .unwrap_or(RunClass::Blocking),
-        Task::ExtractArchiveRepairFile { .. }
+        Task::VerifyMetadata { .. }
+        | Task::ExtractArchiveRepairFile { .. }
         | Task::OpenArchive { .. }
         | Task::DiscoverArchiveDirectory { .. }
         | Task::InspectArchiveIndex { .. }
@@ -998,6 +1003,7 @@ pub(super) fn task_path(task: &Task) -> String {
         ),
         Task::Download { logical_path, .. }
         | Task::Verify { logical_path, .. }
+        | Task::VerifyMetadata { logical_path, .. }
         | Task::RepairFile { logical_path, .. }
         | Task::VerifyReuseVolume { logical_path, .. }
         | Task::ReuseFile { logical_path, .. } => logical_path.clone(),

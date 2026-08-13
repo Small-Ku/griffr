@@ -78,6 +78,78 @@ pub async fn ensure_game_files_from_manifest_with_pool(
     task_pool_runner: Option<&mut crate::runtime::task_pool::TaskPoolRunner>,
     progress: ProgressSender,
 ) -> Result<super::types::FileEnsureSummary> {
+    ensure_game_files_impl(
+        install_path,
+        file_path,
+        manifest,
+        &HashSet::default(),
+        config,
+        task_pool_runner,
+        progress,
+    )
+    .await
+}
+
+/// Normal-update ensure path. Entries whose expected MD5 and size are
+/// unchanged from the locally committed manifest receive an existence/size
+/// check only; changed/new entries retain the strong destination hash check.
+pub async fn ensure_manifest_delta_with_pool(
+    install_path: &Path,
+    file_path: &str,
+    current_manifest: &[GameFileEntry],
+    target_manifest: &[GameFileEntry],
+    config: &super::types::FileReuseConfig,
+    task_pool_runner: Option<&mut crate::runtime::task_pool::TaskPoolRunner>,
+    progress: ProgressSender,
+) -> Result<super::types::FileEnsureSummary> {
+    let mut current = HashMap::<String, (&str, u64)>::default();
+    current.reserve(current_manifest.len());
+    for entry in current_manifest {
+        current.insert(
+            normalize_logical_path(&entry.path),
+            (entry.md5.as_str(), entry.size),
+        );
+    }
+
+    let mut metadata_only = HashSet::default();
+    metadata_only.reserve(target_manifest.len());
+    for entry in target_manifest {
+        let key = normalize_logical_path(&entry.path);
+        if current
+            .get(&key)
+            .is_some_and(|(md5, size)| *size == entry.size && md5.eq_ignore_ascii_case(&entry.md5))
+        {
+            metadata_only.insert(key);
+        }
+    }
+
+    info!(
+        "Manifest delta: metadata_only={} strong_check={}",
+        metadata_only.len(),
+        target_manifest.len().saturating_sub(metadata_only.len())
+    );
+    ensure_game_files_impl(
+        install_path,
+        file_path,
+        target_manifest,
+        &metadata_only,
+        config,
+        task_pool_runner,
+        progress,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn ensure_game_files_impl(
+    install_path: &Path,
+    file_path: &str,
+    manifest: &[GameFileEntry],
+    metadata_only_paths: &HashSet<String>,
+    config: &super::types::FileReuseConfig,
+    task_pool_runner: Option<&mut crate::runtime::task_pool::TaskPoolRunner>,
+    progress: ProgressSender,
+) -> Result<super::types::FileEnsureSummary> {
     let planned_entries = validated_game_file_entries(manifest)?;
     let files_url_base = files_base_url(file_path)?;
     let source_roots = &config.source_roots;
@@ -90,14 +162,25 @@ pub async fn ensure_game_files_from_manifest_with_pool(
             .iter()
             .map(|root| root.join(&relative))
             .collect::<Vec<_>>();
+        let metadata_only = metadata_only_paths.contains(&normalize_logical_path(&entry.path));
         if config.dry_run {
-            let destination_matches = crate::runtime::task_pool::verify::build_issue(
-                &install_path.join(&relative),
-                &entry.path,
-                &entry.md5,
-                Some(entry.size),
-            )
-            .is_none();
+            let destination_matches = if metadata_only {
+                crate::runtime::task_pool::verify::build_metadata_issue(
+                    &install_path.join(&relative),
+                    &entry.path,
+                    &entry.md5,
+                    entry.size,
+                )
+                .is_none()
+            } else {
+                crate::runtime::task_pool::verify::build_issue(
+                    &install_path.join(&relative),
+                    &entry.path,
+                    &entry.md5,
+                    Some(entry.size),
+                )
+                .is_none()
+            };
             let reusable_candidate_exists = candidates.iter().any(|path| {
                 crate::runtime::task_pool::verify::build_issue(
                     path,
@@ -114,7 +197,7 @@ pub async fn ensure_game_files_from_manifest_with_pool(
             }
         }
 
-        tasks.push(Task::ensure_file(FileEnsureTask {
+        let spec = FileEnsureTask {
             dest: install_path.join(&relative),
             logical_path: entry.path.clone(),
             expected_md5: entry.md5.clone(),
@@ -127,7 +210,12 @@ pub async fn ensure_game_files_from_manifest_with_pool(
             retry_count: 0,
             transfer_class: TransferClass::General,
             archive_repair: None,
-        }));
+        };
+        tasks.push(if metadata_only {
+            Task::ensure_file_metadata(spec)
+        } else {
+            Task::ensure_file(spec)
+        });
     }
 
     if config.dry_run {

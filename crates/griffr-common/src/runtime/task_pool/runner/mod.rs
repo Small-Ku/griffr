@@ -48,6 +48,20 @@ pub(crate) fn run_blocking_task(
             on_fail,
             event_tx,
         ),
+        Task::VerifyMetadata {
+            path,
+            logical_path,
+            expected_md5,
+            expected_size,
+            on_fail,
+        } => super::verify::run_metadata_verify(
+            &path,
+            &logical_path,
+            &expected_md5,
+            expected_size,
+            on_fail,
+            event_tx,
+        ),
         task @ Task::Download { resume: None, .. } => {
             transfer::run_prepare_download(task, max_retries, event_tx)
         }

@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use griffr_common::api::types::{GameFileEntry, GetLatestGameResponse};
 use griffr_common::runtime::task_pool::TaskPoolRunner;
 use griffr_common::runtime::{
-    ensure_game_files_from_manifest_with_pool, is_launcher_metadata_path,
-    is_resource_baseline_path, remove_blocking_obsolete_game_files, remove_obsolete_game_files,
-    ContentPlan, FileReuseConfig, LocalInstall, ProgressLane,
+    ensure_manifest_delta_with_pool, is_launcher_metadata_path, is_resource_baseline_path,
+    remove_blocking_obsolete_game_files, remove_obsolete_game_files, ContentPlan, FileReuseConfig,
+    LocalInstall, ProgressLane,
 };
 
 use crate::progress::CountAndByteProgress;
@@ -57,9 +57,10 @@ pub(super) async fn update_via_manifest(
         ProgressLane::FILE_ENSURE_VERIFY,
         ProgressLane::FILE_ENSURE_DOWNLOAD,
     );
-    let ensured = ensure_game_files_from_manifest_with_pool(
+    let ensured = ensure_manifest_delta_with_pool(
         &local.install_path,
         &pkg.file_path,
+        &current_manifest,
         &target_manifest,
         &FileReuseConfig {
             allow_copy_fallback: force_copy,

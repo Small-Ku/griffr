@@ -377,6 +377,15 @@ pub enum Task {
         expected_size: Option<u64>,
         on_fail: Option<Box<Task>>,
     },
+    /// Metadata-only destination check used by normal manifest updates for
+    /// files whose expected content is unchanged between manifests.
+    VerifyMetadata {
+        path: PathBuf,
+        logical_path: String,
+        expected_md5: String,
+        expected_size: u64,
+        on_fail: Option<Box<Task>>,
+    },
     RepairFile {
         dest: PathBuf,
         logical_path: String,
@@ -541,6 +550,18 @@ impl Task {
                 expected_md5.as_str(),
                 *expected_size,
             ),
+            Self::VerifyMetadata {
+                path,
+                logical_path,
+                expected_md5,
+                expected_size,
+                ..
+            } => (
+                path.as_path(),
+                logical_path.as_str(),
+                expected_md5.as_str(),
+                Some(*expected_size),
+            ),
             Self::RepairFile {
                 dest,
                 logical_path,
@@ -590,6 +611,16 @@ impl Task {
     /// Builds a CPU-first verify/repair graph. Explicit relink mode probes reuse
     /// first, then verifies the destination before allowing a network fallback.
     pub fn ensure_file(spec: FileEnsureTask) -> Self {
+        Self::ensure_file_with_check(spec, false)
+    }
+
+    /// Ensures a manifest-unchanged file by checking only existence and size
+    /// before falling back to the same strong repair/materialization path.
+    pub fn ensure_file_metadata(spec: FileEnsureTask) -> Self {
+        Self::ensure_file_with_check(spec, true)
+    }
+
+    fn ensure_file_with_check(spec: FileEnsureTask, metadata_only: bool) -> Self {
         let repair = Self::RepairFile {
             dest: spec.dest.clone(),
             logical_path: spec.logical_path.clone(),
@@ -606,6 +637,14 @@ impl Task {
         };
         if spec.prefer_reuse {
             repair
+        } else if metadata_only {
+            Self::VerifyMetadata {
+                path: spec.dest,
+                logical_path: spec.logical_path,
+                expected_md5: spec.expected_md5,
+                expected_size: spec.expected_size,
+                on_fail: Some(Box::new(repair)),
+            }
         } else {
             Self::Verify {
                 path: spec.dest,

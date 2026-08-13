@@ -63,6 +63,14 @@ This design uses six code stages followed by packaging metadata.
 - Archive repair compares candidate groups by uncached byte count without constructing concrete request vectors, then selects the smallest archive transfer that beats the direct download remainder.
 - Download timeout environment values are resolved once per process, case-insensitive MD5 checks avoid temporary lowercase strings, and uncached verification avoids constructing artifact-cache keys.
 
+## 8. Manifest-Driven Normal Updates
+
+- Ordinary updates compare the locally committed `game_files` manifest with the target manifest before scheduling destination checks.
+- Entries whose normalized path, expected MD5, and expected size are unchanged use a metadata-only existence/size check. They are not re-read solely to prove the same content expectation again.
+- New entries and entries whose expected MD5 or size changed retain the strong MD5 destination check and the same verified repair/materialization fallback.
+- Explicit `verify` and repair paths remain full integrity audits; this optimization is scoped to normal updates whose old and target canonical manifests agree about an entry.
+- The split mirrors the observed YoStar launcher behavior documented in [`API_YOSTAR.md`](API_YOSTAR.md): normal updates trust unchanged manifest identity plus file metadata, while full repair hashes every desired file. Griffr remains stricter for newly produced content by hashing it before atomic commit.
+
 ## Validation
 
 Validation uses `cargo fmt`, workspace `cargo check`, Clippy with warnings denied,

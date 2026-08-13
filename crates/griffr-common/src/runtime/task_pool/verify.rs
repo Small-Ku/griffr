@@ -54,6 +54,74 @@ pub(crate) fn run_verify(
     }
 }
 
+pub(crate) fn run_metadata_verify(
+    path: &Path,
+    logical_path: &str,
+    expected_md5: &str,
+    expected_size: u64,
+    on_fail: Option<Box<super::types::Task>>,
+    event_tx: &flume::Sender<super::types::WorkerEvent>,
+) -> super::graph::TaskRun {
+    let issue = build_metadata_issue(path, logical_path, expected_md5, expected_size);
+    match issue {
+        None => {
+            let _ = event_tx.send(super::types::WorkerEvent::verified(
+                logical_path.to_string(),
+                true,
+                None,
+            ));
+            super::graph::TaskRun::succeeded()
+        }
+        Some(issue) => {
+            if let Some(task) = on_fail {
+                let _ = event_tx.send(super::types::WorkerEvent::Retried {
+                    path: logical_path.to_string(),
+                    reason: format!("metadata verification failed ({:?})", issue.kind),
+                });
+                return super::graph::TaskRun::then(*task);
+            }
+            let _ = event_tx.send(super::types::WorkerEvent::verified(
+                logical_path.to_string(),
+                false,
+                Some(issue.clone()),
+            ));
+            super::graph::TaskRun::failed(format!(
+                "metadata verification failed ({:?})",
+                issue.kind
+            ))
+        }
+    }
+}
+
+pub(crate) fn build_metadata_issue(
+    path: &Path,
+    logical_path: &str,
+    expected_md5: &str,
+    expected_size: u64,
+) -> Option<FileIssue> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return Some(FileIssue {
+                path: logical_path.to_string(),
+                expected_md5: expected_md5.to_string(),
+                expected_size,
+                actual_size: None,
+                actual_md5: None,
+                kind: FileIssueKind::Missing,
+            });
+        }
+    };
+    (metadata.len() != expected_size).then(|| FileIssue {
+        path: logical_path.to_string(),
+        expected_md5: expected_md5.to_string(),
+        expected_size,
+        actual_size: Some(metadata.len()),
+        actual_md5: None,
+        kind: FileIssueKind::SizeMismatch,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ArtifactKey {
     path: PathBuf,
@@ -303,5 +371,15 @@ mod tests {
         assert!(cache
             .build_issue(&path, "artifact.bin", &expected, Some(2))
             .is_none());
+    }
+    #[test]
+    fn metadata_check_accepts_same_size_without_hashing_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("artifact.bin");
+        fs::write(&path, b"bad").unwrap();
+        let expected = crate::to_hex(&Md5::digest(b"ok!"));
+
+        assert!(super::build_metadata_issue(&path, "artifact.bin", &expected, 3).is_none());
+        assert!(super::build_issue(&path, "artifact.bin", &expected, Some(3)).is_some());
     }
 }
