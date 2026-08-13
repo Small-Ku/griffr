@@ -5,8 +5,8 @@ use griffr_common::api::types::{GameFileEntry, GetLatestGameResponse};
 use griffr_common::runtime::task_pool::TaskPoolRunner;
 use griffr_common::runtime::{
     ensure_manifest_delta_with_pool, is_launcher_metadata_path, is_resource_baseline_path,
-    remove_blocking_obsolete_game_files, remove_obsolete_game_files, ContentPlan, FileReuseConfig,
-    LocalInstall, ProgressLane,
+    remove_blocking_obsolete_game_files, remove_obsolete_game_files, ContentPlan,
+    FileMaterializationConfig, LocalInstall, ProgressLane,
 };
 
 use crate::progress::CountAndByteProgress;
@@ -62,10 +62,11 @@ pub(super) async fn update_via_manifest(
         &pkg.file_path,
         &current_manifest,
         &target_manifest,
-        &FileReuseConfig {
+        &FileMaterializationConfig {
             allow_copy_fallback: force_copy,
             dry_run: opts.is_dry_run(),
             source_roots: source_roots.to_vec(),
+            archive_packs: pkg.packs.clone(),
         },
         Some(task_pool_runner),
         ensure_session.sender(),

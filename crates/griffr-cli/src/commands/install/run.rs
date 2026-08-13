@@ -12,9 +12,9 @@ use griffr_common::runtime::{
     directory_has_entries, ensure_game_files_from_manifest_with_pool, finish_install_change,
     finish_vfs_plan, griffr_archives_path, plan_vfs_tasks, read_install_change,
     resolve_file_reuse_roots, run_integrity_pool, start_install_change, streaming_assets_path,
-    sync_launcher_metadata, ContentPlan, FileReuseConfig, GameManifestSnapshot, InstallChangeKind,
-    InstallChangeSource, InstallChangeStart, InstallChangeState, ProgressLane, VfsFilePlanOptions,
-    VfsTaskPlan,
+    sync_launcher_metadata, ContentPlan, FileMaterializationConfig, GameManifestSnapshot,
+    InstallChangeKind, InstallChangeSource, InstallChangeStart, InstallChangeState, ProgressLane,
+    VfsFilePlanOptions, VfsTaskPlan,
 };
 
 use crate::commands::archive_graph::{add_file_tasks, full_archive_excluded_paths};
@@ -418,10 +418,11 @@ pub async fn install(
             &install_path,
             &files_path,
             &core_game_entries,
-            &FileReuseConfig {
+            &FileMaterializationConfig {
                 allow_copy_fallback: force_copy,
                 dry_run: false,
                 source_roots,
+                archive_packs: content_plan.snapshot().package.packs.clone(),
             },
             Some(&mut task_pool),
             ensure_session.sender(),

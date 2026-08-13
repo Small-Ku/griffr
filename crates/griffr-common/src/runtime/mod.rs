@@ -35,8 +35,8 @@ pub(crate) use file_allocation::preallocate_file;
 pub use files::reuse::{
     ensure_game_files_from_manifest_with_pool, ensure_manifest_delta_with_pool,
     inspect_reuse_installations, read_local_game_files, remove_blocking_obsolete_game_files,
-    remove_obsolete_game_files, resolve_file_reuse_roots, FileEnsureSummary, FileReuseConfig,
-    ObsoleteFileCleanupSummary,
+    remove_obsolete_game_files, resolve_file_reuse_roots, FileEnsureSummary,
+    FileMaterializationConfig, ObsoleteFileCleanupSummary,
 };
 pub use files::vfs::{
     commit_vfs_manifests, download_vfs_resources, finish_vfs_plan, get_vfs_resource_info,

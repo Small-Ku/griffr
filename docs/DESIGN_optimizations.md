@@ -71,6 +71,14 @@ This design uses six code stages followed by packaging metadata.
 - Explicit `verify` and repair paths remain full integrity audits; this optimization is scoped to normal updates whose old and target canonical manifests agree about an entry.
 - The split mirrors the observed YoStar launcher behavior documented in [`API_YOSTAR.md`](API_YOSTAR.md): normal updates trust unchanged manifest identity plus file metadata, while full repair hashes every desired file. Griffr remains stricter for newly produced content by hashing it before atomic commit.
 
+## 9. Per-File Materialization Providers
+
+- Manifest-driven ensure work treats compatible installation roots, full-package archive ranges, and the direct file CDN as providers for the same desired file rather than separate command modes.
+- Reuse candidates remain strongly MD5-verified before hardlink/copy commit. If reuse cannot satisfy an entry, the task continues to network materialization.
+- Full-package ZIPs are not downloaded as monolithic prerequisites. The existing archive session prepares central-directory metadata lazily, then compares each candidate entry's uncached compressed bytes with the remaining direct-download bytes at network admission.
+- The archive provider is selected only when its missing compressed range is smaller than the direct transfer, so exposing full packs to manifest updates cannot force a larger archive download.
+- Provider selection shares the command-scoped task pool and range cache; archive cache state is cleaned after the ensure batch unless archive retention is explicitly requested by a separate archive workflow.
+
 ## Validation
 
 Validation uses `cargo fmt`, workspace `cargo check`, Clippy with warnings denied,

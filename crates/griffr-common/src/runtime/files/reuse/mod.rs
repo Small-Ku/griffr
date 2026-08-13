@@ -7,4 +7,4 @@ pub use sources::{
     inspect_reuse_installations, read_local_game_files, remove_blocking_obsolete_game_files,
     remove_obsolete_game_files, resolve_file_reuse_roots,
 };
-pub use types::{FileEnsureSummary, FileReuseConfig, ObsoleteFileCleanupSummary};
+pub use types::{FileEnsureSummary, FileMaterializationConfig, ObsoleteFileCleanupSummary};

@@ -4,10 +4,14 @@ use rapidhash::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 
 use crate::api::types::GameFileEntry;
 use crate::error::{Error, Result};
-use crate::runtime::task_pool::{FileEnsureTask, Task, TransferClass};
+use crate::runtime::task_pool::types::{ArchiveRepairGroupSpec, ArchiveRepairSession};
+use crate::runtime::task_pool::{
+    archive_expected_files, plan_archive_groups, FileEnsureTask, Task, TransferClass,
+};
 use crate::runtime::{
-    build_cdn_file_url, files_base_url, is_griffr_private_path, is_launcher_metadata_path,
-    normalize_logical_path, PathOutcomeTracker, ProgressLane, ProgressSender,
+    build_cdn_file_url, files_base_url, griffr_archives_path, is_griffr_private_path,
+    is_launcher_metadata_path, normalize_logical_path, PathOutcomeTracker, ProgressLane,
+    ProgressSender,
 };
 use tracing::{info, warn};
 
@@ -74,7 +78,7 @@ pub async fn ensure_game_files_from_manifest_with_pool(
     install_path: &Path,
     file_path: &str,
     manifest: &[GameFileEntry],
-    config: &super::types::FileReuseConfig,
+    config: &super::types::FileMaterializationConfig,
     task_pool_runner: Option<&mut crate::runtime::task_pool::TaskPoolRunner>,
     progress: ProgressSender,
 ) -> Result<super::types::FileEnsureSummary> {
@@ -98,7 +102,7 @@ pub async fn ensure_manifest_delta_with_pool(
     file_path: &str,
     current_manifest: &[GameFileEntry],
     target_manifest: &[GameFileEntry],
-    config: &super::types::FileReuseConfig,
+    config: &super::types::FileMaterializationConfig,
     task_pool_runner: Option<&mut crate::runtime::task_pool::TaskPoolRunner>,
     progress: ProgressSender,
 ) -> Result<super::types::FileEnsureSummary> {
@@ -146,13 +150,40 @@ async fn ensure_game_files_impl(
     file_path: &str,
     manifest: &[GameFileEntry],
     metadata_only_paths: &HashSet<String>,
-    config: &super::types::FileReuseConfig,
+    config: &super::types::FileMaterializationConfig,
     task_pool_runner: Option<&mut crate::runtime::task_pool::TaskPoolRunner>,
     progress: ProgressSender,
 ) -> Result<super::types::FileEnsureSummary> {
     let planned_entries = validated_game_file_entries(manifest)?;
     let files_url_base = files_base_url(file_path)?;
     let source_roots = &config.source_roots;
+    let archive_session = if config.archive_packs.is_empty() || config.dry_run {
+        None
+    } else {
+        let groups =
+            plan_archive_groups(&config.archive_packs, &griffr_archives_path(install_path))?;
+        (!groups.is_empty()).then(|| {
+            ArchiveRepairSession::new(
+                groups
+                    .into_iter()
+                    .map(|group| ArchiveRepairGroupSpec {
+                        base_name: group.base_name,
+                        parts: group.parts,
+                    })
+                    .collect(),
+                install_path.to_path_buf(),
+                archive_expected_files(planned_entries.iter().map(|(entry, _)| (*entry).clone())),
+            )
+        })
+    };
+
+    info!(
+        "Materialization providers: reuse_roots={} archive_groups={} direct_cdn=true",
+        source_roots.len(),
+        archive_session
+            .as_ref()
+            .map_or(0, |session| session.group_specs().len())
+    );
 
     let mut dry_run_reused = 0usize;
     let mut dry_run_downloaded = 0usize;
@@ -209,7 +240,7 @@ async fn ensure_game_files_impl(
             prefer_reuse: false,
             retry_count: 0,
             transfer_class: TransferClass::General,
-            archive_repair: None,
+            archive_repair: archive_session.clone(),
         };
         tasks.push(if metadata_only {
             Task::ensure_file_metadata(spec)
@@ -234,22 +265,19 @@ async fn ensure_game_files_impl(
     let task_progress = crate::runtime::task_pool::TaskProgress::new(progress)
         .with_verify(ProgressLane::FILE_ENSURE_VERIFY, total)
         .with_download(ProgressLane::FILE_ENSURE_DOWNLOAD);
-    let result = if let Some(runner) = task_pool_runner {
-        runner
-            .run_batch(tasks, task_progress)
-            .map_err(|error| Error::Message {
-                context: "Task pool error: ",
-                detail: format!("Game-file ensure pool failed: {error}"),
-            })?
+    let run_result = if let Some(runner) = task_pool_runner {
+        runner.run_batch(tasks, task_progress)
     } else {
         let pool_cfg = crate::runtime::task_pool::TaskPoolConfig::for_file_ensure();
-        crate::runtime::task_pool::run_tasks_with_progress(tasks, pool_cfg, task_progress).map_err(
-            |error| Error::Message {
-                context: "Task pool error: ",
-                detail: format!("Game-file ensure pool failed: {error}"),
-            },
-        )?
+        crate::runtime::task_pool::run_tasks_with_progress(tasks, pool_cfg, task_progress)
     };
+    if let Some(session) = archive_session.as_ref() {
+        session.cleanup();
+    }
+    let result = run_result.map_err(|error| Error::Message {
+        context: "Task pool error: ",
+        detail: format!("Game-file ensure pool failed: {error}"),
+    })?;
 
     let failed_graph_nodes = result
         .metrics
@@ -286,7 +314,7 @@ async fn ensure_game_files_impl(
     }
     if !failed_paths.is_empty() {
         return Err(Error::Message {
-            context: "File reuse error: ",
+            context: "File materialization error: ",
             detail: format!(
                 "{} game-file ensure task(s) failed: {}",
                 failed_paths.len(),
