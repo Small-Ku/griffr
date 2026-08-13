@@ -63,19 +63,25 @@ Verify core files only:
 cargo run -p griffr-cli -- verify --path <GAME_PATH> --scope core
 ```
 
-### YoStar Arknights EN
+### YoStar Arknights KR / EN / JP
 
-Arknights EN uses the YoStar launcher protocol and native launcher metadata. It does not take Hypergryph channel/sub-channel arguments:
+Arknights KR, EN, and JP share the YoStar launcher protocol and native launcher metadata. Select the deployment with `--region kr`, `--region en`, or `--region jp`; YoStar does not take Hypergryph channel/sub-channel arguments:
 
 ```bash
-cargo run -p griffr-cli -- install --game arknights --region en --path <GAME_PATH>
+cargo run -p griffr-cli -- install --game arknights --region jp --path <GAME_PATH>
 cargo run -p griffr-cli -- update --path <GAME_PATH>
 cargo run -p griffr-cli -- verify --path <GAME_PATH> --scope core
 cargo run -p griffr-cli -- verify --path <GAME_PATH> --scope core --repair
 cargo run -p griffr-cli -- launch --path <GAME_PATH>
+
+# Native YoStar API probes
+cargo run -p griffr-cli -- debug yostar config --region kr
+cargo run -p griffr-cli -- debug yostar cdn --region en
+cargo run -p griffr-cli -- debug yostar manifest --region jp
+cargo run -p griffr-cli -- debug yostar file-url --region jp --file <MANIFEST_PATH>
 ```
 
-The YoStar backend currently supports install, update, offline full verify, repair, launch, info, and uninstall. Normal updates trust unchanged manifest entries after existence/size checks, while full `verify` computes CRC64-XZ. YoStar has no observed equivalent of the Hypergryph predownload or Persistent/VFS resource-index APIs, so `stage`/predownload and resource synchronization are not available for this backend.
+The YoStar backend supports install, update, offline full verify, repair, launch, info, and uninstall across all three regions. Local region detection comes from the native `Arknights_KR` / `Arknights_EN` / `Arknights_JP` launcher tag. Normal updates trust unchanged manifest entries after existence/size checks, while full `verify` computes CRC64-XZ. YoStar has no observed equivalent of the Hypergryph predownload or Persistent/VFS resource-index APIs, so `stage`/predownload and resource synchronization are not available for this backend.
 
 Synchronize the game-selected Persistent working set (copy-only; add `--prune` to clean unchanged recorded baseline):
 ```bash

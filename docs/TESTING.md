@@ -16,8 +16,9 @@ same-filesystem reuse, hardlink-safe staged update, reuse-assisted update,
 concurrent multi-path verify, account capture/activate, remote debug/media
 calls, Persistent resource sync, snapshots, detach, and uninstall.
 
-The YoStar Arknights EN fixture separately exercises dry-run and real install, native
-`manifest.json` / `game-launcher-config.json` metadata, CRC64-XZ full verify and
+The YoStar Arknights KR/EN/JP fixture separately exercises each regional target,
+dry-run and real install, native `manifest.json` / `game-launcher-config.json` metadata,
+CRC64-XZ full verify and
 repair, primary/backup CDN failover, manifest-driven normal update, `.griffr/state.json`
 launch barriers, launch-time existence/size quick checks, unsupported predownload
 contracts, and uninstall. It deliberately verifies the YoStar distinction between a
