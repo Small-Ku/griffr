@@ -1308,6 +1308,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+ "url",
  "windows-sys 0.59.0",
  "zip",
 ]

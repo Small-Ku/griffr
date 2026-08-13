@@ -68,6 +68,7 @@ fn expected_cdn_fragment(region: RegionId) -> &'static str {
     match region {
         RegionId::Cn => ".hycdn.cn",
         RegionId::Sg => ".hg-cdn.com",
+        RegionId::En => ".yo-star.com",
     }
 }
 

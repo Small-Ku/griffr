@@ -4,6 +4,7 @@ pub mod client;
 pub mod crypto;
 pub mod protocol;
 pub mod types;
+pub mod yostar;
 
 // Integration tests (real API calls) - only compiled for test builds
 #[cfg(test)]

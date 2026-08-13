@@ -7,7 +7,10 @@ use crate::config::{
     game_by_appcode, game_by_exe_name, ChannelPair, GameId, RegionId, GAME_DEFINITIONS,
 };
 use crate::error::{Error, Result};
-use crate::runtime::CONFIG_INI_NAME;
+use crate::runtime::{
+    read_yostar_metadata, YostarLocalMetadata, CONFIG_INI_NAME, YOSTAR_LAUNCHER_CONFIG_NAME,
+    YOSTAR_MANIFEST_NAME,
+};
 
 #[derive(Debug, Clone)]
 pub struct ParsedConfigIni {
@@ -43,9 +46,15 @@ impl ParsedConfigIni {
 }
 
 #[derive(Debug, Clone)]
+pub enum LocalInstallMetadata {
+    Hypergryph(ParsedConfigIni),
+    Yostar(YostarLocalMetadata),
+}
+
+#[derive(Debug, Clone)]
 pub struct LocalInstall {
     pub install_path: PathBuf,
-    pub config_ini: ParsedConfigIni,
+    pub metadata: LocalInstallMetadata,
     pub game_id: Option<GameId>,
     pub region_id: Option<RegionId>,
     pub channel_id: Option<ChannelPair>,
@@ -82,16 +91,62 @@ impl LocalInstall {
         })
     }
 
+    pub const fn is_yostar(&self) -> bool {
+        matches!(self.metadata, LocalInstallMetadata::Yostar(_))
+    }
+
+    pub const fn hypergryph_config(&self) -> Option<&ParsedConfigIni> {
+        match &self.metadata {
+            LocalInstallMetadata::Hypergryph(config) => Some(config),
+            LocalInstallMetadata::Yostar(_) => None,
+        }
+    }
+
+    pub const fn yostar_metadata(&self) -> Option<&YostarLocalMetadata> {
+        match &self.metadata {
+            LocalInstallMetadata::Hypergryph(_) => None,
+            LocalInstallMetadata::Yostar(metadata) => Some(metadata),
+        }
+    }
+
+    pub fn version(&self) -> Option<&str> {
+        match &self.metadata {
+            LocalInstallMetadata::Hypergryph(config) => config.version(),
+            LocalInstallMetadata::Yostar(metadata) => Some(metadata.version()),
+        }
+    }
+
+    pub fn entry(&self) -> Option<&str> {
+        match &self.metadata {
+            LocalInstallMetadata::Hypergryph(config) => config.entry(),
+            LocalInstallMetadata::Yostar(metadata) => Some(metadata.entry()),
+        }
+    }
+
+    pub fn require_version(&self) -> Result<&str> {
+        self.version().ok_or_else(|| Error::Message {
+            context: "Configuration error: ",
+            detail: format!(
+                "local install metadata at {} does not contain a version",
+                self.install_path.display()
+            ),
+        })
+    }
+
     /// Resolve installed game version from decrypted `config.ini`.
-    ///
-    /// `config.ini` is the launcher-managed source of truth for installed
-    /// versions and is shared by CLI and GUI consumers.
     pub fn require_config_ini_version(&self) -> Result<&str> {
-        self.config_ini.version().ok_or_else(|| Error::Message {
+        let config = self.hypergryph_config().ok_or_else(|| Error::Message {
+            context: "Configuration error: ",
+            detail: format!(
+                "{} is a YoStar install and does not use config.ini",
+                self.install_path.display()
+            ),
+        })?;
+        config.version().ok_or_else(|| Error::Message {
             context: "Configuration error: ",
             detail: format!(
                 "config.ini at {} does not contain a version field",
-                self.config_ini.path.display()
+                config.path.display()
             ),
         })
     }
@@ -109,7 +164,7 @@ fn filename_matches(path: &Path, filename: &str) -> bool {
         })
 }
 
-/// Resolve an existing install root or an explicitly named `config.ini` path.
+/// Resolve an existing install root or an explicitly named launcher metadata path.
 ///
 /// A missing ordinary path remains an install-root candidate. It must never be
 /// silently replaced by its parent, because destructive callers such as
@@ -118,12 +173,18 @@ pub async fn resolve_install_path(path: &Path) -> Result<PathBuf> {
     match compio::fs::metadata(path).await {
         Ok(metadata) if metadata.is_dir() => Ok(path.to_path_buf()),
         Ok(metadata) if metadata.is_file() => {
-            if !filename_matches(path, CONFIG_INI_NAME) {
+            if ![
+                CONFIG_INI_NAME,
+                YOSTAR_LAUNCHER_CONFIG_NAME,
+                YOSTAR_MANIFEST_NAME,
+            ]
+            .iter()
+            .any(|name| filename_matches(path, name))
+            {
                 return Err(Error::Message {
                     context: "Path error: ",
                     detail: format!(
-                        "Expected an install directory or {}, found file {}",
-                        CONFIG_INI_NAME,
+                        "Expected an install directory or recognized launcher metadata file, found {}",
                         path.display()
                     ),
                 });
@@ -138,13 +199,19 @@ pub async fn resolve_install_path(path: &Path) -> Result<PathBuf> {
         Ok(_) => Err(Error::Message {
             context: "Path error: ",
             detail: format!(
-                "Expected an install directory or regular {}, found {}",
-                CONFIG_INI_NAME,
+                "Expected an install directory or regular launcher metadata file, found {}",
                 path.display()
             ),
         }),
         Err(source) if source.kind() == ErrorKind::NotFound => {
-            if filename_matches(path, CONFIG_INI_NAME) {
+            if [
+                CONFIG_INI_NAME,
+                YOSTAR_LAUNCHER_CONFIG_NAME,
+                YOSTAR_MANIFEST_NAME,
+            ]
+            .iter()
+            .any(|name| filename_matches(path, name))
+            {
                 path.parent()
                     .map(Path::to_path_buf)
                     .ok_or_else(|| Error::Message {
@@ -220,6 +287,67 @@ pub async fn decrypt_config_ini(path: &Path) -> Result<ParsedConfigIni> {
 
 pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
     let install_path = resolve_install_path(path).await?;
+    let hg_path = install_path.join(CONFIG_INI_NAME);
+    let yostar_path = install_path.join(YOSTAR_LAUNCHER_CONFIG_NAME);
+
+    let hg_exists = match compio::fs::metadata(&hg_path).await {
+        Ok(metadata) => metadata.is_file(),
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(source) => {
+            return Err(Error::IoAt {
+                action: "query file metadata/stat for",
+                path: hg_path,
+                source,
+            })
+        }
+    };
+    let yostar_exists = match compio::fs::metadata(&yostar_path).await {
+        Ok(metadata) => metadata.is_file(),
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(source) => {
+            return Err(Error::IoAt {
+                action: "query file metadata/stat for",
+                path: yostar_path,
+                source,
+            })
+        }
+    };
+
+    if hg_exists && yostar_exists {
+        return Err(Error::Message {
+            context: "Configuration error: ",
+            detail: format!(
+                "Ambiguous install metadata at {}: both {} and {} exist",
+                install_path.display(),
+                CONFIG_INI_NAME,
+                YOSTAR_LAUNCHER_CONFIG_NAME
+            ),
+        });
+    }
+
+    if yostar_exists {
+        let metadata = read_yostar_metadata(&install_path).await?;
+        return Ok(LocalInstall {
+            install_path,
+            metadata: LocalInstallMetadata::Yostar(metadata),
+            game_id: Some(GameId::ARKNIGHTS),
+            region_id: Some(RegionId::En),
+            channel_id: None,
+        });
+    }
+
+    if !hg_exists {
+        return Err(Error::Message {
+            context: "Configuration error: ",
+            detail: format!(
+                "No supported launcher metadata found under {} (expected {} or {})",
+                install_path.display(),
+                CONFIG_INI_NAME,
+                YOSTAR_LAUNCHER_CONFIG_NAME
+            ),
+        });
+    }
+
     let config_ini = decrypt_config_ini(&install_path).await?;
 
     let mut games_with_existing_exe = Vec::new();
@@ -244,7 +372,7 @@ pub async fn detect_local_install(path: &Path) -> Result<LocalInstall> {
 
     Ok(LocalInstall {
         install_path,
-        config_ini,
+        metadata: LocalInstallMetadata::Hypergryph(config_ini),
         game_id,
         region_id,
         channel_id,
@@ -305,11 +433,11 @@ mod tests {
     fn require_config_ini_version_returns_version() {
         let local = LocalInstall {
             install_path: PathBuf::from(r"C:\Games\Endfield"),
-            config_ini: ParsedConfigIni {
+            metadata: LocalInstallMetadata::Hypergryph(ParsedConfigIni {
                 path: PathBuf::from("config.ini"),
                 raw: "version=1.1.9".to_string(),
                 fields: BTreeMap::from([("version".to_string(), "1.1.9".to_string())]),
-            },
+            }),
             game_id: Some(GameId::ENDFIELD),
             region_id: Some(RegionId::Cn),
             channel_id: Some(ChannelPair::from_api("1", None::<String>).unwrap()),
@@ -322,11 +450,11 @@ mod tests {
     fn require_config_ini_version_errors_when_missing() {
         let local = LocalInstall {
             install_path: PathBuf::from(r"C:\Games\Endfield"),
-            config_ini: ParsedConfigIni {
+            metadata: LocalInstallMetadata::Hypergryph(ParsedConfigIni {
                 path: PathBuf::from("config.ini"),
                 raw: String::new(),
                 fields: BTreeMap::new(),
-            },
+            }),
             game_id: Some(GameId::ENDFIELD),
             region_id: Some(RegionId::Cn),
             channel_id: Some(ChannelPair::from_api("1", None::<String>).unwrap()),

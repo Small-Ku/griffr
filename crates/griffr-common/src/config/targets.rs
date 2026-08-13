@@ -66,6 +66,12 @@ pub fn resolve_api_target(
     channels: &ChannelPair,
     overrides: &ApiTargetOverrides,
 ) -> Result<ApiTarget> {
+    if region == RegionId::En {
+        return Err(Error::Message {
+            context: "Configuration error: ",
+            detail: "YoStar EN uses the YoStar launcher backend and cannot be resolved as a Hypergryph/Gryphline ApiTarget".to_string(),
+        });
+    }
     let game_appcode = overrides
         .game_appcode
         .clone()

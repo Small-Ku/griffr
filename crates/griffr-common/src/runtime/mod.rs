@@ -18,6 +18,7 @@ pub mod task_pool;
 #[cfg(test)]
 mod test_checkpoint;
 mod update_plan;
+mod yostar_metadata;
 
 pub use admin::{ensure_admin, is_running_as_admin, restart_as_admin};
 pub(crate) use artifact::ArtifactDigest;
@@ -59,7 +60,7 @@ pub use launcher::{GameProcess, Launcher, WineConfig};
 pub use launcher_metadata::sync_launcher_metadata;
 pub use local_install::{
     decrypt_config_ini, detect_local_install, resolve_install_path, resolve_named_path,
-    LocalInstall, ParsedConfigIni,
+    LocalInstall, LocalInstallMetadata, ParsedConfigIni,
 };
 pub use patch_apply::{
     available_space, check_patch_archives, discard_incomplete_patch_apply,
@@ -93,4 +94,9 @@ pub use update_plan::{
     estimate_manifest_delta, patch_group_beats_manifest_sources, resolve_staged_patch_recovery_dir,
     select_archive_package, selected_archive_download, staged_patch_request_version,
     ArchiveDownloadSummary, ArchivePackageKind, ManifestDeltaEstimate,
+};
+pub use yostar_metadata::{
+    build_yostar_metadata, read_yostar_metadata, validate_remote_yostar_manifest,
+    write_yostar_metadata, YostarLauncherConfig, YostarLocalManifest, YostarLocalManifestEntry,
+    YostarLocalMetadata, YOSTAR_LAUNCHER_CONFIG_NAME, YOSTAR_MANIFEST_NAME,
 };

@@ -140,6 +140,12 @@ impl ChannelPair {
         channel: Option<String>,
         sub_channel: Option<String>,
     ) -> Result<Self> {
+        if region == RegionId::En && (channel.is_some() || sub_channel.is_some()) {
+            return Err(Error::Message {
+                context: "Configuration error: ",
+                detail: "YoStar EN does not expose launcher channel/sub-channel IDs; omit --channel and --sub-channel".to_string(),
+            });
+        }
         let channel = parse_channel(region, channel)?;
         let sub_channel = parse_sub_channel(region, &channel, sub_channel)?;
         Ok(Self::new(channel, Some(sub_channel)))

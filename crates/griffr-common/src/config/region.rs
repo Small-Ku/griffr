@@ -7,6 +7,7 @@ use crate::error::{Error, Result};
 pub enum RegionId {
     Cn,
     Sg,
+    En,
 }
 
 impl RegionId {
@@ -14,6 +15,7 @@ impl RegionId {
         match self {
             Self::Cn => "cn",
             Self::Sg => "sg",
+            Self::En => "en",
         }
     }
 
@@ -21,6 +23,7 @@ impl RegionId {
         match self {
             Self::Cn => "1",
             Self::Sg => "6",
+            Self::En => "0",
         }
     }
 }
@@ -38,8 +41,9 @@ impl std::str::FromStr for RegionId {
         match value.trim().to_ascii_lowercase().as_str() {
             "cn" | "china" | "mainland" => Ok(Self::Cn),
             "sg" | "global" | "os" | "overseas" => Ok(Self::Sg),
+            "en" | "yostar" | "arknights-en" => Ok(Self::En),
             value => Err(Error::Message { context: "Configuration error: ", detail: format!(
-                "invalid region {value:?}: expected cn or sg (aliases: china/mainland, global/os/overseas)"
+                "invalid region {value:?}: expected cn, sg, or en (aliases: china/mainland, global/os/overseas, yostar/arknights-en)"
             ) }),
         }
     }
@@ -77,10 +81,12 @@ mod tests {
             ("sg", RegionId::Sg),
             ("global", RegionId::Sg),
             ("OS", RegionId::Sg),
+            ("en", RegionId::En),
+            ("YoStar", RegionId::En),
         ] {
             let parsed = input.parse::<RegionId>().unwrap();
             assert_eq!(parsed, expected);
-            assert!(matches!(parsed.as_str(), "cn" | "sg"));
+            assert!(matches!(parsed.as_str(), "cn" | "sg" | "en"));
         }
     }
 }

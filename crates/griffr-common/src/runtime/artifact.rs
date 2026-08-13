@@ -40,8 +40,7 @@ impl ArtifactClaim {
     }
 
     pub fn expects_game_file(&self, entry: &GameFileEntry) -> bool {
-        self.expectation.expected_hash
-            == ContentHash::from(&entry.md5)
+        self.expectation.expected_hash == ContentHash::from(&entry.md5)
             && self.expectation.expected_size == Some(entry.size)
     }
 }
@@ -71,11 +70,7 @@ impl ArtifactExpectation {
     }
 
     pub fn from_game_file(entry: &GameFileEntry) -> Self {
-        Self::new(
-            &entry.path,
-            ContentHash::from(&entry.md5),
-            Some(entry.size),
-        )
+        Self::new(&entry.path, ContentHash::from(&entry.md5), Some(entry.size))
     }
 
     pub fn logical_path(&self) -> &str {
@@ -216,8 +211,7 @@ impl ArtifactProof {
     pub fn matches_game_file(&self, install_root: &Path, entry: &GameFileEntry) -> bool {
         let manifest_path = install_root.join(&entry.path);
         paths_resolve_to_same_file(&self.path, &manifest_path)
-            && self.expectation.expected_hash
-                == ContentHash::from(&entry.md5)
+            && self.expectation.expected_hash == ContentHash::from(&entry.md5)
             && self.expectation.expected_size == Some(entry.size)
     }
 

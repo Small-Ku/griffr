@@ -20,6 +20,7 @@ impl GameDefinition {
         match region {
             RegionId::Cn => Some(self.cn_appcode),
             RegionId::Sg => self.sg_appcode,
+            RegionId::En => None,
         }
     }
 }
@@ -76,6 +77,7 @@ pub const fn gateway(region: RegionId) -> &'static str {
     match region {
         RegionId::Cn => HYPERGRYPH_GATEWAY,
         RegionId::Sg => GRYPHLINE_GATEWAY,
+        RegionId::En => crate::api::yostar::YOSTAR_GATEWAY,
     }
 }
 
@@ -84,6 +86,7 @@ pub fn launcher_appcode(region: RegionId, sub_channel: &ChannelId) -> &'static s
         RegionId::Cn => HYPERGRYPH_LAUNCHER_APPCODE,
         RegionId::Sg if sub_channel == &ChannelId::EPIC => EPIC_LAUNCHER_APPCODE,
         RegionId::Sg => GRYPHLINE_LAUNCHER_APPCODE,
+        RegionId::En => "",
     }
 }
 
@@ -91,5 +94,6 @@ pub const fn local_low_vendor(region: RegionId) -> &'static str {
     match region {
         RegionId::Cn => HYPERGRYPH_LOCAL_LOW_VENDOR,
         RegionId::Sg => GRYPHLINE_LOCAL_LOW_VENDOR,
+        RegionId::En => "Yostar",
     }
 }
