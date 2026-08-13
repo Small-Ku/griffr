@@ -79,6 +79,14 @@ This design uses six code stages followed by packaging metadata.
 - The archive provider is selected only when its missing compressed range is smaller than the direct transfer, so exposing full packs to manifest updates cannot force a larger archive download.
 - Provider selection shares the command-scoped task pool and range cache; archive cache state is cleaned after the ensure batch unless archive retention is explicitly requested by a separate archive workflow.
 
+## 10. Patch Archives as Group Delivery Candidates
+
+- `Patch` and `Full` are archive package kinds, not update identities. A normal update remains defined by the old and target manifests.
+- A compatible official patch can compete as one group-level delivery candidate when no reuse source is available. Its declared transfer bytes are compared with the changed-file direct-transfer upper bound and the declared full-package transfer.
+- If the patch does not beat those bounds, the manifest route stays active and its per-file planner may independently choose reuse, ZIP ranges, or direct files.
+- Explicit `--full-package`, staged predownload application, and archive-only fallback still select an archive package directly because those workflows explicitly require archive semantics.
+- This keeps `pre_patch` useful for preloading while avoiding the previous `patch exists => patch pipeline` rule for ordinary updates.
+
 ## Validation
 
 Validation uses `cargo fmt`, workspace `cargo check`, Clippy with warnings denied,

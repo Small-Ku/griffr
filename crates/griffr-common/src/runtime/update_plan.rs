@@ -1,15 +1,84 @@
 use std::path::{Path, PathBuf};
 
-use crate::api::types::GetLatestGameResponse;
+use crate::api::types::{GameFileEntry, GetLatestGameResponse};
 use crate::error::{Error, Result};
 use crate::runtime::{
     griffr_predownload_path, read_predownload_stage_metadata, PREDOWNLOAD_STAGE_METADATA_NAME,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpdatePackageKind {
+pub enum ArchivePackageKind {
     Patch,
     Full,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ManifestDeltaEstimate {
+    pub changed_files: usize,
+    pub direct_bytes: u64,
+}
+
+pub fn estimate_manifest_delta(
+    current: &[GameFileEntry],
+    target: &[GameFileEntry],
+) -> ManifestDeltaEstimate {
+    let mut current_by_path = rapidhash::RapidHashMap::<String, (&str, u64)>::default();
+    current_by_path.reserve(current.len());
+    for entry in current {
+        current_by_path.insert(
+            crate::runtime::normalize_logical_path(&entry.path),
+            (entry.md5.as_str(), entry.size),
+        );
+    }
+
+    target
+        .iter()
+        .fold(ManifestDeltaEstimate::default(), |mut estimate, entry| {
+            let key = crate::runtime::normalize_logical_path(&entry.path);
+            let unchanged = current_by_path.get(&key).is_some_and(|(md5, size)| {
+                *size == entry.size && md5.eq_ignore_ascii_case(&entry.md5)
+            });
+            if !unchanged {
+                estimate.changed_files = estimate.changed_files.saturating_add(1);
+                estimate.direct_bytes = estimate.direct_bytes.saturating_add(entry.size);
+            }
+            estimate
+        })
+}
+
+/// Treats the official patch as one group-level delivery candidate. It wins
+/// only when no zero-network reuse provider is present and its declared
+/// transfer is smaller than both the raw changed-file transfer and a full
+/// package transfer. Per-file archive-range selection can still make the
+/// manifest route cheaper, so callers should regard this as a network-first
+/// heuristic rather than a content identity decision.
+pub fn patch_group_beats_manifest_sources(
+    version_info: &GetLatestGameResponse,
+    current_version: Option<&str>,
+    delta: ManifestDeltaEstimate,
+    has_reuse_sources: bool,
+) -> bool {
+    if has_reuse_sources || delta.changed_files == 0 {
+        return false;
+    }
+    let compatible = current_version
+        .is_some_and(|current| !current.is_empty() && current == version_info.request_version);
+    if !compatible {
+        return false;
+    }
+    let Some(patch) = version_info.patch.as_ref() else {
+        return false;
+    };
+    let patch_bytes = patch.patches.iter().map(|part| part.size()).sum::<u64>();
+    if patch_bytes == 0 || patch_bytes >= delta.direct_bytes {
+        return false;
+    }
+    let full_bytes = version_info
+        .pkg
+        .as_ref()
+        .map(|pkg| pkg.packs.iter().map(|part| part.size()).sum::<u64>())
+        .filter(|bytes| *bytes > 0);
+    full_bytes.is_none_or(|bytes| patch_bytes < bytes)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,18 +171,18 @@ pub fn resolve_staged_patch_recovery_dir(
     }
 }
 
-pub fn select_update_package(
+pub fn select_archive_package(
     version_info: &GetLatestGameResponse,
     current_version: Option<&str>,
-) -> Result<UpdatePackageKind> {
+) -> Result<ArchivePackageKind> {
     let patch_matches_installed_version = current_version
         .is_some_and(|current| !current.is_empty() && current == version_info.request_version);
 
     if version_info.has_patch_package() && patch_matches_installed_version {
-        return Ok(UpdatePackageKind::Patch);
+        return Ok(ArchivePackageKind::Patch);
     }
     if version_info.has_full_package() {
-        return Ok(UpdatePackageKind::Full);
+        return Ok(ArchivePackageKind::Full);
     }
     if version_info.has_patch_package() {
         return Err(Error::Message {
@@ -135,10 +204,10 @@ pub fn select_update_package(
 
 pub fn selected_archive_download(
     version_info: &GetLatestGameResponse,
-    package_kind: UpdatePackageKind,
+    package_kind: ArchivePackageKind,
 ) -> Option<ArchiveDownloadSummary> {
     match package_kind {
-        UpdatePackageKind::Patch => {
+        ArchivePackageKind::Patch => {
             version_info
                 .patch
                 .as_ref()
@@ -148,7 +217,7 @@ pub fn selected_archive_download(
                     total_size: patch.patches.iter().map(|part| part.size()).sum(),
                 })
         }
-        UpdatePackageKind::Full => version_info.pkg.as_ref().map(|pkg| ArchiveDownloadSummary {
+        ArchivePackageKind::Full => version_info.pkg.as_ref().map(|pkg| ArchiveDownloadSummary {
             label: "full",
             part_count: pkg.packs.len(),
             total_size: pkg.packs.iter().map(|part| part.size()).sum(),
@@ -198,6 +267,14 @@ mod tests {
             ],
             total_size: "7".to_string(),
             package_size: "7".to_string(),
+        }
+    }
+
+    fn game_file(path: &str, md5: &str, size: u64) -> GameFileEntry {
+        GameFileEntry {
+            path: path.to_string(),
+            md5: md5.to_string(),
+            size,
         }
     }
 
@@ -276,35 +353,81 @@ mod tests {
     #[test]
     fn selects_matching_patch_package() {
         assert_eq!(
-            select_update_package(&response(true, true), Some("1.0.13")).unwrap(),
-            UpdatePackageKind::Patch
+            select_archive_package(&response(true, true), Some("1.0.13")).unwrap(),
+            ArchivePackageKind::Patch
         );
     }
 
     #[test]
     fn falls_back_to_full_package() {
         assert_eq!(
-            select_update_package(&response(true, false), Some("1.0.13")).unwrap(),
-            UpdatePackageKind::Full
+            select_archive_package(&response(true, false), Some("1.0.13")).unwrap(),
+            ArchivePackageKind::Full
         );
         assert_eq!(
-            select_update_package(&response(true, true), Some("1.0.14")).unwrap(),
-            UpdatePackageKind::Full
+            select_archive_package(&response(true, true), Some("1.0.14")).unwrap(),
+            ArchivePackageKind::Full
         );
     }
 
     #[test]
     fn rejects_mismatched_patch_only_response() {
-        let error = select_update_package(&response(false, true), Some("1.0.14")).unwrap_err();
+        let error = select_archive_package(&response(false, true), Some("1.0.14")).unwrap_err();
         assert!(error.to_string().contains("Patch package was returned"));
     }
 
     #[test]
     fn summarizes_selected_patch_archives() {
         let plan =
-            selected_archive_download(&response(false, true), UpdatePackageKind::Patch).unwrap();
+            selected_archive_download(&response(false, true), ArchivePackageKind::Patch).unwrap();
         assert_eq!(plan.label, "patch");
         assert_eq!(plan.part_count, 2);
         assert_eq!(plan.total_size, 7);
+    }
+    #[test]
+    fn estimates_only_changed_manifest_payload() {
+        let current = vec![game_file("a.bin", "aa", 100), game_file("b.bin", "bb", 200)];
+        let target = vec![
+            game_file("a.bin", "aa", 100),
+            game_file("b.bin", "cc", 220),
+            game_file("c.bin", "dd", 30),
+        ];
+        assert_eq!(
+            estimate_manifest_delta(&current, &target),
+            ManifestDeltaEstimate {
+                changed_files: 2,
+                direct_bytes: 250,
+            }
+        );
+    }
+
+    #[test]
+    fn patch_is_only_a_smaller_group_candidate_without_reuse() {
+        let mut release = response(true, true);
+        release.pkg.as_mut().unwrap().packs[0].package_size = "500".to_string();
+        release.patch.as_mut().unwrap().patches[0].package_size = "30".to_string();
+        release.patch.as_mut().unwrap().patches[1].package_size = "20".to_string();
+        let delta = ManifestDeltaEstimate {
+            changed_files: 3,
+            direct_bytes: 100,
+        };
+        assert!(patch_group_beats_manifest_sources(
+            &release,
+            Some("1.0.13"),
+            delta,
+            false
+        ));
+        assert!(!patch_group_beats_manifest_sources(
+            &release,
+            Some("1.0.13"),
+            delta,
+            true
+        ));
+        assert!(!patch_group_beats_manifest_sources(
+            &release,
+            Some("wrong"),
+            delta,
+            false
+        ));
     }
 }

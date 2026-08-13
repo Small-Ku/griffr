@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use griffr_common::api::types::GetLatestGameResponse;
-use griffr_common::runtime::{selected_archive_download, UpdatePackageKind};
+use griffr_common::runtime::{selected_archive_download, ArchivePackageKind};
 
 use crate::ui;
 
@@ -14,7 +14,7 @@ pub(super) enum ArchiveAcquireMode {
 pub(super) fn describe_update_package_selection(
     version_info: &GetLatestGameResponse,
     current_version: Option<&str>,
-    package_kind: UpdatePackageKind,
+    package_kind: ArchivePackageKind,
     force_full_package: bool,
 ) -> String {
     if force_full_package {
@@ -22,14 +22,14 @@ pub(super) fn describe_update_package_selection(
     }
 
     match package_kind {
-        UpdatePackageKind::Patch => {
+        ArchivePackageKind::Patch => {
             let installed = current_version.unwrap_or("<unknown>");
             format!(
                 "Using patch package: installed version '{}' matches request_version '{}'.",
                 installed, version_info.request_version
             )
         }
-        UpdatePackageKind::Full => {
+        ArchivePackageKind::Full => {
             if version_info.patch.is_some() {
                 let installed = current_version.unwrap_or("<unknown>");
                 format!(
@@ -43,26 +43,12 @@ pub(super) fn describe_update_package_selection(
     }
 }
 
-pub(super) fn should_use_manifest_update(
-    has_current_manifest: bool,
-    has_target_manifest: bool,
-    require_staged_predownload: bool,
-    force_full_package: bool,
-    staged_patch_requested: bool,
-) -> bool {
-    has_current_manifest
-        && has_target_manifest
-        && !require_staged_predownload
-        && !force_full_package
-        && !staged_patch_requested
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_update_dry_run_plan(
     install_path: &Path,
     current_version: &str,
     version_info: &GetLatestGameResponse,
-    package_kind: UpdatePackageKind,
+    package_kind: ArchivePackageKind,
     use_manifest_update: bool,
     reuse_paths: &[PathBuf],
     use_predownload: bool,
@@ -95,7 +81,7 @@ pub(super) fn build_update_dry_run_plan(
                 plan.part_count,
                 ui::format_bytes(plan.total_size)
             ));
-            if use_predownload && package_kind == UpdatePackageKind::Patch {
+            if use_predownload && package_kind == ArchivePackageKind::Patch {
                 if let Some(stage_dir) = predownload_stage_dir {
                     lines.push(format!(
                         "Would reuse matching staged predownload archives from {} before downloading missing patch parts.",

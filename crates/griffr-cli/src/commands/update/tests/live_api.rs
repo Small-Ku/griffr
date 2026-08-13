@@ -1,5 +1,5 @@
 use super::*;
-use griffr_common::runtime::{select_update_package, UpdatePackageKind};
+use griffr_common::runtime::{select_archive_package, ArchivePackageKind};
 #[compio::test]
 #[ignore = "Makes real network request"]
 async fn real_cn_endfield_patch_and_full_fallback_selection() {
@@ -25,8 +25,8 @@ async fn real_cn_endfield_patch_and_full_fallback_selection() {
         "expected patch payload for request_version=1.1.9"
     );
     assert_eq!(
-        select_update_package(&patch_case, Some("1.1.9")).expect("selection failed"),
-        UpdatePackageKind::Patch
+        select_archive_package(&patch_case, Some("1.1.9")).expect("selection failed"),
+        ArchivePackageKind::Patch
     );
 
     let full_case = api_client
@@ -39,7 +39,7 @@ async fn real_cn_endfield_patch_and_full_fallback_selection() {
         "expected no patch payload for request_version=1.2.3"
     );
     assert_eq!(
-        select_update_package(&full_case, Some("1.2.3")).expect("selection failed"),
-        UpdatePackageKind::Full
+        select_archive_package(&full_case, Some("1.2.3")).expect("selection failed"),
+        ArchivePackageKind::Full
     );
 }

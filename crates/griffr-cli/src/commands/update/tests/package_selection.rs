@@ -1,5 +1,5 @@
 use super::*;
-use griffr_common::runtime::UpdatePackageKind;
+use griffr_common::runtime::ArchivePackageKind;
 use std::path::PathBuf;
 
 fn response_with_full_and_patch() -> GetLatestGameResponse {
@@ -42,7 +42,7 @@ fn describe_selection_mentions_patch_match_reason() {
     let message = describe_update_package_selection(
         &response,
         Some("1.0.13"),
-        UpdatePackageKind::Patch,
+        ArchivePackageKind::Patch,
         false,
     );
     assert!(message.contains("Using patch package"));
@@ -55,7 +55,7 @@ fn describe_selection_mentions_full_fallback_when_patch_mismatch() {
     let message = describe_update_package_selection(
         &response,
         Some("1.0.14"),
-        UpdatePackageKind::Full,
+        ArchivePackageKind::Full,
         false,
     );
     assert!(message.contains("Using full package"));
@@ -65,8 +65,12 @@ fn describe_selection_mentions_full_fallback_when_patch_mismatch() {
 #[test]
 fn describe_selection_mentions_forced_full() {
     let response = response_with_full_and_patch();
-    let message =
-        describe_update_package_selection(&response, Some("1.0.13"), UpdatePackageKind::Full, true);
+    let message = describe_update_package_selection(
+        &response,
+        Some("1.0.13"),
+        ArchivePackageKind::Full,
+        true,
+    );
     assert!(message.contains("--full-package"));
 }
 
@@ -77,7 +81,7 @@ fn dry_run_plan_includes_archive_verify_and_vfs_steps() {
         Path::new(r"C:\Games\Endfield"),
         "1.0.13",
         &response,
-        UpdatePackageKind::Full,
+        ArchivePackageKind::Full,
         false,
         &[],
         false,
@@ -106,7 +110,7 @@ fn dry_run_plan_reports_manifest_reuse_without_archive_selection() {
         Path::new(r"C:\Games\Endfield"),
         "1.0.13",
         &response,
-        UpdatePackageKind::Patch,
+        ArchivePackageKind::Patch,
         true,
         &[PathBuf::from(r"C:\Games\Endfield-Source")],
         false,
@@ -134,7 +138,7 @@ fn dry_run_plan_keeps_old_peers_as_archive_fallbacks() {
         Path::new(r"C:\Games\Endfield"),
         "1.0.13",
         &response,
-        UpdatePackageKind::Patch,
+        ArchivePackageKind::Patch,
         false,
         &[PathBuf::from(r"C:\Games\Endfield-Peer")],
         false,
@@ -151,22 +155,4 @@ fn dry_run_plan_keeps_old_peers_as_archive_fallbacks() {
     assert!(lines
         .iter()
         .any(|line| line.contains("post-update repair fallbacks")));
-}
-
-#[test]
-fn manifest_update_policy_requires_local_and_target_manifests() {
-    assert!(should_use_manifest_update(true, true, false, false, false));
-    assert!(!should_use_manifest_update(
-        false, true, false, false, false
-    ));
-    assert!(!should_use_manifest_update(
-        true, false, false, false, false
-    ));
-}
-
-#[test]
-fn archive_and_staged_options_override_manifest_update() {
-    assert!(!should_use_manifest_update(true, true, false, true, false));
-    assert!(!should_use_manifest_update(true, true, true, false, false));
-    assert!(!should_use_manifest_update(true, true, false, false, true));
 }

@@ -87,6 +87,7 @@ pub use progress::{
     ProgressUpdate,
 };
 pub use update_plan::{
-    resolve_staged_patch_recovery_dir, select_update_package, selected_archive_download,
-    staged_patch_request_version, ArchiveDownloadSummary, UpdatePackageKind,
+    estimate_manifest_delta, patch_group_beats_manifest_sources, resolve_staged_patch_recovery_dir,
+    select_archive_package, selected_archive_download, staged_patch_request_version,
+    ArchiveDownloadSummary, ArchivePackageKind, ManifestDeltaEstimate,
 };

@@ -7,11 +7,12 @@ use griffr_common::api::types::GetLatestGameResponse;
 use griffr_common::config::InstallTarget;
 use griffr_common::runtime::task_pool::{archive_expected_files, TaskPoolRunner};
 use griffr_common::runtime::{
-    finish_install_change, plan_vfs_tasks, read_install_change, read_local_game_files,
-    resolve_staged_patch_recovery_dir, select_update_package, start_install_change,
-    streaming_assets_path, ContentPlan, GameManifestSnapshot, InstallChangeKind,
-    InstallChangeSource, InstallChangeStart, InstallChangeState, IntegritySelection,
-    UpdatePackageKind, VfsFilePlanOptions, VfsTaskPlan,
+    estimate_manifest_delta, finish_install_change, is_launcher_metadata_path,
+    is_resource_baseline_path, patch_group_beats_manifest_sources, plan_vfs_tasks,
+    read_install_change, read_local_game_files, resolve_staged_patch_recovery_dir,
+    select_archive_package, start_install_change, streaming_assets_path, ArchivePackageKind,
+    ContentPlan, GameManifestSnapshot, InstallChangeKind, InstallChangeSource, InstallChangeStart,
+    InstallChangeState, IntegritySelection, VfsFilePlanOptions, VfsTaskPlan,
 };
 
 use super::*;
@@ -323,32 +324,76 @@ pub(super) async fn update_internal(
             current_version
         ));
     }
-    let package_kind = if opts.force_full_package || force_full_for_mixed_recovery {
-        UpdatePackageKind::Full
-    } else {
-        select_update_package(&version_info, Some(&package_request_version))?
-    };
     let current_manifest = match read_local_game_files(&local.install_path).await {
         Ok(manifest) => manifest,
         Err(error) => {
             if opts.output != crate::OutputFormat::Json {
                 ui::print_warning(format!(
-                    "Local game_files metadata is unavailable ({error}); falling back to the selected archive update."
+                    "Local game_files metadata is unavailable ({error}); falling back to an archive update."
                 ));
             }
             None
         }
     };
-    let staged_patch_requested = use_predownload && package_kind == UpdatePackageKind::Patch;
-    let use_manifest_update = should_use_manifest_update(
-        current_manifest.is_some(),
-        version_info.pkg.is_some(),
-        require_staged_predownload,
-        opts.force_full_package,
-        staged_patch_requested,
-    );
+    let manifest_snapshot = GameManifestSnapshot::fetch(api_client, &version_info)
+        .await
+        .context("Failed to fetch the update manifest snapshot")?;
+
+    let force_full_archive = opts.force_full_package || force_full_for_mixed_recovery;
+    let manifest_eligible = current_manifest.is_some()
+        && version_info.pkg.is_some()
+        && !require_staged_predownload
+        && !force_full_archive
+        && !use_predownload;
+    let manifest_delta = current_manifest.as_deref().map(|current| {
+        let current_core = current
+            .iter()
+            .filter(|entry| {
+                !is_launcher_metadata_path(&entry.path) && !is_resource_baseline_path(&entry.path)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let target_core = manifest_snapshot
+            .entries
+            .iter()
+            .filter(|entry| {
+                !is_launcher_metadata_path(&entry.path) && !is_resource_baseline_path(&entry.path)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        estimate_manifest_delta(&current_core, &target_core)
+    });
+    let patch_group_selected = manifest_eligible
+        && manifest_delta.is_some_and(|delta| {
+            patch_group_beats_manifest_sources(
+                &version_info,
+                Some(&package_request_version),
+                delta,
+                !reuse_roots.is_empty(),
+            )
+        });
+
+    let archive_kind = if force_full_archive {
+        Some(ArchivePackageKind::Full)
+    } else if require_staged_predownload || use_predownload {
+        Some(select_archive_package(
+            &version_info,
+            Some(&package_request_version),
+        )?)
+    } else if patch_group_selected {
+        Some(ArchivePackageKind::Patch)
+    } else if manifest_eligible {
+        None
+    } else {
+        Some(select_archive_package(
+            &version_info,
+            Some(&package_request_version),
+        )?)
+    };
+    let use_manifest_update = archive_kind.is_none();
+    let package_kind = archive_kind.unwrap_or(ArchivePackageKind::Full);
     let predownload_stage_dir =
-        if !use_manifest_update && use_predownload && package_kind == UpdatePackageKind::Patch {
+        if !use_manifest_update && use_predownload && package_kind == ArchivePackageKind::Patch {
             Some(
                 recovery_stage_dir
                     .or(predownload_dir_override)
@@ -367,10 +412,19 @@ pub(super) async fn update_internal(
 
     if use_manifest_update {
         ui::print_info(format!(
-            "Using target-manifest update with {} optional reuse source(s); archive package selection is bypassed.",
+            "Using target-manifest update with {} optional reuse source(s); patch/full archives are delivery providers rather than the update identity.",
             reuse_roots.len()
         ));
     } else {
+        if patch_group_selected {
+            if let Some(delta) = manifest_delta {
+                ui::print_info(format!(
+                    "Selected official patch as a group delivery candidate: declared patch transfer is smaller than the {} changed-file / {} direct-byte manifest upper bound.",
+                    delta.changed_files,
+                    delta.direct_bytes
+                ));
+            }
+        }
         ui::print_info(describe_update_package_selection(
             &version_info,
             Some(&package_request_version),
@@ -385,7 +439,7 @@ pub(super) async fn update_internal(
         }
     }
 
-    if require_staged_predownload && package_kind != UpdatePackageKind::Patch {
+    if require_staged_predownload && package_kind != ArchivePackageKind::Patch {
         anyhow::bail!(
             "Predownload apply requires a live patch update for the installed version; got {:?}",
             package_kind
@@ -432,7 +486,7 @@ pub(super) async fn update_internal(
         Vec::new()
     } else {
         match package_kind {
-            UpdatePackageKind::Patch => version_info
+            ArchivePackageKind::Patch => version_info
                 .patch
                 .as_ref()
                 .map(|patch| patch.patches.as_slice())
@@ -440,7 +494,7 @@ pub(super) async fn update_internal(
                 .iter()
                 .map(|part| part.md5.clone())
                 .collect(),
-            UpdatePackageKind::Full => version_info
+            ArchivePackageKind::Full => version_info
                 .pkg
                 .as_ref()
                 .map(|pkg| pkg.packs.as_slice())
@@ -450,15 +504,11 @@ pub(super) async fn update_internal(
                 .collect(),
         }
     };
-    let manifest_snapshot = GameManifestSnapshot::fetch(api_client, &version_info)
-        .await
-        .context("Failed to fetch the update manifest snapshot")?;
-
     let mut change_state = InstallChangeState::new(
         InstallChangeKind::Update,
         if use_manifest_update {
             InstallChangeSource::Manifest
-        } else if package_kind == UpdatePackageKind::Patch {
+        } else if package_kind == ArchivePackageKind::Patch {
             InstallChangeSource::PatchArchive
         } else {
             InstallChangeSource::FullArchive
@@ -505,7 +555,7 @@ pub(super) async fn update_internal(
     )
     .context("Failed to build the update content plan")?;
 
-    if !use_manifest_update && package_kind == UpdatePackageKind::Patch {
+    if !use_manifest_update && package_kind == ArchivePackageKind::Patch {
         validate_patch_target(&install_target.exe_name, &local.install_path).await?;
     }
 
@@ -543,7 +593,7 @@ pub(super) async fn update_internal(
 
     if !use_manifest_update {
         match package_kind {
-            UpdatePackageKind::Patch => {
+            ArchivePackageKind::Patch => {
                 let patch = version_info
                     .patch
                     .as_ref()
@@ -589,7 +639,7 @@ pub(super) async fn update_internal(
                     .await?;
                 }
             }
-            UpdatePackageKind::Full => {
+            ArchivePackageKind::Full => {
                 let pkg = version_info
                     .pkg
                     .as_ref()
@@ -615,7 +665,7 @@ pub(super) async fn update_internal(
 
     let verification_selection = if use_manifest_update {
         IntegritySelection::Paths(Vec::new())
-    } else if package_kind == UpdatePackageKind::Full {
+    } else if package_kind == ArchivePackageKind::Full {
         // Full-package extraction verifies and commits every archive entry as it
         // is written. The manifest closure still checks paths that were absent
         // from the archive or owned by independent file tasks, while cached
