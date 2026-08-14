@@ -1,0 +1,12 @@
+[package]
+name = "griffr-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core domain model for Griffr"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }

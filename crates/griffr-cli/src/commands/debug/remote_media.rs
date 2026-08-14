@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use griffr_common::api::client::ApiClient;
-use griffr_common::config::{ChannelPair, GameId, RegionId};
+use griffr_core::{ChannelPair, GameId, RegionId};
+use griffr_hypergryph_api::client::ApiClient;
 use serde_json::{json, Value};
 
 use super::vfs_support::emit_json;
@@ -13,7 +13,7 @@ fn media_to_json(
     region_id: RegionId,
     channel_id: ChannelPair,
     language: &str,
-    media: &griffr_common::api::client::MediaResponse,
+    media: &griffr_hypergryph_api::client::MediaResponse,
 ) -> Value {
     json!({
         "game": game_id.to_string(),
@@ -102,7 +102,7 @@ pub async fn api_get_media(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target = griffr_common::config::resolve_api_target(
+    let target = griffr_hypergryph_api::resolve_api_target(
         &game_id,
         region_id,
         &channel_id,
@@ -122,7 +122,7 @@ pub async fn fetch_media(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target = griffr_common::config::resolve_api_target(
+    let target = griffr_hypergryph_api::resolve_api_target(
         &game_id,
         region_id,
         &channel_id,

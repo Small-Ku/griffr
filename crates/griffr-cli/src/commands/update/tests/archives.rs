@@ -93,7 +93,7 @@ fn start_test_http_channel(
 async fn download_and_extract_archives_recovers_partial_part_on_rerun() {
     let tmp = tempdir().unwrap();
     let install_path = tmp.path().join("install");
-    let download_dir = griffr_common::runtime::griffr_archives_path(&install_path);
+    let download_dir = griffr_runtime::griffr_archives_path(&install_path);
     std::fs::create_dir_all(&download_dir).unwrap();
     std::fs::create_dir_all(&install_path).unwrap();
 
@@ -131,12 +131,12 @@ async fn download_and_extract_archives_recovers_partial_part_on_rerun() {
     let archives = vec![
         PackFile {
             url: format!("{}/{}", base_url, part1_name),
-            md5: griffr_common::to_hex(&md5::Md5::digest(&part1)),
+            md5: griffr_core::to_hex(&md5::Md5::digest(&part1)),
             package_size: part1.len().to_string(),
         },
         PackFile {
             url: format!("{}/{}", base_url, part2_name),
-            md5: griffr_common::to_hex(&md5::Md5::digest(&part2)),
+            md5: griffr_core::to_hex(&md5::Md5::digest(&part2)),
             package_size: part2.len().to_string(),
         },
     ];
@@ -154,8 +154,8 @@ async fn download_and_extract_archives_recovers_partial_part_on_rerun() {
         "patch",
         false,
         None,
-        &griffr_common::runtime::PatchApplyOptions::default(),
-        griffr_common::runtime::task_pool::archive_expected_files(Vec::new()),
+        &griffr_runtime::PatchApplyOptions::default(),
+        griffr_runtime::task_pool::archive_expected_files(Vec::new()),
         Vec::new(),
         &[],
         false,
@@ -217,7 +217,7 @@ async fn download_and_extract_archives_applies_delete_files_manifest() {
 
     let archives = vec![PackFile {
         url: format!("{}/{}", base_url, part_name),
-        md5: griffr_common::to_hex(&md5::Md5::digest(&zip_bytes)),
+        md5: griffr_core::to_hex(&md5::Md5::digest(&zip_bytes)),
         package_size: zip_bytes.len().to_string(),
     }];
 
@@ -234,8 +234,8 @@ async fn download_and_extract_archives_applies_delete_files_manifest() {
         "patch",
         false,
         None,
-        &griffr_common::runtime::PatchApplyOptions::default(),
-        griffr_common::runtime::task_pool::archive_expected_files(Vec::new()),
+        &griffr_runtime::PatchApplyOptions::default(),
+        griffr_runtime::task_pool::archive_expected_files(Vec::new()),
         Vec::new(),
         &[],
         false,

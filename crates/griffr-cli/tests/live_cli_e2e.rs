@@ -5,11 +5,12 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use griffr_common::api::client::ApiClient;
-use griffr_common::api::crypto::decrypt_game_files_owned;
-use griffr_common::api::types::GameFileEntry;
-use griffr_common::config::{resolve_api_target, ChannelPair, GameId, RegionId};
-use griffr_common::runtime::task_pool::{download_and_discard, DEFAULT_PROGRESS_BUFFER_BYTES};
+use griffr_core::{ChannelPair, GameId, RegionId};
+use griffr_hypergryph_api::client::ApiClient;
+use griffr_hypergryph_api::crypto::decrypt_game_files_owned;
+use griffr_hypergryph_api::resolve_api_target;
+use griffr_hypergryph_api::types::GameFileEntry;
+use griffr_runtime::task_pool::{download_and_discard, DEFAULT_PROGRESS_BUFFER_BYTES};
 use md5::{Digest, Md5};
 
 mod support;
@@ -253,7 +254,7 @@ fn choose_probe_entry(install: &Path, entries: &[GameFileEntry]) -> GameFileEntr
 
 fn assert_md5(path: &Path, expected: &str) {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    let actual = griffr_common::to_hex(&Md5::digest(bytes));
+    let actual = griffr_core::to_hex(&Md5::digest(bytes));
     assert_eq!(
         actual,
         expected.to_ascii_lowercase(),

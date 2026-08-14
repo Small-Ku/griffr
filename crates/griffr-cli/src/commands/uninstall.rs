@@ -2,10 +2,10 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use griffr_common::runtime::{
+use griffr_hypergryph_api::CONFIG_INI_NAME;
+use griffr_runtime::{
     read_asset_storage_layout, read_yostar_metadata, remove_dir_all, resolve_install_path,
-    ASSET_STORAGE_METADATA_NAME, CONFIG_INI_NAME, GRIFFR_DIR, YOSTAR_LAUNCHER_CONFIG_NAME,
-    YOSTAR_MANIFEST_NAME,
+    ASSET_STORAGE_METADATA_NAME, GRIFFR_DIR, YOSTAR_LAUNCHER_CONFIG_NAME, YOSTAR_MANIFEST_NAME,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +18,7 @@ const UNINSTALL_PLAN_NAME: &str = ".griffr-uninstall.json";
 #[derive(Debug)]
 struct UninstallTarget {
     root: PathBuf,
-    storage: Option<griffr_common::runtime::AssetStorageLayout>,
+    storage: Option<griffr_runtime::AssetStorageLayout>,
     owned_external_root: Option<PathBuf>,
 }
 

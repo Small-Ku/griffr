@@ -1,0 +1,21 @@
+[package]
+name = "griffr-yostar-api"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "YoStar launcher API protocol for Griffr"
+
+[dependencies]
+griffr-core = { workspace = true }
+cyper = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+md-5 = { workspace = true }
+url = "2"
+
+[dev-dependencies]
+compio = { workspace = true }

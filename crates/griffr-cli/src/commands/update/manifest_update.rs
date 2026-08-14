@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use griffr_common::api::types::{GameFileEntry, GetLatestGameResponse};
-use griffr_common::runtime::task_pool::TaskPoolRunner;
-use griffr_common::runtime::{
+use griffr_hypergryph_api::types::{GameFileEntry, GetLatestGameResponse};
+use griffr_runtime::task_pool::TaskPoolRunner;
+use griffr_runtime::{
     ensure_manifest_delta_with_pool, is_launcher_metadata_path, is_resource_baseline_path,
     remove_blocking_obsolete_game_files, remove_obsolete_game_files, ContentPlan,
     FileMaterializationConfig, LocalInstall, ProgressLane,

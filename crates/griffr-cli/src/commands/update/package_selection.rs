@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use griffr_common::api::types::GetLatestGameResponse;
-use griffr_common::runtime::{selected_archive_download, ArchivePackageKind};
+use griffr_hypergryph_api::types::GetLatestGameResponse;
+use griffr_runtime::{selected_archive_download, ArchivePackageKind};
 
 use crate::ui;
 

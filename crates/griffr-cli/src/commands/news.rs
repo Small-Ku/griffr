@@ -1,6 +1,6 @@
 use anyhow::Result;
-use griffr_common::api::client::ApiClient;
-use griffr_common::config::{ChannelPair, GameId, RegionId};
+use griffr_core::{ChannelPair, GameId, RegionId};
+use griffr_hypergryph_api::client::ApiClient;
 use serde_json::json;
 
 use crate::{ui, GlobalOptions, OutputFormat};
@@ -19,7 +19,7 @@ pub async fn show(
     opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target = griffr_common::config::resolve_api_target(
+    let target = griffr_hypergryph_api::resolve_api_target(
         &game_id,
         region_id,
         &channel_id,

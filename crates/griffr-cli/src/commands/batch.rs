@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use futures_util::{stream, stream::FuturesUnordered, StreamExt, TryStreamExt};
-use griffr_common::config::GameId;
-use griffr_common::runtime::{detect_local_install, LocalInstall};
+use griffr_core::GameId;
+use griffr_runtime::{detect_local_install, LocalInstall};
 
 const PATH_INSPECTION_CONCURRENCY: usize = 8;
 
@@ -302,7 +302,7 @@ fn path_key(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use griffr_common::runtime::{LocalInstallMetadata, ParsedConfigIni};
+    use griffr_runtime::{LocalInstallMetadata, ParsedConfigIni};
     use std::collections::BTreeMap;
 
     fn local(path: &str, game: GameId) -> LocalInstall {

@@ -1,20 +1,18 @@
-use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use griffr_common::api::client::ApiClient;
-use griffr_common::config::{ChannelPair, GameId, RegionId};
-use griffr_common::runtime::task_pool::{
+use griffr_core::{ChannelPair, GameId, RegionId};
+use griffr_hypergryph_api::client::ApiClient;
+use griffr_runtime::task_pool::{
     archive_expected_files, plan_archive_groups, ArchiveRetention, ArchiveSource, Task,
     TaskGraphBuilder, TaskOutcome, TaskPoolRunner, TaskProgress,
 };
-use griffr_common::runtime::{
-    directory_has_entries, ensure_game_files_from_manifest_with_pool, finish_install_change,
-    finish_vfs_plan, griffr_archives_path, plan_vfs_tasks, read_install_change,
-    resolve_file_reuse_roots, run_integrity_pool, start_install_change, streaming_assets_path,
-    sync_launcher_metadata, ContentPlan, FileMaterializationConfig, GameManifestSnapshot,
-    InstallChangeKind, InstallChangeSource, InstallChangeStart, InstallChangeState, ProgressLane,
-    VfsFilePlanOptions, VfsTaskPlan,
+use griffr_runtime::{
+    ensure_game_files_from_manifest_with_pool, finish_install_change, finish_vfs_plan,
+    griffr_archives_path, plan_vfs_tasks, resolve_file_reuse_roots, run_integrity_pool,
+    start_install_change, streaming_assets_path, sync_launcher_metadata, ContentPlan,
+    FileMaterializationConfig, GameManifestSnapshot, InstallChangeKind, InstallChangeSource,
+    InstallChangeStart, InstallChangeState, ProgressLane, VfsFilePlanOptions, VfsTaskPlan,
 };
 
 use crate::commands::archive_graph::{add_file_tasks, full_archive_excluded_paths};
@@ -22,54 +20,17 @@ use crate::progress::{ArchiveProgress, CountAndByteProgress};
 use crate::ui;
 use crate::GlobalOptions;
 
-pub async fn install(
+pub(super) async fn install_hypergryph(
     game_id: GameId,
     region_id: RegionId,
     channel_id: ChannelPair,
     overrides: crate::InstallTargetOverrideArgs,
     install_path: PathBuf,
-    force: bool,
+    install_path_had_entries: bool,
     reuse_paths: Vec<PathBuf>,
     force_copy: bool,
     opts: GlobalOptions,
 ) -> Result<()> {
-    let pending_change = read_install_change(&install_path)?;
-    let can_resume_install = pending_change
-        .as_ref()
-        .is_some_and(|state| state.kind == InstallChangeKind::Install);
-    let install_path_exists = match compio::fs::metadata(&install_path).await {
-        Ok(_) => true,
-        Err(err) if err.kind() == ErrorKind::NotFound => false,
-        Err(err) => {
-            return Err(err)
-                .with_context(|| format!("Failed to stat install path {}", install_path.display()))
-        }
-    };
-
-    let install_path_had_entries =
-        install_path_exists && directory_has_entries(install_path.clone()).await?;
-
-    if install_path_had_entries && !force && !can_resume_install {
-        anyhow::bail!(
-            "Install path is not empty: {} (pass --force to reuse it)",
-            install_path.display()
-        );
-    }
-
-    if region_id.is_yostar() {
-        return crate::commands::yostar::install(
-            game_id,
-            region_id,
-            install_path,
-            install_path_had_entries,
-            reuse_paths,
-            force_copy,
-            overrides,
-            opts,
-        )
-        .await;
-    }
-
     if opts.is_dry_run() {
         opts.dry_run(format!(
             "Would install {:?} region={} {:?} into {}",
@@ -103,7 +64,7 @@ pub async fn install(
         .with_context(|| format!("Failed to create {}", install_path.display()))?;
 
     let api_client = ApiClient::new()?;
-    let install_target = griffr_common::config::resolve_install_target(
+    let install_target = griffr_hypergryph_api::resolve_install_target(
         &game_id,
         region_id,
         &channel_id,
@@ -257,7 +218,7 @@ pub async fn install(
             .context("Failed to refresh install delivery URLs")?;
         let summary = run_integrity_pool(
             &content_plan,
-            griffr_common::runtime::IntegritySelection::GameFiles,
+            griffr_runtime::IntegritySelection::GameFiles,
             &[],
             true,
             &source_roots,
@@ -324,7 +285,7 @@ pub async fn install(
                 dest: install_path.clone(),
                 retention: ArchiveRetention::from_keep_full_volumes(opts.keep_pack_archives),
                 password: None,
-                patch_options: griffr_common::runtime::PatchApplyOptions::default(),
+                patch_options: griffr_runtime::PatchApplyOptions::default(),
                 expected_files: expected_archive_files.clone(),
                 excluded_commit_paths: excluded_commit_paths.clone(),
             }));
@@ -474,7 +435,7 @@ pub async fn install(
         .context("Failed to refresh final install delivery URLs")?;
     let summary = run_integrity_pool(
         &content_plan,
-        griffr_common::runtime::IntegritySelection::GameFiles,
+        griffr_runtime::IntegritySelection::GameFiles,
         &already_verified_paths,
         true,
         &[],

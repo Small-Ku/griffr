@@ -8,6 +8,7 @@ mod debug_cli;
 #[path = "main/entrypoint/mod.rs"]
 mod entrypoint;
 mod progress;
+mod target;
 mod ui;
 
 pub(crate) use cli::*;

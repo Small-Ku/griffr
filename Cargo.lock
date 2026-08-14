@@ -1273,7 +1273,10 @@ dependencies = [
  "compio 0.19.1",
  "dirs",
  "futures-util",
- "griffr-common",
+ "griffr-core",
+ "griffr-hypergryph-api",
+ "griffr-runtime",
+ "griffr-yostar-api",
  "indicatif",
  "md-5",
  "rapidhash",
@@ -1287,30 +1290,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "griffr-common"
+name = "griffr-core"
 version = "0.0.1"
 dependencies = [
- "aes 0.8.4",
- "base64",
- "cbc",
- "chrono",
- "compio 0.19.1",
- "cyper",
- "dirs",
- "flume",
- "futures-util",
- "hdiffpatch-rs",
- "libc",
- "md-5",
- "rapidhash",
  "serde",
- "serde_json",
- "tempfile",
  "thiserror",
- "tracing",
- "url",
- "windows-sys 0.59.0",
- "zip",
 ]
 
 [[package]]
@@ -1330,6 +1314,65 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "griffr-hypergryph-api"
+version = "0.0.1"
+dependencies = [
+ "aes 0.8.4",
+ "base64",
+ "cbc",
+ "compio 0.19.1",
+ "cyper",
+ "griffr-core",
+ "md-5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "griffr-runtime"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "chrono",
+ "compio 0.19.1",
+ "cyper",
+ "dirs",
+ "flume",
+ "futures-util",
+ "griffr-core",
+ "griffr-hypergryph-api",
+ "griffr-yostar-api",
+ "hdiffpatch-rs",
+ "libc",
+ "md-5",
+ "rapidhash",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "windows-sys 0.59.0",
+ "zip",
+]
+
+[[package]]
+name = "griffr-yostar-api"
+version = "0.0.1"
+dependencies = [
+ "compio 0.19.1",
+ "cyper",
+ "futures-util",
+ "griffr-core",
+ "md-5",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "url",
 ]
 
 [[package]]

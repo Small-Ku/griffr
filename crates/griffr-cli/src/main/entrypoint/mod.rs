@@ -1,9 +1,10 @@
 use crate::cli::*;
 use crate::debug_cli::*;
+use crate::target::RemoteTarget;
 use crate::{commands, GlobalOptions};
 use anyhow::Result;
 use clap::Parser;
-use griffr_common::config::{ChannelPair, GameId, RegionId};
+use griffr_core::{ChannelPair, GameId, RegionId};
 use tracing::debug;
 
 mod account;
@@ -12,16 +13,24 @@ mod debug;
 #[cfg(test)]
 mod tests;
 
-fn parse_remote_args(
+fn parse_remote_args(remote: RequiredGameRegionChannelArgs) -> Result<RemoteTarget> {
+    let (game, region, channel, sub_channel) = remote.into_parts();
+    RemoteTarget::parse(game, region, channel, sub_channel)
+}
+
+fn parse_hypergryph_remote_args(
     remote: RequiredGameRegionChannelArgs,
 ) -> Result<(GameId, RegionId, ChannelPair)> {
-    let (game, region, channel, sub_channel) = remote.into_parts();
-    let region = region.parse::<RegionId>()?;
-    Ok((
-        game.parse::<GameId>()?,
-        region,
-        ChannelPair::parse(region, channel, sub_channel)?,
-    ))
+    match parse_remote_args(remote)? {
+        RemoteTarget::Hypergryph {
+            game,
+            region,
+            channels,
+        } => Ok((game, region, channels)),
+        RemoteTarget::Yostar { region, .. } => anyhow::bail!(
+            "This command uses the Hypergryph/Gryphline API and is unavailable for YoStar {region}"
+        ),
+    }
 }
 
 async fn dispatch_resource_sync(args: PersistentResourceArgs, opts: GlobalOptions) -> Result<()> {
@@ -64,7 +73,7 @@ pub(crate) async fn run() -> Result<()> {
 
     crate::ui::set_quiet(cli.quiet);
     let default_level = if cli.verbose {
-        "warn,griffr=debug,griffr_common=debug"
+        "warn,griffr=debug,griffr_core=debug,griffr_hypergryph_api=debug,griffr_yostar_api=debug,griffr_runtime=debug"
     } else if cli.quiet {
         "error"
     } else {
@@ -99,7 +108,7 @@ pub(crate) async fn run() -> Result<()> {
             keep_pack_archives,
         } => {
             let opts = opts.with_dry_run(mutation.dry_run);
-            let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
+            let target = parse_remote_args(remote)?;
             let PathArg { path } = path;
             let ReuseSourcesArg {
                 reuse_from,
@@ -114,14 +123,10 @@ pub(crate) async fn run() -> Result<()> {
             };
 
             opts.verbose(format!(
-                "Install command: game={:?}, region={}, channel={:?}, path={:?}, reuse_from={:?}, force_copy={}, resource_policy={:?}, keep_pack_archives={}",
-                game_id, region_id, channel_id, path, reuse_from, force_copy, resource_policy, keep_pack_archives
+                "Install command: target={:?}, path={:?}, reuse_from={:?}, force_copy={}, resource_policy={:?}, keep_pack_archives={}",
+                target, path, reuse_from, force_copy, resource_policy, keep_pack_archives
             ));
-            commands::install(
-                game_id, region_id, channel_id, overrides, path, force, reuse_from, force_copy,
-                opts,
-            )
-            .await?;
+            commands::install(target, overrides, path, force, reuse_from, force_copy, opts).await?;
         }
 
         Commands::Uninstall {
@@ -183,7 +188,7 @@ pub(crate) async fn run() -> Result<()> {
                 require_staged,
                 use_default_stage,
                 batch,
-                griffr_common::runtime::PatchApplyOptions {
+                griffr_runtime::PatchApplyOptions {
                     work_dir,
                     external_asset_root,
                 },
@@ -241,7 +246,7 @@ pub(crate) async fn run() -> Result<()> {
                     path,
                     overrides,
                     stage_dir,
-                    griffr_common::runtime::PatchApplyOptions {
+                    griffr_runtime::PatchApplyOptions {
                         work_dir,
                         external_asset_root,
                     },
@@ -376,7 +381,7 @@ pub(crate) async fn run() -> Result<()> {
             report,
         } => {
             let opts = opts.with_output(report.output);
-            let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
+            let (game_id, region_id, channel_id) = parse_hypergryph_remote_args(remote)?;
             opts.verbose(format!("News: {:?} {:?}", game_id, channel_id));
             commands::news_show(
                 game_id,

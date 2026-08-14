@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use griffr_common::api::crypto::encrypt_game_files;
+use griffr_hypergryph_api::crypto::encrypt_game_files;
 use md5::{Digest, Md5};
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -52,7 +52,7 @@ impl ResourceFixture {
             }]
         }))
         .expect("serialize resource index");
-        let key = griffr_common::api::crypto::RES_INDEX_KEY.as_bytes();
+        let key = griffr_hypergryph_api::crypto::RES_INDEX_KEY.as_bytes();
         let encrypted = plaintext
             .iter()
             .enumerate()
@@ -693,7 +693,7 @@ fn write_response_owned(
 }
 
 fn md5_hex(bytes: &[u8]) -> String {
-    griffr_common::to_hex(&Md5::digest(bytes))
+    griffr_core::to_hex(&Md5::digest(bytes))
 }
 
 fn run_command<I, S>(args: I) -> Output
@@ -1402,7 +1402,7 @@ fn yostar_regions_and_debug_commands_share_one_protocol_family() {
 #[test]
 fn resource_index_cipher_fixture_round_trips() {
     let plaintext = br#"{"version":"1","path":"","files":[]}"#;
-    let key = griffr_common::api::crypto::RES_INDEX_KEY.as_bytes();
+    let key = griffr_hypergryph_api::crypto::RES_INDEX_KEY.as_bytes();
     let encrypted = plaintext
         .iter()
         .enumerate()
@@ -1410,9 +1410,9 @@ fn resource_index_cipher_fixture_round_trips() {
         .collect::<Vec<_>>();
     let encoded = STANDARD.encode(encrypted);
     assert_eq!(
-        griffr_common::api::crypto::decrypt_res_index(
+        griffr_hypergryph_api::crypto::decrypt_res_index(
             &encoded,
-            griffr_common::api::crypto::RES_INDEX_KEY,
+            griffr_hypergryph_api::crypto::RES_INDEX_KEY,
         )
         .unwrap()
         .as_bytes(),

@@ -3,17 +3,17 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 #[cfg(windows)]
-use griffr_common::runtime::admin::ensure_admin;
-use griffr_common::runtime::task_pool::TaskPoolRunner;
+use griffr_runtime::admin::ensure_admin;
+use griffr_runtime::task_pool::TaskPoolRunner;
 #[cfg(not(windows))]
-use griffr_common::runtime::WineConfig;
-use griffr_common::runtime::{
+use griffr_runtime::WineConfig;
+use griffr_runtime::{
     check_yostar_file_metadata_with_pool, ensure_install_ready, Launcher, ProgressSender,
 };
 
 use crate::ui;
 use crate::GlobalOptions;
-use griffr_common::runtime::detect_local_install;
+use griffr_runtime::detect_local_install;
 
 pub async fn launch(
     path: PathBuf,
@@ -67,7 +67,7 @@ pub async fn launch(
     } else {
         let region_id = local.require_known_region()?;
         let channel_id = local.require_known_channel()?;
-        let install_target = griffr_common::config::resolve_install_target(
+        let install_target = griffr_hypergryph_api::resolve_install_target(
             &game_id,
             region_id,
             &channel_id,

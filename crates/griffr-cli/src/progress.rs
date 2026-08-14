@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use griffr_common::runtime::{
+use griffr_runtime::{
     ProgressLane, ProgressReceiver, ProgressSender, ProgressUnit, ProgressUpdate,
 };
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};

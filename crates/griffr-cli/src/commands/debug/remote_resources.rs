@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use griffr_common::api::client::ApiClient;
-use griffr_common::api::crypto;
-use griffr_common::config::{ChannelPair, GameId, RegionId};
-use griffr_common::runtime::{resource_manifest_url, ResourceManifestKind};
+use griffr_core::{build_cdn_file_url, ChannelPair, GameId, RegionId};
+use griffr_hypergryph_api::client::ApiClient;
+use griffr_hypergryph_api::crypto;
+use griffr_runtime::{download_file_with_verify, resource_manifest_url, ResourceManifestKind};
 use serde_json::json;
 
 use super::vfs_support::emit_json;
@@ -21,7 +21,7 @@ pub async fn fetch_game_files(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target = griffr_common::config::resolve_api_target(
+    let target = griffr_hypergryph_api::resolve_api_target(
         &game_id,
         region_id,
         &channel_id,
@@ -68,7 +68,7 @@ pub async fn fetch_file(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target = griffr_common::config::resolve_api_target(
+    let target = griffr_hypergryph_api::resolve_api_target(
         &game_id,
         region_id,
         &channel_id,
@@ -89,13 +89,13 @@ pub async fn fetch_file(
         .find(|entry| entry.path == file)
         .context("Requested file not found in remote game_files manifest")?;
 
-    let base_url = pkg.file_path.trim_end_matches('/');
-    let url = format!("{}/{}", base_url, entry.path);
+    let base_url = griffr_hypergryph_api::files_base_url(&pkg.file_path)?;
+    let url = build_cdn_file_url(base_url, &entry.path);
     let progress = ActivityProgress::new(format!("debug.fetch-file {}", entry.path));
-    let download_result = api_client
-        .download_file_with_verify(&url, &output, &entry.md5)
-        .await
-        .with_context(|| format!("Failed to download {} to {}", entry.path, output.display()));
+    let download_result =
+        download_file_with_verify(api_client.user_agent(), &url, &output, &entry.md5)
+            .await
+            .with_context(|| format!("Failed to download {} to {}", entry.path, output.display()));
     if let Err(err) = download_result {
         progress.fail();
         return Err(err);
@@ -116,7 +116,7 @@ pub async fn api_get_latest_game(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target = griffr_common::config::resolve_api_target(
+    let target = griffr_hypergryph_api::resolve_api_target(
         &game_id,
         region_id,
         &channel_id,
@@ -163,7 +163,7 @@ pub async fn api_get_latest_resources(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target = griffr_common::config::resolve_api_target(
+    let target = griffr_hypergryph_api::resolve_api_target(
         &game_id,
         region_id,
         &channel_id,
@@ -233,7 +233,7 @@ pub async fn list_resource_files(
     _opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;
-    let target = griffr_common::config::resolve_api_target(
+    let target = griffr_hypergryph_api::resolve_api_target(
         &game_id,
         region_id,
         &channel_id,

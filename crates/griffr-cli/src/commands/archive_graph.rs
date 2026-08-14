@@ -3,12 +3,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Result;
-use griffr_common::api::types::GameFileEntry;
-use griffr_common::runtime::task_pool::{NodeId, Task, TaskGraphBuilder};
-use griffr_common::runtime::{
-    ArtifactClaim, CONFIG_INI_NAME, GAME_FILES_NAME, GRIFFR_DIR, INSTALL_CHANGE_STATE_NAME,
-    PACKAGE_FILES_NAME,
+use griffr_hypergryph_api::{
+    types::GameFileEntry, CONFIG_INI_NAME, GAME_FILES_NAME, PACKAGE_FILES_NAME,
 };
+use griffr_runtime::task_pool::{NodeId, Task, TaskGraphBuilder};
+use griffr_runtime::{ArtifactClaim, GRIFFR_DIR, INSTALL_CHANGE_STATE_NAME};
 
 fn normalize_relative_path(path: &Path) -> String {
     path.to_string_lossy()
@@ -119,15 +118,13 @@ pub(crate) fn add_file_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use griffr_common::runtime::task_pool::{ArchiveRetention, ArchiveSource, TransferClass};
+    use griffr_runtime::task_pool::{ArchiveRetention, ArchiveSource, TransferClass};
 
     fn verify_task(path: &Path, logical_path: &str) -> Task {
         Task::Verify {
             path: path.to_path_buf(),
             logical_path: logical_path.to_string(),
-            expected_hash: griffr_common::runtime::ContentHash::from(
-                "00000000000000000000000000000000",
-            ),
+            expected_hash: griffr_runtime::ContentHash::from("00000000000000000000000000000000"),
             expected_size: Some(1),
             on_fail: None,
         }
@@ -205,7 +202,7 @@ mod tests {
         );
         let claim = ArtifactClaim::new(
             root.join("Data/index_main.json"),
-            griffr_common::runtime::ArtifactExpectation::new(
+            griffr_runtime::ArtifactExpectation::new(
                 "index_main.json",
                 "11111111111111111111111111111111",
                 Some(2),
@@ -245,9 +242,7 @@ mod tests {
             url: "https://example.invalid/archive".to_string(),
             dest: root.join("archive"),
             logical_path: "archive".to_string(),
-            expected_hash: griffr_common::runtime::ContentHash::from(
-                "00000000000000000000000000000000",
-            ),
+            expected_hash: griffr_runtime::ContentHash::from("00000000000000000000000000000000"),
             expected_size: None,
             retry_count: 0,
             transfer_class: TransferClass::General,

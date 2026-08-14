@@ -1,21 +1,21 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use griffr_common::api::yostar::{YostarApiClient, YostarReleaseSnapshot};
-use griffr_common::config::{GameId, RegionId};
-use griffr_common::runtime::task_pool::TaskPoolRunner;
-use griffr_common::runtime::{
+use griffr_core::{BackendKind, GameId, RegionId};
+use griffr_runtime::task_pool::TaskPoolRunner;
+use griffr_runtime::{
     cleanup_yostar_obsolete_files, ensure_yostar_files_with_pool, finish_install_change,
     start_install_change, verify_yostar_files_with_pool, write_yostar_metadata, InstallChangeKind,
     InstallChangeSource, InstallChangeStart, InstallChangeState, LocalInstall, ProgressLane,
 };
+use griffr_yostar_api::{YostarApiClient, YostarReleaseSnapshot};
 use serde_json::json;
 
 use crate::progress::CountAndByteProgress;
 use crate::{ui, GlobalOptions, InstallTargetOverrideArgs, OutputFormat};
 
 fn validate_target(game: &GameId, region: RegionId) -> Result<()> {
-    if game != &GameId::ARKNIGHTS || !region.is_yostar() {
+    if game != &GameId::ARKNIGHTS || region.backend() != BackendKind::Yostar {
         anyhow::bail!(
             "YoStar backend supports Arknights regions kr, en, and jp; got --game {game} --region {region}"
         );
@@ -54,8 +54,8 @@ fn change_state(
         },
         GameId::ARKNIGHTS.to_string(),
         region.to_string(),
-        region.official_channel_id(),
-        region.official_channel_id(),
+        "",
+        "",
         from_version,
         target_version.to_string(),
         None,
@@ -128,7 +128,7 @@ pub async fn install(
         .latest_release()
         .await
         .context("Failed to resolve the latest YoStar release")?;
-    griffr_common::runtime::validate_remote_yostar_manifest(&release.manifest)?;
+    griffr_runtime::validate_remote_yostar_manifest(&release.manifest)?;
 
     ui::print_phase(format!(
         "Installing {} (YoStar {}) into {}",
@@ -225,7 +225,7 @@ pub async fn update(
     let release = release_result.context("Failed to resolve the latest YoStar release")?;
     let current = match current_result {
         Ok(manifest) => {
-            griffr_common::runtime::validate_remote_yostar_manifest(&manifest)?;
+            griffr_runtime::validate_remote_yostar_manifest(&manifest)?;
             Some(manifest)
         }
         Err(error) => {
@@ -260,8 +260,8 @@ pub async fn update(
                         .files
                         .iter()
                         .find(|old| {
-                            griffr_common::runtime::normalize_logical_path(&old.path)
-                                == griffr_common::runtime::normalize_logical_path(&target.path)
+                            griffr_runtime::normalize_logical_path(&old.path)
+                                == griffr_runtime::normalize_logical_path(&target.path)
                         })
                         .is_none_or(|old| old.size != target.size || old.hash != target.hash)
                 })
@@ -417,7 +417,7 @@ pub async fn verify(
             api.cdn_config()
         )
         .context("Failed to resolve YoStar repair manifest/CDN")?;
-        griffr_common::runtime::validate_remote_yostar_manifest(&manifest)?;
+        griffr_runtime::validate_remote_yostar_manifest(&manifest)?;
         let mut roots = vec![cdn.primary_cdn];
         if !cdn.back_up_cdn.trim().is_empty() && cdn.back_up_cdn != roots[0] {
             roots.push(cdn.back_up_cdn);

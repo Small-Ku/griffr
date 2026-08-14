@@ -1,21 +1,18 @@
 use anyhow::{Context, Result};
 use compio::buf::BufResult;
 use compio::io::AsyncReadAt;
-use griffr_common::api::crypto;
-use griffr_common::api::types::ResIndex;
-use griffr_common::runtime::{
-    collect_files_recursive, normalize_logical_path, path_is_dir, path_is_file,
-};
+use griffr_hypergryph_api::crypto;
+use griffr_hypergryph_api::{types::ResIndex, CONFIG_INI_NAME};
+use griffr_runtime::{collect_files_recursive, normalize_logical_path, path_is_dir, path_is_file};
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 use crate::VfsDiffAgainst;
-use griffr_common::config::{game_definition, GameId};
-use griffr_common::runtime::{
-    persistent_path, streaming_assets_path, vfs_path, CONFIG_INI_NAME, PERSISTENT_DIR,
-    STREAMING_ASSETS_DIR, VFS_DIR,
+use griffr_core::{game_definition, GameId};
+use griffr_runtime::{
+    persistent_path, streaming_assets_path, vfs_path, PERSISTENT_DIR, STREAMING_ASSETS_DIR, VFS_DIR,
 };
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LocalResManifests {
@@ -350,7 +347,7 @@ pub async fn file_md5(path: &Path) -> Result<String> {
     file.close()
         .await
         .with_context(|| format!("Failed to close {}", path.display()))?;
-    Ok(griffr_common::to_hex(&hasher.finalize()))
+    Ok(griffr_core::to_hex(&hasher.finalize()))
 }
 
 pub async fn resolve_endfield_data_root(path: &Path) -> Result<PathBuf> {

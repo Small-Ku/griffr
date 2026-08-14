@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use griffr_common::api::crypto;
+use griffr_hypergryph_api::crypto;
 
 use super::vfs_support::*;
 use crate::progress::StepProgress;
 use crate::{GlobalOptions, SnapshotHashScope, VfsDiffAgainst};
-use griffr_common::runtime::{
+use griffr_runtime::{
     path_is_dir, persistent_path, resource_manifest_filename, streaming_assets_path,
     ResourceManifestKind, RESOURCE_GROUP_BASE, RESOURCE_GROUP_MAIN,
 };

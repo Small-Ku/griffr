@@ -1,5 +1,5 @@
 use super::*;
-use griffr_common::runtime::ArchivePackageKind;
+use griffr_runtime::ArchivePackageKind;
 use std::path::PathBuf;
 
 fn response_with_full_and_patch() -> GetLatestGameResponse {

@@ -1,4 +1,4 @@
-use super::parse_remote_args;
+use super::parse_hypergryph_remote_args;
 use crate::debug_cli::{DebugCommands, YostarDebugCommands};
 use crate::{commands, GlobalOptions};
 use anyhow::Result;
@@ -33,7 +33,7 @@ pub(super) async fn dispatch_debug(command: DebugCommands, opts: GlobalOptions) 
             version,
             output,
         } => {
-            let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
+            let (game_id, region_id, channel_id) = parse_hypergryph_remote_args(remote)?;
             commands::debug_api_get_latest_game(
                 game_id, region_id, channel_id, overrides, version, output, opts,
             )
@@ -48,7 +48,7 @@ pub(super) async fn dispatch_debug(command: DebugCommands, opts: GlobalOptions) 
             platform,
             output,
         } => {
-            let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
+            let (game_id, region_id, channel_id) = parse_hypergryph_remote_args(remote)?;
             commands::debug_api_get_latest_resources(
                 game_id,
                 region_id,
@@ -69,7 +69,7 @@ pub(super) async fn dispatch_debug(command: DebugCommands, opts: GlobalOptions) 
             version,
             output,
         } => {
-            let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
+            let (game_id, region_id, channel_id) = parse_hypergryph_remote_args(remote)?;
             commands::debug_fetch_game_files(
                 game_id, region_id, channel_id, overrides, version, output, opts,
             )
@@ -84,7 +84,7 @@ pub(super) async fn dispatch_debug(command: DebugCommands, opts: GlobalOptions) 
             platform,
             output,
         } => {
-            let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
+            let (game_id, region_id, channel_id) = parse_hypergryph_remote_args(remote)?;
             commands::debug_list_resource_files(
                 game_id,
                 region_id,
@@ -106,7 +106,7 @@ pub(super) async fn dispatch_debug(command: DebugCommands, opts: GlobalOptions) 
             file,
             output,
         } => {
-            let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
+            let (game_id, region_id, channel_id) = parse_hypergryph_remote_args(remote)?;
             commands::debug_fetch_file(
                 game_id, region_id, channel_id, overrides, version, file, output, opts,
             )
@@ -118,7 +118,7 @@ pub(super) async fn dispatch_debug(command: DebugCommands, opts: GlobalOptions) 
             language,
             output,
         } => {
-            let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
+            let (game_id, region_id, channel_id) = parse_hypergryph_remote_args(remote)?;
             commands::debug_api_get_media(
                 game_id, region_id, channel_id, overrides, language, output, opts,
             )
@@ -130,7 +130,7 @@ pub(super) async fn dispatch_debug(command: DebugCommands, opts: GlobalOptions) 
             language,
             output,
         } => {
-            let (game_id, region_id, channel_id) = parse_remote_args(remote)?;
+            let (game_id, region_id, channel_id) = parse_hypergryph_remote_args(remote)?;
             commands::debug_fetch_media(
                 game_id, region_id, channel_id, overrides, language, output, opts,
             )

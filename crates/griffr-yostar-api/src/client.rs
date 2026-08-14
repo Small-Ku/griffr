@@ -1,0 +1,456 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use md5::{Digest, Md5};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
+
+use crate::yostar_arknights_target;
+use crate::{Error, Result};
+use griffr_core::{build_cdn_file_url, to_hex, RegionId};
+
+pub const YOSTAR_LAUNCHER_VERSION: &str = "1.8.1";
+const YOSTAR_AUTH_SALT: &str = "DE7108E9B2842FD460F4777702727869";
+const AUTHORIZATION_HEADER: &str = "Authorization";
+
+#[derive(Debug, Clone)]
+pub struct YostarApiClient {
+    client: cyper::Client,
+    gateway: String,
+    game_tag: String,
+    launcher_version: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthHead<'a> {
+    game_tag: &'a str,
+    time: u64,
+    version: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct Authorization<'a> {
+    head: AuthHead<'a>,
+    sign: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiEnvelope {
+    code: i64,
+    #[serde(default)]
+    data: serde_json::Value,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    msg: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct YostarGameConfig {
+    pub game_latest_version: String,
+    pub game_lowest_version: String,
+    pub game_latest_file_path: String,
+    pub game_start_exe_name: String,
+    #[serde(default)]
+    pub game_start_params: Vec<String>,
+    #[serde(default)]
+    pub game_uninstall_script: String,
+    #[serde(default, deserialize_with = "deserialize_optional_u64")]
+    pub decompression_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct ManifestLocator {
+    url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct YostarCdnConfig {
+    pub primary_cdn: String,
+    #[serde(default)]
+    pub back_up_cdn: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct YostarManifest {
+    pub source: String,
+    #[serde(rename = "file")]
+    pub files: Vec<YostarManifestEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct YostarManifestEntry {
+    pub path: String,
+    #[serde(deserialize_with = "deserialize_u64")]
+    pub size: u64,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct YostarReleaseSnapshot {
+    pub config: YostarGameConfig,
+    pub manifest: YostarManifest,
+    pub cdn: YostarCdnConfig,
+}
+
+impl YostarApiClient {
+    pub fn arknights(region: RegionId) -> Result<Self> {
+        Self::arknights_with_gateway(region, None)
+    }
+
+    pub fn arknights_with_gateway(region: RegionId, gateway: Option<&str>) -> Result<Self> {
+        let target = yostar_arknights_target(region).ok_or_else(|| Error::Message {
+            context: "YoStar API error: ",
+            detail: format!("region {region} is not a YoStar Arknights deployment"),
+        })?;
+        Self::new(
+            gateway.unwrap_or(target.gateway),
+            target.game_tag,
+            YOSTAR_LAUNCHER_VERSION,
+        )
+    }
+
+    pub fn new(
+        gateway: impl Into<String>,
+        game_tag: impl Into<String>,
+        launcher_version: impl Into<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            client: cyper::Client::new()?,
+            gateway: gateway.into().trim_end_matches('/').to_string(),
+            game_tag: game_tag.into(),
+            launcher_version: launcher_version.into(),
+        })
+    }
+
+    fn authorization(&self, request_body: &str) -> Result<String> {
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| Error::Message {
+                context: "YoStar API error: ",
+                detail: format!("system clock is before UNIX epoch: {error}"),
+            })?
+            .as_secs();
+        let head = AuthHead {
+            game_tag: &self.game_tag,
+            time,
+            version: &self.launcher_version,
+        };
+        let head_json = serde_json::to_string(&head).map_err(|error| Error::Message {
+            context: "YoStar API error: ",
+            detail: format!("failed to serialize authorization head: {error}"),
+        })?;
+        let sign = to_hex(&Md5::digest(format!(
+            "{head_json}{request_body}{YOSTAR_AUTH_SALT}"
+        )));
+        serde_json::to_string(&Authorization { head, sign }).map_err(|error| Error::Message {
+            context: "YoStar API error: ",
+            detail: format!("failed to serialize Authorization header: {error}"),
+        })
+    }
+
+    async fn get_api<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
+        let authorization = self.authorization("")?;
+        let response = self
+            .client
+            .get(url)
+            .map_err(|error| Error::Message {
+                context: "YoStar API error: ",
+                detail: format!("failed to build request for {url}: {error}"),
+            })?
+            .header(AUTHORIZATION_HEADER, authorization)
+            .map_err(|error| Error::Message {
+                context: "YoStar API error: ",
+                detail: format!("failed to attach Authorization header: {error}"),
+            })?
+            .send()
+            .await
+            .map_err(|error| Error::Message {
+                context: "YoStar API error: ",
+                detail: format!("request to {url} failed: {error}"),
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Message {
+                context: "YoStar API error: ",
+                detail: format!("{url} returned {status}: {body}"),
+            });
+        }
+        let envelope = response
+            .json::<ApiEnvelope>()
+            .await
+            .map_err(|error| Error::Message {
+                context: "YoStar API error: ",
+                detail: format!("failed to parse response from {url}: {error}"),
+            })?;
+        if envelope.code != 200 {
+            let detail = envelope
+                .message
+                .or(envelope.msg)
+                .unwrap_or_else(|| "no server message".to_string());
+            return Err(Error::Message {
+                context: "YoStar API error: ",
+                detail: format!("{url} returned API code {}: {detail}", envelope.code),
+            });
+        }
+        serde_json::from_value(envelope.data).map_err(|error| Error::Message {
+            context: "YoStar API error: ",
+            detail: format!("failed to decode data from {url}: {error}"),
+        })
+    }
+
+    pub async fn game_config(&self) -> Result<YostarGameConfig> {
+        self.get_api(&format!("{}/api/launcher/game/config", self.gateway))
+            .await
+    }
+
+    pub async fn manifest_for(&self, version: &str, basis: &str) -> Result<YostarManifest> {
+        let mut url = url::Url::parse(&format!("{}/api/launcher/game/config/json", self.gateway))
+            .map_err(|error| Error::Message {
+            context: "YoStar API error: ",
+            detail: format!("invalid manifest resolver URL: {error}"),
+        })?;
+        url.query_pairs_mut()
+            .append_pair("version", version)
+            .append_pair("file_path", basis);
+        let locator: ManifestLocator = self.get_api(url.as_str()).await?;
+        self.fetch_manifest(&locator.url).await
+    }
+
+    pub async fn fetch_manifest(&self, url: &str) -> Result<YostarManifest> {
+        let response = self
+            .client
+            .get(url)
+            .map_err(|error| Error::Message {
+                context: "YoStar API error: ",
+                detail: format!("failed to build manifest request for {url}: {error}"),
+            })?
+            .send()
+            .await
+            .map_err(|error| Error::Message {
+                context: "YoStar API error: ",
+                detail: format!("manifest request to {url} failed: {error}"),
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Message {
+                context: "YoStar API error: ",
+                detail: format!("manifest URL returned {status}: {body}"),
+            });
+        }
+        response.json().await.map_err(|error| Error::Message {
+            context: "YoStar API error: ",
+            detail: format!("failed to parse game manifest from {url}: {error}"),
+        })
+    }
+
+    pub async fn cdn_config(&self) -> Result<YostarCdnConfig> {
+        self.get_api(&format!(
+            "{}/api/launcher/advanced/game/download/cdn",
+            self.gateway
+        ))
+        .await
+    }
+
+    pub async fn latest_release(&self) -> Result<YostarReleaseSnapshot> {
+        let (config, cdn) = futures_util::try_join!(self.game_config(), self.cdn_config())?;
+        let manifest = self
+            .manifest_for(&config.game_latest_version, &config.game_latest_file_path)
+            .await?;
+        Ok(YostarReleaseSnapshot {
+            config,
+            manifest,
+            cdn,
+        })
+    }
+}
+
+impl YostarManifest {
+    pub fn file_url(&self, cdn_root: &str, entry: &YostarManifestEntry) -> String {
+        let base = [
+            cdn_root.trim_end_matches('/'),
+            self.source.trim_matches('/'),
+        ]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+        build_cdn_file_url(&format!("{base}/"), &entry.path)
+    }
+}
+
+fn parse_human_byte_size(input: &str) -> std::result::Result<u64, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("empty size string".to_string());
+    }
+
+    if let Ok(val) = s.parse::<u64>() {
+        return Ok(val);
+    }
+
+    let end_of_num = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
+
+    let (num_part, unit_part) = s.split_at(end_of_num);
+    let num_part = num_part.trim();
+    let unit_part = unit_part.trim().to_ascii_uppercase();
+
+    if num_part.is_empty() {
+        return Err(format!("missing numeric value in size '{s}'"));
+    }
+
+    let number: f64 = num_part
+        .parse()
+        .map_err(|_| format!("invalid numeric value in byte size '{s}'"))?;
+
+    let multiplier: u64 = match unit_part.as_str() {
+        "" | "B" | "BYTES" => 1,
+        "K" | "KB" | "KIB" => 1024,
+        "M" | "MB" | "MIB" => 1024 * 1024,
+        "G" | "GB" | "GIB" => 1024 * 1024 * 1024,
+        "T" | "TB" | "TIB" => 1024 * 1024 * 1024 * 1024,
+        _ => return Err(format!("unknown size unit '{unit_part}' in '{s}'")),
+    };
+
+    let total = number * (multiplier as f64);
+    if total < 0.0 || total > (u64::MAX as f64) {
+        return Err(format!("byte size out of range: '{s}'"));
+    }
+
+    Ok(total as u64)
+}
+
+fn deserialize_u64<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Number {
+        Integer(u64),
+        Float(f64),
+        Text(String),
+    }
+    match Number::deserialize(deserializer)? {
+        Number::Integer(value) => Ok(value),
+        Number::Float(value) => Ok(value as u64),
+        Number::Text(value) => parse_human_byte_size(&value).map_err(serde::de::Error::custom),
+    }
+}
+
+fn deserialize_optional_u64<'de, D>(deserializer: D) -> std::result::Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OptionalNumber {
+        Integer(u64),
+        Float(f64),
+        Text(String),
+        Null,
+    }
+    match OptionalNumber::deserialize(deserializer)? {
+        OptionalNumber::Integer(value) => Ok(Some(value)),
+        OptionalNumber::Float(value) => Ok(Some(value as u64)),
+        OptionalNumber::Text(value) if value.trim().is_empty() => Ok(None),
+        OptionalNumber::Text(value) => parse_human_byte_size(&value)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        OptionalNumber::Null => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_accepts_string_sizes_and_builds_cdn_url() {
+        let manifest: YostarManifest = serde_json::from_str(
+            r#"{"source":"game/files","file":[{"path":"a b/[x].bin","size":"9","hash":"11051210869376104954"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(manifest.files[0].size, 9);
+        assert_eq!(
+            manifest.file_url("https://cdn.example/root/", &manifest.files[0]),
+            "https://cdn.example/root/game/files/a%20b/%5Bx%5D.bin"
+        );
+    }
+
+    #[test]
+    fn authorization_uses_observed_launcher_shape() {
+        let client =
+            YostarApiClient::new("https://example.invalid", "Arknights_EN", "1.8.1").unwrap();
+        let auth = client.authorization("").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&auth).unwrap();
+        assert_eq!(value["head"]["game_tag"], "Arknights_EN");
+        assert_eq!(value["head"]["version"], "1.8.1");
+        assert_eq!(value["sign"].as_str().unwrap().len(), 32);
+    }
+
+    #[test]
+    fn arknights_regions_share_protocol_but_select_native_gateway_and_tag() {
+        for (region, gateway, game_tag) in [
+            (
+                RegionId::Kr,
+                crate::YOSTAR_KR_GATEWAY,
+                crate::YOSTAR_ARKNIGHTS_KR_TAG,
+            ),
+            (
+                RegionId::En,
+                crate::YOSTAR_EN_GATEWAY,
+                crate::YOSTAR_ARKNIGHTS_EN_TAG,
+            ),
+            (
+                RegionId::Jp,
+                crate::YOSTAR_JP_GATEWAY,
+                crate::YOSTAR_ARKNIGHTS_JP_TAG,
+            ),
+        ] {
+            let target = yostar_arknights_target(region).unwrap();
+            assert_eq!(target.gateway, gateway);
+            assert_eq!(target.game_tag, game_tag);
+            assert_eq!(crate::yostar_region_from_game_tag(game_tag), Some(region));
+        }
+        assert!(yostar_arknights_target(RegionId::Cn).is_none());
+        assert!(yostar_arknights_target(RegionId::Sg).is_none());
+        assert_eq!(
+            crate::yostar_region_from_game_tag("Arknights_UNKNOWN"),
+            None
+        );
+    }
+
+    #[test]
+    fn game_config_deserializes_human_readable_decompression_size() {
+        let json = r#"{
+            "game_lowest_version": "041.2.0",
+            "game_latest_version": "041.2.0",
+            "game_latest_file_path": "prod/ZIP_TEMP/Arknights_EN_TEMP/Arknights_EN-041.2.0-game.zip",
+            "game_start_exe_name": "Arknights",
+            "decompression_size": "30GB",
+            "game_start_params": [],
+            "game_uninstall_script": ""
+        }"#;
+        let config: YostarGameConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.decompression_size, Some(30 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn parse_human_byte_size_handles_units_floats_and_integers() {
+        assert_eq!(parse_human_byte_size("32212254720").unwrap(), 32212254720);
+        assert_eq!(
+            parse_human_byte_size("30GB").unwrap(),
+            30 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            parse_human_byte_size("30.5GB").unwrap(),
+            (30.5 * 1024.0 * 1024.0 * 1024.0) as u64
+        );
+        assert_eq!(parse_human_byte_size("500MB").unwrap(), 500 * 1024 * 1024);
+        assert_eq!(parse_human_byte_size("100KB").unwrap(), 100 * 1024);
+        assert_eq!(parse_human_byte_size("1024 B").unwrap(), 1024);
+    }
+}

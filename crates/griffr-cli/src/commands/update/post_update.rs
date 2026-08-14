@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use griffr_common::api::client::ApiClient;
-use griffr_common::runtime::task_pool::{Task, TaskOutcome, TaskPoolRunner, TaskProgress};
-use griffr_common::runtime::{
+use griffr_hypergryph_api::client::ApiClient;
+use griffr_runtime::task_pool::{Task, TaskOutcome, TaskPoolRunner, TaskProgress};
+use griffr_runtime::{
     finish_vfs_plan, is_launcher_metadata_path, run_integrity_pool, sync_launcher_metadata,
     ContentPlan, IntegritySelection, ProgressLane, VfsTaskPlan,
 };
@@ -20,12 +20,12 @@ pub(super) enum PostUpdateResult {
 
 pub(super) async fn verify_updated_install(
     api_client: &ApiClient,
-    api_target: &griffr_common::config::ApiTarget,
+    api_target: &griffr_hypergryph_api::ApiTarget,
     content_plan: &mut ContentPlan,
     skip_verify: bool,
     mut vfs_plan: VfsTaskPlan,
     selection: IntegritySelection,
-    verified_artifacts: Vec<griffr_common::runtime::ArtifactProof>,
+    verified_artifacts: Vec<griffr_runtime::ArtifactProof>,
     reuse_roots: &[PathBuf],
     allow_copy_fallback: bool,
     opts: &GlobalOptions,

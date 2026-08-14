@@ -1,6 +1,9 @@
 [workspace]
 members = [
-  "crates/griffr-common",
+  "crates/griffr-core",
+  "crates/griffr-hypergryph-api",
+  "crates/griffr-yostar-api",
+  "crates/griffr-runtime",
   "crates/griffr-cli",
   "crates/griffr-gui",
   "crates/griffr-gui-macros",
@@ -49,7 +52,10 @@ rapidhash = "4.5"
 bitflags = "2.6"
 
 # griffr crates
-griffr-common = { path = "crates/griffr-common" }
+griffr-core = { path = "crates/griffr-core" }
+griffr-hypergryph-api = { path = "crates/griffr-hypergryph-api" }
+griffr-yostar-api = { path = "crates/griffr-yostar-api" }
+griffr-runtime = { path = "crates/griffr-runtime" }
 
 [profile.dev]
 opt-level = 0

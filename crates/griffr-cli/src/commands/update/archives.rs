@@ -4,12 +4,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use griffr_common::api::types::GameFileEntry;
-use griffr_common::runtime::task_pool::{
+use griffr_hypergryph_api::types::GameFileEntry;
+use griffr_runtime::task_pool::{
     plan_archive_groups, ArchiveRetention, ArchiveSource, Task, TaskGraphBuilder, TaskOutcome,
     TaskPoolRunner, TaskProgress,
 };
-use griffr_common::runtime::{
+use griffr_runtime::{
     griffr_archives_path, ArtifactClaim, ArtifactProof, PatchApplyOptions, ProgressLane,
 };
 
@@ -69,7 +69,7 @@ fn collect_archive_result(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn download_and_extract_archives_from_dir(
-    archives: &[griffr_common::api::types::PackFile],
+    archives: &[griffr_hypergryph_api::types::PackFile],
     archive_dir: &Path,
     install_path: &Path,
     label: &str,
@@ -124,9 +124,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
                     graph.add_root(Task::Verify {
                         path: part.dest.clone(),
                         logical_path: part.logical_path.clone(),
-                        expected_hash: griffr_common::runtime::ContentHash::from(
-                            &part.expected_md5,
-                        ),
+                        expected_hash: griffr_runtime::ContentHash::from(&part.expected_md5),
                         expected_size: Some(part.expected_size),
                         on_fail: None,
                     })
@@ -331,7 +329,7 @@ pub(super) async fn download_and_extract_archives_from_dir(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn download_and_extract_archives(
-    archives: &[griffr_common::api::types::PackFile],
+    archives: &[griffr_hypergryph_api::types::PackFile],
     install_path: &Path,
     label: &str,
     keep_pack_archives: bool,

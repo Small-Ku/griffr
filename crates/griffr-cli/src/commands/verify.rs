@@ -1,16 +1,15 @@
 use anyhow::{Context, Result};
-use griffr_common::api::client::ApiClient;
-use griffr_common::config::{ChannelPair, GameId, RegionId};
-use griffr_common::runtime::task_pool::TaskPoolRunner;
-use griffr_common::runtime::{
+use griffr_core::BackendKind;
+use griffr_core::{ChannelPair, GameId, RegionId};
+use griffr_hypergryph_api::client::ApiClient;
+use griffr_runtime::task_pool::TaskPoolRunner;
+use griffr_runtime::{
     finish_install_change, finish_vfs_plan, is_launcher_metadata_path, read_install_change,
     run_integrity_pool, start_install_change, sync_launcher_metadata, ContentPlan, FileIssue,
     GameManifestSnapshot, InstallChangeKind, InstallChangeSource, InstallChangeStart,
     InstallChangeState, IntegritySelection, ProgressLane, ProgressSender,
 };
-use griffr_common::runtime::{
-    plan_vfs_tasks, streaming_assets_path, VfsFilePlanOptions, VfsTaskPlan,
-};
+use griffr_runtime::{plan_vfs_tasks, streaming_assets_path, VfsFilePlanOptions, VfsTaskPlan};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -133,7 +132,7 @@ impl RepairTransaction {
         &mut self,
         api_client: &ApiClient,
         install_path: &Path,
-        install_target: &griffr_common::config::InstallTarget,
+        install_target: &griffr_hypergryph_api::InstallTarget,
         content_plan: &mut ContentPlan,
         vfs_plan: &VfsTaskPlan,
         text_output: bool,
@@ -196,7 +195,7 @@ impl RepairTransaction {
 async fn verify_one(
     api_client: &ApiClient,
     pool_runner: &mut TaskPoolRunner,
-    local: griffr_common::runtime::LocalInstall,
+    local: griffr_runtime::LocalInstall,
     game_override: Option<GameId>,
     region_override: Option<RegionId>,
     channel_override: Option<ChannelPair>,
@@ -209,7 +208,7 @@ async fn verify_one(
     scope: Option<crate::VerifyScopeArg>,
     opts: GlobalOptions,
 ) -> Result<serde_json::Value> {
-    if local.is_yostar() {
+    if local.backend() == BackendKind::Yostar {
         let detected_region = local.require_known_region()?;
         if skip_local_detect && region_override != Some(detected_region) {
             anyhow::bail!(
@@ -279,7 +278,7 @@ async fn verify_one(
         .as_ref()
         .map(|state| state.target_version.clone())
         .unwrap_or_else(|| installed_version.clone());
-    let install_target = griffr_common::config::resolve_install_target(
+    let install_target = griffr_hypergryph_api::resolve_install_target(
         &game_id,
         region_id,
         &channel_id,
@@ -732,7 +731,7 @@ pub async fn verify(
     #[derive(Debug)]
     struct VerifyWork {
         index: usize,
-        install: griffr_common::runtime::LocalInstall,
+        install: griffr_runtime::LocalInstall,
         reuse_paths: Vec<PathBuf>,
         volume_keys: Vec<String>,
     }
@@ -778,13 +777,13 @@ pub async fn verify(
             );
         }
 
-        let mut volume_keys = vec![griffr_common::runtime::task_pool::storage_volume_key(
+        let mut volume_keys = vec![griffr_runtime::task_pool::storage_volume_key(
             &install.install_path,
         )];
         volume_keys.extend(
             reuse
                 .iter()
-                .map(griffr_common::runtime::task_pool::storage_volume_key),
+                .map(griffr_runtime::task_pool::storage_volume_key),
         );
         volume_keys.sort_unstable();
         volume_keys.dedup();
@@ -948,14 +947,12 @@ pub async fn verify(
 #[cfg(test)]
 mod transaction_tests {
     use super::*;
-    use griffr_common::runtime::FileIssueKind;
+    use griffr_runtime::FileIssueKind;
 
     fn issue(path: &str) -> FileIssue {
         FileIssue {
             path: path.to_string(),
-            expected_hash: griffr_common::runtime::ContentHash::from(
-                "00000000000000000000000000000000",
-            ),
+            expected_hash: griffr_runtime::ContentHash::from("00000000000000000000000000000000"),
             expected_size: 1,
             actual_size: None,
             actual_hash: None,

@@ -1,14 +1,14 @@
 use super::*;
-use griffr_common::runtime::{select_archive_package, ArchivePackageKind};
+use griffr_runtime::{select_archive_package, ArchivePackageKind};
 #[compio::test]
 #[ignore = "Makes real network request"]
 async fn real_cn_endfield_patch_and_full_fallback_selection() {
     let api_client = ApiClient::new().expect("Failed to create API client");
-    let target = griffr_common::config::resolve_api_target(
+    let target = griffr_hypergryph_api::resolve_api_target(
         &GameId::ENDFIELD,
-        griffr_common::config::RegionId::Cn,
+        griffr_core::RegionId::Cn,
         &ChannelPair::from_api("1", None::<String>).unwrap(),
-        &griffr_common::config::ApiTargetOverrides::default(),
+        &griffr_hypergryph_api::ApiTargetOverrides::default(),
     )
     .unwrap();
 

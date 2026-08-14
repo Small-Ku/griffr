@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use griffr_common::api::yostar::{YostarApiClient, YostarManifest, YOSTAR_LAUNCHER_VERSION};
-use griffr_common::config::{yostar_arknights_target, RegionId};
+use griffr_core::RegionId;
+use griffr_yostar_api::yostar_arknights_target;
+use griffr_yostar_api::{YostarApiClient, YostarManifest, YOSTAR_LAUNCHER_VERSION};
 use serde_json::json;
 
 use super::vfs_support::emit_json;
@@ -76,7 +77,7 @@ pub async fn manifest(
 ) -> Result<()> {
     let client = client(region, gateway.as_deref())?;
     let (version, basis, manifest) = resolve_manifest(&client, version, basis).await?;
-    griffr_common::runtime::validate_remote_yostar_manifest(&manifest)?;
+    griffr_runtime::validate_remote_yostar_manifest(&manifest)?;
     let mut payload = target_json(region, gateway.as_deref())?;
     payload["request"] = json!({"version": version, "basis": basis});
     payload["response"] = serde_json::to_value(manifest)?;
@@ -98,13 +99,13 @@ pub async fn file_url(
     );
     let (version, basis, manifest) = manifest_result?;
     let cdn = cdn_result?;
-    griffr_common::runtime::validate_remote_yostar_manifest(&manifest)?;
+    griffr_runtime::validate_remote_yostar_manifest(&manifest)?;
     let entry = manifest
         .files
         .iter()
         .find(|entry| {
-            griffr_common::runtime::normalize_logical_path(&entry.path)
-                == griffr_common::runtime::normalize_logical_path(&file)
+            griffr_runtime::normalize_logical_path(&entry.path)
+                == griffr_runtime::normalize_logical_path(&file)
         })
         .with_context(|| format!("file {file:?} is not present in the selected YoStar manifest"))?;
 

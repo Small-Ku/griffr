@@ -1,0 +1,551 @@
+use super::{AdmissionSnapshot, ResourceState, SchedulerQueue};
+use crate::task_pool::scheduler::routing::{ResourceRequest, RunClass};
+use crate::task_pool::scheduler::TaskPriority;
+use crate::task_pool::{NodeId, Task, TaskPoolConfig, VolumeIoPolicy, VolumeStreamingMode};
+use std::path::PathBuf;
+
+fn task(name: &str) -> Task {
+    Task::ApplyDeleteManifest {
+        install_root: PathBuf::from(name),
+    }
+}
+
+fn resources(volume: &str) -> ResourceRequest {
+    ResourceRequest {
+        run: RunClass::Blocking,
+        write_volumes: vec![volume.to_string()],
+        ..ResourceRequest::default()
+    }
+}
+
+fn read(volume: &str) -> ResourceRequest {
+    ResourceRequest {
+        run: RunClass::AsyncIo,
+        read_volumes: vec![volume.to_string()],
+        ..ResourceRequest::default()
+    }
+}
+
+fn write(volume: &str) -> ResourceRequest {
+    ResourceRequest {
+        run: RunClass::Blocking,
+        write_volumes: vec![volume.to_string()],
+        ..ResourceRequest::default()
+    }
+}
+
+fn metadata(volume: &str) -> ResourceRequest {
+    ResourceRequest {
+        run: RunClass::Blocking,
+        metadata_volumes: vec![volume.to_string()],
+        ..ResourceRequest::default()
+    }
+}
+
+#[test]
+fn unavailable_blocking_pool_does_not_stall_async_admission() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig::default();
+    queue.push(
+        NodeId::from_index(0),
+        task("blocking"),
+        ResourceRequest {
+            run: RunClass::Blocking,
+            ..ResourceRequest::default()
+        },
+        TaskPriority::Bulk,
+    );
+    queue.push(
+        NodeId::from_index(1),
+        task("async"),
+        ResourceRequest {
+            run: RunClass::AsyncIo,
+            ..ResourceRequest::default()
+        },
+        TaskPriority::Bulk,
+    );
+
+    let selected = queue.pop_next(&config, false).unwrap();
+    assert!(matches!(
+        selected.task,
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("async")
+    ));
+    queue.release(&selected.resources);
+    assert!(queue.pop_next(&config, false).is_none());
+
+    let selected = queue.pop_next(&config, true).unwrap();
+    assert!(matches!(
+        selected.task,
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("blocking")
+    ));
+    queue.release(&selected.resources);
+}
+
+#[test]
+fn runnable_task_beyond_priority_lookahead_is_still_admitted() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig::default();
+    for index in 0..64 {
+        queue.push(
+            NodeId::from_index(index),
+            task(&format!("blocking-{index}")),
+            ResourceRequest {
+                run: RunClass::Blocking,
+                ..ResourceRequest::default()
+            },
+            TaskPriority::Bulk,
+        );
+    }
+    queue.push(
+        NodeId::from_index(64),
+        task("async-after-lookahead"),
+        ResourceRequest {
+            run: RunClass::AsyncIo,
+            ..ResourceRequest::default()
+        },
+        TaskPriority::Bulk,
+    );
+
+    let selected = queue.pop_next(&config, false).unwrap();
+    assert!(matches!(
+        selected.task,
+        Task::ApplyDeleteManifest { ref install_root }
+            if install_root == &PathBuf::from("async-after-lookahead")
+    ));
+    queue.release(&selected.resources);
+}
+
+#[test]
+fn volume_writer_blocks_only_the_same_volume() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig::default();
+    queue.push(
+        NodeId::from_index(0),
+        task("a"),
+        resources("volume-a"),
+        TaskPriority::Bulk,
+    );
+    queue.push(
+        NodeId::from_index(1),
+        task("b"),
+        resources("volume-b"),
+        TaskPriority::Bulk,
+    );
+
+    let first = queue.pop_next(&config, true).unwrap();
+    let second = queue.pop_next(&config, true).unwrap();
+    queue.release(&first.resources);
+    queue.release(&second.resources);
+}
+
+#[test]
+fn default_policy_uses_nvme_limits_and_allows_mixed_io() {
+    let config = TaskPoolConfig {
+        blocking_slots: 200,
+        ..TaskPoolConfig::default()
+    };
+    let admission = AdmissionSnapshot::default();
+    let reader = read("volume-a");
+    let writer = write("volume-a");
+    let metadata = metadata("volume-a");
+    let mut state = ResourceState::default();
+
+    assert_eq!(
+        config.default_volume_policy,
+        VolumeIoPolicy::new(16, 16, 128, 32, VolumeStreamingMode::Mixed)
+    );
+    for _ in 0..128 {
+        state.acquire(&metadata);
+    }
+    assert!(!state.can_acquire(&metadata, &config, &admission));
+
+    for _ in 0..16 {
+        assert!(state.can_acquire(&reader, &config, &admission));
+        state.acquire(&reader);
+    }
+    for _ in 0..16 {
+        assert!(state.can_acquire(&writer, &config, &admission));
+        state.acquire(&writer);
+    }
+    assert!(!state.can_acquire(&reader, &config, &admission));
+    assert!(!state.can_acquire(&writer, &config, &admission));
+}
+
+#[test]
+fn same_volume_copy_consumes_both_mixed_streaming_credits() {
+    let config = TaskPoolConfig {
+        default_volume_policy: VolumeIoPolicy::new(2, 1, 1, 3, VolumeStreamingMode::Mixed),
+        ..Default::default()
+    };
+    let admission = AdmissionSnapshot::default();
+    let copy = ResourceRequest {
+        read_volumes: vec!["volume-a".to_string()],
+        write_volumes: vec!["volume-a".to_string()],
+        ..ResourceRequest::default()
+    };
+    let mut state = ResourceState::default();
+
+    assert!(state.can_acquire(&copy, &config, &admission));
+    state.acquire(&copy);
+    assert!(state.can_acquire(&read("volume-a"), &config, &admission));
+    assert!(!state.can_acquire(&write("volume-a"), &config, &admission));
+}
+
+#[test]
+fn exclusive_policy_keeps_streaming_and_metadata_separate() {
+    let config = TaskPoolConfig {
+        default_volume_policy: VolumeIoPolicy::new(1, 1, 1, 1, VolumeStreamingMode::Exclusive),
+        ..Default::default()
+    };
+    let admission = AdmissionSnapshot::default();
+    let reader = read("volume-a");
+    let mut state = ResourceState::default();
+
+    state.acquire(&reader);
+    assert!(!state.can_acquire(&write("volume-a"), &config, &admission));
+    assert!(!state.can_acquire(&metadata("volume-a"), &config, &admission));
+
+    let copy = ResourceRequest {
+        read_volumes: vec!["volume-a".to_string()],
+        write_volumes: vec!["volume-a".to_string()],
+        ..ResourceRequest::default()
+    };
+    assert!(ResourceState::default().can_acquire(&copy, &config, &admission));
+}
+
+#[test]
+fn aged_writer_reserves_pressure_without_stopping_all_mixed_mode_readers() {
+    let config = TaskPoolConfig::default();
+    let admission = AdmissionSnapshot {
+        reserved_write_volumes: ["volume-a".to_string()].into_iter().collect(),
+        ..AdmissionSnapshot::default()
+    };
+    let reader = read("volume-a");
+    let writer = write("volume-a");
+    let mut state = ResourceState::default();
+
+    assert!(state.can_acquire(&reader, &config, &admission));
+    state.acquire(&reader);
+    assert!(state.can_acquire(&reader, &config, &admission));
+    state.acquire(&reader);
+    assert!(state.can_acquire(&writer, &config, &admission));
+    assert!(state.can_acquire(&metadata("volume-a"), &config, &admission));
+}
+
+#[test]
+fn aged_writer_stops_new_exclusive_work_until_the_volume_drains() {
+    let config = TaskPoolConfig {
+        default_volume_policy: VolumeIoPolicy::new(1, 1, 1, 1, VolumeStreamingMode::Exclusive),
+        ..Default::default()
+    };
+    let admission = AdmissionSnapshot {
+        reserved_write_volumes: ["volume-a".to_string()].into_iter().collect(),
+        ..AdmissionSnapshot::default()
+    };
+
+    assert!(!ResourceState::default().can_acquire(&read("volume-a"), &config, &admission,));
+    assert!(!ResourceState::default().can_acquire(&metadata("volume-a"), &config, &admission,));
+    assert!(ResourceState::default().can_acquire(&write("volume-a"), &config, &admission,));
+}
+
+#[test]
+fn per_volume_override_can_select_an_exclusive_policy() {
+    let mut config = TaskPoolConfig::default();
+    config.volume_policies.insert(
+        "volume-a".to_string(),
+        VolumeIoPolicy::new(1, 1, 1, 1, VolumeStreamingMode::Exclusive),
+    );
+    let admission = AdmissionSnapshot::default();
+    let mut state = ResourceState::default();
+
+    state.acquire(&read("volume-a"));
+    assert!(!state.can_acquire(&write("volume-a"), &config, &admission));
+    assert!(state.can_acquire(&write("volume-b"), &config, &admission));
+}
+
+#[test]
+fn reuse_queue_limit_limits_verified_but_uncommitted_files() {
+    let config = TaskPoolConfig {
+        reuse_queue_limit: 1,
+        ..Default::default()
+    };
+    let probe = ResourceRequest {
+        reuse_probe: true,
+        read_volumes: vec!["volume-a".to_string()],
+        ..ResourceRequest::default()
+    };
+    let admission = AdmissionSnapshot {
+        queued_reuse_commits: 1,
+        ..AdmissionSnapshot::default()
+    };
+    assert!(!ResourceState::default().can_acquire(&probe, &config, &admission));
+}
+
+#[test]
+fn queued_reuse_probes_do_not_count_as_uncommitted_reuse_files() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig {
+        reuse_queue_limit: 2,
+        ..Default::default()
+    };
+    for index in 0..3 {
+        queue.push(
+            NodeId::from_index(index),
+            task(&format!("probe-{index}")),
+            ResourceRequest {
+                run: RunClass::Cpu,
+                reuse_probe: true,
+                read_volumes: vec!["volume-a".to_string()],
+                ..ResourceRequest::default()
+            },
+            TaskPriority::Bulk,
+        );
+    }
+
+    let selected = queue
+        .pop_next(&config, true)
+        .expect("queued probes must not deadlock reuse admission");
+    queue.release(&selected.resources);
+}
+
+#[test]
+fn writer_reservation_waits_for_the_configured_delay() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig {
+        default_volume_policy: VolumeIoPolicy::new(1, 1, 1, 1, VolumeStreamingMode::Exclusive),
+        volume_write_reservation_delay: std::time::Duration::from_secs(60),
+        ..Default::default()
+    };
+    queue.push(
+        NodeId::from_index(0),
+        task("writer"),
+        write("volume-a"),
+        TaskPriority::Bulk,
+    );
+    queue.push(
+        NodeId::from_index(1),
+        task("reader"),
+        read("volume-a"),
+        TaskPriority::Bulk,
+    );
+
+    let selected = queue.pop_next(&config, true).unwrap();
+    assert!(matches!(
+        selected.task,
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("reader")
+    ));
+    queue.release(&selected.resources);
+}
+
+#[test]
+fn zero_writer_reservation_delay_prioritizes_the_waiting_writer() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig {
+        default_volume_policy: VolumeIoPolicy::new(1, 1, 1, 1, VolumeStreamingMode::Exclusive),
+        volume_write_reservation_delay: std::time::Duration::ZERO,
+        ..Default::default()
+    };
+    queue.push(
+        NodeId::from_index(0),
+        task("writer"),
+        write("volume-a"),
+        TaskPriority::Bulk,
+    );
+    queue.push(
+        NodeId::from_index(1),
+        task("reader"),
+        read("volume-a"),
+        TaskPriority::Bulk,
+    );
+
+    let selected = queue.pop_next(&config, true).unwrap();
+    assert!(matches!(
+        selected.task,
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("writer")
+    ));
+    queue.release(&selected.resources);
+}
+
+#[test]
+fn runnable_tasks_prefer_smaller_work_on_the_same_backlogged_volume() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig::default();
+    let mut large = resources("volume-a");
+    large.run = RunClass::Blocking;
+    large.estimated_bytes = 1024;
+    let mut small = resources("volume-a");
+    small.run = RunClass::Blocking;
+    small.estimated_bytes = 1;
+    queue.push(
+        NodeId::from_index(0),
+        task("large"),
+        large,
+        TaskPriority::Bulk,
+    );
+    queue.push(
+        NodeId::from_index(1),
+        task("small"),
+        small,
+        TaskPriority::Bulk,
+    );
+
+    let selected = queue.pop_next(&config, true).unwrap();
+    assert!(matches!(
+        selected.task,
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("small")
+    ));
+    queue.release(&selected.resources);
+}
+
+#[test]
+fn mutation_paths_block_ancestors_and_descendants_only() {
+    let config = TaskPoolConfig::default();
+    let admission = AdmissionSnapshot::default();
+    let parent = ResourceRequest {
+        mutation_paths: vec!["c:/game/data".to_string()],
+        ..ResourceRequest::default()
+    };
+    let child = ResourceRequest {
+        mutation_paths: vec!["c:/game/data/file.bin".to_string()],
+        ..ResourceRequest::default()
+    };
+    let sibling = ResourceRequest {
+        mutation_paths: vec!["c:/game/other/file.bin".to_string()],
+        ..ResourceRequest::default()
+    };
+    let mut state = ResourceState::default();
+
+    state.acquire(&parent);
+    assert!(!state.can_acquire(&child, &config, &admission));
+    assert!(state.can_acquire(&sibling, &config, &admission));
+    state.release(&parent);
+    assert!(state.can_acquire(&child, &config, &admission));
+}
+
+#[test]
+fn archive_commit_limits_same_volume_metadata_and_cross_volume_copies() {
+    let mut config = TaskPoolConfig::default();
+    // This test isolates the archive-commit lane. Keep the unrelated blocking
+    // lane from becoming the limit on small CI/VM machines.
+    config.blocking_slots = config.blocking_slots.max(3);
+    let admission = AdmissionSnapshot::default();
+    let metadata_commit = ResourceRequest {
+        archive_commit_volumes: vec![("volume-a".to_string(), false)],
+        ..ResourceRequest::default()
+    };
+    let copy_commit = ResourceRequest {
+        archive_commit_volumes: vec![("volume-b".to_string(), true)],
+        ..ResourceRequest::default()
+    };
+    let mut state = ResourceState::default();
+
+    state.acquire(&metadata_commit);
+    assert!(!state.can_acquire(&metadata_commit, &config, &admission));
+    state.release(&metadata_commit);
+
+    for _ in 0..3 {
+        assert!(state.can_acquire(&copy_commit, &config, &admission));
+        state.acquire(&copy_commit);
+    }
+    assert!(!state.can_acquire(&copy_commit, &config, &admission));
+}
+
+#[test]
+fn admission_snapshot_is_reused_across_one_dispatch_wave() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig {
+        blocking_slots: 8,
+        ..TaskPoolConfig::default()
+    };
+    for index in 0..4 {
+        queue.push(
+            NodeId::from_index(index),
+            task(&format!("task-{index}")),
+            resources("volume-a"),
+            TaskPriority::Bulk,
+        );
+    }
+
+    let mut selected = Vec::new();
+    while let Some(task) = queue.pop_next(&config, true) {
+        selected.push(task);
+    }
+
+    assert_eq!(selected.len(), 4);
+    assert_eq!(queue.admission_rebuilds(), 1);
+}
+
+#[test]
+fn selected_reuse_commit_is_not_double_counted_in_cached_admission() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig {
+        reuse_queue_limit: 2,
+        ..TaskPoolConfig::default()
+    };
+    queue.push(
+        NodeId::from_index(0),
+        task("commit"),
+        ResourceRequest {
+            run: RunClass::AsyncIo,
+            reuse_commit: true,
+            ..ResourceRequest::default()
+        },
+        TaskPriority::Bulk,
+    );
+    queue.push(
+        NodeId::from_index(1),
+        task("probe"),
+        ResourceRequest {
+            run: RunClass::AsyncIo,
+            reuse_probe: true,
+            ..ResourceRequest::default()
+        },
+        TaskPriority::Bulk,
+    );
+
+    let commit = queue.pop_next(&config, true).unwrap();
+    assert!(commit.resources.reuse_commit);
+    let probe = queue.pop_next(&config, true).unwrap();
+    assert!(probe.resources.reuse_probe);
+    assert_eq!(queue.admission_rebuilds(), 1);
+}
+
+#[test]
+fn cached_admission_expires_when_writer_reservation_becomes_due() {
+    let mut queue = SchedulerQueue::default();
+    let config = TaskPoolConfig {
+        volume_write_reservation_delay: std::time::Duration::from_millis(5),
+        ..TaskPoolConfig::default()
+    };
+    let mut writer = write("volume-a");
+    writer.run = RunClass::AsyncIo;
+    writer.estimated_bytes = 100;
+    let mut reader = read("volume-a");
+    reader.estimated_bytes = 1;
+    queue.push(
+        NodeId::from_index(0),
+        task("writer"),
+        writer,
+        TaskPriority::Bulk,
+    );
+    queue.push(
+        NodeId::from_index(1),
+        task("reader"),
+        reader,
+        TaskPriority::Bulk,
+    );
+
+    let selected = queue.pop_next(&config, true).unwrap();
+    assert!(matches!(
+        selected.task,
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("reader")
+    ));
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    let selected = queue.pop_next(&config, true).unwrap();
+    assert!(matches!(
+        selected.task,
+        Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("writer")
+    ));
+    assert_eq!(queue.admission_rebuilds(), 2);
+}

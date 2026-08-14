@@ -2,11 +2,12 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use griffr_common::api::client::ApiClient;
-use griffr_common::api::types::GetLatestGameResponse;
-use griffr_common::config::InstallTarget;
-use griffr_common::runtime::task_pool::{archive_expected_files, TaskPoolRunner};
-use griffr_common::runtime::{
+use griffr_core::BackendKind;
+use griffr_hypergryph_api::client::ApiClient;
+use griffr_hypergryph_api::types::GetLatestGameResponse;
+use griffr_hypergryph_api::InstallTarget;
+use griffr_runtime::task_pool::{archive_expected_files, TaskPoolRunner};
+use griffr_runtime::{
     estimate_manifest_delta, finish_install_change, is_launcher_metadata_path,
     is_resource_baseline_path, patch_group_beats_manifest_sources, plan_vfs_tasks,
     read_install_change, read_local_game_files, resolve_staged_patch_recovery_dir,
@@ -18,7 +19,7 @@ use griffr_common::runtime::{
 use super::*;
 use crate::ui;
 use crate::GlobalOptions;
-use griffr_common::runtime::detect_local_install;
+use griffr_runtime::detect_local_install;
 
 pub(super) async fn update_internal(
     api_client: &ApiClient,
@@ -29,13 +30,13 @@ pub(super) async fn update_internal(
     peer_reuse_paths: Vec<PathBuf>,
     force_copy: bool,
     use_predownload: bool,
-    patch_options: griffr_common::runtime::PatchApplyOptions,
+    patch_options: griffr_runtime::PatchApplyOptions,
     predownload_dir_override: Option<PathBuf>,
     require_staged_predownload: bool,
     opts: GlobalOptions,
 ) -> Result<()> {
     let mut local = detect_local_install(&path).await?;
-    if local.is_yostar() {
+    if local.backend() == BackendKind::Yostar {
         let mut reuse = explicit_reuse_paths;
         reuse.extend(peer_reuse_paths);
         reuse.sort_unstable();
@@ -57,9 +58,9 @@ pub(super) async fn update_internal(
     }
     let pending_change = read_install_change(&local.install_path)?;
     let mut resumed_pending_patch = false;
-    match griffr_common::runtime::get_patch_recovery_state(&local.install_path, None)? {
-        griffr_common::runtime::PatchRecoveryState::ExtractedReady
-        | griffr_common::runtime::PatchRecoveryState::DeletePending => {
+    match griffr_runtime::get_patch_recovery_state(&local.install_path, None)? {
+        griffr_runtime::PatchRecoveryState::ExtractedReady
+        | griffr_runtime::PatchRecoveryState::DeletePending => {
             if pending_change.is_none() {
                 ui::print_info(format!(
                     "Found orphaned patch artifacts under {} without an install change marker; clearing leftovers...",
@@ -71,7 +72,7 @@ pub(super) async fn update_internal(
                         local.install_path.display()
                     ));
                 } else {
-                    griffr_common::runtime::discard_incomplete_patch_apply(&local.install_path)?;
+                    griffr_runtime::discard_incomplete_patch_apply(&local.install_path)?;
                 }
             } else {
                 if opts.is_dry_run() {
@@ -86,7 +87,7 @@ pub(super) async fn update_internal(
                 resumed_pending_patch = true;
             }
         }
-        griffr_common::runtime::PatchRecoveryState::ExtractedMissing { missing } => {
+        griffr_runtime::PatchRecoveryState::ExtractedMissing { missing } => {
             if require_staged_predownload {
                 ui::print_info(format!(
                     "Pending extracted patch state is missing required data; replaying staged archives: {}",
@@ -103,11 +104,11 @@ pub(super) async fn update_internal(
                         local.install_path.display()
                     ));
                 } else {
-                    griffr_common::runtime::discard_incomplete_patch_apply(&local.install_path)?;
+                    griffr_runtime::discard_incomplete_patch_apply(&local.install_path)?;
                 }
             }
         }
-        griffr_common::runtime::PatchRecoveryState::Inconsistent { reasons } => {
+        griffr_runtime::PatchRecoveryState::Inconsistent { reasons } => {
             if !require_staged_predownload {
                 anyhow::bail!(
                     "Pending patch state under {} is inconsistent: {}",
@@ -120,8 +121,8 @@ pub(super) async fn update_internal(
                 reasons.join("; ")
             ));
         }
-        griffr_common::runtime::PatchRecoveryState::ArchiveReady { .. }
-        | griffr_common::runtime::PatchRecoveryState::Idle => {}
+        griffr_runtime::PatchRecoveryState::ArchiveReady { .. }
+        | griffr_runtime::PatchRecoveryState::Idle => {}
     }
     if resumed_pending_patch && require_staged_predownload && pending_change.is_none() {
         ui::print_success("Pending staged predownload patch finished");
@@ -163,7 +164,7 @@ pub(super) async fn update_internal(
         }
     }
     let mut package_request_version = current_version.clone();
-    let install_target = griffr_common::config::resolve_install_target(
+    let install_target = griffr_hypergryph_api::resolve_install_target(
         &game_id,
         region_id,
         &channel_id,
@@ -785,7 +786,7 @@ pub async fn update(
     require_staged: bool,
     use_default_stage: bool,
     batch: crate::BatchArgs,
-    patch_options: griffr_common::runtime::PatchApplyOptions,
+    patch_options: griffr_runtime::PatchApplyOptions,
     opts: GlobalOptions,
 ) -> Result<()> {
     crate::commands::batch::validate_batch_options(batch)?;
@@ -837,14 +838,14 @@ pub async fn update(
         };
         explicit_reuse.shrink_to_fit();
 
-        let mut volume_keys = vec![griffr_common::runtime::task_pool::storage_volume_key(
+        let mut volume_keys = vec![griffr_runtime::task_pool::storage_volume_key(
             &install.install_path,
         )];
         volume_keys.extend(
             explicit_reuse
                 .iter()
                 .chain(&peer_reuse)
-                .map(griffr_common::runtime::task_pool::storage_volume_key),
+                .map(griffr_runtime::task_pool::storage_volume_key),
         );
         volume_keys.extend(
             [
@@ -854,7 +855,7 @@ pub async fn update(
             ]
             .into_iter()
             .flatten()
-            .map(griffr_common::runtime::task_pool::storage_volume_key),
+            .map(griffr_runtime::task_pool::storage_volume_key),
         );
         volume_keys.sort_unstable();
         volume_keys.dedup();
@@ -970,7 +971,7 @@ pub(crate) async fn apply_staged_predownload(
     path: PathBuf,
     overrides: crate::InstallTargetOverrideArgs,
     predownload_dir_override: Option<PathBuf>,
-    patch_options: griffr_common::runtime::PatchApplyOptions,
+    patch_options: griffr_runtime::PatchApplyOptions,
     opts: GlobalOptions,
 ) -> Result<()> {
     let api_client = ApiClient::new()?;

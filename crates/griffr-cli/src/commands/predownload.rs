@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use griffr_common::api::client::ApiClient;
-use griffr_common::api::types::{GetLatestGameResponse, PackFile, PrePatchInfo};
-use griffr_common::runtime::task_pool::{Task, TaskOutcome, TaskPoolRunner, TaskProgress};
-use griffr_common::runtime::{
+use griffr_core::BackendKind;
+use griffr_hypergryph_api::client::ApiClient;
+use griffr_hypergryph_api::types::{GetLatestGameResponse, PackFile, PrePatchInfo};
+use griffr_runtime::task_pool::{Task, TaskOutcome, TaskPoolRunner, TaskProgress};
+use griffr_runtime::{
     get_patch_recovery_state, griffr_predownload_path, read_install_change,
     write_predownload_stage_metadata, InstallChangeKind, PatchRecoveryState,
     PredownloadStageMetadata, ProgressLane, StagedArchivePart, DELETE_FILES_MANIFEST_NAME,
@@ -14,7 +15,7 @@ use griffr_common::runtime::{
 use crate::progress::{ArchiveProgress, CountAndByteProgress};
 use crate::ui;
 use crate::{GlobalOptions, InstallTargetOverrideArgs};
-use griffr_common::runtime::{detect_local_install, LocalInstall};
+use griffr_runtime::{detect_local_install, LocalInstall};
 
 pub(crate) fn default_stage_dir(
     install_path: &Path,
@@ -91,16 +92,16 @@ fn build_predownload_tasks(stage_dir: &Path, patches: &[PackFile]) -> Result<Vec
         tasks.push(Task::Verify {
             path: dest.clone(),
             logical_path: filename.clone(),
-            expected_hash: griffr_common::runtime::ContentHash::from(&patch.md5),
+            expected_hash: griffr_runtime::ContentHash::from(&patch.md5),
             expected_size: Some(patch.size()),
             on_fail: Some(Box::new(Task::Download {
                 url: patch.url.clone(),
                 dest,
                 logical_path: filename,
-                expected_hash: griffr_common::runtime::ContentHash::from(&patch.md5),
+                expected_hash: griffr_runtime::ContentHash::from(&patch.md5),
                 expected_size: Some(patch.size()),
                 retry_count: 0,
-                transfer_class: griffr_common::runtime::task_pool::TransferClass::General,
+                transfer_class: griffr_runtime::task_pool::TransferClass::General,
                 archive_repair: None,
                 resume: None,
             })),
@@ -120,7 +121,7 @@ async fn resolve_predownload_payload(
     String,
 )> {
     let local = detect_local_install(path).await?;
-    if local.is_yostar() {
+    if local.backend() == BackendKind::Yostar {
         anyhow::bail!("No YoStar pre-patch/predownload API was observed; staging is unsupported for this backend");
     }
     let current_version = local.require_config_ini_version()?.to_string();
@@ -128,7 +129,7 @@ async fn resolve_predownload_payload(
     let game_id = local.require_known_game()?;
     let region_id = local.require_known_region()?;
     let channel_id = local.require_known_channel()?;
-    let install_target = griffr_common::config::resolve_install_target(
+    let install_target = griffr_hypergryph_api::resolve_install_target(
         &game_id,
         region_id,
         &channel_id,
@@ -283,7 +284,7 @@ pub async fn apply(
     path: PathBuf,
     overrides: crate::InstallTargetOverrideArgs,
     output_dir: Option<PathBuf>,
-    patch_options: griffr_common::runtime::PatchApplyOptions,
+    patch_options: griffr_runtime::PatchApplyOptions,
     opts: GlobalOptions,
 ) -> Result<()> {
     if let Some(output_dir) = output_dir.as_ref() {

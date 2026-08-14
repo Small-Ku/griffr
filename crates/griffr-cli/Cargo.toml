@@ -12,7 +12,10 @@ name = "griffr"
 path = "src/main.rs"
 
 [dependencies]
-griffr-common = { workspace = true }
+griffr-core = { workspace = true }
+griffr-hypergryph-api = { workspace = true }
+griffr-yostar-api = { workspace = true }
+griffr-runtime = { workspace = true }
 
 # Core
 compio = { workspace = true }

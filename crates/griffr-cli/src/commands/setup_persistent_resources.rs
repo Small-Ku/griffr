@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use griffr_common::api::client::ApiClient;
-use griffr_common::runtime::task_pool::TaskPoolRunner;
-use griffr_common::runtime::{
+use griffr_core::BackendKind;
+use griffr_hypergryph_api::client::ApiClient;
+use griffr_runtime::task_pool::TaskPoolRunner;
+use griffr_runtime::{
     inspect_reuse_installations, setup_persistent_vfs, Launcher, PersistentVfsConfig,
     PersistentVfsFileSet, ProgressLane,
 };
@@ -11,7 +12,7 @@ use griffr_common::runtime::{
 use crate::progress::CountAndByteProgress;
 use crate::ui;
 use crate::GlobalOptions;
-use griffr_common::runtime::detect_local_install;
+use griffr_runtime::detect_local_install;
 
 pub async fn setup_persistent_resources(
     path: PathBuf,
@@ -24,7 +25,7 @@ pub async fn setup_persistent_resources(
     opts: GlobalOptions,
 ) -> Result<()> {
     let local = detect_local_install(&path).await?;
-    if local.is_yostar() {
+    if local.backend() == BackendKind::Yostar {
         anyhow::bail!("YoStar does not use the Hypergryph Persistent/VFS resource-index workflow");
     }
     let game_id = local.require_known_game()?;
@@ -32,7 +33,7 @@ pub async fn setup_persistent_resources(
     let channel_id = local.require_known_channel()?;
     let installed_version = local.require_config_ini_version()?.to_string();
 
-    let install_target = griffr_common::config::resolve_install_target(
+    let install_target = griffr_hypergryph_api::resolve_install_target(
         &game_id,
         region_id,
         &channel_id,
@@ -64,14 +65,14 @@ pub async fn setup_persistent_resources(
     }
 
     let data_root = local.install_path.join(install_target.data_root.clone());
-    let streaming_assets_root = griffr_common::runtime::streaming_assets_path(&data_root);
-    let persistent_root = griffr_common::runtime::persistent_path(&data_root);
+    let streaming_assets_root = griffr_runtime::streaming_assets_path(&data_root);
+    let persistent_root = griffr_runtime::persistent_path(&data_root);
 
     let reuse_sources =
         inspect_reuse_installations(&game_id, &local.install_path, &reuse_paths).await?;
     let mut extra_source_streaming_assets = Vec::with_capacity(reuse_sources.len());
     for source in reuse_sources {
-        let source_target = griffr_common::config::resolve_install_target(
+        let source_target = griffr_hypergryph_api::resolve_install_target(
             &source.require_known_game()?,
             source.require_known_region()?,
             &source.require_known_channel()?,
@@ -81,7 +82,7 @@ pub async fn setup_persistent_resources(
             source
                 .install_path
                 .join(source_target.data_root)
-                .join(griffr_common::runtime::STREAMING_ASSETS_DIR),
+                .join(griffr_runtime::STREAMING_ASSETS_DIR),
         );
     }
 
@@ -169,7 +170,7 @@ pub async fn setup_persistent_resources(
             prefer_reuse,
             allow_download,
             prune_extra_files,
-            state_root: griffr_common::runtime::griffr_path(&local.install_path),
+            state_root: griffr_runtime::griffr_path(&local.install_path),
         },
         &mut task_pool_runner,
         progress_session.sender(),

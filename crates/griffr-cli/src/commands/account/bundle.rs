@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use griffr_common::config::{
+use griffr_core::{
     game_definition, local_low_vendor, GameId, RegionId, GRYPHLINE_LOCAL_LOW_VENDOR,
     HYPERGRYPH_LOCAL_LOW_VENDOR,
 };
-use griffr_common::runtime::{copy_dir_recursive, path_is_dir_or_err, remove_dir_all};
+use griffr_runtime::{copy_dir_recursive, path_is_dir_or_err, remove_dir_all};
 
 use crate::ui;
 use crate::GlobalOptions;

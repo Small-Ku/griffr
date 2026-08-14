@@ -1,6 +1,6 @@
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
-use griffr_common::api::protocol::DEFAULT_LANGUAGE;
-use griffr_common::runtime::PersistentVfsFileSet;
+use griffr_hypergryph_api::protocol::DEFAULT_LANGUAGE;
+use griffr_runtime::PersistentVfsFileSet;
 
 use crate::debug_cli::{AccountCommands, DebugCommands, StageCommands};
 
@@ -127,7 +127,7 @@ pub struct InstallTargetOverrideArgs {
     pub data_root: Option<String>,
 }
 
-impl From<ApiTargetOverrideArgs> for griffr_common::config::ApiTargetOverrides {
+impl From<ApiTargetOverrideArgs> for griffr_hypergryph_api::ApiTargetOverrides {
     fn from(args: ApiTargetOverrideArgs) -> Self {
         Self {
             gateway: args.gateway,
@@ -137,7 +137,7 @@ impl From<ApiTargetOverrideArgs> for griffr_common::config::ApiTargetOverrides {
     }
 }
 
-impl From<InstallTargetOverrideArgs> for griffr_common::config::InstallTargetOverrides {
+impl From<InstallTargetOverrideArgs> for griffr_hypergryph_api::InstallTargetOverrides {
     fn from(args: InstallTargetOverrideArgs) -> Self {
         Self {
             api: args.api.into(),

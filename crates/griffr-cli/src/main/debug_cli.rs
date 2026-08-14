@@ -1,6 +1,6 @@
 use clap::Subcommand;
-use griffr_common::api::protocol::{DEFAULT_LANGUAGE, DEFAULT_PLATFORM};
-use griffr_common::config::{GameId, RegionId};
+use griffr_core::{GameId, RegionId};
+use griffr_hypergryph_api::protocol::{DEFAULT_LANGUAGE, DEFAULT_PLATFORM};
 use tracing::debug;
 
 use crate::cli::{
@@ -473,14 +473,14 @@ pub struct GlobalOptions {
     pub volume_write_limit: usize,
     pub volume_metadata_limit: usize,
     pub volume_streaming_pressure_limit: usize,
-    pub volume_streaming_mode: griffr_common::runtime::task_pool::VolumeStreamingMode,
+    pub volume_streaming_mode: griffr_runtime::task_pool::VolumeStreamingMode,
     pub reuse_queue_limit: usize,
     pub output: OutputFormat,
 }
 
 impl GlobalOptions {
     pub fn from_environment(dry_run: bool, verbose: bool, output: OutputFormat) -> Self {
-        use griffr_common::runtime::task_pool::{
+        use griffr_runtime::task_pool::{
             VolumeStreamingMode, DEFAULT_PROGRESS_BUFFER_BYTES, DEFAULT_REUSE_QUEUE_LIMIT,
             DEFAULT_VOLUME_METADATA_LIMIT, DEFAULT_VOLUME_READ_LIMIT,
             DEFAULT_VOLUME_STREAMING_MODE, DEFAULT_VOLUME_STREAMING_PRESSURE_LIMIT,
@@ -547,15 +547,15 @@ impl GlobalOptions {
         Self { dry_run, ..self }
     }
 
-    pub fn task_pool_config(&self) -> griffr_common::runtime::task_pool::TaskPoolConfig {
+    pub fn task_pool_config(&self) -> griffr_runtime::task_pool::TaskPoolConfig {
         self.task_pool_config_for_batch(1)
     }
 
     pub fn task_pool_config_for_batch(
         &self,
         target_jobs: usize,
-    ) -> griffr_common::runtime::task_pool::TaskPoolConfig {
-        use griffr_common::runtime::task_pool::{TaskPoolConfig, VolumeIoPolicy};
+    ) -> griffr_runtime::task_pool::TaskPoolConfig {
+        use griffr_runtime::task_pool::{TaskPoolConfig, VolumeIoPolicy};
 
         let target_jobs = target_jobs.max(1);
         let share = |value: usize| value.div_ceil(target_jobs).max(1);
@@ -598,11 +598,11 @@ impl GlobalOptions {
     pub fn task_pool_batch(
         &self,
         target_jobs: usize,
-    ) -> griffr_common::error::Result<(
-        griffr_common::runtime::task_pool::TaskPoolRunnerGroup,
-        griffr_common::runtime::task_pool::TaskPoolConfig,
+    ) -> griffr_runtime::error::Result<(
+        griffr_runtime::task_pool::TaskPoolRunnerGroup,
+        griffr_runtime::task_pool::TaskPoolConfig,
     )> {
-        use griffr_common::runtime::task_pool::TaskPoolRunnerGroup;
+        use griffr_runtime::task_pool::TaskPoolRunnerGroup;
 
         let target_jobs = target_jobs.max(1);
         let runner_config = self.task_pool_config_for_batch(target_jobs);

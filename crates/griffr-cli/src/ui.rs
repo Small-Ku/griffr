@@ -79,7 +79,7 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-pub fn print_patch_check(report: &griffr_common::runtime::PatchCheckReport) {
+pub fn print_patch_check(report: &griffr_runtime::PatchCheckReport) {
     let available_install = report
         .available_install_bytes
         .map(format_bytes)

@@ -3,8 +3,8 @@ use super::vfs_support::{
     VfsExpectedScope,
 };
 use crate::VfsDiffAgainst;
-use griffr_common::api::types::ResIndex;
-use griffr_common::api::types::ResIndexFile;
+use griffr_hypergryph_api::types::ResIndex;
+use griffr_hypergryph_api::types::ResIndexFile;
 
 fn make_index(paths: &[&str]) -> ResIndex {
     ResIndex {

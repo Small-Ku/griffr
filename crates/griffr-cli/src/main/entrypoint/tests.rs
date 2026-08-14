@@ -19,11 +19,18 @@ fn clap_accepts_native_region_defaults_and_sub_channel_alias() {
         panic!("expected install command");
     };
 
-    let (game, region, channel) = parse_remote_args(remote).unwrap();
+    let RemoteTarget::Hypergryph {
+        game,
+        region,
+        channels,
+    } = parse_remote_args(remote).unwrap()
+    else {
+        panic!("expected Hypergryph target");
+    };
     assert_eq!(game, GameId::ENDFIELD);
     assert_eq!(region, RegionId::Sg);
-    assert_eq!(channel.channel().as_str(), "6");
-    assert_eq!(channel.sub_channel().as_str(), "802");
+    assert_eq!(channels.channel().as_str(), "6");
+    assert_eq!(channels.sub_channel().as_str(), "802");
 }
 
 #[test]
@@ -35,11 +42,18 @@ fn remote_args_use_native_region_and_scoped_aliases() {
         sub_channel: Some("google-play".to_string()),
     };
 
-    let (game, region, channel) = parse_remote_args(remote).unwrap();
+    let RemoteTarget::Hypergryph {
+        game,
+        region,
+        channels,
+    } = parse_remote_args(remote).unwrap()
+    else {
+        panic!("expected Hypergryph target");
+    };
     assert_eq!(game, GameId::ENDFIELD);
     assert_eq!(region, RegionId::Sg);
-    assert_eq!(channel.channel().as_str(), "6");
-    assert_eq!(channel.sub_channel().as_str(), "802");
+    assert_eq!(channels.channel().as_str(), "6");
+    assert_eq!(channels.sub_channel().as_str(), "802");
 }
 
 #[test]
@@ -51,11 +65,18 @@ fn remote_parser_does_not_reject_arknights_sg_combination() {
         sub_channel: None,
     };
 
-    let (game, region, channel) = parse_remote_args(remote).unwrap();
+    let RemoteTarget::Hypergryph {
+        game,
+        region,
+        channels,
+    } = parse_remote_args(remote).unwrap()
+    else {
+        panic!("expected Hypergryph target");
+    };
     assert_eq!(game, GameId::ARKNIGHTS);
     assert_eq!(region, RegionId::Sg);
-    assert_eq!(channel.channel().as_str(), "6");
-    assert_eq!(channel.sub_channel().as_str(), "6");
+    assert_eq!(channels.channel().as_str(), "6");
+    assert_eq!(channels.sub_channel().as_str(), "6");
 }
 
 #[test]
@@ -67,10 +88,15 @@ fn remote_args_default_to_region_official_channel() {
         sub_channel: None,
     };
 
-    let (_, region, channel) = parse_remote_args(remote).unwrap();
+    let RemoteTarget::Hypergryph {
+        region, channels, ..
+    } = parse_remote_args(remote).unwrap()
+    else {
+        panic!("expected Hypergryph target");
+    };
     assert_eq!(region, RegionId::Cn);
-    assert_eq!(channel.channel().as_str(), "1");
-    assert_eq!(channel.sub_channel().as_str(), "1");
+    assert_eq!(channels.channel().as_str(), "1");
+    assert_eq!(channels.sub_channel().as_str(), "1");
 }
 
 #[test]

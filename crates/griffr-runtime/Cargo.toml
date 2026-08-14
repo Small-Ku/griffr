@@ -1,0 +1,52 @@
+[package]
+name = "griffr-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Filesystem, install, update, verification, and launch runtime for Griffr"
+
+[dependencies]
+griffr-core = { workspace = true }
+griffr-hypergryph-api = { workspace = true }
+griffr-yostar-api = { workspace = true }
+
+compio = { workspace = true }
+cyper = { workspace = true }
+flume = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }
+
+zip = { workspace = true }
+md-5 = { workspace = true }
+hdiffpatch-rs = { git = "https://github.com/TwintailTeam/hdiffpatch-rs", branch = "master" }
+base64 = "0.22"
+
+dirs = { workspace = true }
+rapidhash = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Security",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_Com",
+] }
+
+[dev-dependencies]
+tempfile = "3.14"
