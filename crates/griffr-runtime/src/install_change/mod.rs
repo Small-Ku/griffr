@@ -2,6 +2,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use griffr_core::GameTarget;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -56,10 +57,7 @@ pub struct InstallChangeState {
     pub schema_version: u32,
     pub kind: InstallChangeKind,
     pub source: InstallChangeSource,
-    pub game: String,
-    pub region: String,
-    pub channel: String,
-    pub sub_channel: String,
+    pub target: GameTarget,
     pub from_version: Option<String>,
     pub target_version: String,
     pub game_files_md5: Option<String>,
@@ -71,16 +69,13 @@ pub struct InstallChangeState {
 }
 
 impl InstallChangeState {
-    pub const SCHEMA_VERSION: u32 = 3;
+    pub const SCHEMA_VERSION: u32 = 4;
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         kind: InstallChangeKind,
         source: InstallChangeSource,
-        game: impl Into<String>,
-        region: impl Into<String>,
-        channel: impl Into<String>,
-        sub_channel: impl Into<String>,
+        target: GameTarget,
         from_version: Option<String>,
         target_version: impl Into<String>,
         game_files_md5: Option<String>,
@@ -91,10 +86,7 @@ impl InstallChangeState {
             schema_version: Self::SCHEMA_VERSION,
             kind,
             source,
-            game: game.into(),
-            region: region.into(),
-            channel: channel.into(),
-            sub_channel: sub_channel.into(),
+            target,
             from_version,
             target_version: target_version.into(),
             game_files_md5: game_files_md5
@@ -135,19 +127,12 @@ impl InstallChangeState {
                 ),
             });
         }
-        for (name, value) in [
-            ("game", self.game.as_str()),
-            ("region", self.region.as_str()),
-            ("channel", self.channel.as_str()),
-            ("sub_channel", self.sub_channel.as_str()),
-            ("target_version", self.target_version.as_str()),
-        ] {
-            if value.trim().is_empty() {
-                return Err(Error::Message {
-                    context: "Configuration error: ",
-                    detail: format!("Install change {name} cannot be empty"),
-                });
-            }
+        self.target.validate()?;
+        if self.target_version.trim().is_empty() {
+            return Err(Error::Message {
+                context: "Configuration error: ",
+                detail: "Install change target_version cannot be empty".to_string(),
+            });
         }
         if self
             .from_version
@@ -234,26 +219,12 @@ impl InstallChangeState {
         Ok(())
     }
 
-    pub fn matches_install(
-        &self,
-        game: &str,
-        region: &str,
-        channel: &str,
-        sub_channel: &str,
-    ) -> bool {
-        self.game == game
-            && self.region == region
-            && self.channel == channel
-            && self.sub_channel == sub_channel
+    pub fn matches_install(&self, target: &GameTarget) -> bool {
+        &self.target == target
     }
 
     pub fn same_install(&self, other: &Self) -> bool {
-        self.matches_install(
-            &other.game,
-            &other.region,
-            &other.channel,
-            &other.sub_channel,
-        )
+        self.target == other.target
     }
 
     pub fn same_change(&self, other: &Self) -> bool {

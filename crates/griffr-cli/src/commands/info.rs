@@ -5,7 +5,7 @@ use griffr_hypergryph_api::client::ApiClient;
 
 use serde::Serialize;
 
-use crate::target::RemoteTarget;
+use crate::target::{parse_remote_target, RemoteTarget};
 use crate::{ui, GlobalOptions, OutputFormat};
 use griffr_runtime::{detect_local_install, LocalInstall};
 
@@ -220,7 +220,7 @@ pub async fn show(
         }
         Some(local)
     } else if let (Some(game), Some(region)) = (game, region) {
-        remote_target = Some(RemoteTarget::parse(game, region, channel, sub_channel)?);
+        remote_target = Some(parse_remote_target(game, region, channel, sub_channel)?);
         None
     } else {
         anyhow::bail!("info requires either --path or both --game and --region");

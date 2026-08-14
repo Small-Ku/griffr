@@ -86,10 +86,11 @@ impl RepairTransaction {
             let state = InstallChangeState::new(
                 InstallChangeKind::Repair,
                 InstallChangeSource::Repair,
-                game_id.to_string(),
-                region_id.to_string(),
-                channel_id.channel().to_string(),
-                channel_id.sub_channel().to_string(),
+                griffr_core::GameTarget::hypergryph(
+                    game_id.clone(),
+                    region_id,
+                    channel_id.clone(),
+                )?,
                 Some(checked_version.to_string()),
                 checked_version.to_string(),
                 content_plan.snapshot().release.game_files_md5.clone(),
@@ -272,28 +273,18 @@ async fn verify_one(
         None => unreachable!("--region always resolves a channel pair"),
     };
     let installed_version = local.require_config_ini_version()?.to_string();
+    let persisted_target =
+        griffr_core::GameTarget::hypergryph(game_id.clone(), region_id, channel_id.clone())?;
     let pending_change = read_install_change(&local.install_path)?;
     let mut active_change = pending_change.clone();
     if let Some(state) = active_change.as_ref() {
-        let same_install = state.matches_install(
-            &game_id.to_string(),
-            &region_id.to_string(),
-            channel_id.channel().as_str(),
-            channel_id.sub_channel().as_str(),
-        );
-        if !same_install {
+        if !state.matches_install(&persisted_target) {
             anyhow::bail!(
-                "Pending {} change at {} belongs to {}/{}/{}/{}, not {}/{}/{}/{}",
+                "Pending {} change at {} belongs to {}, not {}",
                 state.kind,
                 local.install_path.display(),
-                state.game,
-                state.region,
-                state.channel,
-                state.sub_channel,
-                game_id,
-                region_id,
-                channel_id.channel(),
-                channel_id.sub_channel()
+                state.target,
+                persisted_target
             );
         }
     }
@@ -335,10 +326,11 @@ async fn verify_one(
             let advanced = InstallChangeState::new(
                 InstallChangeKind::Update,
                 InstallChangeSource::Repair,
-                game_id.to_string(),
-                region_id.to_string(),
-                channel_id.channel().to_string(),
-                channel_id.sub_channel().to_string(),
+                griffr_core::GameTarget::hypergryph(
+                    game_id.clone(),
+                    region_id,
+                    channel_id.clone(),
+                )?,
                 Some(state.target_version.clone()),
                 release_info.version.clone(),
                 release_package.and_then(|pkg| pkg.game_files_md5.clone()),

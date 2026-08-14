@@ -44,18 +44,15 @@ fn change_state(
     from_version: Option<String>,
     target_version: &str,
     basis: &str,
-) -> InstallChangeState {
-    InstallChangeState::new(
+) -> Result<InstallChangeState> {
+    Ok(InstallChangeState::new(
         kind,
         if kind == InstallChangeKind::Repair {
             InstallChangeSource::Repair
         } else {
             InstallChangeSource::Manifest
         },
-        GameId::ARKNIGHTS.to_string(),
-        region.to_string(),
-        "",
-        "",
+        griffr_core::GameTarget::yostar(GameId::ARKNIGHTS, region)?,
         from_version,
         target_version.to_string(),
         None,
@@ -65,7 +62,7 @@ fn change_state(
     // `game_files_path` is the generic persisted manifest locator in the
     // change receipt. For YoStar the corresponding release identity is its
     // observed `basis`.
-    .with_game_files_path(basis)
+    .with_game_files_path(basis))
 }
 
 fn report_change_start(start: InstallChangeStart, kind: &str, version: &str) {
@@ -150,7 +147,7 @@ pub async fn install(
         None,
         &release.config.game_latest_version,
         &release.config.game_latest_file_path,
-    );
+    )?;
     report_change_start(
         start_install_change(&install_path, &change)?,
         "install",
@@ -280,7 +277,7 @@ pub async fn update(
         Some(metadata.version().to_string()),
         &release.config.game_latest_version,
         &release.config.game_latest_file_path,
-    );
+    )?;
     report_change_start(
         start_install_change(&local.install_path, &change)?,
         "update",
@@ -437,7 +434,7 @@ pub async fn verify(
             Some(metadata.version().to_string()),
             metadata.version(),
             metadata.basis(),
-        );
+        )?;
         report_change_start(
             start_install_change(&local.install_path, &state)?,
             "repair",

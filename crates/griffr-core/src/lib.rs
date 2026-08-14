@@ -4,6 +4,7 @@ mod channel;
 mod error;
 mod game;
 mod region;
+mod target;
 mod url_path;
 
 pub use backend::*;
@@ -12,6 +13,7 @@ pub use channel::*;
 pub use error::{Error, Result};
 pub use game::*;
 pub use region::*;
+pub use target::*;
 pub use url_path::build_cdn_file_url;
 
 /// Formats a byte slice as a lowercase hexadecimal string.

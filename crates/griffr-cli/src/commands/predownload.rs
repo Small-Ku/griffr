@@ -312,22 +312,13 @@ pub async fn resume(path: PathBuf, opts: GlobalOptions) -> Result<()> {
             change.target_version
         );
     }
-    if !change.matches_install(
-        &game_id.to_string(),
-        &region_id.to_string(),
-        channel_id.channel().as_str(),
-        channel_id.sub_channel().as_str(),
-    ) {
+    let persisted_target =
+        griffr_core::GameTarget::hypergryph(game_id.clone(), region_id, channel_id.clone())?;
+    if !change.matches_install(&persisted_target) {
         anyhow::bail!(
-            "Patch resume marker belongs to {}/{}/{}/{}, not {}/{}/{}/{}",
-            change.game,
-            change.region,
-            change.channel,
-            change.sub_channel,
-            game_id,
-            region_id,
-            channel_id.channel(),
-            channel_id.sub_channel()
+            "Patch resume marker belongs to {}, not {}",
+            change.target,
+            persisted_target
         );
     }
     let root_task = match get_patch_recovery_state(&install_root, None)? {

@@ -21,10 +21,12 @@ fn state(
     InstallChangeState::new(
         kind,
         source,
-        "endfield",
-        "cn",
-        "1",
-        "1",
+        griffr_core::GameTarget::hypergryph(
+            griffr_core::GameId::ENDFIELD,
+            griffr_core::RegionId::Cn,
+            griffr_core::ChannelPair::parse(griffr_core::RegionId::Cn, None, None).unwrap(),
+        )
+        .unwrap(),
         from.map(str::to_string),
         to,
         Some("0123456789abcdef0123456789abcdef".to_string()),
@@ -281,10 +283,12 @@ fn constructor_normalizes_digest_identity() {
     let state = InstallChangeState::new(
         InstallChangeKind::Install,
         InstallChangeSource::FullArchive,
-        "endfield",
-        "cn",
-        "1",
-        "1",
+        griffr_core::GameTarget::hypergryph(
+            griffr_core::GameId::ENDFIELD,
+            griffr_core::RegionId::Cn,
+            griffr_core::ChannelPair::parse(griffr_core::RegionId::Cn, None, None).unwrap(),
+        )
+        .unwrap(),
         None,
         "1.1",
         Some("ABCDEF0123456789ABCDEF0123456789".to_string()),

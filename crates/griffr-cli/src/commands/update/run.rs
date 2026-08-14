@@ -141,26 +141,16 @@ pub(super) async fn update_internal(
     let region_id = local.require_known_region()?;
     let channel_id = local.require_known_channel()?;
     let current_version = local.require_config_ini_version()?.to_string();
+    let persisted_target =
+        griffr_core::GameTarget::hypergryph(game_id.clone(), region_id, channel_id.clone())?;
     if let Some(state) = pending_change.as_ref() {
-        let same_install = state.matches_install(
-            &game_id.to_string(),
-            &region_id.to_string(),
-            channel_id.channel().as_str(),
-            channel_id.sub_channel().as_str(),
-        );
-        if !same_install {
+        if !state.matches_install(&persisted_target) {
             anyhow::bail!(
-                "Pending {} change at {} belongs to {}/{}/{}/{}, not {}/{}/{}/{}",
+                "Pending {} change at {} belongs to {}, not {}",
                 state.kind,
                 local.install_path.display(),
-                state.game,
-                state.region,
-                state.channel,
-                state.sub_channel,
-                game_id,
-                region_id,
-                channel_id.channel(),
-                channel_id.sub_channel()
+                state.target,
+                persisted_target
             );
         }
         if state.kind == InstallChangeKind::Repair {
@@ -556,10 +546,7 @@ pub(super) async fn update_internal(
         } else {
             InstallChangeSource::FullArchive
         },
-        game_id.to_string(),
-        region_id.to_string(),
-        channel_id.channel().to_string(),
-        channel_id.sub_channel().to_string(),
+        griffr_core::GameTarget::hypergryph(game_id.clone(), region_id, channel_id.clone())?,
         Some(package_request_version.clone()),
         version_info.version.clone(),
         version_info

@@ -1,6 +1,6 @@
 use crate::cli::*;
 use crate::debug_cli::*;
-use crate::target::RemoteTarget;
+use crate::target::{parse_remote_target, RemoteTarget};
 use crate::{commands, GlobalOptions};
 use anyhow::Result;
 use clap::Parser;
@@ -15,7 +15,7 @@ mod tests;
 
 fn parse_remote_args(remote: RequiredGameRegionChannelArgs) -> Result<RemoteTarget> {
     let (game, region, channel, sub_channel) = remote.into_parts();
-    RemoteTarget::parse(game, region, channel, sub_channel)
+    parse_remote_target(game, region, channel, sub_channel)
 }
 
 fn parse_optional_remote_args(remote: GameRegionChannelArgs) -> Result<Option<RemoteTarget>> {
@@ -30,7 +30,7 @@ fn parse_optional_remote_args(remote: GameRegionChannelArgs) -> Result<Option<Re
     match (game, region) {
         (None, None) => Ok(None),
         (Some(game), Some(region)) => {
-            RemoteTarget::parse(game, region, channel, sub_channel).map(Some)
+            parse_remote_target(game, region, channel, sub_channel).map(Some)
         }
         _ => anyhow::bail!("--game and --region must be provided together"),
     }

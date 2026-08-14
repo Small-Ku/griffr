@@ -153,10 +153,7 @@ pub(super) async fn install_hypergryph(
         } else {
             InstallChangeSource::Manifest
         },
-        game_id.to_string(),
-        region_id.to_string(),
-        channel_id.channel().to_string(),
-        channel_id.sub_channel().to_string(),
+        griffr_core::GameTarget::hypergryph(game_id.clone(), region_id, channel_id.clone())?,
         None,
         version_info.version.clone(),
         pkg.game_files_md5.clone(),

@@ -130,7 +130,7 @@ impl<'de> Deserialize<'de> for ChannelId {
 }
 
 /// Native launcher API `channel` and `sub_channel` values.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelPair {
     channel: ChannelId,
     sub_channel: ChannelId,
