@@ -138,7 +138,15 @@ class CiWorkflowTopologyTests(unittest.TestCase):
             lifecycle.index("official_server_content_lifecycle_disk_preflight"),
             lifecycle.index("official_server_content_lifecycle_without_launch"),
         )
-        self.assertIn("default: off", workflow)
+        self.assertIn('options: ["off", base, all]', workflow)
+        self.assertIn('default: "off"', workflow)
+        self.assertNotIn("default: off", workflow)
+
+    def test_live_resource_off_is_always_a_quoted_string(self) -> None:
+        workflow = read(".github/workflows/live-e2e.yml")
+        self.assertNotIn("GRIFFR_LIVE_E2E_RESOURCES: off", workflow)
+        self.assertIn('GRIFFR_LIVE_E2E_RESOURCES: "off"', workflow)
+        self.assertEqual(workflow.count('GRIFFR_LIVE_E2E_RESOURCES: "off"'), 1)
 
     def test_live_hosted_root_defaults_are_safe_and_optional(self) -> None:
         workflow = read(".github/workflows/live-e2e.yml")

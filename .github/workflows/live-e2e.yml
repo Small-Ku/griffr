@@ -46,8 +46,8 @@ on:
       resources:
         description: Persistent resource scope for lifecycle. Keep off for the smallest hosted-runner footprint.
         type: choice
-        options: [off, base, all]
-        default: off
+        options: ["off", base, all]
+        default: "off"
       fetch_predownload:
         description: Also fetch an advertised predownload payload during lifecycle.
         type: boolean
@@ -300,6 +300,6 @@ jobs:
           GRIFFR_LIVE_E2E_REGION: ${{ inputs.region }}
           GRIFFR_LIVE_E2E_CHANNEL: ${{ inputs.channel }}
           GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ inputs.sub_channel }}
-          GRIFFR_LIVE_E2E_RESOURCES: off
+          GRIFFR_LIVE_E2E_RESOURCES: "off"
           GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
         run: cargo nextest run -P ci --archive-file "${{ runner.temp }}/live-cli.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_streaming_package_soak
