@@ -14,6 +14,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 
 use crate::progress::CountAndByteProgress;
+use crate::target::RemoteTarget;
 use crate::ui;
 use crate::{GlobalOptions, OutputFormat};
 
@@ -193,12 +194,10 @@ impl RepairTransaction {
 }
 
 async fn verify_one(
-    api_client: &ApiClient,
+    api_client: Option<&ApiClient>,
     pool_runner: &mut TaskPoolRunner,
     local: griffr_runtime::LocalInstall,
-    game_override: Option<GameId>,
-    region_override: Option<RegionId>,
-    channel_override: Option<ChannelPair>,
+    remote_override: Option<RemoteTarget>,
     overrides: crate::InstallTargetOverrideArgs,
     skip_local_detect: bool,
     repair: bool,
@@ -209,6 +208,15 @@ async fn verify_one(
     opts: GlobalOptions,
 ) -> Result<serde_json::Value> {
     if local.backend() == BackendKind::Yostar {
+        let (game_override, region_override) = match remote_override {
+            Some(RemoteTarget::Yostar { game, region }) => (Some(game), Some(region)),
+            Some(RemoteTarget::Hypergryph { .. }) => {
+                anyhow::bail!(
+                    "A YoStar install cannot be verified with a Hypergryph/Gryphline remote target"
+                )
+            }
+            None => (None, None),
+        };
         let detected_region = local.require_known_region()?;
         if skip_local_detect && region_override != Some(detected_region) {
             anyhow::bail!(
@@ -229,6 +237,21 @@ async fn verify_one(
         )
         .await;
     }
+    let (game_override, region_override, channel_override) = match remote_override {
+        Some(RemoteTarget::Hypergryph {
+            game,
+            region,
+            channels,
+        }) => (Some(game), Some(region), Some(channels)),
+        Some(RemoteTarget::Yostar { .. }) => {
+            anyhow::bail!(
+                "A Hypergryph/Gryphline install cannot be verified with a YoStar remote target"
+            )
+        }
+        None => (None, None, None),
+    };
+    let api_client = api_client
+        .context("Hypergryph/Gryphline verification requires the Hypergryph API client")?;
     let text_output = opts.output != OutputFormat::Json;
     let detected_game = local.game_id.as_ref();
     let detected_region = local.region_id;
@@ -679,9 +702,7 @@ async fn verify_one(
 
 pub async fn verify(
     paths: Vec<PathBuf>,
-    game_override: Option<GameId>,
-    region_override: Option<RegionId>,
-    channel_override: Option<ChannelPair>,
+    remote_override: Option<RemoteTarget>,
     overrides: crate::InstallTargetOverrideArgs,
     skip_local_detect: bool,
     repair: bool,
@@ -696,9 +717,7 @@ pub async fn verify(
     if relink_reuse && !repair {
         anyhow::bail!("--relink-reuse requires --repair");
     }
-    if skip_local_detect
-        && (game_override.is_none() || region_override.is_none() || channel_override.is_none())
-    {
+    if skip_local_detect && remote_override.is_none() {
         anyhow::bail!("--skip-local-detect requires both --game and --region");
     }
 
@@ -708,13 +727,16 @@ pub async fn verify(
     } else {
         Vec::new()
     };
+    let remote_game = remote_override.as_ref().map(|target| match target {
+        RemoteTarget::Hypergryph { game, .. } | RemoteTarget::Yostar { game, .. } => game.clone(),
+    });
     let target_games = installs
         .iter()
         .map(|install| {
             if skip_local_detect {
-                Ok(game_override.clone().expect("validated above"))
+                Ok(remote_game.clone().expect("validated above"))
             } else {
-                game_override
+                remote_game
                     .clone()
                     .or_else(|| install.game_id.clone())
                     .ok_or_else(|| {
@@ -801,7 +823,11 @@ pub async fn verify(
         );
     }
 
-    let api_client = ApiClient::new()?;
+    let api_client = installs
+        .iter()
+        .any(|install| install.backend() == BackendKind::Hypergryph)
+        .then(ApiClient::new)
+        .transpose()?;
     let mut reports = vec![None; installs.len()];
     let mut failures = Vec::new();
     if batch.jobs == 1 {
@@ -809,12 +835,10 @@ pub async fn verify(
         for item in work {
             let path = item.install.install_path.clone();
             match verify_one(
-                &api_client,
+                api_client.as_ref(),
                 &mut pool_runner,
                 item.install,
-                game_override.clone(),
-                region_override,
-                channel_override.clone(),
+                remote_override.clone(),
                 overrides.clone(),
                 skip_local_detect,
                 repair,
@@ -853,20 +877,17 @@ pub async fn verify(
                 let api_client = api_client.clone();
                 let runner_group = runner_group.clone();
                 let runner_config = runner_config.clone();
-                let game_override = game_override.clone();
-                let channel_override = channel_override.clone();
+                let remote_override = remote_override.clone();
                 let overrides = overrides.clone();
                 async move {
                     let path = item.install.install_path.clone();
                     let result = async {
                         let mut runner = runner_group.runner(runner_config)?;
                         verify_one(
-                            &api_client,
+                            api_client.as_ref(),
                             &mut runner,
                             item.install,
-                            game_override,
-                            region_override,
-                            channel_override,
+                            remote_override,
                             overrides,
                             skip_local_detect,
                             repair,

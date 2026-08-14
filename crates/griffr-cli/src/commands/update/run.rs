@@ -22,7 +22,7 @@ use crate::GlobalOptions;
 use griffr_runtime::detect_local_install;
 
 pub(super) async fn update_internal(
-    api_client: &ApiClient,
+    api_client: Option<&ApiClient>,
     task_pool_runner: &mut TaskPoolRunner,
     path: PathBuf,
     overrides: crate::InstallTargetOverrideArgs,
@@ -56,6 +56,14 @@ pub(super) async fn update_internal(
         )
         .await;
     }
+    let owned_api_client;
+    let api_client = match api_client {
+        Some(client) => client,
+        None => {
+            owned_api_client = ApiClient::new()?;
+            &owned_api_client
+        }
+    };
     let pending_change = read_install_change(&local.install_path)?;
     let mut resumed_pending_patch = false;
     match griffr_runtime::get_patch_recovery_state(&local.install_path, None)? {
@@ -874,13 +882,17 @@ pub async fn update(
         );
     }
 
-    let api_client = ApiClient::new()?;
+    let api_client = installs
+        .iter()
+        .any(|install| install.backend() == BackendKind::Hypergryph)
+        .then(ApiClient::new)
+        .transpose()?;
     let mut failures = Vec::new();
     if batch.jobs == 1 {
         let mut task_pool_runner = TaskPoolRunner::new(opts.task_pool_config())?;
         for item in work {
             let result = update_internal(
-                &api_client,
+                api_client.as_ref(),
                 &mut task_pool_runner,
                 item.path.clone(),
                 overrides.clone(),
@@ -927,7 +939,7 @@ pub async fn update(
                     let result = async {
                         let mut runner = runner_group.runner(runner_config)?;
                         update_internal(
-                            &api_client,
+                            api_client.as_ref(),
                             &mut runner,
                             item.path,
                             overrides,
@@ -974,10 +986,9 @@ pub(crate) async fn apply_staged_predownload(
     patch_options: griffr_runtime::PatchApplyOptions,
     opts: GlobalOptions,
 ) -> Result<()> {
-    let api_client = ApiClient::new()?;
     let mut task_pool_runner = TaskPoolRunner::new(opts.task_pool_config())?;
     update_internal(
-        &api_client,
+        None,
         &mut task_pool_runner,
         path,
         overrides,

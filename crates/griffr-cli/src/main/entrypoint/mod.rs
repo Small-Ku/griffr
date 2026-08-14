@@ -18,6 +18,24 @@ fn parse_remote_args(remote: RequiredGameRegionChannelArgs) -> Result<RemoteTarg
     RemoteTarget::parse(game, region, channel, sub_channel)
 }
 
+fn parse_optional_remote_args(remote: GameRegionChannelArgs) -> Result<Option<RemoteTarget>> {
+    let GameRegionChannelArgs {
+        game: GameArg { game },
+        region: RegionArg { region },
+        channel: ChannelArg {
+            channel,
+            sub_channel,
+        },
+    } = remote;
+    match (game, region) {
+        (None, None) => Ok(None),
+        (Some(game), Some(region)) => {
+            RemoteTarget::parse(game, region, channel, sub_channel).map(Some)
+        }
+        _ => anyhow::bail!("--game and --region must be provided together"),
+    }
+}
+
 fn parse_hypergryph_remote_args(
     remote: RequiredGameRegionChannelArgs,
 ) -> Result<(GameId, RegionId, ChannelPair)> {
@@ -306,34 +324,19 @@ pub(crate) async fn run() -> Result<()> {
                 reuse_from,
                 force_copy,
             } = reuse;
-            let GameRegionChannelArgs {
-                game: GameArg { game },
-                region: RegionArg { region },
-                channel:
-                    ChannelArg {
-                        channel,
-                        sub_channel,
-                    },
-            } = remote;
-            let game = game.map(|value| value.parse::<GameId>()).transpose()?;
-            let region = region.map(|value| value.parse::<RegionId>()).transpose()?;
-            let channel = region
-                .map(|region| ChannelPair::parse(region, channel, sub_channel))
-                .transpose()?;
+            let remote = parse_optional_remote_args(remote)?;
             let scope = if skip_vfs {
                 Some(VerifyScopeArg::Core)
             } else {
                 scope
             };
             opts.verbose(format!(
-                "Verify paths: {:?}, game={:?}, region={:?}, channel={:?}, repair={}, reuse_from={:?}, force_copy={}, relink_reuse={}, scope={:?}, skip_local_detect={}",
-                paths, game, region, channel, repair, reuse_from, force_copy, relink_reuse, scope, skip_local_detect
+                "Verify paths: {:?}, remote={:?}, repair={}, reuse_from={:?}, force_copy={}, relink_reuse={}, scope={:?}, skip_local_detect={}",
+                paths, remote, repair, reuse_from, force_copy, relink_reuse, scope, skip_local_detect
             ));
             commands::verify(
                 paths,
-                game,
-                region,
-                channel,
+                remote,
                 overrides,
                 skip_local_detect,
                 repair,

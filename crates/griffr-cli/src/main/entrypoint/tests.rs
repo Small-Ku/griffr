@@ -100,6 +100,32 @@ fn remote_args_default_to_region_official_channel() {
 }
 
 #[test]
+fn verify_remote_override_preserves_yostar_backend_shape() {
+    let cli = Cli::try_parse_from([
+        "griffr",
+        "verify",
+        "--path",
+        r"C:\Games\Arknights",
+        "--game",
+        "arknights",
+        "--region",
+        "jp",
+        "--skip-local-detect",
+    ])
+    .unwrap();
+    let Commands::Verify { remote, .. } = *cli.command else {
+        panic!("expected verify command");
+    };
+
+    let Some(RemoteTarget::Yostar { game, region }) = parse_optional_remote_args(remote).unwrap()
+    else {
+        panic!("expected YoStar target");
+    };
+    assert_eq!(game, GameId::ARKNIGHTS);
+    assert_eq!(region, RegionId::Jp);
+}
+
+#[test]
 fn scheduler_tuning_is_not_part_of_the_public_cli() {
     let Err(error) = Cli::try_parse_from([
         "griffr",
