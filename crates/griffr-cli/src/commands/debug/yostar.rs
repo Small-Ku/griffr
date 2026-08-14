@@ -117,7 +117,7 @@ pub async fn file_url(
     let mut payload = target_json(region, gateway.as_deref())?;
     payload["request"] = json!({"version": version, "basis": basis, "file": file});
     payload["response"] = json!({
-        "path": entry.path,
+        "path": griffr_runtime::normalize_logical_path(&entry.path),
         "size": entry.size,
         "crc64_xz": entry.hash,
         "urls": urls,
