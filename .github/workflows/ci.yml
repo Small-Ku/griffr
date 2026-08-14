@@ -33,9 +33,20 @@ jobs:
       - name: Compile Python tooling
         run: python -m compileall -q scripts
       - name: Install actionlint
-        uses: taiki-e/install-action@v2.85.13
-        with:
-          tool: actionlint@1.7.12
+        shell: bash
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          mkdir -p "$RUNNER_TEMP/actionlint-bin"
+          curl --fail --location --retry 3 --retry-all-errors \
+            --output "$RUNNER_TEMP/$archive" "$url"
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$RUNNER_TEMP/$archive" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/actionlint-bin" actionlint
+          echo "$RUNNER_TEMP/actionlint-bin" >> "$GITHUB_PATH"
       - name: Lint GitHub Actions workflows
         run: actionlint -color
       - name: Compute exact main-push live policy
@@ -94,6 +105,7 @@ jobs:
 
   feature-boundaries:
     name: Feature boundary / ${{ matrix.name }}
+    needs: [repository-policy, formatting]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:

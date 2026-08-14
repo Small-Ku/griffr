@@ -33,6 +33,24 @@ class CiWorkflowTopologyTests(unittest.TestCase):
         self.assertNotIn("rustup default", action)
         self.assertNotIn("target/", action)
 
+    def test_repository_policy_installs_actionlint_from_pinned_release(self) -> None:
+        workflow = read(".github/workflows/ci.yml")
+        policy = job_block(workflow, "repository-policy")
+        self.assertIn('ACTIONLINT_VERSION: "1.7.12"', policy)
+        self.assertIn(
+            'ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"',
+            policy,
+        )
+        self.assertIn("rhysd/actionlint/releases/download", policy)
+        self.assertIn("sha256sum --check --strict", policy)
+        self.assertNotIn("tool: actionlint@", policy)
+        self.assertNotIn("cargo-binstall", policy)
+
+    def test_feature_boundaries_wait_for_static_gates(self) -> None:
+        workflow = read(".github/workflows/ci.yml")
+        feature = job_block(workflow, "feature-boundaries")
+        self.assertIn("needs: [repository-policy, formatting]", feature)
+
     def test_ci_builds_one_nextest_archive_per_platform_then_shards(self) -> None:
         workflow = read(".github/workflows/ci.yml")
         self.assertEqual(workflow.count("cargo nextest archive --workspace"), 2)
