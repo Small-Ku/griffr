@@ -32,11 +32,106 @@ Hardlink assertions are physical identity checks rather than content checks:
   `GetFileInformationByHandle` via the existing `windows-sys` dependency. This
   keeps the E2E suite compatible with the repository's Rust 1.97.1 stable CI.
 
-`.github/workflows/platform-e2e.yml` runs this suite on Ubuntu 24.04 and Windows
-Server 2025 with Rust 1.97.1. The equivalent local Windows entry point is:
+`CI` compiles this suite once per platform with the `ci` Cargo profile, archives the
+result with cargo-nextest, and fans the archive out across four deterministic hash shards on
+Ubuntu 24.04 and Windows Server 2025. The test runners do not rebuild the workspace. The
+equivalent local Windows entry point is:
 
 ```powershell
 scripts/test_windows_e2e.ps1
+```
+
+
+## GitHub Actions test topology
+
+The normal `.github/workflows/ci.yml` workflow is the pull-request and main-branch
+authority. It separates cheap policy checks from expensive compilation and then reuses the
+compiled test payload:
+
+1. `repository-policy`, `rustfmt`, and feature-boundary jobs fail early without waiting for
+   the full workspace test build. `actionlint` validates every workflow in the same policy
+   lane.
+2. Linux and Windows each compile the workspace test graph once with `[profile.ci]` and
+   `cargo nextest archive`. The archive contains test executables, required dynamic libraries,
+   Cargo metadata, and non-test binaries needed by integration tests.
+3. Four `hash:m/4` nextest jobs per platform download that archive and run independent
+   deterministic shards. The real-process CLI E2E is part of this archive.
+4. Platform `cargo check`, release-profile check, all-features check, and `clippy -D warnings`
+   fan out in parallel with the archive builds after the cheap repository-policy/rustfmt gates.
+   They still reuse sccache entries from prior jobs/runs when compiler flags match, without putting
+   the archive build on the critical path. Linux additionally runs doctests and builds rustdoc with
+   warnings denied, which nextest does not cover.
+
+Cargo registry/index and Git dependency source downloads are cached separately by OS, architecture,
+and `Cargo.lock`. `sccache` uses the GitHub Actions backend for compiler objects across jobs and
+workflow runs; workflow artifacts are used only to transport the already-linked nextest test archive
+within a single run. The repository deliberately does not cache or upload the whole Cargo `target/`
+directory, so incremental compiler state never becomes a cross-run correctness dependency.
+
+`.github/workflows/nightly.yml` is a weekly compatibility lane on Linux and Windows. It runs
+check, clippy, and the non-ignored workspace tests with current Rust nightly. Stable Rust
+1.97.1 remains the required/gating compiler in normal CI.
+
+For branch protection, require the single **`CI / Required`** check rather than every matrix
+expansion. That aggregate job runs with `always()` and fails unless repository policy, rustfmt,
+feature boundaries, both platform build archives, both quality jobs, and both platform test matrices
+all finished successfully. This keeps the protected check name stable if shard counts or internal job
+names change.
+
+`.github/workflows/extended-platform.yml` is a separate weekly/manual host-integration lane.
+Its Ubuntu job installs Wine, clang, and lld, builds a tiny generated Windows PE fixture, launches
+it through Griffr's real Wine launcher, observes the process, then stops it. Keeping this outside
+normal CI tests the host integration without making every pull request install Wine.
+
+### Production/live test policy
+
+Production services are intentionally not part of pull-request correctness. The live workflow
+has four lanes with different risk:
+
+- **smoke** is read-only. During a trusted push to `main`, `CI` evaluates the exact
+  `before..sha` push range with `scripts/ci/live_e2e_policy.py` and publishes that decision as
+  a short-lived workflow artifact. After the same CI run succeeds, `Live E2E` consumes that
+  artifact instead of guessing a single-commit diff. Provider/core/CLI changes that can
+  affect remote protocol behavior schedule smoke. If a manually re-run/old CI run has already lost
+  its tiny policy artifact, the post-CI workflow falls back conservatively to smoke only rather than
+  guessing destructive coverage. A daily scheduled smoke also detects API drift even when the
+  repository has not changed. It covers CLI requests for Endfield CN/global
+  and YoStar Arknights EN/JP/KR, plus the current Hypergryph latest/media/game-files channel
+  matrix. No install tree is created.
+- **archive-sample** performs bounded range reads against the current official multi-volume
+  Endfield archive and validates the split/archive format assumptions used by the extractor. It
+  is manual because it contacts the production CDN and may cache hundreds of MiB, even though
+  it does not retain a game installation.
+- **lifecycle** performs the full retained install/verify/repair/reuse/update/detach/uninstall
+  lifecycle and can download a complete game. It is never started automatically.
+- **streaming** downloads official package parts through the production bounded writer, checks
+  size/hash/atomic commit, and discards each part. It can transfer the complete package set even
+  though peak disk use is bounded, so it is also manual only.
+
+`archive-sample`, `lifecycle`, and `streaming` run only through `workflow_dispatch` on a dedicated
+self-hosted runner labelled `griffr-live` plus `linux` or `windows`. A manual run always performs
+the hosted read-only smoke first; the selected large/destructive lane is released only after that
+smoke passes, and then references the `live-e2e` GitHub Environment. Configure that environment in repository Settings with required
+reviewers; enabling **Prevent self-review** is recommended for deletion-capable/large-download
+runs. Keep those self-hosted runners at Actions Runner v2.327.1 or newer because the workflow uses
+Node 24-generation actions. The supplied `root` must point at a dedicated test filesystem root.
+
+The path policy is advisory for dangerous lanes: extractor changes may recommend
+`archive-sample`; runtime install changes may recommend `lifecycle`; and downloader/task-pool
+changes may additionally recommend `streaming`. Automatic execution is still capped at
+read-only smoke. This keeps production outages, large downloads, deletion-capable tests, and
+untrusted pull-request code out of the required PR gate while still showing reviewers which
+live lane should be run before a risky release.
+
+Historical-version probes remain ignored/manual. Their purpose is diagnosing a known old
+launcher response or confirming patch/full behavior for a recorded version pair; deterministic
+unit/E2E tests own the stable package-selection contract, so a provider deleting old metadata
+should not make normal CI red.
+
+To inspect the recommendation locally:
+
+```bash
+python scripts/ci/live_e2e_policy.py --base origin/main --head HEAD
 ```
 
 ## Official-server content lifecycle

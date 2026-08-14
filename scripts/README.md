@@ -39,6 +39,29 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+
+## CI/live-test policy helper
+
+Classify a change without contacting production services:
+
+```bash
+python scripts/ci/live_e2e_policy.py --base origin/main --head HEAD
+```
+
+The output recommends `smoke`, `archive-sample`, `lifecycle`, and/or `streaming`. `smoke` is
+read-only and may run automatically after main-branch CI succeeds; the other lanes are advisory
+until a maintainer explicitly dispatches the `Live E2E` workflow on a dedicated `griffr-live`
+runner protected by the `live-e2e` GitHub Environment.
+The classifier has regression coverage in `scripts/tests/test_live_e2e_policy.py`.
+`test_ci_workflows.py` additionally locks the intended build-once/shard topology, the aggregate
+required gate, sccache setup, and the rule that destructive live lanes remain manual, self-hosted,
+and gated behind the read-only smoke.
+
+Normal CI compiles a cargo-nextest archive once per operating system with Cargo `profile.ci` and
+runs four hash-partitioned shards from the archive. Cargo registry/Git source downloads are cached
+separately; `sccache` caches compiler outputs. Neither is a replacement for the archive, and the
+workflow does not persist the complete `target/` tree.
+
 ## Stable and nightly Linux toolchain matrix
 
 The repository defaults to the stable LLVM backend so every Cargo command works
