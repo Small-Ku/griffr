@@ -341,7 +341,7 @@ Synthetic tests cover raw byte splits, independent ZIP parts, split central dire
 An ignored integration test checks the production remote source against the official Endfield package:
 
 ```powershell
-cargo test -p griffr-common check_official_archive_sample -- --ignored --nocapture
+cargo test -p griffr-runtime check_official_archive_sample -- --ignored --nocapture
 ```
 
 It has no custom environment variables. It:

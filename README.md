@@ -3,8 +3,14 @@
 Rust workspace for a Hypergryph, Gryphline, and YoStar game launcher/downloader CLI.
 
 ## Workspace
-- `crates/griffr-common`: shared library crate
-- `crates/griffr-cli`: CLI crate (binary: `griffr`)
+- `crates/griffr-core`: provider-neutral game, region, channel, catalog, and path value types
+- `crates/griffr-hypergryph-api`: Hypergryph/Gryphline launcher protocol, target resolution, crypto, and HTTP client
+- `crates/griffr-yostar-api`: YoStar launcher target resolution, protocol, and HTTP client
+- `crates/griffr-runtime`: filesystem, download, install/update/verify, reuse, VFS, patch, and launch runtime
+- `crates/griffr-cli`: CLI frontend (binary: `griffr`)
+- `crates/griffr-gui` and `crates/griffr-gui-macros`: GUI frontend and macros
+
+The dependency direction is intentionally one-way: provider API crates depend on `griffr-core` but never on each other or `griffr-runtime`; `griffr-runtime` may consume both provider APIs; frontends compose those libraries. Backend-specific channel data is represented only by the Hypergryph target type, so YoStar targets do not carry synthetic channel IDs.
 
 ## Prerequisites
 - Rust toolchain
@@ -28,10 +34,23 @@ cargo run -p griffr-cli -- <SUBCOMMAND> --help
 
 Tests:
 ```bash
-cargo test
-cargo test -p griffr-common
+cargo test --workspace
+cargo test -p griffr-core
+cargo test -p griffr-hypergryph-api
+cargo test -p griffr-yostar-api
+cargo test -p griffr-runtime
 cargo test -p griffr-cli
 ```
+
+Capability boundaries can be checked without pulling optional HTTP/crypto/patch engines into every build:
+```bash
+cargo check -p griffr-hypergryph-api --no-default-features
+cargo check -p griffr-hypergryph-api --no-default-features --features crypto
+cargo check -p griffr-yostar-api --no-default-features
+cargo check -p griffr-runtime --no-default-features
+```
+
+`griffr-hypergryph-api` enables `client` by default; `client` includes `crypto`. `griffr-yostar-api` enables its `client` feature by default. `griffr-runtime` enables `hdiff-patch` by default; disabling it removes the HDiff engine while preserving planning/model code.
 
 Format/Lint:
 ```bash
@@ -128,7 +147,7 @@ lifecycle. A real Wine smoke test generates a small PE executable and can be
 run on a host with Wine, clang, and lld-link:
 
 ```bash
-cargo test -p griffr-common real_wine_launch_smoke -- --ignored --nocapture
+cargo test -p griffr-runtime real_wine_launch_smoke -- --ignored --nocapture
 ```
 
 ## Documentation

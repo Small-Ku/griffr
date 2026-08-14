@@ -4,6 +4,8 @@ This directory documents the core design, runtime task model, storage layouts, a
 
 The primary runtime is optimized for Windows large-file I/O, leveraging `compio` for asynchronous kernel I/O results (IOCP) and compio's blocking thread pool for CPU/blocking tasks.
 
+The workspace has explicit dependency layers. `griffr-core` owns provider-neutral identity and value types. `griffr-hypergryph-api` and `griffr-yostar-api` each own one launcher protocol and may depend on core, but never on runtime or each other. `griffr-runtime` owns filesystem and execution policy and may consume both provider APIs. The CLI resolves user input into a provider-correct target before dispatching execution, so YoStar paths never manufacture Hypergryph channel/sub-channel values. `scripts/check_repo.py` enforces these dependency directions.
+
 ---
 
 ## File Index

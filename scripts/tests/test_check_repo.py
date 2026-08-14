@@ -20,15 +20,23 @@ class CheckerTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
+        crate_names = [
+            "griffr-core",
+            "griffr-hypergryph-api",
+            "griffr-yostar-api",
+            "griffr-runtime",
+        ]
+        members = ", ".join(f'"crates/{name}"' for name in crate_names)
         (root / "Cargo.toml").write_text(
-            '[workspace]\nmembers = ["crates/griffr-common"]\n', encoding="utf-8"
+            f"[workspace]\nmembers = [{members}]\n", encoding="utf-8"
         )
-        common_manifest = root / "crates/griffr-common/Cargo.toml"
-        common_manifest.parent.mkdir(parents=True, exist_ok=True)
-        common_manifest.write_text(
-            '[package]\nname = "griffr-common"\nversion = "0.0.0"\n',
-            encoding="utf-8",
-        )
+        for name in crate_names:
+            manifest = root / f"crates/{name}/Cargo.toml"
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            manifest.write_text(
+                f'[package]\nname = "{name}"\nversion = "0.0.0"\n',
+                encoding="utf-8",
+            )
         for relative, body in files.items():
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,17 +48,44 @@ class CheckerTests(unittest.TestCase):
 
     def test_rejects_frontend_dependency(self) -> None:
         root = self.make_repo({})
-        (root / "crates/griffr-common/Cargo.toml").write_text(
-            '[package]\nname = "griffr-common"\nversion = "0.0.0"\n'
+        (root / "crates/griffr-core/Cargo.toml").write_text(
+            '[package]\nname = "griffr-core"\nversion = "0.0.0"\n'
             '[dependencies]\nindicatif = "0.18"\n',
             encoding="utf-8",
         )
         self.assertIn("ARC001", self.codes(root))
 
+    def test_rejects_network_dependency_in_core(self) -> None:
+        root = self.make_repo({})
+        (root / "crates/griffr-core/Cargo.toml").write_text(
+            '[package]\nname = "griffr-core"\nversion = "0.0.0"\n'
+            '[dependencies]\ncyper = "0.9"\n',
+            encoding="utf-8",
+        )
+        self.assertIn("ARC002", self.codes(root))
+
+    def test_rejects_runtime_dependency_from_provider_api(self) -> None:
+        root = self.make_repo({})
+        (root / "crates/griffr-yostar-api/Cargo.toml").write_text(
+            '[package]\nname = "griffr-yostar-api"\nversion = "0.0.0"\n'
+            '[dependencies]\ngriffr-runtime = { path = "../griffr-runtime" }\n',
+            encoding="utf-8",
+        )
+        self.assertIn("ARC002", self.codes(root))
+
+    def test_rejects_provider_api_cross_dependency(self) -> None:
+        root = self.make_repo({})
+        (root / "crates/griffr-hypergryph-api/Cargo.toml").write_text(
+            '[package]\nname = "griffr-hypergryph-api"\nversion = "0.0.0"\n'
+            '[dependencies]\ngriffr-yostar-api = { path = "../griffr-yostar-api" }\n',
+            encoding="utf-8",
+        )
+        self.assertIn("ARC002", self.codes(root))
+
     def test_rejects_raw_progress_channel_outside_wrapper(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/lib.rs": """
+                "crates/griffr-runtime/src/lib.rs": """
                     pub struct Bad {
                         tx: flume::Sender<ProgressUpdate>,
                     }
@@ -62,7 +97,7 @@ class CheckerTests(unittest.TestCase):
     def test_allows_raw_progress_channel_in_wrapper(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/runtime/progress.rs": """
+                "crates/griffr-runtime/src/progress.rs": """
                     pub struct ProgressSender {
                         tx: Option<flume::Sender<ProgressUpdate>>,
                     }
@@ -74,7 +109,7 @@ class CheckerTests(unittest.TestCase):
     def test_rejects_public_progress_callback(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/lib.rs": """
+                "crates/griffr-runtime/src/lib.rs": """
                     pub async fn run(progress_callback: impl FnMut(u64)) {}
                 """
             }
@@ -84,7 +119,7 @@ class CheckerTests(unittest.TestCase):
     def test_allows_crate_private_callback(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/lib.rs": """
+                "crates/griffr-runtime/src/lib.rs": """
                     pub(crate) fn run(progress_callback: impl FnMut(u64)) {}
                 """
             }
@@ -94,7 +129,7 @@ class CheckerTests(unittest.TestCase):
     def test_rejects_lane_constructor_outside_catalog(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/lib.rs": """
+                "crates/griffr-runtime/src/lib.rs": """
                     fn lane() { let _ = ProgressLane::new(scope, phase); }
                 """
             }
@@ -104,7 +139,7 @@ class CheckerTests(unittest.TestCase):
     def test_rejects_custom_task_pool_thread(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/runtime/task_pool/queue.rs": """
+                "crates/griffr-runtime/src/task_pool/queue.rs": """
                     fn start() { let _ = std::thread::Builder::new(); }
                 """
             }
@@ -114,7 +149,7 @@ class CheckerTests(unittest.TestCase):
     def test_allows_task_pool_retry_sleep(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/runtime/task_pool/queue.rs": """
+                "crates/griffr-runtime/src/task_pool/queue.rs": """
                     fn retry() { std::thread::sleep(delay); }
                 """
             }
@@ -124,7 +159,7 @@ class CheckerTests(unittest.TestCase):
     def test_rejects_std_fs_in_async_function(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/lib.rs": """
+                "crates/griffr-runtime/src/lib.rs": """
                     async fn load(path: &Path) {
                         let _ = std::fs::read(path);
                     }
@@ -136,7 +171,7 @@ class CheckerTests(unittest.TestCase):
     def test_rejects_imported_fs_alias_in_async_function(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/lib.rs": """
+                "crates/griffr-runtime/src/lib.rs": """
                     use std::fs as blocking_fs;
                     async fn load(path: &Path) {
                         let _ = blocking_fs::read(path);
@@ -149,7 +184,7 @@ class CheckerTests(unittest.TestCase):
     def test_allows_std_fs_inside_blocking_boundary(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/lib.rs": """
+                "crates/griffr-runtime/src/lib.rs": """
                     async fn load(path: PathBuf) {
                         dispatch_blocking(move || {
                             let _ = std::fs::read(path);
@@ -163,7 +198,7 @@ class CheckerTests(unittest.TestCase):
     def test_allows_std_fs_inside_expression_blocking_boundary(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/lib.rs": """
+                "crates/griffr-runtime/src/lib.rs": """
                     async fn load(path: PathBuf) {
                         run_blocking("read", move || std::fs::read(path)).await;
                     }
@@ -175,7 +210,7 @@ class CheckerTests(unittest.TestCase):
     def test_ignores_async_trait_declaration_without_body(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/lib.rs": """
+                "crates/griffr-runtime/src/lib.rs": """
                     trait Load {
                         async fn load(path: &Path);
                     }
@@ -188,7 +223,7 @@ class CheckerTests(unittest.TestCase):
     def test_ignores_inline_test_module(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/lib.rs": """
+                "crates/griffr-runtime/src/lib.rs": """
                     #[cfg(test)]
                     mod tests {
                         async fn sample(path: &Path) {
@@ -203,7 +238,7 @@ class CheckerTests(unittest.TestCase):
     def test_comments_and_strings_do_not_trigger_rules(self) -> None:
         root = self.make_repo(
             {
-                "crates/griffr-common/src/lib.rs": r'''
+                "crates/griffr-runtime/src/lib.rs": r'''
                     // std::fs::read and ProgressLane::new are examples.
                     const SAMPLE: &str = "flume::Sender<ProgressUpdate>";
                 '''
@@ -216,12 +251,12 @@ class CheckerTests(unittest.TestCase):
 
     def test_rejects_removed_model_name(self) -> None:
         root = self.make_repo(
-            {"crates/griffr-common/src/lib.rs": "struct TransferDownload;"}
+            {"crates/griffr-runtime/src/lib.rs": "struct TransferDownload;"}
         )
         self.assertIn("SSOT001", self.codes(root))
 
     def test_rejects_vague_file_name(self) -> None:
-        root = self.make_repo({"crates/griffr-common/src/model.rs": ""})
+        root = self.make_repo({"crates/griffr-runtime/src/model.rs": ""})
         self.assertIn("NAM001", self.codes(root))
 
 

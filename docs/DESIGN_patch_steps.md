@@ -1,6 +1,6 @@
 # Patch Steps
 
-This document describes the forward-only patch step implemented in `griffr-common`.
+This document describes the forward-only patch step implemented in `griffr-runtime`.
 
 ---
 

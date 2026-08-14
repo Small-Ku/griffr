@@ -8,9 +8,14 @@ Do not add migration, compatibility, or deprecation layers unless the user expli
 
 Primary workspace crates:
 
-- `crates/griffr-common`: shared domain logic, task runs, protocols, storage, and frontend-neutral runtime APIs.
+- `crates/griffr-core`: provider-neutral game/region/channel/catalog value types and small shared primitives.
+- `crates/griffr-hypergryph-api`: Hypergryph/Gryphline launcher protocol, targets, crypto, and client.
+- `crates/griffr-yostar-api`: YoStar launcher protocol, targets, and client.
+- `crates/griffr-runtime`: frontend-neutral filesystem, task DAG, download, install/update/verify, VFS, patch, reuse, and launch execution.
 - `crates/griffr-cli`: command parsing, terminal presentation, and CLI-specific orchestration.
-- Future GUI crates must use shared APIs without terminal-specific dependencies in `griffr-common`.
+- `crates/griffr-gui` / `crates/griffr-gui-macros`: GUI frontend and code generation.
+
+Dependency direction is one-way: provider APIs may depend on `griffr-core` but not on each other or `griffr-runtime`; runtime may consume both provider APIs; frontends compose the library crates. Shared library crates must not gain terminal- or GUI-specific dependencies.
 
 Reference material:
 - `docs/WORDING.md`: controlled project terms and direct naming rules.
@@ -51,7 +56,9 @@ Every domain fact should have one authoritative representation.
 
 Shared APIs must expose domain semantics, not frontend mechanics.
 
-- `griffr-common` must not depend on `indicatif`, terminal styling, CLI message wording, or GUI toolkit types.
+- `griffr-core`, both provider API crates, and `griffr-runtime` must not depend on `indicatif`, terminal styling, CLI message wording, or GUI toolkit types.
+- `griffr-core` must remain below network, archive, patch-engine, and platform-I/O layers.
+- Provider API crates must not depend on `griffr-runtime` or on the other provider API crate.
 - CLI and future GUI crates own rendering state and presentation policy.
 - Avoid exported callback-heavy APIs. In particular, do not expose progress through `Fn`, `FnMut`, or `FnOnce` parameters across crate boundaries.
 - Do not expose raw `flume::Sender<ProgressUpdate>` or `flume::Receiver<ProgressUpdate>` types. Use the shared wrapper types.
@@ -85,7 +92,7 @@ Shared APIs must expose domain semantics, not frontend mechanics.
 toolchain does not express. Keep it dependency-free and focused on stable
 architecture boundaries:
 
-- frontend-neutral `griffr-common` dependencies and APIs;
+- layered `griffr-core` / provider API / `griffr-runtime` dependencies and frontend-neutral APIs;
 - canonical progress wrappers and lane catalog;
 - Dispatcher-only task-pool concurrency;
 - explicit blocking filesystem calls inside production async code;

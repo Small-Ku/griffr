@@ -17,7 +17,8 @@ understand:
 
 | Code | Policy |
 | --- | --- |
-| `ARC001` | `griffr-common` stays independent from terminal and GUI renderer crates. |
+| `ARC001` | Core, provider API, and runtime crates stay independent from terminal and GUI renderer crates. |
+| `ARC002` | `griffr-core` stays below network/runtime/platform layers, and provider API crates never depend on runtime or each other. |
 | `PRG001` | Raw `ProgressUpdate` channels stay private to the canonical wrapper module. |
 | `PRG002` | Progress lanes come from the shared lane catalog. |
 | `PRG003` | Public shared APIs do not expose progress callbacks. |

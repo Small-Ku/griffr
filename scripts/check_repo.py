@@ -3,9 +3,9 @@
 
 This checker intentionally does not duplicate rustfmt, rustc, Clippy, Cargo, or
 the Rust test suite. It uses only the Python standard library and checks rules
-that those tools do not understand: cross-crate frontend boundaries, progress
-API shape, task-pool execution policy, explicit blocking filesystem calls in
-async code, removed model names, and broad file names.
+that those tools do not understand: layered crate boundaries, progress API
+shape, task-pool execution policy, explicit blocking filesystem calls in async
+code, removed model names, and broad file names.
 """
 
 from __future__ import annotations
@@ -177,7 +177,7 @@ class Checker:
             for path in _source_files(self.root, ".rs")
             for text in (_read(path),)
         ]
-        self._check_frontend_boundary(rust_files)
+        self._check_crate_boundaries(rust_files)
         self._check_progress_api(rust_files)
         self._check_task_pool_model(rust_files)
         self._check_async_filesystem(rust_files)
@@ -185,27 +185,59 @@ class Checker:
         self._check_file_names()
         return sorted(set(self.diagnostics))
 
-    def _check_frontend_boundary(self, rust_files: list[RustSource]) -> None:
-        manifest = self.root / "crates/griffr-common/Cargo.toml"
-        if manifest.is_file():
+    def _check_crate_boundaries(self, rust_files: list[RustSource]) -> None:
+        library_crates = {
+            "griffr-core": self.root / "crates/griffr-core",
+            "griffr-hypergryph-api": self.root / "crates/griffr-hypergryph-api",
+            "griffr-yostar-api": self.root / "crates/griffr-yostar-api",
+            "griffr-runtime": self.root / "crates/griffr-runtime",
+        }
+        forbidden_by_crate = {
+            "griffr-core": {
+                "compio",
+                "cyper",
+                "zip",
+                "hdiffpatch-rs",
+                "windows-sys",
+                "libc",
+                "griffr-hypergryph-api",
+                "griffr-yostar-api",
+                "griffr-runtime",
+            },
+            "griffr-hypergryph-api": {"griffr-yostar-api", "griffr-runtime"},
+            "griffr-yostar-api": {"griffr-hypergryph-api", "griffr-runtime"},
+        }
+
+        for crate_name, crate_root in library_crates.items():
+            manifest = crate_root / "Cargo.toml"
+            if not manifest.is_file():
+                continue
             try:
                 data = tomllib.loads(manifest.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
                 self.add_file("REP001", manifest, f"Cannot parse manifest: {error}")
-            else:
-                for dependency in sorted(_dependency_names(data)):
-                    if dependency in _RENDERER_CRATES:
-                        self.add_file(
-                            "ARC001",
-                            manifest,
-                            f"griffr-common depends on frontend renderer crate {dependency!r}",
-                            "Keep terminal and GUI rendering dependencies in frontend crates.",
-                        )
+                continue
 
-        common_root = self.root / "crates/griffr-common/src"
+            dependencies = _dependency_names(data)
+            for dependency in sorted(dependencies & _RENDERER_CRATES):
+                self.add_file(
+                    "ARC001",
+                    manifest,
+                    f"{crate_name} depends on frontend renderer crate {dependency!r}",
+                    "Keep terminal and GUI rendering dependencies in frontend crates.",
+                )
+            for dependency in sorted(dependencies & forbidden_by_crate.get(crate_name, set())):
+                self.add_file(
+                    "ARC002",
+                    manifest,
+                    f"{crate_name} depends on forbidden upper-layer crate {dependency!r}",
+                    "Keep core provider-neutral and keep provider API crates independent from runtime and each other.",
+                )
+
+        library_roots = tuple((root / "src").resolve() for root in library_crates.values())
         for source in rust_files:
             path = source.path
-            if not _is_relative_to(path, common_root):
+            if not any(_is_relative_to(path, root) for root in library_roots):
                 continue
             text = source.text
             masked = source.masked
@@ -217,16 +249,16 @@ class Checker:
                         path,
                         text,
                         match.start(),
-                        f"griffr-common references frontend renderer crate {crate!r}",
+                        f"Library crate references frontend renderer crate {crate!r}",
                         "Move terminal or GUI rendering to its frontend crate.",
                     )
 
     def _check_progress_api(self, rust_files: list[RustSource]) -> None:
-        common_root = self.root / "crates/griffr-common/src"
-        progress_file = (common_root / "runtime/progress.rs").resolve()
+        runtime_root = self.root / "crates/griffr-runtime/src"
+        progress_file = (runtime_root / "progress.rs").resolve()
         for source in rust_files:
             path = source.path
-            if not _is_relative_to(path, common_root):
+            if not _is_relative_to(path, runtime_root):
                 continue
             text = source.text
             masked = source.masked
@@ -249,7 +281,7 @@ class Checker:
                         text,
                         match.start(),
                         "Progress lane is constructed outside the shared lane catalog",
-                        "Add a named ProgressLane constant in runtime/progress.rs.",
+                        "Add a named ProgressLane constant in griffr-runtime/src/progress.rs.",
                     )
 
             for start, signature in _public_function_signatures(masked):
@@ -262,12 +294,12 @@ class Checker:
                     path,
                     text,
                     start,
-                    "Public griffr-common API exposes a progress callback",
+                    "Public griffr-runtime API exposes a progress callback",
                     "Expose ProgressSender or a frontend-neutral context object instead.",
                 )
 
     def _check_task_pool_model(self, rust_files: list[RustSource]) -> None:
-        task_pool_root = self.root / "crates/griffr-common/src/runtime/task_pool"
+        task_pool_root = self.root / "crates/griffr-runtime/src/task_pool"
         for source in rust_files:
             path = source.path
             if not _is_relative_to(path, task_pool_root) or _is_test_path(path):
