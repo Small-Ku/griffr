@@ -29,7 +29,8 @@ Hardlink assertions are physical identity checks rather than content checks:
 
 - Linux and other Unix hosts compare filesystem device, inode, and link count.
 - Windows compares volume serial number, file index, and link count through
-  `std::os::windows::fs::MetadataExt`.
+  `GetFileInformationByHandle` via the existing `windows-sys` dependency. This
+  keeps the E2E suite compatible with the repository's Rust 1.97.1 stable CI.
 
 `.github/workflows/platform-e2e.yml` runs this suite on Ubuntu 24.04 and Windows
 Server 2025 with Rust 1.97.1. The equivalent local Windows entry point is:

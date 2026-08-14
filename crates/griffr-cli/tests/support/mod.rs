@@ -33,30 +33,23 @@ pub fn file_identity(path: &Path) -> io::Result<FileIdentity> {
 
 #[cfg(windows)]
 pub fn file_identity(path: &Path) -> io::Result<FileIdentity> {
-    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::AsRawHandle;
 
-    let metadata = fs::metadata(path)?;
-    let missing = |field: &'static str| {
-        io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "Windows filesystem metadata did not expose {field} for {}",
-                path.display()
-            ),
-        )
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
     };
+
+    let file = fs::File::open(path)?;
+    let mut info = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+    let result = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+    if result == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
     Ok(FileIdentity {
-        volume: u64::from(
-            metadata
-                .volume_serial_number()
-                .ok_or_else(|| missing("volume serial number"))?,
-        ),
-        file: metadata.file_index().ok_or_else(|| missing("file index"))?,
-        links: u64::from(
-            metadata
-                .number_of_links()
-                .ok_or_else(|| missing("hardlink count"))?,
-        ),
+        volume: u64::from(info.dwVolumeSerialNumber),
+        file: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        links: u64::from(info.nNumberOfLinks),
     })
 }
 

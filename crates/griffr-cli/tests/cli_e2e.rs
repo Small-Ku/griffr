@@ -1,5 +1,3 @@
-#![feature(windows_by_handle)]
-
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
