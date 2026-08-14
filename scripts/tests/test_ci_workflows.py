@@ -106,6 +106,8 @@ class CiWorkflowTopologyTests(unittest.TestCase):
         workflow = read(".github/workflows/live-e2e.yml")
         self.assertIn("workflow_run:", workflow)
         self.assertIn("schedule:", workflow)
+        plan = job_block(workflow, "plan")
+        self.assertNotIn("actions/checkout", plan)
         smoke = job_block(workflow, "smoke")
         self.assertIn("runs-on: ubuntu-24.04", smoke)
         self.assertIn("live_api_smoke", smoke)
