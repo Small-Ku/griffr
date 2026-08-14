@@ -50,12 +50,17 @@ python scripts/ci/live_e2e_policy.py --base origin/main --head HEAD
 
 The output recommends `smoke`, `archive-sample`, `lifecycle`, and/or `streaming`. `smoke` is
 read-only and may run automatically after main-branch CI succeeds; the other lanes are advisory
-until a maintainer explicitly dispatches the `Live E2E` workflow on a dedicated `griffr-live`
-runner protected by the `live-e2e` GitHub Environment.
+until a maintainer explicitly dispatches the `Live E2E` workflow. Manual live lanes default to
+GitHub-hosted Ubuntu 24.04 or Windows 2025 and remain protected by the `live-e2e` GitHub
+Environment. They build a relocatable nextest archive, `cargo clean` the compile tree, then use
+`scripts/ci/prepare_live_workspace.py` to select a safe `RUNNER_TEMP` root and enforce a free-space
+floor before production payload I/O. The retained lifecycle adds a package-aware manifest-footprint
+preflight; if a full game cannot fit, use the bounded streaming lane or the local lifecycle harness
+on a roomier volume instead of maintaining a default self-hosted Actions runner.
 The classifier has regression coverage in `scripts/tests/test_live_e2e_policy.py`.
 `test_ci_workflows.py` additionally locks the intended build-once/shard topology, the aggregate
-required gate, sccache setup, and the rule that destructive live lanes remain manual, self-hosted,
-and gated behind the read-only smoke.
+required gate, sccache setup, hosted-first live execution, build-space reclamation, and smoke/disk
+gates for destructive lanes.
 
 Normal CI compiles a cargo-nextest archive once per operating system with Cargo `profile.ci` and
 runs four hash-partitioned shards from the archive. Cargo registry/Git source downloads are cached

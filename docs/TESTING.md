@@ -108,13 +108,27 @@ has four lanes with different risk:
   size/hash/atomic commit, and discards each part. It can transfer the complete package set even
   though peak disk use is bounded, so it is also manual only.
 
-`archive-sample`, `lifecycle`, and `streaming` run only through `workflow_dispatch` on a dedicated
-self-hosted runner labelled `griffr-live` plus `linux` or `windows`. A manual run always performs
-the hosted read-only smoke first; the selected large/destructive lane is released only after that
-smoke passes, and then references the `live-e2e` GitHub Environment. Configure that environment in repository Settings with required
-reviewers; enabling **Prevent self-review** is recommended for deletion-capable/large-download
-runs. Keep those self-hosted runners at Actions Runner v2.327.1 or newer because the workflow uses
-Node 24-generation actions. The supplied `root` must point at a dedicated test filesystem root.
+`archive-sample`, `lifecycle`, and `streaming` run only through `workflow_dispatch`. They are
+**GitHub-hosted first**: choose `linux` for `ubuntu-24.04` or `windows` for `windows-2025`. A manual
+run always performs the hosted read-only smoke first; the selected large/destructive lane is
+released only after that smoke passes and then references the `live-e2e` GitHub Environment.
+Configure that environment in repository Settings with required reviewers; enabling **Prevent
+self-review** is recommended for deletion-capable/large-download runs.
+
+The live lane compiles its required test into a relocatable nextest archive, runs `cargo clean` to
+release the normal Cargo `target/` tree, and only then starts production payload I/O. If `root` is
+blank, CI uses a lane-scoped directory under `RUNNER_TEMP`; an explicit root is still accepted but
+must be separate from the checkout, home directory, and filesystem root. `minimum_free_gib=0`
+selects the built-in floor (3 GiB for archive sampling, 4 GiB for lifecycle setup, 6 GiB for
+streaming). The lifecycle lane additionally fetches the current `game_files` manifest and refuses
+to start the retained install when the selected volume cannot hold the current core tree plus
+bounded extraction headroom. The default live lifecycle resource scope is `off` to minimize hosted
+runner disk demand; select `base` or `all` explicitly when that extra production coverage is needed.
+
+If the current game simply cannot fit on a standard hosted runner, the workflow fails during this
+preflight before downloading the installation. Use the bounded `streaming` lane for CDN/integrity
+coverage, or run the local lifecycle harness on a machine/volume that already has enough space. A
+permanent self-hosted Actions runner is not part of the default CI topology.
 
 The path policy is advisory for dangerous lanes: extractor changes may recommend
 `archive-sample`; runtime install changes may recommend `lifecycle`; and downloader/task-pool
@@ -160,6 +174,13 @@ scripts/test_live_cli_e2e.ps1 `
 The root must be a dedicated directory on the filesystem being tested. A unique
 `run-*` child is created; a failed run is retained for diagnosis, while a
 successful run exercises detach and uninstall and removes the empty child.
+
+Before the workflow starts the retained lifecycle, the ignored
+`official_server_content_lifecycle_disk_preflight` test fetches the current Hypergryph package and
+`game_files` metadata, sums the manifest footprint, adds extraction/filesystem headroom, and checks
+the live volume's current free space. This protects hosted runners from beginning a download that
+cannot possibly fit. The local shell/PowerShell harnesses still rely on the runtime's own allocation
+checks unless you invoke that preflight separately.
 
 The official-server lifecycle performs:
 
