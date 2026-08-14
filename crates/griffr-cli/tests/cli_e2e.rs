@@ -18,8 +18,11 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use zip::write::SimpleFileOptions;
 
+#[path = "test_support/exe.rs"]
+mod exe;
 mod support;
 
+use exe::griffr_exe;
 use support::{assert_distinct_files, assert_same_hardlink};
 
 const EXE_NAME: &str = "Endfield.exe";
@@ -701,7 +704,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    Command::new(env!("CARGO_BIN_EXE_griffr"))
+    Command::new(griffr_exe())
         .args(args)
         .env("NO_COLOR", "1")
         .env("RUST_BACKTRACE", "1")

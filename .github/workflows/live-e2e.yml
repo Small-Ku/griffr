@@ -1,0 +1,305 @@
+name: Live E2E
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "41 19 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Live lane to run. Archive/lifecycle/streaming require a self-hosted runner labelled griffr-live.
+        type: choice
+        options: [smoke, archive-sample, lifecycle, streaming]
+        default: smoke
+      runner_os:
+        description: Self-hosted runner label for destructive/large-download lanes.
+        type: choice
+        options: [linux, windows]
+        default: linux
+      root:
+        description: Dedicated filesystem root for archive/lifecycle/streaming (required for those modes).
+        type: string
+        required: false
+      game:
+        description: Game for lifecycle/streaming.
+        type: string
+        default: endfield
+      region:
+        description: Region for lifecycle/streaming.
+        type: string
+        default: cn
+      channel:
+        description: Optional channel for lifecycle/streaming.
+        type: string
+        default: "1"
+      sub_channel:
+        description: Optional sub-channel for lifecycle/streaming.
+        type: string
+        required: false
+      resources:
+        description: Persistent resource scope for lifecycle.
+        type: choice
+        options: [off, base, all]
+        default: base
+      fetch_predownload:
+        description: Also fetch an advertised predownload payload during lifecycle.
+        type: boolean
+        default: false
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: live-e2e-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  plan:
+    name: Select live lanes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      smoke: ${{ steps.plan.outputs.smoke }}
+      archive_sample: ${{ steps.plan.outputs.archive_sample }}
+      lifecycle: ${{ steps.plan.outputs.lifecycle }}
+      streaming: ${{ steps.plan.outputs.streaming }}
+      recommended: ${{ steps.plan.outputs.recommended }}
+      live_ref: ${{ steps.plan.outputs.live_ref }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 2
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+      - name: Download exact policy from successful CI run
+        id: policy-artifact
+        if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+        continue-on-error: true
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: live-e2e-policy-${{ github.event.workflow_run.head_sha }}
+          path: .live-policy
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+      - id: plan
+        name: Classify trigger
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          CURRENT_SHA: ${{ github.sha }}
+          DISPATCH_MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          live_ref="$CURRENT_SHA"
+          if [[ "$EVENT_NAME" == workflow_run ]]; then
+            live_ref="$RUN_SHA"
+            if [[ "$RUN_CONCLUSION" != success || "$RUN_EVENT" != push ]]; then
+              printf '%s\n' 'smoke=false' 'archive_sample=false' 'lifecycle=false' 'streaming=false' 'recommended=none' >> "$GITHUB_OUTPUT"
+              printf 'live_ref=%s\n' "$live_ref" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ -f .live-policy/live-e2e-policy.json ]]; then
+              python - <<'PY_POLICY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+          payload = json.loads(Path('.live-policy/live-e2e-policy.json').read_text())
+          for key in ('smoke', 'archive_sample', 'lifecycle', 'streaming'):
+              print(f"{key}={str(bool(payload[key])).lower()}")
+          print(f"recommended={payload['recommended']}")
+          PY_POLICY
+            else
+              echo 'CI policy artifact is unavailable; conservatively falling back to read-only smoke.' >&2
+              printf '%s\n' 'smoke=true' 'archive_sample=false' 'lifecycle=false' 'streaming=false' 'recommended=smoke-fallback' >> "$GITHUB_OUTPUT"
+            fi
+          elif [[ "$EVENT_NAME" == schedule ]]; then
+            printf '%s\n' 'smoke=true' 'archive_sample=false' 'lifecycle=false' 'streaming=false' 'recommended=smoke' >> "$GITHUB_OUTPUT"
+          else
+            smoke=true
+            archive_sample=false
+            lifecycle=false
+            streaming=false
+            if [[ "$DISPATCH_MODE" == archive-sample ]]; then archive_sample=true; fi
+            if [[ "$DISPATCH_MODE" == lifecycle ]]; then lifecycle=true; fi
+            if [[ "$DISPATCH_MODE" == streaming ]]; then streaming=true; fi
+            printf 'smoke=%s\narchive_sample=%s\nlifecycle=%s\nstreaming=%s\nrecommended=%s\n' \
+              "$smoke" "$archive_sample" "$lifecycle" "$streaming" "$DISPATCH_MODE" >> "$GITHUB_OUTPUT"
+          fi
+          printf 'live_ref=%s\n' "$live_ref" >> "$GITHUB_OUTPUT"
+      - name: Summarize decision
+        shell: bash
+        env:
+          RECOMMENDED: ${{ steps.plan.outputs.recommended }}
+        run: |
+          {
+            echo '### Live E2E policy'
+            echo
+            echo "Recommended lanes: \`$RECOMMENDED\`."
+            echo
+            echo 'Automatic production coverage is read-only smoke only, and main-branch smoke starts after CI succeeds. Archive sampling, lifecycle, and streaming require explicit workflow dispatch onto a dedicated self-hosted runner.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke:
+    name: Production API smoke
+    needs: plan
+    if: needs.plan.outputs.smoke == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: ./.github/actions/setup-rust
+      - name: Compile smoke test once
+        run: cargo test --profile ci -p griffr-cli --test live_api_smoke --locked --no-run
+      - name: Endfield CN
+        env:
+          GRIFFR_LIVE_SMOKE_GAME: endfield
+          GRIFFR_LIVE_SMOKE_REGION: cn
+          GRIFFR_LIVE_SMOKE_CHANNEL: "1"
+        run: cargo test --profile ci -p griffr-cli --test live_api_smoke --locked official_api_smoke -- --ignored --exact --nocapture
+      - name: Endfield Global
+        env:
+          GRIFFR_LIVE_SMOKE_GAME: endfield
+          GRIFFR_LIVE_SMOKE_REGION: sg
+        run: cargo test --profile ci -p griffr-cli --test live_api_smoke --locked official_api_smoke -- --ignored --exact --nocapture
+      - name: Arknights EN
+        env:
+          GRIFFR_LIVE_SMOKE_GAME: arknights
+          GRIFFR_LIVE_SMOKE_REGION: en
+        run: cargo test --profile ci -p griffr-cli --test live_api_smoke --locked official_api_smoke -- --ignored --exact --nocapture
+      - name: Arknights JP
+        env:
+          GRIFFR_LIVE_SMOKE_GAME: arknights
+          GRIFFR_LIVE_SMOKE_REGION: jp
+        run: cargo test --profile ci -p griffr-cli --test live_api_smoke --locked official_api_smoke -- --ignored --exact --nocapture
+      - name: Arknights KR
+        env:
+          GRIFFR_LIVE_SMOKE_GAME: arknights
+          GRIFFR_LIVE_SMOKE_REGION: kr
+        run: cargo test --profile ci -p griffr-cli --test live_api_smoke --locked official_api_smoke -- --ignored --exact --nocapture
+
+      - name: Hypergryph current API contract matrix
+        run: cargo test --profile ci -p griffr-hypergryph-api --locked integration_tests::test_real_api_ -- --ignored --nocapture
+
+  archive-sample:
+    name: Official archive range sample / ${{ inputs.runner_os }}
+    needs: [plan, smoke]
+    if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.archive_sample == 'true' && needs.smoke.result == 'success'
+    runs-on: [self-hosted, griffr-live, "${{ inputs.runner_os }}"]
+    timeout-minutes: 90
+    environment: live-e2e
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: ./.github/actions/setup-rust
+      - name: Require dedicated root / Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LIVE_ROOT: ${{ inputs.root }}
+        run: test -n "$LIVE_ROOT" || { echo 'workflow_dispatch input root is required' >&2; exit 2; }
+      - name: Require dedicated root / Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LIVE_ROOT: ${{ inputs.root }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:LIVE_ROOT)) {
+            Write-Error 'workflow_dispatch input root is required'
+            exit 2
+          }
+      - name: Sample current official multi-volume archive
+        env:
+          GRIFFR_LIVE_E2E_ROOT: ${{ inputs.root }}
+        run: cargo test --profile ci -p griffr-runtime --locked download::extractor::tests::format_check::check_official_archive_sample -- --ignored --exact --nocapture
+
+  lifecycle:
+    name: Full content lifecycle / ${{ inputs.runner_os }}
+    needs: [plan, smoke]
+    if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.lifecycle == 'true' && needs.smoke.result == 'success'
+    runs-on: [self-hosted, griffr-live, "${{ inputs.runner_os }}"]
+    timeout-minutes: 360
+    environment: live-e2e
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: ./.github/actions/setup-rust
+      - name: Require dedicated root / Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LIVE_ROOT: ${{ inputs.root }}
+        run: test -n "$LIVE_ROOT" || { echo 'workflow_dispatch input root is required' >&2; exit 2; }
+      - name: Require dedicated root / Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LIVE_ROOT: ${{ inputs.root }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:LIVE_ROOT)) {
+            Write-Error 'workflow_dispatch input root is required'
+            exit 2
+          }
+      - name: Run destructive official-server lifecycle
+        env:
+          GRIFFR_LIVE_E2E_ROOT: ${{ inputs.root }}
+          GRIFFR_LIVE_E2E_GAME: ${{ inputs.game }}
+          GRIFFR_LIVE_E2E_REGION: ${{ inputs.region }}
+          GRIFFR_LIVE_E2E_CHANNEL: ${{ inputs.channel }}
+          GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ inputs.sub_channel }}
+          GRIFFR_LIVE_E2E_RESOURCES: ${{ inputs.resources }}
+          GRIFFR_LIVE_E2E_FETCH_PREDOWNLOAD: ${{ inputs.fetch_predownload && '1' || '0' }}
+          GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
+        run: cargo test --profile ci -p griffr-cli --test live_cli_e2e --locked official_server_content_lifecycle_without_launch -- --ignored --exact --nocapture
+
+  streaming:
+    name: Bounded package streaming / ${{ inputs.runner_os }}
+    needs: [plan, smoke]
+    if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.streaming == 'true' && needs.smoke.result == 'success'
+    runs-on: [self-hosted, griffr-live, "${{ inputs.runner_os }}"]
+    timeout-minutes: 360
+    environment: live-e2e
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: ./.github/actions/setup-rust
+      - name: Require dedicated root / Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LIVE_ROOT: ${{ inputs.root }}
+        run: test -n "$LIVE_ROOT" || { echo 'workflow_dispatch input root is required' >&2; exit 2; }
+      - name: Require dedicated root / Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LIVE_ROOT: ${{ inputs.root }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:LIVE_ROOT)) {
+            Write-Error 'workflow_dispatch input root is required'
+            exit 2
+          }
+      - name: Stream and discard official package parts
+        env:
+          GRIFFR_LIVE_E2E_ROOT: ${{ inputs.root }}
+          GRIFFR_LIVE_E2E_GAME: ${{ inputs.game }}
+          GRIFFR_LIVE_E2E_REGION: ${{ inputs.region }}
+          GRIFFR_LIVE_E2E_CHANNEL: ${{ inputs.channel }}
+          GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ inputs.sub_channel }}
+          GRIFFR_LIVE_E2E_RESOURCES: off
+          GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
+        run: cargo test --profile ci -p griffr-cli --test live_cli_e2e --locked official_server_streaming_package_soak -- --ignored --exact --nocapture

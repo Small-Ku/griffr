@@ -44,8 +44,11 @@ fn official_cache_root(
         identity.update(pack.size().to_le_bytes());
     }
     let identity = griffr_core::to_hex(&identity.finalize());
-    Ok(workspace
-        .join("target/griffr-test-samples/archive-range-sample")
+    let cache_base = std::env::var_os("GRIFFR_LIVE_E2E_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.join("target/griffr-test-samples"));
+    Ok(cache_base
+        .join("archive-range-sample")
         .join(format!("{version}-{}", &identity[..16])))
 }
 

@@ -1,0 +1,39 @@
+name: Nightly Rust Compatibility
+
+on:
+  schedule:
+    - cron: "23 18 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-rust-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  nightly:
+    name: nightly / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+          components: clippy
+      - name: Check future compiler compatibility
+        run: cargo check --workspace --all-targets --locked
+      - name: Clippy on nightly
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run tests on nightly
+        run: cargo test --workspace --locked

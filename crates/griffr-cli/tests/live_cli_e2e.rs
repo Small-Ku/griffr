@@ -13,8 +13,11 @@ use griffr_hypergryph_api::types::GameFileEntry;
 use griffr_runtime::task_pool::{download_and_discard, DEFAULT_PROGRESS_BUFFER_BYTES};
 use md5::{Digest, Md5};
 
+#[path = "test_support/exe.rs"]
+mod exe;
 mod support;
 
+use exe::griffr_exe;
 use support::{assert_distinct_files, assert_same_hardlink};
 
 const CONFIRMATION: &str = "I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION";
@@ -146,7 +149,7 @@ where
             .collect::<Vec<_>>()
             .join(" ")
     );
-    Command::new(env!("CARGO_BIN_EXE_griffr"))
+    Command::new(griffr_exe())
         .args(&args)
         .env("NO_COLOR", "1")
         .env("RUST_BACKTRACE", "1")

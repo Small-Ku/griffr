@@ -1,0 +1,322 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  repository-policy:
+    name: Repository policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check repository policy
+        run: python scripts/check_repo.py .
+      - name: Run checker regression tests
+        run: python -m unittest discover -s scripts/tests -v
+      - name: Compile Python tooling
+        run: python -m compileall -q scripts
+      - name: Install actionlint
+        uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: actionlint@1.7.12
+      - name: Lint GitHub Actions workflows
+        run: actionlint -color
+      - name: Compute exact main-push live policy
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            BEFORE_SHA=$(git hash-object -t tree /dev/null)
+          elif ! git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$BEFORE_SHA"
+          fi
+          python scripts/ci/live_e2e_policy.py --base "$BEFORE_SHA" --head "$HEAD_SHA" > live-e2e-policy.json
+          cat live-e2e-policy.json
+      - name: Publish live policy for post-CI workflow
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: live-e2e-policy-${{ github.sha }}
+          path: live-e2e-policy.json
+          overwrite: true
+          retention-days: 7
+      - name: Report recommended live coverage for pull requests
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          report=$(python scripts/ci/live_e2e_policy.py --base "$BASE_SHA" --head "$HEAD_SHA")
+          echo "$report"
+          recommendation=$(python -c 'import json,sys; print(json.load(sys.stdin)["recommended"])' <<<"$report")
+          {
+            echo '### Live E2E recommendation'
+            echo
+            echo "Changed paths recommend: \`$recommendation\`."
+            echo
+            echo 'Pull requests run deterministic local-fixture E2E only. Production-server lanes begin only after trusted main CI succeeds, or by explicit dispatch.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  formatting:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+          sccache: "false"
+      - run: cargo fmt --all -- --check
+
+  feature-boundaries:
+    name: Feature boundary / ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: hypergryph-core
+            package: griffr-hypergryph-api
+            features: ""
+          - name: hypergryph-crypto
+            package: griffr-hypergryph-api
+            features: crypto
+          - name: yostar-core
+            package: griffr-yostar-api
+            features: ""
+          - name: runtime-no-hdiff
+            package: griffr-runtime
+            features: ""
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-rust
+      - name: Check feature boundary
+        shell: bash
+        env:
+          PACKAGE: ${{ matrix.package }}
+          FEATURES: ${{ matrix.features }}
+        run: |
+          set -euo pipefail
+          args=(check -p "$PACKAGE" --no-default-features --locked)
+          if [[ -n "$FEATURES" ]]; then
+            args+=(--features "$FEATURES")
+          fi
+          cargo "${args[@]}"
+
+  build-tests-linux:
+    name: Compile test archive / Linux
+    needs: [repository-policy, formatting]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-rust
+      - uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Compile and archive tests once
+        run: cargo nextest archive --workspace --cargo-profile ci -P ci --locked --archive-file nextest-linux.tar.zst
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: nextest-linux-${{ github.sha }}
+          path: nextest-linux.tar.zst
+          compression-level: 0
+          overwrite: true
+          retention-days: 1
+
+  build-tests-windows:
+    name: Compile test archive / Windows
+    needs: [repository-policy, formatting]
+    runs-on: windows-2025
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-rust
+      - uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Compile and archive tests once
+        run: cargo nextest archive --workspace --cargo-profile ci -P ci --locked --archive-file nextest-windows.tar.zst
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: nextest-windows-${{ github.sha }}
+          path: nextest-windows.tar.zst
+          compression-level: 0
+          overwrite: true
+          retention-days: 1
+
+  quality-linux:
+    name: Check + Clippy / Linux
+    needs: [repository-policy, formatting]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+      - name: Check all targets
+        run: cargo check --workspace --all-targets --locked
+      - name: Check release configuration
+        run: cargo check --workspace --all-targets --release --locked
+      - name: Check all features
+        run: cargo check --workspace --all-targets --all-features --locked
+      - name: Clippy all targets
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Doctests
+        run: cargo test --workspace --doc --locked
+      - name: Build documentation with warnings denied
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --no-deps --locked
+
+  quality-windows:
+    name: Check + Clippy / Windows
+    needs: [repository-policy, formatting]
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+      - name: Check all targets
+        run: cargo check --workspace --all-targets --locked
+      - name: Check release configuration
+        run: cargo check --workspace --all-targets --release --locked
+      - name: Check all features
+        run: cargo check --workspace --all-targets --all-features --locked
+      - name: Clippy all targets
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test-linux:
+    name: Tests / Linux / shard ${{ matrix.shard }}/4
+    needs: build-tests-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: cargo-nextest@0.9.143
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: nextest-linux-${{ github.sha }}
+      - name: Run archived test shard
+        run: cargo-nextest nextest run -P ci --archive-file nextest-linux.tar.zst --workspace-remap "${{ github.workspace }}" --partition "hash:${{ matrix.shard }}/4"
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: junit-linux-${{ matrix.shard }}-${{ github.sha }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
+
+  test-windows:
+    name: Tests / Windows / shard ${{ matrix.shard }}/4
+    needs: build-tests-windows
+    runs-on: windows-2025
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: cargo-nextest@0.9.143
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: nextest-windows-${{ github.sha }}
+      - name: Run archived test shard
+        run: cargo-nextest nextest run -P ci --archive-file nextest-windows.tar.zst --workspace-remap "${{ github.workspace }}" --partition "hash:${{ matrix.shard }}/4"
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: junit-windows-${{ matrix.shard }}-${{ github.sha }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 7
+  required:
+    name: Required
+    if: always()
+    needs:
+      - repository-policy
+      - formatting
+      - feature-boundaries
+      - build-tests-linux
+      - build-tests-windows
+      - quality-linux
+      - quality-windows
+      - test-linux
+      - test-windows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI lane
+        shell: bash
+        env:
+          REPOSITORY_POLICY: ${{ needs.repository-policy.result }}
+          FORMATTING: ${{ needs.formatting.result }}
+          FEATURE_BOUNDARIES: ${{ needs.feature-boundaries.result }}
+          BUILD_TESTS_LINUX: ${{ needs.build-tests-linux.result }}
+          BUILD_TESTS_WINDOWS: ${{ needs.build-tests-windows.result }}
+          QUALITY_LINUX: ${{ needs.quality-linux.result }}
+          QUALITY_WINDOWS: ${{ needs.quality-windows.result }}
+          TEST_LINUX: ${{ needs.test-linux.result }}
+          TEST_WINDOWS: ${{ needs.test-windows.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for entry in \
+            "repository-policy=$REPOSITORY_POLICY" \
+            "formatting=$FORMATTING" \
+            "feature-boundaries=$FEATURE_BOUNDARIES" \
+            "build-tests-linux=$BUILD_TESTS_LINUX" \
+            "build-tests-windows=$BUILD_TESTS_WINDOWS" \
+            "quality-linux=$QUALITY_LINUX" \
+            "quality-windows=$QUALITY_WINDOWS" \
+            "test-linux=$TEST_LINUX" \
+            "test-windows=$TEST_WINDOWS"; do
+            name=${entry%%=*}
+            result=${entry#*=}
+            printf '%-24s %s\n' "$name" "$result"
+            if [[ "$result" != success ]]; then
+              failed=1
+            fi
+          done
+          exit "$failed"

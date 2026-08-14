@@ -1,0 +1,96 @@
+name: Setup Rust CI
+description: Install the pinned Rust toolchain and enable sccache with the GitHub Actions backend.
+
+inputs:
+  toolchain:
+    description: Rust toolchain to install.
+    required: false
+    default: "1.97.1"
+  components:
+    description: Comma-separated rustup components to install.
+    required: false
+    default: ""
+  sccache:
+    description: Whether to install and enable sccache.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain / Unix
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+        COMPONENTS: ${{ inputs.components }}
+      run: |
+        set -euo pipefail
+        args=(toolchain install "$TOOLCHAIN" --profile minimal)
+        if [[ -n "$COMPONENTS" ]]; then
+          IFS=',' read -ra components <<< "$COMPONENTS"
+          for component in "${components[@]}"; do
+            component="${component//[[:space:]]/}"
+            if [[ -n "$component" ]]; then
+              args+=(--component "$component")
+            fi
+          done
+        fi
+        rustup "${args[@]}"
+        echo "RUSTUP_TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+
+    - name: Install Rust toolchain / Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+        COMPONENTS: ${{ inputs.components }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $arguments = @('toolchain', 'install', $env:TOOLCHAIN, '--profile', 'minimal')
+        if (-not [string]::IsNullOrWhiteSpace($env:COMPONENTS)) {
+          foreach ($component in $env:COMPONENTS.Split(',')) {
+            $component = $component.Trim()
+            if ($component) {
+              $arguments += @('--component', $component)
+            }
+          }
+        }
+        & rustup @arguments
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        "RUSTUP_TOOLCHAIN=$env:TOOLCHAIN" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+    - name: Cache Cargo source downloads
+      uses: actions/cache@v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: cargo-sources-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          cargo-sources-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Install sccache
+      if: inputs.sccache == 'true'
+      uses: mozilla-actions/sccache-action@v0.0.11
+      with:
+        version: v0.17.0
+
+    - name: Enable sccache / Unix
+      if: inputs.sccache == 'true' && runner.os != 'Windows'
+      shell: bash
+      run: |
+        echo 'SCCACHE_GHA_ENABLED=true' >> "$GITHUB_ENV"
+        echo 'SCCACHE_CLIENT_SIDE=true' >> "$GITHUB_ENV"
+        echo 'RUSTC_WRAPPER=sccache' >> "$GITHUB_ENV"
+        echo 'CARGO_INCREMENTAL=0' >> "$GITHUB_ENV"
+
+    - name: Enable sccache / Windows
+      if: inputs.sccache == 'true' && runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        'SCCACHE_GHA_ENABLED=true' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        'SCCACHE_CLIENT_SIDE=true' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        'RUSTC_WRAPPER=sccache' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        'CARGO_INCREMENTAL=0' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
