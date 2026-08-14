@@ -8,12 +8,14 @@ pub enum Error {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[cfg(feature = "client")]
     #[error("HTTP client error: {0}")]
     Cyper(#[from] cyper::Error),
 
     #[error("UTF-8 error: {0}")]
     FromUtf8(#[from] std::string::FromUtf8Error),
 
+    #[cfg(feature = "crypto")]
     #[error("Base64 decode error: {0}")]
     Base64(#[from] base64::DecodeError),
 

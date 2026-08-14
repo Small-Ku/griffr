@@ -34,6 +34,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check crate feature boundaries
+        shell: bash
+        run: |
+          cargo check -p griffr-hypergryph-api --no-default-features --locked
+          cargo check -p griffr-hypergryph-api --no-default-features --features crypto --locked
+          cargo check -p griffr-yostar-api --no-default-features --locked
+          cargo check -p griffr-runtime --no-default-features --locked
+
       - name: Compile CLI tests
         run: cargo check -p griffr-cli --tests --locked
 

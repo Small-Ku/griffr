@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Filesystem, install, update, verification, and launch runtime for Griffr"
 
+[features]
+default = ["hdiff-patch"]
+hdiff-patch = ["dep:hdiffpatch-rs"]
+
 [dependencies]
 griffr-core = { workspace = true }
 griffr-hypergryph-api = { workspace = true }
@@ -24,7 +28,7 @@ futures-util = { workspace = true }
 
 zip = { workspace = true }
 md-5 = { workspace = true }
-hdiffpatch-rs = { git = "https://github.com/TwintailTeam/hdiffpatch-rs", branch = "master" }
+hdiffpatch-rs = { git = "https://github.com/TwintailTeam/hdiffpatch-rs", branch = "master", optional = true }
 base64 = "0.22"
 
 dirs = { workspace = true }

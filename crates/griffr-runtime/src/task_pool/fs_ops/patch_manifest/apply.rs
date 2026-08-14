@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "hdiff-patch")]
+use std::path::PathBuf;
+#[cfg(feature = "hdiff-patch")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{Error, Result};
@@ -6,14 +9,19 @@ use crate::error::{Error, Result};
 use crate::task_pool::verify::build_issue;
 use griffr_hypergryph_api::ResourcePatchEntry;
 
-use super::super::artifact::{commit_observed_artifact, commit_verified_artifact, verify_artifact};
+#[cfg(feature = "hdiff-patch")]
+use super::super::artifact::commit_observed_artifact;
+use super::super::artifact::{commit_verified_artifact, verify_artifact};
+#[cfg(feature = "hdiff-patch")]
 use super::super::extract::copy_file_with_md5;
 use super::super::path_safety::parse_safe_relative_path;
+#[cfg(feature = "hdiff-patch")]
 use super::super::reuse::make_temp_write_path;
 use super::resolve_patch_stage_path;
+#[cfg(feature = "hdiff-patch")]
+use crate::ArtifactDigest;
 use crate::{
-    ArtifactDigest, ArtifactExpectation, ArtifactProof, ArtifactSource, PATCH_DIFF_STAGE_DIR,
-    PATCH_FILES_STAGE_DIR,
+    ArtifactExpectation, ArtifactProof, ArtifactSource, PATCH_DIFF_STAGE_DIR, PATCH_FILES_STAGE_DIR,
 };
 
 fn manifest_path<'a>(alternate: Option<&'a str>, primary: &'a str) -> &'a str {
@@ -64,6 +72,7 @@ fn apply_local_patch_entry(
     )
 }
 
+#[cfg(feature = "hdiff-patch")]
 fn make_patch_work_path(work_dir: &Path, destination: &Path) -> Result<PathBuf> {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     std::fs::create_dir_all(work_dir).map_err(|source| Error::IoAt {
@@ -79,6 +88,7 @@ fn make_patch_work_path(work_dir: &Path, destination: &Path) -> Result<PathBuf> 
     Ok(work_dir.join(format!(".{file_name}.griffr-patch-{counter}.tmp")))
 }
 
+#[cfg(feature = "hdiff-patch")]
 pub(super) fn apply_hdiff_patch(
     base_path: &Path,
     patch_path: &Path,
@@ -159,6 +169,22 @@ pub(super) fn apply_hdiff_patch(
             Err(error)
         }
     }
+}
+
+#[cfg(not(feature = "hdiff-patch"))]
+pub(super) fn apply_hdiff_patch(
+    _base_path: &Path,
+    _patch_path: &Path,
+    _dest_path: &Path,
+    _logical_path: &str,
+    _expected_md5: &str,
+    _expected_size: u64,
+    _work_dir: Option<&Path>,
+) -> Result<ArtifactProof> {
+    Err(Error::Message {
+        context: "Patch support unavailable: ",
+        detail: "griffr-runtime was built without the `hdiff-patch` feature".to_string(),
+    })
 }
 
 fn apply_patch_entry(

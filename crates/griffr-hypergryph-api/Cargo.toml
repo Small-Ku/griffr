@@ -7,17 +7,22 @@ license.workspace = true
 repository.workspace = true
 description = "Hypergryph and Gryphline launcher API protocol for Griffr"
 
+[features]
+default = ["client"]
+client = ["crypto", "dep:compio", "dep:cyper", "dep:md-5"]
+crypto = ["dep:aes", "dep:cbc", "dep:base64"]
+
 [dependencies]
 griffr-core = { workspace = true }
-compio = { workspace = true }
-cyper = { workspace = true }
+compio = { workspace = true, optional = true }
+cyper = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-md-5 = { workspace = true }
-aes = "0.8"
-cbc = "0.1"
-base64 = "0.22"
+md-5 = { workspace = true, optional = true }
+aes = { version = "0.8", optional = true }
+cbc = { version = "0.1", optional = true }
+base64 = { version = "0.22", optional = true }
 
 [dev-dependencies]
 tempfile = "3.14"

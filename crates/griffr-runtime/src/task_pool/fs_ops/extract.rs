@@ -208,6 +208,7 @@ pub(crate) fn move_path_replace(src: &Path, dest: &Path) -> Result<()> {
     }
 }
 
+#[cfg(feature = "hdiff-patch")]
 pub(crate) struct CopiedFileDigest {
     pub(crate) bytes: u64,
     pub(crate) md5: String,
@@ -280,6 +281,7 @@ pub(crate) fn copy_file_with_hash(
 
 /// MD5-specific compatibility wrapper for patch/archive code whose wire schema
 /// is defined in terms of MD5.
+#[cfg(feature = "hdiff-patch")]
 pub(crate) fn copy_file_with_md5(src: &Path, dest: &Path) -> Result<CopiedFileDigest> {
     let digest = copy_file_with_hash(src, dest, &ContentHash::Md5(String::new()))?;
     let ContentHash::Md5(md5) = digest.hash else {

@@ -7,15 +7,26 @@ license.workspace = true
 repository.workspace = true
 description = "YoStar launcher API protocol for Griffr"
 
+[features]
+default = ["client"]
+client = [
+  "dep:cyper",
+  "dep:futures-util",
+  "dep:serde",
+  "dep:serde_json",
+  "dep:md-5",
+  "dep:url",
+]
+
 [dependencies]
 griffr-core = { workspace = true }
-cyper = { workspace = true }
-futures-util = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
+cyper = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 thiserror = { workspace = true }
-md-5 = { workspace = true }
-url = "2"
+md-5 = { workspace = true, optional = true }
+url = { version = "2", optional = true }
 
 [dev-dependencies]
 compio = { workspace = true }
