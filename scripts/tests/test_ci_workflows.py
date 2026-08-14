@@ -87,8 +87,13 @@ class CiWorkflowTopologyTests(unittest.TestCase):
         self.assertIn("if: always()", required)
         self.assertIn('if [[ "$result" != success ]]', required)
 
-    def test_live_dangerous_lanes_are_manual_self_hosted_and_smoke_gated(self) -> None:
+    def test_live_large_lanes_are_manual_hosted_and_smoke_gated(self) -> None:
         workflow = read(".github/workflows/live-e2e.yml")
+        self.assertNotIn("self-hosted", workflow)
+        self.assertNotIn("griffr-live", workflow)
+        hosted_runner = (
+            "runs-on: ${{ inputs.runner_os == 'windows' && 'windows-2025' || 'ubuntu-24.04' }}"
+        )
         for lane, output in (
             ("archive-sample", "archive_sample"),
             ("lifecycle", "lifecycle"),
@@ -99,8 +104,30 @@ class CiWorkflowTopologyTests(unittest.TestCase):
             self.assertIn("github.event_name == 'workflow_dispatch'", block)
             self.assertIn(f"needs.plan.outputs.{output} == 'true'", block)
             self.assertIn("needs.smoke.result == 'success'", block)
-            self.assertIn("runs-on: [self-hosted, griffr-live", block)
+            self.assertIn(hosted_runner, block)
             self.assertIn("environment: live-e2e", block)
+            self.assertIn("cargo nextest archive", block)
+            self.assertIn("cargo clean", block)
+            self.assertIn("prepare_live_workspace.py", block)
+            self.assertIn("GRIFFR_LIVE_MIN_FREE_GIB", block)
+
+    def test_live_lifecycle_reclaims_build_space_and_checks_manifest_budget(self) -> None:
+        workflow = read(".github/workflows/live-e2e.yml")
+        lifecycle = job_block(workflow, "lifecycle")
+        self.assertLess(lifecycle.index("cargo nextest archive"), lifecycle.index("cargo clean"))
+        self.assertLess(lifecycle.index("cargo clean"), lifecycle.index("prepare_live_workspace.py"))
+        self.assertLess(
+            lifecycle.index("official_server_content_lifecycle_disk_preflight"),
+            lifecycle.index("official_server_content_lifecycle_without_launch"),
+        )
+        self.assertIn("default: off", workflow)
+
+    def test_live_hosted_root_defaults_are_safe_and_optional(self) -> None:
+        workflow = read(".github/workflows/live-e2e.yml")
+        self.assertIn("Blank uses a lane-scoped directory under RUNNER_TEMP", workflow)
+        self.assertIn("minimum_free_gib:", workflow)
+        self.assertIn('default: "0"', workflow)
+        self.assertNotIn("workflow_dispatch input root is required", workflow)
 
     def test_live_automatic_lane_is_read_only_smoke(self) -> None:
         workflow = read(".github/workflows/live-e2e.yml")

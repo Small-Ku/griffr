@@ -10,6 +10,7 @@ use griffr_hypergryph_api::client::ApiClient;
 use griffr_hypergryph_api::crypto::decrypt_game_files_owned;
 use griffr_hypergryph_api::resolve_api_target;
 use griffr_hypergryph_api::types::GameFileEntry;
+use griffr_runtime::available_space;
 use griffr_runtime::task_pool::{download_and_discard, DEFAULT_PROGRESS_BUFFER_BYTES};
 use md5::{Digest, Md5};
 
@@ -21,6 +22,8 @@ use exe::griffr_exe;
 use support::{assert_distinct_files, assert_same_hardlink};
 
 const CONFIRMATION: &str = "I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION";
+const GIB: u64 = 1024 * 1024 * 1024;
+const LIFECYCLE_MIN_HEADROOM_BYTES: u64 = 4 * GIB;
 
 #[derive(Debug)]
 struct LiveConfig {
@@ -336,6 +339,85 @@ fn run_disposable_real_update(path: &Path) {
     push_path(&mut after, "--path", path);
     let after = command(after).stdout;
     println!("Disposable update metadata changed: {}", before != after);
+}
+
+async fn current_hypergryph_install_footprint(config: &LiveConfig) -> (u64, u64, u64) {
+    let game: GameId = config.game.parse().expect("valid live game id");
+    let region: RegionId = config.region.parse().expect("valid live region");
+    let channels = ChannelPair::parse(region, config.channel.clone(), config.sub_channel.clone())
+        .expect("live lifecycle disk preflight currently requires a Hypergryph channel pair");
+    let target = resolve_api_target(&game, region, &channels, &Default::default())
+        .expect("resolve live API target");
+    let client = ApiClient::with_user_agent(ApiClient::OFFICIAL_USER_AGENT)
+        .expect("create official API client");
+    let latest = client
+        .get_latest_game(&target, None)
+        .await
+        .expect("fetch latest official package metadata");
+    let package = latest
+        .pkg
+        .expect("official lifecycle requires a current full package payload");
+    let entries = client
+        .fetch_game_files(&package.file_path, package.game_files_md5.as_deref())
+        .await
+        .expect("fetch current official game_files manifest");
+    assert!(!entries.is_empty(), "official game_files manifest is empty");
+
+    let install_bytes = entries
+        .iter()
+        .fold(0u64, |total, entry| total.saturating_add(entry.size));
+    let largest_file = entries.iter().map(|entry| entry.size).max().unwrap_or(0);
+    let package_bytes = package
+        .packs
+        .iter()
+        .fold(0u64, |total, part| total.saturating_add(part.size()));
+    (install_bytes, largest_file, package_bytes)
+}
+
+#[compio::test]
+#[ignore = "queries current official metadata and checks free space before the retained lifecycle"]
+async fn official_server_content_lifecycle_disk_preflight() {
+    let config = LiveConfig::from_env();
+    let (install_bytes, largest_file, package_bytes) =
+        current_hypergryph_install_footprint(&config).await;
+    let available = available_space(&config.run_root)
+        .expect("query live E2E volume free space")
+        .expect("live E2E volume must report free space");
+
+    // Normal fresh installs are manifest-first and release archive ranges as
+    // extraction shards commit, so the retained game_files footprint is the
+    // dominant allocation rather than the sum of the complete compressed
+    // package plus a second staging tree. Keep explicit breathing room for the
+    // largest output, range caches, metadata, and filesystem variance.
+    let extraction_headroom = LIFECYCLE_MIN_HEADROOM_BYTES
+        .max(largest_file.saturating_mul(2))
+        .max(install_bytes / 20);
+    let resource_headroom = if config.resource_set.is_some() {
+        4 * GIB
+    } else {
+        0
+    };
+    let required = install_bytes
+        .saturating_add(extraction_headroom)
+        .saturating_add(resource_headroom);
+
+    println!(
+        "official lifecycle disk preflight: manifest={:.2} GiB, package-transfer={:.2} GiB, largest-file={:.2} GiB, required={:.2} GiB, free={:.2} GiB",
+        install_bytes as f64 / GIB as f64,
+        package_bytes as f64 / GIB as f64,
+        largest_file as f64 / GIB as f64,
+        required as f64 / GIB as f64,
+        available as f64 / GIB as f64,
+    );
+    assert!(
+        available >= required,
+        "current official install needs about {:.2} GiB free for the retained core tree plus bounded extraction headroom, but only {:.2} GiB is available at {}; choose a roomier runner/filesystem or use the bounded streaming lane",
+        required as f64 / GIB as f64,
+        available as f64 / GIB as f64,
+        config.run_root.display(),
+    );
+
+    fs::remove_dir(&config.run_root).expect("remove empty disk-preflight run directory");
 }
 
 #[test]

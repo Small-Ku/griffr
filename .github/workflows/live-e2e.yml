@@ -10,19 +10,23 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Live lane to run. Archive/lifecycle/streaming require a self-hosted runner labelled griffr-live.
+        description: Live lane to run. Large/download lanes are manual and run on GitHub-hosted runners.
         type: choice
         options: [smoke, archive-sample, lifecycle, streaming]
         default: smoke
       runner_os:
-        description: Self-hosted runner label for destructive/large-download lanes.
+        description: GitHub-hosted OS for archive/lifecycle/streaming lanes.
         type: choice
         options: [linux, windows]
         default: linux
       root:
-        description: Dedicated filesystem root for archive/lifecycle/streaming (required for those modes).
+        description: Optional dedicated live root. Blank uses a lane-scoped directory under RUNNER_TEMP.
         type: string
         required: false
+      minimum_free_gib:
+        description: Optional free-space floor in GiB; 0 uses the lane default. Lifecycle also checks the current manifest footprint.
+        type: string
+        default: "0"
       game:
         description: Game for lifecycle/streaming.
         type: string
@@ -40,10 +44,10 @@ on:
         type: string
         required: false
       resources:
-        description: Persistent resource scope for lifecycle.
+        description: Persistent resource scope for lifecycle. Keep off for the smallest hosted-runner footprint.
         type: choice
         options: [off, base, all]
-        default: base
+        default: off
       fetch_predownload:
         description: Also fetch an advertised predownload payload during lifecycle.
         type: boolean
@@ -142,7 +146,7 @@ jobs:
             echo
             echo "Recommended lanes: \`$RECOMMENDED\`."
             echo
-            echo 'Automatic production coverage is read-only smoke only, and main-branch smoke starts after CI succeeds. Archive sampling, lifecycle, and streaming require explicit workflow dispatch onto a dedicated self-hosted runner.'
+            echo 'Automatic production coverage is read-only smoke only, and main-branch smoke starts after CI succeeds. Manual archive/lifecycle/streaming lanes use GitHub-hosted runners, keep the live-e2e Environment approval, and check free space before production payload I/O.'
           } >> "$GITHUB_STEP_SUMMARY"
 
   smoke:
@@ -184,7 +188,6 @@ jobs:
           GRIFFR_LIVE_SMOKE_GAME: arknights
           GRIFFR_LIVE_SMOKE_REGION: kr
         run: cargo test --profile ci -p griffr-cli --test live_api_smoke --locked official_api_smoke -- --ignored --exact --nocapture
-
       - name: Hypergryph current API contract matrix
         run: cargo test --profile ci -p griffr-hypergryph-api --locked integration_tests::test_real_api_ -- --ignored --nocapture
 
@@ -192,7 +195,7 @@ jobs:
     name: Official archive range sample / ${{ inputs.runner_os }}
     needs: [plan, smoke]
     if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.archive_sample == 'true' && needs.smoke.result == 'success'
-    runs-on: [self-hosted, griffr-live, "${{ inputs.runner_os }}"]
+    runs-on: ${{ inputs.runner_os == 'windows' && 'windows-2025' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     environment: live-e2e
     steps:
@@ -200,32 +203,29 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.live_ref }}
       - uses: ./.github/actions/setup-rust
-      - name: Require dedicated root / Unix
-        if: runner.os != 'Windows'
-        shell: bash
+      - uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Compile relocatable archive sample test
+        run: cargo nextest archive -p griffr-runtime --lib --cargo-profile ci -P ci --locked --archive-file "${{ runner.temp }}/live-runtime.tar.zst"
+      - name: Release Cargo build space
+        run: cargo clean
+      - id: live-root
+        name: Prepare hosted live workspace
         env:
-          LIVE_ROOT: ${{ inputs.root }}
-        run: test -n "$LIVE_ROOT" || { echo 'workflow_dispatch input root is required' >&2; exit 2; }
-      - name: Require dedicated root / Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          LIVE_ROOT: ${{ inputs.root }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:LIVE_ROOT)) {
-            Write-Error 'workflow_dispatch input root is required'
-            exit 2
-          }
+          GRIFFR_LIVE_ROOT_INPUT: ${{ inputs.root }}
+          GRIFFR_LIVE_MIN_FREE_GIB: ${{ inputs.minimum_free_gib }}
+        run: python scripts/ci/prepare_live_workspace.py --lane archive-sample --github-output
       - name: Sample current official multi-volume archive
         env:
-          GRIFFR_LIVE_E2E_ROOT: ${{ inputs.root }}
-        run: cargo test --profile ci -p griffr-runtime --locked download::extractor::tests::format_check::check_official_archive_sample -- --ignored --exact --nocapture
+          GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
+        run: cargo nextest run -P ci --archive-file "${{ runner.temp }}/live-runtime.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture download::extractor::tests::format_check::check_official_archive_sample
 
   lifecycle:
     name: Full content lifecycle / ${{ inputs.runner_os }}
     needs: [plan, smoke]
     if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.lifecycle == 'true' && needs.smoke.result == 'success'
-    runs-on: [self-hosted, griffr-live, "${{ inputs.runner_os }}"]
+    runs-on: ${{ inputs.runner_os == 'windows' && 'windows-2025' || 'ubuntu-24.04' }}
     timeout-minutes: 360
     environment: live-e2e
     steps:
@@ -233,25 +233,32 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.live_ref }}
       - uses: ./.github/actions/setup-rust
-      - name: Require dedicated root / Unix
-        if: runner.os != 'Windows'
-        shell: bash
+      - uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Compile relocatable live lifecycle tests
+        run: cargo nextest archive -p griffr-cli --test live_cli_e2e --cargo-profile ci -P ci --locked --archive-file "${{ runner.temp }}/live-cli.tar.zst"
+      - name: Release Cargo build space
+        run: cargo clean
+      - id: live-root
+        name: Prepare hosted live workspace
         env:
-          LIVE_ROOT: ${{ inputs.root }}
-        run: test -n "$LIVE_ROOT" || { echo 'workflow_dispatch input root is required' >&2; exit 2; }
-      - name: Require dedicated root / Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
+          GRIFFR_LIVE_ROOT_INPUT: ${{ inputs.root }}
+          GRIFFR_LIVE_MIN_FREE_GIB: ${{ inputs.minimum_free_gib }}
+        run: python scripts/ci/prepare_live_workspace.py --lane lifecycle --github-output
+      - name: Check current install footprint against hosted disk
         env:
-          LIVE_ROOT: ${{ inputs.root }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:LIVE_ROOT)) {
-            Write-Error 'workflow_dispatch input root is required'
-            exit 2
-          }
+          GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
+          GRIFFR_LIVE_E2E_GAME: ${{ inputs.game }}
+          GRIFFR_LIVE_E2E_REGION: ${{ inputs.region }}
+          GRIFFR_LIVE_E2E_CHANNEL: ${{ inputs.channel }}
+          GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ inputs.sub_channel }}
+          GRIFFR_LIVE_E2E_RESOURCES: ${{ inputs.resources }}
+          GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
+        run: cargo nextest run -P ci --archive-file "${{ runner.temp }}/live-cli.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_content_lifecycle_disk_preflight
       - name: Run destructive official-server lifecycle
         env:
-          GRIFFR_LIVE_E2E_ROOT: ${{ inputs.root }}
+          GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
           GRIFFR_LIVE_E2E_GAME: ${{ inputs.game }}
           GRIFFR_LIVE_E2E_REGION: ${{ inputs.region }}
           GRIFFR_LIVE_E2E_CHANNEL: ${{ inputs.channel }}
@@ -259,13 +266,13 @@ jobs:
           GRIFFR_LIVE_E2E_RESOURCES: ${{ inputs.resources }}
           GRIFFR_LIVE_E2E_FETCH_PREDOWNLOAD: ${{ inputs.fetch_predownload && '1' || '0' }}
           GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
-        run: cargo test --profile ci -p griffr-cli --test live_cli_e2e --locked official_server_content_lifecycle_without_launch -- --ignored --exact --nocapture
+        run: cargo nextest run -P ci --archive-file "${{ runner.temp }}/live-cli.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_content_lifecycle_without_launch
 
   streaming:
     name: Bounded package streaming / ${{ inputs.runner_os }}
     needs: [plan, smoke]
     if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.streaming == 'true' && needs.smoke.result == 'success'
-    runs-on: [self-hosted, griffr-live, "${{ inputs.runner_os }}"]
+    runs-on: ${{ inputs.runner_os == 'windows' && 'windows-2025' || 'ubuntu-24.04' }}
     timeout-minutes: 360
     environment: live-e2e
     steps:
@@ -273,29 +280,26 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.live_ref }}
       - uses: ./.github/actions/setup-rust
-      - name: Require dedicated root / Unix
-        if: runner.os != 'Windows'
-        shell: bash
+      - uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Compile relocatable streaming test
+        run: cargo nextest archive -p griffr-cli --test live_cli_e2e --cargo-profile ci -P ci --locked --archive-file "${{ runner.temp }}/live-cli.tar.zst"
+      - name: Release Cargo build space
+        run: cargo clean
+      - id: live-root
+        name: Prepare hosted live workspace
         env:
-          LIVE_ROOT: ${{ inputs.root }}
-        run: test -n "$LIVE_ROOT" || { echo 'workflow_dispatch input root is required' >&2; exit 2; }
-      - name: Require dedicated root / Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          LIVE_ROOT: ${{ inputs.root }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:LIVE_ROOT)) {
-            Write-Error 'workflow_dispatch input root is required'
-            exit 2
-          }
+          GRIFFR_LIVE_ROOT_INPUT: ${{ inputs.root }}
+          GRIFFR_LIVE_MIN_FREE_GIB: ${{ inputs.minimum_free_gib }}
+        run: python scripts/ci/prepare_live_workspace.py --lane streaming --github-output
       - name: Stream and discard official package parts
         env:
-          GRIFFR_LIVE_E2E_ROOT: ${{ inputs.root }}
+          GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
           GRIFFR_LIVE_E2E_GAME: ${{ inputs.game }}
           GRIFFR_LIVE_E2E_REGION: ${{ inputs.region }}
           GRIFFR_LIVE_E2E_CHANNEL: ${{ inputs.channel }}
           GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ inputs.sub_channel }}
           GRIFFR_LIVE_E2E_RESOURCES: off
           GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
-        run: cargo test --profile ci -p griffr-cli --test live_cli_e2e --locked official_server_streaming_package_soak -- --ignored --exact --nocapture
+        run: cargo nextest run -P ci --archive-file "${{ runner.temp }}/live-cli.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_streaming_package_soak
