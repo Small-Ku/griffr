@@ -219,7 +219,7 @@ jobs:
       - name: Sample current official multi-volume archive
         env:
           GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
-        run: cargo nextest run -P ci --archive-file "${{ runner.temp }}/live-runtime.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture download::extractor::tests::format_check::check_official_archive_sample
+        run: cargo nextest run -P live-e2e --archive-file "${{ runner.temp }}/live-runtime.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture download::extractor::tests::format_check::check_official_archive_sample
 
   lifecycle:
     name: Full content lifecycle / ${{ inputs.runner_os }}
@@ -255,7 +255,7 @@ jobs:
           GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ inputs.sub_channel }}
           GRIFFR_LIVE_E2E_RESOURCES: ${{ inputs.resources }}
           GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
-        run: cargo nextest run -P ci --archive-file "${{ runner.temp }}/live-cli.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_content_lifecycle_disk_preflight
+        run: cargo nextest run -P live-e2e --archive-file "${{ runner.temp }}/live-cli.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_content_lifecycle_disk_preflight
       - name: Run destructive official-server lifecycle
         env:
           GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
@@ -266,7 +266,7 @@ jobs:
           GRIFFR_LIVE_E2E_RESOURCES: ${{ inputs.resources }}
           GRIFFR_LIVE_E2E_FETCH_PREDOWNLOAD: ${{ inputs.fetch_predownload && '1' || '0' }}
           GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
-        run: cargo nextest run -P ci --archive-file "${{ runner.temp }}/live-cli.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_content_lifecycle_without_launch
+        run: cargo nextest run -P live-e2e --archive-file "${{ runner.temp }}/live-cli.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_content_lifecycle_without_launch
 
   streaming:
     name: Bounded package streaming / ${{ inputs.runner_os }}
@@ -302,4 +302,4 @@ jobs:
           GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ inputs.sub_channel }}
           GRIFFR_LIVE_E2E_RESOURCES: "off"
           GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
-        run: cargo nextest run -P ci --archive-file "${{ runner.temp }}/live-cli.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_streaming_package_soak
+        run: cargo nextest run -P live-e2e --archive-file "${{ runner.temp }}/live-cli.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_streaming_package_soak

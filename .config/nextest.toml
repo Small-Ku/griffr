@@ -12,3 +12,14 @@ path = "junit.xml"
 store-success-output = false
 store-failure-output = true
 report-skipped = "ignored"
+
+# Production payload tests legitimately spend tens of minutes downloading,
+# extracting, hashing, and deleting full game installs. Keep the ordinary CI
+# timeout strict, and give only explicitly selected live lanes a long test-level
+# budget. GitHub job timeouts remain the outer hard limit.
+[profile.live-e2e]
+fail-fast = false
+status-level = "fail"
+final-status-level = "slow"
+slow-timeout = { period = "15m", terminate-after = 20 }
+leak-timeout = { period = "500ms", result = "fail" }

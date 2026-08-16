@@ -129,6 +129,18 @@ class CiWorkflowTopologyTests(unittest.TestCase):
             self.assertIn("prepare_live_workspace.py", block)
             self.assertIn("GRIFFR_LIVE_MIN_FREE_GIB", block)
 
+    def test_live_payload_lanes_use_long_running_nextest_profile(self) -> None:
+        workflow = read(".github/workflows/live-e2e.yml")
+        nextest = read(".config/nextest.toml")
+        self.assertIn('[profile.ci]', nextest)
+        self.assertIn('slow-timeout = { period = "60s", terminate-after = 5 }', nextest)
+        self.assertIn('[profile.live-e2e]', nextest)
+        self.assertIn('slow-timeout = { period = "15m", terminate-after = 20 }', nextest)
+        for lane in ("archive-sample", "lifecycle", "streaming"):
+            block = job_block(workflow, lane)
+            self.assertIn("cargo nextest run -P live-e2e", block)
+            self.assertNotIn("cargo nextest run -P ci", block)
+
     def test_live_lifecycle_reclaims_build_space_and_checks_manifest_budget(self) -> None:
         workflow = read(".github/workflows/live-e2e.yml")
         lifecycle = job_block(workflow, "lifecycle")
