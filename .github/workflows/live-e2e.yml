@@ -10,15 +10,31 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Live lane to run. Large/download lanes are manual and run on GitHub-hosted runners.
+        description: Live lane to run. full-matrix fans out every large lane after smoke.
         type: choice
-        options: [smoke, archive-sample, lifecycle, streaming]
+        options: [smoke, archive-sample, lifecycle, streaming, full-matrix]
         default: smoke
       runner_os:
-        description: GitHub-hosted OS for archive/lifecycle/streaming lanes.
+        description: Hosted OS matrix for large lanes. Smoke remains Linux-only.
         type: choice
-        options: [linux, windows]
-        default: linux
+        options: [all, linux, windows]
+        default: all
+      target:
+        description: Deployment matrix selection. YoStar deployments are smoke-only for now.
+        type: choice
+        options:
+          - all
+          - endfield-cn-official
+          - endfield-cn-bilibili
+          - endfield-global-official
+          - endfield-global-epic
+          - endfield-global-google-play
+          - arknights-cn-official
+          - arknights-cn-bilibili
+          - arknights-en
+          - arknights-jp
+          - arknights-kr
+        default: all
       root:
         description: Optional dedicated live root. Blank uses a lane-scoped directory under RUNNER_TEMP.
         type: string
@@ -27,24 +43,8 @@ on:
         description: Optional free-space floor in GiB; 0 uses the lane default. Lifecycle also checks the current manifest footprint.
         type: string
         default: "0"
-      game:
-        description: Game for lifecycle/streaming.
-        type: string
-        default: endfield
-      region:
-        description: Region for lifecycle/streaming.
-        type: string
-        default: cn
-      channel:
-        description: Optional channel for lifecycle/streaming.
-        type: string
-        default: "1"
-      sub_channel:
-        description: Optional sub-channel for lifecycle/streaming.
-        type: string
-        required: false
       resources:
-        description: Persistent resource scope for lifecycle. Keep off for the smallest hosted-runner footprint.
+        description: Persistent Endfield resource scope for lifecycle. Arknights CN is forced to off because its launcher has no Endfield resource API.
         type: choice
         options: ["off", base, all]
         default: "off"
@@ -77,6 +77,10 @@ jobs:
       streaming: ${{ steps.plan.outputs.streaming }}
       recommended: ${{ steps.plan.outputs.recommended }}
       live_ref: ${{ steps.plan.outputs.live_ref }}
+      smoke_matrix: ${{ steps.matrix.outputs.smoke_matrix }}
+      payload_matrix: ${{ steps.matrix.outputs.payload_matrix }}
+      run_linux: ${{ steps.matrix.outputs.run_linux }}
+      run_windows: ${{ steps.matrix.outputs.run_windows }}
     steps:
       - name: Download exact policy from successful CI run
         id: policy-artifact
@@ -114,8 +118,13 @@ jobs:
           import json
           from pathlib import Path
           payload = json.loads(Path('.live-policy/live-e2e-policy.json').read_text())
-          for key in ('smoke', 'archive_sample', 'lifecycle', 'streaming'):
-              print(f"{key}={str(bool(payload[key])).lower()}")
+          # Automatic production work stays read-only. The policy artifact can
+          # recommend large lanes for a human-triggered follow-up, but a
+          # workflow_run never starts large CDN traffic by itself.
+          print(f"smoke={str(bool(payload['smoke'])).lower()}")
+          print("archive_sample=false")
+          print("lifecycle=false")
+          print("streaming=false")
           print(f"recommended={payload['recommended']}")
           PY_POLICY
             else
@@ -129,75 +138,134 @@ jobs:
             archive_sample=false
             lifecycle=false
             streaming=false
-            if [[ "$DISPATCH_MODE" == archive-sample ]]; then archive_sample=true; fi
-            if [[ "$DISPATCH_MODE" == lifecycle ]]; then lifecycle=true; fi
-            if [[ "$DISPATCH_MODE" == streaming ]]; then streaming=true; fi
+            case "$DISPATCH_MODE" in
+              archive-sample) archive_sample=true ;;
+              lifecycle) lifecycle=true ;;
+              streaming) streaming=true ;;
+              full-matrix)
+                archive_sample=true
+                lifecycle=true
+                streaming=true
+                ;;
+            esac
             printf 'smoke=%s\narchive_sample=%s\nlifecycle=%s\nstreaming=%s\nrecommended=%s\n' \
               "$smoke" "$archive_sample" "$lifecycle" "$streaming" "$DISPATCH_MODE" >> "$GITHUB_OUTPUT"
           fi
           printf 'live_ref=%s\n' "$live_ref" >> "$GITHUB_OUTPUT"
+      - id: matrix
+        name: Build deployment and platform matrices
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TARGET_SELECTION: ${{ inputs.target }}
+          RUNNER_SELECTION: ${{ inputs.runner_os }}
+          SMOKE: ${{ steps.plan.outputs.smoke }}
+          ARCHIVE_SAMPLE: ${{ steps.plan.outputs.archive_sample }}
+          LIFECYCLE: ${{ steps.plan.outputs.lifecycle }}
+          STREAMING: ${{ steps.plan.outputs.streaming }}
+        run: |
+          python - <<'PY_MATRIX' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          targets = [
+              dict(id="endfield-cn-official", label="Endfield CN Official", backend="hypergryph", game="endfield", region="cn", channel="1", sub_channel="1", payload=True, resources=True),
+              dict(id="endfield-cn-bilibili", label="Endfield CN Bilibili", backend="hypergryph", game="endfield", region="cn", channel="2", sub_channel="2", payload=True, resources=True),
+              dict(id="endfield-global-official", label="Endfield Global Official", backend="hypergryph", game="endfield", region="sg", channel="6", sub_channel="6", payload=True, resources=True),
+              dict(id="endfield-global-epic", label="Endfield Global Epic", backend="hypergryph", game="endfield", region="sg", channel="6", sub_channel="801", payload=True, resources=True),
+              dict(id="endfield-global-google-play", label="Endfield Global Google Play", backend="hypergryph", game="endfield", region="sg", channel="6", sub_channel="802", payload=True, resources=True),
+              dict(id="arknights-cn-official", label="Arknights CN Official", backend="hypergryph", game="arknights", region="cn", channel="1", sub_channel="1", payload=True, resources=False),
+              dict(id="arknights-cn-bilibili", label="Arknights CN Bilibili", backend="hypergryph", game="arknights", region="cn", channel="2", sub_channel="2", payload=True, resources=False),
+              dict(id="arknights-en", label="Arknights EN", backend="yostar", game="arknights", region="en", channel="", sub_channel="", payload=False, resources=False),
+              dict(id="arknights-jp", label="Arknights JP", backend="yostar", game="arknights", region="jp", channel="", sub_channel="", payload=False, resources=False),
+              dict(id="arknights-kr", label="Arknights KR", backend="yostar", game="arknights", region="kr", channel="", sub_channel="", payload=False, resources=False),
+          ]
+          by_id = {target["id"]: target for target in targets}
+          selection = os.environ.get("TARGET_SELECTION") or "all"
+          selected = targets if selection == "all" else [by_id[selection]]
+
+          large_requested = os.environ.get("LIFECYCLE") == "true" or os.environ.get("STREAMING") == "true"
+          payload = [target for target in selected if target["payload"]]
+          if large_requested and selection != "all" and not payload:
+              raise SystemExit(
+                  f"target {selection!r} is YoStar smoke-only; lifecycle/streaming currently require a Hypergryph/Gryphline PC payload target"
+              )
+
+          smoke_matrix = selected if os.environ.get("SMOKE") == "true" else []
+          payload_matrix = payload if large_requested else []
+          print("smoke_matrix=" + json.dumps(smoke_matrix, separators=(",", ":")))
+          print("payload_matrix=" + json.dumps(payload_matrix, separators=(",", ":")))
+
+          archive = os.environ.get("ARCHIVE_SAMPLE") == "true"
+          lifecycle = os.environ.get("LIFECYCLE") == "true"
+          streaming = os.environ.get("STREAMING") == "true"
+          large = archive or lifecycle or streaming
+          runner = os.environ.get("RUNNER_SELECTION") or "all"
+          need_linux = os.environ.get("SMOKE") == "true" or (large and runner in {"all", "linux"})
+          need_windows = os.environ.get("EVENT_NAME") == "workflow_dispatch" and large and runner in {"all", "windows"}
+          print(f"run_linux={str(need_linux).lower()}")
+          print(f"run_windows={str(need_windows).lower()}")
+          PY_MATRIX
       - name: Summarize decision
         shell: bash
         env:
           RECOMMENDED: ${{ steps.plan.outputs.recommended }}
+          TARGET_SELECTION: ${{ inputs.target }}
+          RUNNER_SELECTION: ${{ inputs.runner_os }}
         run: |
           {
             echo '### Live E2E policy'
             echo
             echo "Recommended lanes: \`$RECOMMENDED\`."
+            echo "Target selection: \`${TARGET_SELECTION:-all}\`; hosted OS selection: \`${RUNNER_SELECTION:-linux}\`."
             echo
-            echo 'Automatic production coverage is read-only smoke only, and main-branch smoke starts after CI succeeds. Manual archive/lifecycle/streaming lanes use GitHub-hosted runners, keep the live-e2e Environment approval, and check free space before production payload I/O.'
+            echo 'Read-only production smoke fans out by deployment. Manual archive/lifecycle/streaming lanes fan out by selected hosted OS and deployment, use fail-fast=false, keep the live-e2e Environment approval, and check free space before production payload I/O.'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  smoke:
-    name: Production API smoke
+  prepare-live-linux:
+    name: Prepare archived live tests / Linux
     needs: plan
-    if: needs.plan.outputs.smoke == 'true'
+    if: needs.plan.outputs.run_linux == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.plan.outputs.live_ref }}
+      - id: ci-archive
+        name: Reuse exact Linux archive from triggering CI
+        if: github.event_name == 'workflow_run'
+        continue-on-error: true
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: nextest-linux-${{ needs.plan.outputs.live_ref }}
+          path: .
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
       - uses: ./.github/actions/setup-rust
-      - name: Compile smoke test once
-        run: cargo test --profile ci -p griffr-cli --test live_api_smoke --locked --no-run
-      - name: Endfield CN
-        env:
-          GRIFFR_LIVE_SMOKE_GAME: endfield
-          GRIFFR_LIVE_SMOKE_REGION: cn
-          GRIFFR_LIVE_SMOKE_CHANNEL: "1"
-        run: cargo test --profile ci -p griffr-cli --test live_api_smoke --locked official_api_smoke -- --ignored --exact --nocapture
-      - name: Endfield Global
-        env:
-          GRIFFR_LIVE_SMOKE_GAME: endfield
-          GRIFFR_LIVE_SMOKE_REGION: sg
-        run: cargo test --profile ci -p griffr-cli --test live_api_smoke --locked official_api_smoke -- --ignored --exact --nocapture
-      - name: Arknights EN
-        env:
-          GRIFFR_LIVE_SMOKE_GAME: arknights
-          GRIFFR_LIVE_SMOKE_REGION: en
-        run: cargo test --profile ci -p griffr-cli --test live_api_smoke --locked official_api_smoke -- --ignored --exact --nocapture
-      - name: Arknights JP
-        env:
-          GRIFFR_LIVE_SMOKE_GAME: arknights
-          GRIFFR_LIVE_SMOKE_REGION: jp
-        run: cargo test --profile ci -p griffr-cli --test live_api_smoke --locked official_api_smoke -- --ignored --exact --nocapture
-      - name: Arknights KR
-        env:
-          GRIFFR_LIVE_SMOKE_GAME: arknights
-          GRIFFR_LIVE_SMOKE_REGION: kr
-        run: cargo test --profile ci -p griffr-cli --test live_api_smoke --locked official_api_smoke -- --ignored --exact --nocapture
-      - name: Hypergryph current API contract matrix
-        run: cargo test --profile ci -p griffr-hypergryph-api --locked integration_tests::test_real_api_ -- --ignored --nocapture
+        if: github.event_name != 'workflow_run' || steps.ci-archive.outcome != 'success'
+      - uses: taiki-e/install-action@v2.85.13
+        if: github.event_name != 'workflow_run' || steps.ci-archive.outcome != 'success'
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Compile one workspace archive for every Linux live matrix cell
+        if: github.event_name != 'workflow_run' || steps.ci-archive.outcome != 'success'
+        run: cargo nextest archive --workspace --cargo-profile ci -P ci --locked --archive-file nextest-linux.tar.zst
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: live-nextest-linux-${{ github.run_id }}
+          path: nextest-linux.tar.zst
+          compression-level: 0
+          overwrite: true
+          retention-days: 1
 
-  archive-sample:
-    name: Official archive range sample / ${{ inputs.runner_os }}
-    needs: [plan, smoke]
-    if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.archive_sample == 'true' && needs.smoke.result == 'success'
-    runs-on: ${{ inputs.runner_os == 'windows' && 'windows-2025' || 'ubuntu-24.04' }}
+  prepare-live-windows:
+    name: Prepare archived live tests / Windows
+    needs: plan
+    if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.run_windows == 'true'
+    runs-on: windows-2025
     timeout-minutes: 90
-    environment: live-e2e
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -206,10 +274,69 @@ jobs:
       - uses: taiki-e/install-action@v2.85.13
         with:
           tool: cargo-nextest@0.9.143
-      - name: Compile relocatable archive sample test
-        run: cargo nextest archive -p griffr-runtime --lib --cargo-profile ci -P ci --locked --archive-file "${{ runner.temp }}/live-runtime.tar.zst"
-      - name: Release Cargo build space
-        run: cargo clean
+      - name: Compile one workspace archive for every Windows live matrix cell
+        run: cargo nextest archive --workspace --cargo-profile ci -P ci --locked --archive-file nextest-windows.tar.zst
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: live-nextest-windows-${{ github.run_id }}
+          path: nextest-windows.tar.zst
+          compression-level: 0
+          overwrite: true
+          retention-days: 1
+
+  smoke:
+    name: Production smoke / ${{ matrix.label }}
+    needs: [plan, prepare-live-linux]
+    if: needs.plan.outputs.smoke == 'true' && needs.prepare-live-linux.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.smoke_matrix) }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: cargo-nextest@0.9.143
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: live-nextest-linux-${{ github.run_id }}
+      - name: CLI production contract
+        env:
+          GRIFFR_LIVE_SMOKE_GAME: ${{ matrix.game }}
+          GRIFFR_LIVE_SMOKE_REGION: ${{ matrix.region }}
+          GRIFFR_LIVE_SMOKE_CHANNEL: ${{ matrix.channel }}
+          GRIFFR_LIVE_SMOKE_SUB_CHANNEL: ${{ matrix.sub_channel }}
+        run: cargo-nextest nextest run -P ci --archive-file nextest-linux.tar.zst --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_api_smoke
+      - name: Hypergryph protocol contract
+        if: matrix.backend == 'hypergryph'
+        env:
+          GRIFFR_LIVE_SMOKE_GAME: ${{ matrix.game }}
+          GRIFFR_LIVE_SMOKE_REGION: ${{ matrix.region }}
+          GRIFFR_LIVE_SMOKE_CHANNEL: ${{ matrix.channel }}
+          GRIFFR_LIVE_SMOKE_SUB_CHANNEL: ${{ matrix.sub_channel }}
+        run: cargo-nextest nextest run -P ci --archive-file nextest-linux.tar.zst --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture integration_tests::test_real_api_contract_target
+
+  archive-sample-linux:
+    name: Official archive range sample / Linux
+    needs: [plan, prepare-live-linux, smoke]
+    if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.archive_sample == 'true' && needs.plan.outputs.run_linux == 'true' && needs.prepare-live-linux.result == 'success' && needs.smoke.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: live-e2e
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: cargo-nextest@0.9.143
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: live-nextest-linux-${{ github.run_id }}
       - id: live-root
         name: Prepare hosted live workspace
         env:
@@ -219,27 +346,57 @@ jobs:
       - name: Sample current official multi-volume archive
         env:
           GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
-        run: cargo nextest run -P live-e2e --archive-file "${{ runner.temp }}/live-runtime.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture download::extractor::tests::format_check::check_official_archive_sample
+        run: cargo-nextest nextest run -P live-e2e --archive-file nextest-linux.tar.zst --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture download::extractor::tests::format_check::check_official_archive_sample
 
-  lifecycle:
-    name: Full content lifecycle / ${{ inputs.runner_os }}
-    needs: [plan, smoke]
-    if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.lifecycle == 'true' && needs.smoke.result == 'success'
-    runs-on: ${{ inputs.runner_os == 'windows' && 'windows-2025' || 'ubuntu-24.04' }}
-    timeout-minutes: 360
+  archive-sample-windows:
+    name: Official archive range sample / Windows
+    needs: [plan, prepare-live-windows, smoke]
+    if: always() && github.event_name == 'workflow_dispatch' && needs.plan.outputs.archive_sample == 'true' && needs.plan.outputs.run_windows == 'true' && needs.prepare-live-windows.result == 'success' && needs.smoke.result == 'success'
+    runs-on: windows-2025
+    timeout-minutes: 90
     environment: live-e2e
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.plan.outputs.live_ref }}
-      - uses: ./.github/actions/setup-rust
       - uses: taiki-e/install-action@v2.85.13
         with:
           tool: cargo-nextest@0.9.143
-      - name: Compile relocatable live lifecycle tests
-        run: cargo nextest archive -p griffr-cli --test live_cli_e2e --cargo-profile ci -P ci --locked --archive-file "${{ runner.temp }}/live-cli.tar.zst"
-      - name: Release Cargo build space
-        run: cargo clean
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: live-nextest-windows-${{ github.run_id }}
+      - id: live-root
+        name: Prepare hosted live workspace
+        env:
+          GRIFFR_LIVE_ROOT_INPUT: ${{ inputs.root }}
+          GRIFFR_LIVE_MIN_FREE_GIB: ${{ inputs.minimum_free_gib }}
+        run: python scripts/ci/prepare_live_workspace.py --lane archive-sample --github-output
+      - name: Sample current official multi-volume archive
+        env:
+          GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
+        run: cargo-nextest nextest run -P live-e2e --archive-file nextest-windows.tar.zst --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture download::extractor::tests::format_check::check_official_archive_sample
+
+  lifecycle-linux:
+    name: Full lifecycle / Linux / ${{ matrix.label }}
+    needs: [plan, prepare-live-linux, smoke]
+    if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.lifecycle == 'true' && needs.plan.outputs.run_linux == 'true' && needs.prepare-live-linux.result == 'success' && needs.smoke.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    environment: live-e2e
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.payload_matrix) }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: cargo-nextest@0.9.143
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: live-nextest-linux-${{ github.run_id }}
       - id: live-root
         name: Prepare hosted live workspace
         env:
@@ -249,44 +406,95 @@ jobs:
       - name: Check current install footprint against hosted disk
         env:
           GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
-          GRIFFR_LIVE_E2E_GAME: ${{ inputs.game }}
-          GRIFFR_LIVE_E2E_REGION: ${{ inputs.region }}
-          GRIFFR_LIVE_E2E_CHANNEL: ${{ inputs.channel }}
-          GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ inputs.sub_channel }}
-          GRIFFR_LIVE_E2E_RESOURCES: ${{ inputs.resources }}
+          GRIFFR_LIVE_E2E_GAME: ${{ matrix.game }}
+          GRIFFR_LIVE_E2E_REGION: ${{ matrix.region }}
+          GRIFFR_LIVE_E2E_CHANNEL: ${{ matrix.channel }}
+          GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ matrix.sub_channel }}
+          GRIFFR_LIVE_E2E_RESOURCES: ${{ matrix.resources && inputs.resources || 'off' }}
           GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
-        run: cargo nextest run -P live-e2e --archive-file "${{ runner.temp }}/live-cli.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_content_lifecycle_disk_preflight
+        run: cargo-nextest nextest run -P live-e2e --archive-file nextest-linux.tar.zst --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_content_lifecycle_disk_preflight
       - name: Run destructive official-server lifecycle
         env:
           GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
-          GRIFFR_LIVE_E2E_GAME: ${{ inputs.game }}
-          GRIFFR_LIVE_E2E_REGION: ${{ inputs.region }}
-          GRIFFR_LIVE_E2E_CHANNEL: ${{ inputs.channel }}
-          GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ inputs.sub_channel }}
-          GRIFFR_LIVE_E2E_RESOURCES: ${{ inputs.resources }}
+          GRIFFR_LIVE_E2E_GAME: ${{ matrix.game }}
+          GRIFFR_LIVE_E2E_REGION: ${{ matrix.region }}
+          GRIFFR_LIVE_E2E_CHANNEL: ${{ matrix.channel }}
+          GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ matrix.sub_channel }}
+          GRIFFR_LIVE_E2E_RESOURCES: ${{ matrix.resources && inputs.resources || 'off' }}
           GRIFFR_LIVE_E2E_FETCH_PREDOWNLOAD: ${{ inputs.fetch_predownload && '1' || '0' }}
           GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
-        run: cargo nextest run -P live-e2e --archive-file "${{ runner.temp }}/live-cli.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_content_lifecycle_without_launch
+        run: cargo-nextest nextest run -P live-e2e --archive-file nextest-linux.tar.zst --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_content_lifecycle_without_launch
 
-  streaming:
-    name: Bounded package streaming / ${{ inputs.runner_os }}
-    needs: [plan, smoke]
-    if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.streaming == 'true' && needs.smoke.result == 'success'
-    runs-on: ${{ inputs.runner_os == 'windows' && 'windows-2025' || 'ubuntu-24.04' }}
+  lifecycle-windows:
+    name: Full lifecycle / Windows / ${{ matrix.label }}
+    needs: [plan, prepare-live-windows, smoke]
+    if: always() && github.event_name == 'workflow_dispatch' && needs.plan.outputs.lifecycle == 'true' && needs.plan.outputs.run_windows == 'true' && needs.prepare-live-windows.result == 'success' && needs.smoke.result == 'success'
+    runs-on: windows-2025
     timeout-minutes: 360
     environment: live-e2e
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.payload_matrix) }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.plan.outputs.live_ref }}
-      - uses: ./.github/actions/setup-rust
       - uses: taiki-e/install-action@v2.85.13
         with:
           tool: cargo-nextest@0.9.143
-      - name: Compile relocatable streaming test
-        run: cargo nextest archive -p griffr-cli --test live_cli_e2e --cargo-profile ci -P ci --locked --archive-file "${{ runner.temp }}/live-cli.tar.zst"
-      - name: Release Cargo build space
-        run: cargo clean
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: live-nextest-windows-${{ github.run_id }}
+      - id: live-root
+        name: Prepare hosted live workspace
+        env:
+          GRIFFR_LIVE_ROOT_INPUT: ${{ inputs.root }}
+          GRIFFR_LIVE_MIN_FREE_GIB: ${{ inputs.minimum_free_gib }}
+        run: python scripts/ci/prepare_live_workspace.py --lane lifecycle --github-output
+      - name: Check current install footprint against hosted disk
+        env:
+          GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
+          GRIFFR_LIVE_E2E_GAME: ${{ matrix.game }}
+          GRIFFR_LIVE_E2E_REGION: ${{ matrix.region }}
+          GRIFFR_LIVE_E2E_CHANNEL: ${{ matrix.channel }}
+          GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ matrix.sub_channel }}
+          GRIFFR_LIVE_E2E_RESOURCES: ${{ matrix.resources && inputs.resources || 'off' }}
+          GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
+        run: cargo-nextest nextest run -P live-e2e --archive-file nextest-windows.tar.zst --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_content_lifecycle_disk_preflight
+      - name: Run destructive official-server lifecycle
+        env:
+          GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
+          GRIFFR_LIVE_E2E_GAME: ${{ matrix.game }}
+          GRIFFR_LIVE_E2E_REGION: ${{ matrix.region }}
+          GRIFFR_LIVE_E2E_CHANNEL: ${{ matrix.channel }}
+          GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ matrix.sub_channel }}
+          GRIFFR_LIVE_E2E_RESOURCES: ${{ matrix.resources && inputs.resources || 'off' }}
+          GRIFFR_LIVE_E2E_FETCH_PREDOWNLOAD: ${{ inputs.fetch_predownload && '1' || '0' }}
+          GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
+        run: cargo-nextest nextest run -P live-e2e --archive-file nextest-windows.tar.zst --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_content_lifecycle_without_launch
+
+  streaming-linux:
+    name: Package streaming / Linux / ${{ matrix.label }}
+    needs: [plan, prepare-live-linux, smoke]
+    if: github.event_name == 'workflow_dispatch' && needs.plan.outputs.streaming == 'true' && needs.plan.outputs.run_linux == 'true' && needs.prepare-live-linux.result == 'success' && needs.smoke.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    environment: live-e2e
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.payload_matrix) }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: cargo-nextest@0.9.143
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: live-nextest-linux-${{ github.run_id }}
       - id: live-root
         name: Prepare hosted live workspace
         env:
@@ -296,10 +504,48 @@ jobs:
       - name: Stream and discard official package parts
         env:
           GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
-          GRIFFR_LIVE_E2E_GAME: ${{ inputs.game }}
-          GRIFFR_LIVE_E2E_REGION: ${{ inputs.region }}
-          GRIFFR_LIVE_E2E_CHANNEL: ${{ inputs.channel }}
-          GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ inputs.sub_channel }}
+          GRIFFR_LIVE_E2E_GAME: ${{ matrix.game }}
+          GRIFFR_LIVE_E2E_REGION: ${{ matrix.region }}
+          GRIFFR_LIVE_E2E_CHANNEL: ${{ matrix.channel }}
+          GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ matrix.sub_channel }}
           GRIFFR_LIVE_E2E_RESOURCES: "off"
           GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
-        run: cargo nextest run -P live-e2e --archive-file "${{ runner.temp }}/live-cli.tar.zst" --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_streaming_package_soak
+        run: cargo-nextest nextest run -P live-e2e --archive-file nextest-linux.tar.zst --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_streaming_package_soak
+
+  streaming-windows:
+    name: Package streaming / Windows / ${{ matrix.label }}
+    needs: [plan, prepare-live-windows, smoke]
+    if: always() && github.event_name == 'workflow_dispatch' && needs.plan.outputs.streaming == 'true' && needs.plan.outputs.run_windows == 'true' && needs.prepare-live-windows.result == 'success' && needs.smoke.result == 'success'
+    runs-on: windows-2025
+    timeout-minutes: 360
+    environment: live-e2e
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.payload_matrix) }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: taiki-e/install-action@v2.85.13
+        with:
+          tool: cargo-nextest@0.9.143
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: live-nextest-windows-${{ github.run_id }}
+      - id: live-root
+        name: Prepare hosted live workspace
+        env:
+          GRIFFR_LIVE_ROOT_INPUT: ${{ inputs.root }}
+          GRIFFR_LIVE_MIN_FREE_GIB: ${{ inputs.minimum_free_gib }}
+        run: python scripts/ci/prepare_live_workspace.py --lane streaming --github-output
+      - name: Stream and discard official package parts
+        env:
+          GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
+          GRIFFR_LIVE_E2E_GAME: ${{ matrix.game }}
+          GRIFFR_LIVE_E2E_REGION: ${{ matrix.region }}
+          GRIFFR_LIVE_E2E_CHANNEL: ${{ matrix.channel }}
+          GRIFFR_LIVE_E2E_SUB_CHANNEL: ${{ matrix.sub_channel }}
+          GRIFFR_LIVE_E2E_RESOURCES: "off"
+          GRIFFR_LIVE_E2E_CONFIRM: I_ACCEPT_LARGE_DOWNLOADS_AND_TEST_DELETION
+        run: cargo-nextest nextest run -P live-e2e --archive-file nextest-windows.tar.zst --workspace-remap "${{ github.workspace }}" --run-ignored only --no-capture official_server_streaming_package_soak
