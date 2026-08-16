@@ -73,8 +73,8 @@ impl LiveConfig {
             run_root,
             game: required_env("GRIFFR_LIVE_E2E_GAME"),
             region: required_env("GRIFFR_LIVE_E2E_REGION"),
-            channel: env::var("GRIFFR_LIVE_E2E_CHANNEL").ok(),
-            sub_channel: env::var("GRIFFR_LIVE_E2E_SUB_CHANNEL").ok(),
+            channel: optional_env("GRIFFR_LIVE_E2E_CHANNEL"),
+            sub_channel: optional_env("GRIFFR_LIVE_E2E_SUB_CHANNEL"),
             resource_set,
             fetch_predownload: env_flag("GRIFFR_LIVE_E2E_FETCH_PREDOWNLOAD"),
             disposable_update_path: env::var_os("GRIFFR_LIVE_E2E_UPDATE_PATH").map(PathBuf::from),
@@ -102,10 +102,41 @@ fn required_env(name: &str) -> String {
     env::var(name).unwrap_or_else(|_| panic!("{name} must be set explicitly"))
 }
 
+fn optional_env(name: &str) -> Option<String> {
+    nonempty_env_value(env::var(name).ok())
+}
+
+fn nonempty_env_value(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    })
+}
+
 fn env_flag(name: &str) -> bool {
     env::var(name)
         .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false)
+}
+
+#[test]
+fn optional_live_selector_treats_blank_values_as_omitted() {
+    assert_eq!(nonempty_env_value(None), None);
+    assert_eq!(nonempty_env_value(Some(String::new())), None);
+    assert_eq!(nonempty_env_value(Some("   ".to_string())), None);
+    assert_eq!(
+        nonempty_env_value(Some("  official  ".to_string())),
+        Some("official".to_string())
+    );
+
+    let channels = ChannelPair::parse(
+        RegionId::Cn,
+        nonempty_env_value(Some("1".to_string())),
+        nonempty_env_value(Some(String::new())),
+    )
+    .expect("blank workflow sub-channel must behave like an omitted selector");
+    assert_eq!(channels.channel().as_str(), "1");
+    assert_eq!(channels.sub_channel().as_str(), "1");
 }
 
 fn prepare_safe_root(path: &Path) -> PathBuf {
