@@ -42,7 +42,12 @@ where
     output
 }
 
-fn hypergryph_target_args(game: &str, region: &str, channel: &str) -> Vec<OsString> {
+fn hypergryph_target_args(
+    game: &str,
+    region: &str,
+    channel: &str,
+    sub_channel: &str,
+) -> Vec<OsString> {
     let mut args = vec![
         "--game".into(),
         game.into(),
@@ -52,7 +57,32 @@ fn hypergryph_target_args(game: &str, region: &str, channel: &str) -> Vec<OsStri
     if !channel.is_empty() {
         args.extend(["--channel".into(), channel.into()]);
     }
+    if !sub_channel.is_empty() {
+        args.extend(["--sub-channel".into(), sub_channel.into()]);
+    }
     args
+}
+
+#[test]
+fn hypergryph_target_args_keep_channel_tuple() {
+    let args = hypergryph_target_args("endfield", "sg", "6", "801");
+    let rendered = args
+        .iter()
+        .map(|value| value.to_string_lossy())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rendered,
+        [
+            "--game",
+            "endfield",
+            "--region",
+            "sg",
+            "--channel",
+            "6",
+            "--sub-channel",
+            "801",
+        ]
+    );
 }
 
 #[test]
@@ -61,6 +91,7 @@ fn official_api_smoke() {
     let game = required_env("GRIFFR_LIVE_SMOKE_GAME");
     let region = required_env("GRIFFR_LIVE_SMOKE_REGION");
     let channel = env::var("GRIFFR_LIVE_SMOKE_CHANNEL").unwrap_or_default();
+    let sub_channel = env::var("GRIFFR_LIVE_SMOKE_SUB_CHANNEL").unwrap_or_default();
 
     if matches!(region.as_str(), "en" | "jp" | "kr") {
         assert_eq!(
@@ -73,7 +104,7 @@ fn official_api_smoke() {
         return;
     }
 
-    let target = hypergryph_target_args(&game, &region, &channel);
+    let target = hypergryph_target_args(&game, &region, &channel, &sub_channel);
 
     let mut news = vec![OsString::from("news")];
     news.extend(target.clone());

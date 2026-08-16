@@ -3,10 +3,12 @@
 //! These tests make actual network requests and are marked with `#[ignore]`
 //! so they only run when explicitly requested.
 //!
-//! Run them manually with:
+//! Run the selected production contract manually with `GRIFFR_LIVE_SMOKE_GAME`,
+//! `GRIFFR_LIVE_SMOKE_REGION`, `GRIFFR_LIVE_SMOKE_CHANNEL`, and
+//! `GRIFFR_LIVE_SMOKE_SUB_CHANNEL` set, then invoke:
 //!
 //! ```bash
-//! cargo test -p griffr-hypergryph-api integration_tests -- --ignored --nocapture
+//! cargo test -p griffr-hypergryph-api test_real_api_contract_target -- --ignored --nocapture
 //! ```
 
 use crate::client::{ApiClient, MediaResponse};
@@ -301,170 +303,38 @@ async fn assert_game_files_for_channel(
     assert_game_files_entries(&entries);
 }
 
-#[compio::test]
-#[ignore = "Makes real network request"]
-async fn test_real_api_latest_matrix() {
-    let client = ApiClient::new().expect("Failed to create API client");
+fn required_live_env(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| panic!("{name} must be set for live API contract tests"))
+}
 
-    let matrix = [
-        (
-            GameId::ARKNIGHTS,
-            RegionId::Cn,
-            ChannelPair::from_api("1", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ARKNIGHTS,
-            RegionId::Cn,
-            ChannelPair::from_api("2", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Cn,
-            ChannelPair::from_api("1", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Cn,
-            ChannelPair::from_api("2", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Sg,
-            ChannelPair::from_api("6", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Sg,
-            ChannelPair::from_api("6", Some("801")).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Sg,
-            ChannelPair::from_api("6", Some("802")).unwrap(),
-        ),
-    ];
-    assert_eq!(
-        matrix.len(),
-        7,
-        "latest matrix should cover all known CN/SG combinations"
-    );
-
-    for (game, region, channel) in matrix {
-        assert_latest_for_channel(&client, game, region, channel).await;
-    }
+fn selected_live_target() -> (GameId, RegionId, ChannelPair) {
+    let game = required_live_env("GRIFFR_LIVE_SMOKE_GAME")
+        .parse()
+        .expect("valid live smoke game id");
+    let region = required_live_env("GRIFFR_LIVE_SMOKE_REGION")
+        .parse()
+        .expect("valid live smoke region id");
+    let channel = std::env::var("GRIFFR_LIVE_SMOKE_CHANNEL").ok();
+    let sub_channel = std::env::var("GRIFFR_LIVE_SMOKE_SUB_CHANNEL").ok();
+    let channels = ChannelPair::parse(region, channel, sub_channel)
+        .expect("live Hypergryph contract target requires valid channel metadata");
+    (game, region, channels)
 }
 
 #[compio::test]
-#[ignore = "Makes real network request"]
-async fn test_real_api_media_matrix() {
+#[ignore = "Makes real network requests to the selected Hypergryph/Gryphline deployment"]
+async fn test_real_api_contract_target() {
     let client = ApiClient::new().expect("Failed to create API client");
+    let (game, region, channels) = selected_live_target();
+    let language = if region == RegionId::Sg {
+        "en-us"
+    } else {
+        DEFAULT_LANGUAGE
+    };
 
-    let matrix = [
-        (
-            GameId::ARKNIGHTS,
-            RegionId::Cn,
-            ChannelPair::from_api("1", None::<String>).unwrap(),
-            DEFAULT_LANGUAGE,
-        ),
-        (
-            GameId::ARKNIGHTS,
-            RegionId::Cn,
-            ChannelPair::from_api("2", None::<String>).unwrap(),
-            DEFAULT_LANGUAGE,
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Cn,
-            ChannelPair::from_api("1", None::<String>).unwrap(),
-            DEFAULT_LANGUAGE,
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Cn,
-            ChannelPair::from_api("2", None::<String>).unwrap(),
-            DEFAULT_LANGUAGE,
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Sg,
-            ChannelPair::from_api("6", None::<String>).unwrap(),
-            "en-us",
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Sg,
-            ChannelPair::from_api("6", Some("801")).unwrap(),
-            "en-us",
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Sg,
-            ChannelPair::from_api("6", Some("802")).unwrap(),
-            "en-us",
-        ),
-    ];
-    assert_eq!(
-        matrix.len(),
-        7,
-        "media matrix should cover all known CN/SG combinations"
-    );
-
-    for (game, region, channel, language) in matrix {
-        assert_media_for_channel(&client, game, region, channel, language).await;
-    }
-}
-
-#[compio::test]
-#[ignore = "Makes real network request"]
-async fn test_real_api_game_files_matrix() {
-    let client = ApiClient::new().expect("Failed to create API client");
-
-    let matrix = [
-        (
-            GameId::ARKNIGHTS,
-            RegionId::Cn,
-            ChannelPair::from_api("1", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ARKNIGHTS,
-            RegionId::Cn,
-            ChannelPair::from_api("2", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Cn,
-            ChannelPair::from_api("1", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Cn,
-            ChannelPair::from_api("2", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Sg,
-            ChannelPair::from_api("6", None::<String>).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Sg,
-            ChannelPair::from_api("6", Some("801")).unwrap(),
-        ),
-        (
-            GameId::ENDFIELD,
-            RegionId::Sg,
-            ChannelPair::from_api("6", Some("802")).unwrap(),
-        ),
-    ];
-    assert_eq!(
-        matrix.len(),
-        7,
-        "game_files matrix should cover all known CN/SG combinations"
-    );
-
-    for (game, region, channel) in matrix {
-        assert_game_files_for_channel(&client, game, region, channel).await;
-    }
+    assert_latest_for_channel(&client, game.clone(), region, channels.clone()).await;
+    assert_media_for_channel(&client, game.clone(), region, channels.clone(), language).await;
+    assert_game_files_for_channel(&client, game, region, channels).await;
 }
 
 mod known_versions;

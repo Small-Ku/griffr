@@ -353,12 +353,18 @@ fn remote_smoke(config: &LiveConfig) {
     news.extend(config.target_args());
     command(news);
 
-    for action in [
-        "get-raw-latest-game",
-        "get-raw-latest-resources",
-        "list-game-files",
-    ] {
+    for action in ["get-raw-latest-game", "list-game-files"] {
         let mut args = vec!["debug".into(), action.into()];
+        args.extend(config.target_args());
+        command(args);
+    }
+
+    // Arknights CN does not expose the Endfield persistent-resource API.
+    // Keep the lifecycle smoke provider/game-correct so the Arknights matrix
+    // can exercise install/verify/repair without manufacturing an unsupported
+    // resource request.
+    if config.game == "endfield" {
+        let mut args = vec!["debug".into(), "get-raw-latest-resources".into()];
         args.extend(config.target_args());
         command(args);
     }
