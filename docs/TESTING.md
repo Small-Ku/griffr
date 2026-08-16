@@ -95,9 +95,11 @@ has four lanes with different risk:
   affect remote protocol behavior schedule smoke. If a manually re-run/old CI run has already lost
   its tiny policy artifact, the post-CI workflow falls back conservatively to smoke only rather than
   guessing destructive coverage. A daily scheduled smoke also detects API drift even when the
-  repository has not changed. It covers CLI requests for Endfield CN/global
-  and YoStar Arknights EN/JP/KR, plus the current Hypergryph latest/media/game-files channel
-  matrix. No install tree is created.
+  repository has not changed. Smoke fans out with `fail-fast: false` across all known deployment
+  identities: five Endfield CN/global channel tuples, two Arknights CN channel tuples, and YoStar
+  Arknights EN/JP/KR. Hypergryph/Gryphline cells run both the CLI contract and a target-scoped
+  latest/media/game-files protocol contract; YoStar cells run their config/CDN/manifest contract.
+  No install tree is created.
 - **archive-sample** performs bounded range reads against the current official multi-volume
   Endfield archive and validates the split/archive format assumptions used by the extractor. It
   is manual because it contacts the production CDN and may cache hundreds of MiB, even though
@@ -109,21 +111,33 @@ has four lanes with different risk:
   though peak disk use is bounded, so it is also manual only.
 
 `archive-sample`, `lifecycle`, and `streaming` run only through `workflow_dispatch`. They are
-**GitHub-hosted first**: choose `linux` for `ubuntu-24.04` or `windows` for `windows-2025`. A manual
-run always performs the hosted read-only smoke first; the selected large/destructive lane is
-released only after that smoke passes and then references the `live-e2e` GitHub Environment.
-Configure that environment in repository Settings with required reviewers; enabling **Prevent
-self-review** is recommended for deletion-capable/large-download runs.
+**GitHub-hosted first**: `runner_os=all` fans out to Ubuntu 24.04 and Windows 2025, while `linux` or
+`windows` narrows the platform matrix. `target=all` fans lifecycle/streaming out across the seven
+currently supported Hypergryph/Gryphline PC payload identities; a single target can be selected for
+focused reruns. YoStar EN/JP/KR remain smoke-only until the retained payload harness becomes
+provider-neutral. `full-matrix` starts archive sampling, lifecycle, and streaming as independent
+job families after smoke, so they can run concurrently. Every matrix uses `fail-fast: false`, so one
+production target failing does not hide results from the remaining cells.
 
-The live lane compiles its required test into a relocatable nextest archive, runs `cargo clean` to
-release the normal Cargo `target/` tree, and only then starts production payload I/O. If `root` is
-blank, CI uses a lane-scoped directory under `RUNNER_TEMP`; an explicit root is still accepted but
-must be separate from the checkout, home directory, and filesystem root. `minimum_free_gib=0`
-selects the built-in floor (3 GiB for archive sampling, 4 GiB for lifecycle setup, 6 GiB for
-streaming). The lifecycle lane additionally fetches the current `game_files` manifest and refuses
-to start the retained install when the selected volume cannot hold the current core tree plus
-bounded extraction headroom. The default live lifecycle resource scope is `off` to minimize hosted
-runner disk demand; select `base` or `all` explicitly when that extra production coverage is needed.
+A manual run always performs the hosted read-only smoke first; large/destructive jobs are released
+only after the complete smoke matrix passes and then reference the `live-e2e` GitHub Environment.
+Configure that environment in repository Settings with required reviewers; enabling **Prevent
+self-review** is recommended for deletion-capable/large-download runs. Large lanes remain manual
+because GitHub-hosted compute being available does not make third-party production CDN traffic
+free or harmless.
+
+The workflow compiles one relocatable workspace nextest archive per required operating system and
+shares that archive with every matrix cell on the same platform. Post-CI smoke reuses the exact
+Linux archive produced by the triggering CI run when it is still available, avoiding a second
+workspace compile. Payload jobs therefore start without a Cargo build tree and can spend their
+runtime on production I/O. If `root` is blank, CI uses a lane-scoped directory under `RUNNER_TEMP`;
+an explicit root is still accepted but must be separate from the checkout, home directory, and
+filesystem root. `minimum_free_gib=0` selects the built-in floor (3 GiB for archive sampling,
+4 GiB for lifecycle setup, 6 GiB for streaming). Every lifecycle matrix cell additionally fetches
+the current `game_files` manifest and refuses to start the retained install when its runner volume
+cannot hold the current core tree plus bounded extraction headroom. The default live lifecycle
+resource scope is `off`; Endfield cells can opt into `base` or `all`, while Arknights CN cells force
+resources off because that launcher does not expose Endfield's persistent-resource API.
 
 If the current game simply cannot fit on a standard hosted runner, the workflow fails during this
 preflight before downloading the installation. Use the bounded `streaming` lane for CDN/integrity

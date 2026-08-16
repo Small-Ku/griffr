@@ -50,9 +50,12 @@ python scripts/ci/live_e2e_policy.py --base origin/main --head HEAD
 
 The output recommends `smoke`, `archive-sample`, `lifecycle`, and/or `streaming`. `smoke` is
 read-only and may run automatically after main-branch CI succeeds; the other lanes are advisory
-until a maintainer explicitly dispatches the `Live E2E` workflow. Manual live lanes default to
-GitHub-hosted Ubuntu 24.04 or Windows 2025 and remain protected by the `live-e2e` GitHub
-Environment. They build a relocatable nextest archive, `cargo clean` the compile tree, then use
+until a maintainer explicitly dispatches the `Live E2E` workflow. Smoke fans out by deployment.
+Manual large lanes accept `runner_os=all|linux|windows` and `target=all|<known deployment>`; the
+`full-matrix` mode releases archive sampling, lifecycle, and streaming as independent job families
+after smoke. Each platform compiles one relocatable workspace nextest archive and every target cell
+on that platform reuses it. Post-CI smoke reuses the exact Linux archive from the triggering CI run
+when available. Large jobs remain protected by the `live-e2e` GitHub Environment and use
 `scripts/ci/prepare_live_workspace.py` to select a safe `RUNNER_TEMP` root and enforce a free-space
 floor before production payload I/O. The retained lifecycle adds a package-aware manifest-footprint
 preflight; if a full game cannot fit, use the bounded streaming lane or the local lifecycle harness
