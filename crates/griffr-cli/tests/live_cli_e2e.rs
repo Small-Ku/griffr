@@ -2,7 +2,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, ExitStatus, Output};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use griffr_core::{ChannelPair, GameId, RegionId};
@@ -167,15 +167,17 @@ fn prepare_safe_root(path: &Path) -> PathBuf {
     root
 }
 
-fn run_command<I, S>(args: I) -> Output
+fn collect_args<I, S>(args: I) -> Vec<OsString>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let args = args
-        .into_iter()
+    args.into_iter()
         .map(|value| value.as_ref().to_owned())
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn print_command(args: &[OsString]) {
     println!(
         "\n$ griffr {}",
         args.iter()
@@ -183,12 +185,38 @@ where
             .collect::<Vec<_>>()
             .join(" ")
     );
-    Command::new(griffr_exe())
-        .args(&args)
+}
+
+fn griffr_command(args: &[OsString]) -> Command {
+    let mut command = Command::new(griffr_exe());
+    command
+        .args(args)
         .env("NO_COLOR", "1")
-        .env("RUST_BACKTRACE", "1")
-        .output()
-        .expect("run griffr")
+        .env("RUST_BACKTRACE", "1");
+    command
+}
+
+fn run_command<I, S>(args: I) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args = collect_args(args);
+    print_command(&args);
+    griffr_command(&args).output().expect("run griffr")
+}
+
+fn run_command_streamed<I, S>(args: I) -> ExitStatus
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args = collect_args(args);
+    print_command(&args);
+    // Inherit stdout/stderr so non-TTY plain progress emitted by the CLI is
+    // visible in GitHub Actions while a long download/extract/verify is still
+    // running instead of being buffered until process exit.
+    griffr_command(&args).status().expect("run griffr")
 }
 
 fn command<I, S>(args: I) -> Output
@@ -209,6 +237,18 @@ where
         println!("{}", String::from_utf8_lossy(&output.stdout));
     }
     output
+}
+
+fn command_streamed<I, S>(args: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let status = run_command_streamed(args);
+    assert!(
+        status.success(),
+        "griffr failed ({status}); stdout/stderr were streamed above"
+    );
 }
 
 fn command_fails_with<I, S>(args: I, expected: &str)
@@ -235,11 +275,11 @@ fn push_path(args: &mut Vec<OsString>, flag: &str, path: &Path) {
 }
 
 fn install_target(config: &LiveConfig) {
-    let mut args = vec!["--quiet".into(), "install".into()];
+    let mut args = vec!["install".into()];
     args.extend(config.target_args());
     args.extend(["--resources".into(), "package-only".into()]);
     push_path(&mut args, "--path", &config.primary);
-    command(args);
+    command_streamed(args);
 }
 
 fn parse_manifest(install: &Path) -> Vec<GameFileEntry> {
@@ -326,7 +366,6 @@ fn remote_smoke(config: &LiveConfig) {
 
 fn verify_core(path: &Path) {
     let mut args = vec![
-        "--quiet".into(),
         "verify".into(),
         "--scope".into(),
         "core".into(),
@@ -334,7 +373,7 @@ fn verify_core(path: &Path) {
         "json".into(),
     ];
     push_path(&mut args, "--path", path);
-    command(args);
+    command_streamed(args);
 }
 
 fn run_disposable_real_update(path: &Path) {
@@ -351,14 +390,9 @@ fn run_disposable_real_update(path: &Path) {
     push_path(&mut before, "--path", path);
     let before = command(before).stdout;
 
-    let mut update = vec![
-        "--quiet".into(),
-        "update".into(),
-        "--resources".into(),
-        "package-only".into(),
-    ];
+    let mut update = vec!["update".into(), "--resources".into(), "package-only".into()];
     push_path(&mut update, "--path", path);
-    command(update);
+    command_streamed(update);
     verify_core(path);
 
     let mut after = vec![
@@ -482,7 +516,6 @@ fn official_server_content_lifecycle_without_launch() {
 
     copy_launcher_metadata(&config.primary, &config.reuse);
     let mut materialize = vec![
-        "--quiet".into(),
         "verify".into(),
         "--repair".into(),
         "--relink-reuse".into(),
@@ -491,7 +524,7 @@ fn official_server_content_lifecycle_without_launch() {
     ];
     push_path(&mut materialize, "--path", &config.reuse);
     push_path(&mut materialize, "--reuse-from", &config.primary);
-    command(materialize);
+    command_streamed(materialize);
     assert_same_hardlink(
         &primary_probe,
         &reuse_probe,
@@ -507,14 +540,13 @@ fn official_server_content_lifecycle_without_launch() {
     );
 
     let mut repair = vec![
-        "--quiet".into(),
         "verify".into(),
         "--repair".into(),
         "--scope".into(),
         "core".into(),
     ];
     push_path(&mut repair, "--path", &config.primary);
-    command(repair);
+    command_streamed(repair);
     assert_md5(&primary_probe, &probe.md5);
     assert_eq!(
         fs::read(&reuse_probe).expect("read peer after CDN repair"),
@@ -528,7 +560,6 @@ fn official_server_content_lifecycle_without_launch() {
     );
 
     let mut relink = vec![
-        "--quiet".into(),
         "verify".into(),
         "--repair".into(),
         "--relink-reuse".into(),
@@ -537,7 +568,7 @@ fn official_server_content_lifecycle_without_launch() {
     ];
     push_path(&mut relink, "--path", &config.primary);
     push_path(&mut relink, "--reuse-from", &config.reuse);
-    command(relink);
+    command_streamed(relink);
     assert_same_hardlink(
         &primary_probe,
         &reuse_probe,
@@ -545,7 +576,6 @@ fn official_server_content_lifecycle_without_launch() {
     );
 
     let mut update = vec![
-        "--quiet".into(),
         "update".into(),
         "--jobs".into(),
         "2".into(),
@@ -554,10 +584,9 @@ fn official_server_content_lifecycle_without_launch() {
     ];
     push_path(&mut update, "--path", &config.primary);
     push_path(&mut update, "--path", &config.reuse);
-    command(update);
+    command_streamed(update);
 
     let mut verify_both = vec![
-        "--quiet".into(),
         "verify".into(),
         "--jobs".into(),
         "2".into(),
@@ -568,11 +597,10 @@ fn official_server_content_lifecycle_without_launch() {
     ];
     push_path(&mut verify_both, "--path", &config.primary);
     push_path(&mut verify_both, "--path", &config.reuse);
-    command(verify_both);
+    command_streamed(verify_both);
 
     if let Some(file_set) = config.resource_set.as_deref() {
         let mut resources = vec![
-            "--quiet".into(),
             "resources".into(),
             "sync".into(),
             "--allow-download".into(),
@@ -580,10 +608,9 @@ fn official_server_content_lifecycle_without_launch() {
             file_set.into(),
         ];
         push_path(&mut resources, "--path", &config.primary);
-        command(resources);
+        command_streamed(resources);
 
         let mut verify_all = vec![
-            "--quiet".into(),
             "verify".into(),
             "--scope".into(),
             "all".into(),
@@ -591,7 +618,7 @@ fn official_server_content_lifecycle_without_launch() {
             "json".into(),
         ];
         push_path(&mut verify_all, "--path", &config.primary);
-        command(verify_all);
+        command_streamed(verify_all);
     }
 
     let mut stage_inspect = vec!["--quiet".into(), "stage".into(), "inspect".into()];
@@ -601,10 +628,10 @@ fn official_server_content_lifecycle_without_launch() {
         println!("{}", String::from_utf8_lossy(&inspect.stdout));
         if config.fetch_predownload {
             let stage_dir = config.run_root.join("predownload");
-            let mut fetch = vec!["--quiet".into(), "stage".into(), "fetch".into()];
+            let mut fetch = vec!["stage".into(), "fetch".into()];
             push_path(&mut fetch, "--path", &config.primary);
             push_path(&mut fetch, "--stage-dir", &stage_dir);
-            command(fetch);
+            command_streamed(fetch);
         }
     } else {
         let combined = format!(
@@ -627,20 +654,15 @@ fn official_server_content_lifecycle_without_launch() {
         run_disposable_real_update(path);
     }
 
-    let mut detach = vec![
-        "--quiet".into(),
-        "uninstall".into(),
-        "--detach".into(),
-        "--yes".into(),
-    ];
+    let mut detach = vec!["uninstall".into(), "--detach".into(), "--yes".into()];
     push_path(&mut detach, "--path", &config.primary);
-    command(detach);
+    command_streamed(detach);
     assert!(primary_probe.is_file(), "detach must keep game content");
 
     for target in [&config.reuse, &config.primary] {
-        let mut uninstall = vec!["--quiet".into(), "uninstall".into(), "--yes".into()];
+        let mut uninstall = vec!["uninstall".into(), "--yes".into()];
         push_path(&mut uninstall, "--path", target);
-        command(uninstall);
+        command_streamed(uninstall);
         assert!(
             !target.exists(),
             "uninstall did not remove {}",
