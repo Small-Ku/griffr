@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crc_fast::{CrcAlgorithm, Digest as CrcDigest};
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 
@@ -61,7 +62,9 @@ impl ContentHash {
     pub(crate) fn hasher(&self) -> ContentHasher {
         match self {
             Self::Md5(_) => ContentHasher::Md5(Md5::new()),
-            Self::Crc64Xz(_) => ContentHasher::Crc64Xz(Crc64Xz::new()),
+            Self::Crc64Xz(_) => {
+                ContentHasher::Crc64Xz(Box::new(CrcDigest::new(CrcAlgorithm::Crc64Xz)))
+            }
         }
     }
 }
@@ -99,7 +102,9 @@ impl fmt::Display for ContentHash {
 #[derive(Clone)]
 pub(crate) enum ContentHasher {
     Md5(Md5),
-    Crc64Xz(Crc64Xz),
+    // crc-fast keeps a comparatively large algorithm state. Box it so the
+    // common MD5 hasher does not inherit that enum size on every stream.
+    Crc64Xz(Box<CrcDigest>),
 }
 
 impl ContentHasher {
@@ -113,59 +118,8 @@ impl ContentHasher {
     pub(crate) fn finalize(self) -> ContentHash {
         match self {
             Self::Md5(hasher) => ContentHash::Md5(griffr_core::to_hex(&Digest::finalize(hasher))),
-            Self::Crc64Xz(hasher) => ContentHash::Crc64Xz(hasher.finalize()),
+            Self::Crc64Xz(hasher) => ContentHash::Crc64Xz((*hasher).finalize()),
         }
-    }
-}
-
-/// Reflected CRC-64/ECMA polynomial with the init/xorout used by CRC-64/XZ.
-/// The inspected YoStar launcher embeds the same polynomial and produces the
-/// standard CRC-64/XZ check value for `123456789`.
-const CRC64_XZ_POLY: u64 = 0xc96c_5795_d787_0f42;
-
-const fn crc64_xz_table() -> [u64; 256] {
-    let mut table = [0u64; 256];
-    let mut index = 0usize;
-    while index < table.len() {
-        let mut crc = index as u64;
-        let mut bit = 0;
-        while bit < 8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ CRC64_XZ_POLY
-            } else {
-                crc >> 1
-            };
-            bit += 1;
-        }
-        table[index] = crc;
-        index += 1;
-    }
-    table
-}
-
-const CRC64_XZ_TABLE: [u64; 256] = crc64_xz_table();
-
-#[derive(Debug, Clone)]
-pub(crate) struct Crc64Xz {
-    state: u64,
-}
-
-impl Crc64Xz {
-    pub(crate) const fn new() -> Self {
-        Self { state: u64::MAX }
-    }
-
-    pub(crate) fn update(&mut self, bytes: &[u8]) {
-        let mut crc = self.state;
-        for &byte in bytes {
-            let index = ((crc ^ u64::from(byte)) & 0xff) as usize;
-            crc = CRC64_XZ_TABLE[index] ^ (crc >> 8);
-        }
-        self.state = crc;
-    }
-
-    pub(crate) const fn finalize(self) -> u64 {
-        !self.state
     }
 }
 
@@ -175,9 +129,12 @@ mod tests {
 
     #[test]
     fn crc64_xz_matches_yostar_launcher_check_value() {
-        let mut hasher = Crc64Xz::new();
+        let mut hasher = ContentHash::Crc64Xz(0).hasher();
         hasher.update(b"123456789");
-        let digest = hasher.finalize();
+        let digest = match hasher.finalize() {
+            ContentHash::Crc64Xz(value) => value,
+            ContentHash::Md5(_) => unreachable!("CRC-64/XZ selected CRC hasher"),
+        };
         assert_eq!(digest, 0x995d_c9bb_df19_39fa);
         assert_eq!(digest.to_string(), "11051210869376104954");
     }

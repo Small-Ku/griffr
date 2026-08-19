@@ -33,6 +33,7 @@ base64 = "0.22"
 
 dirs = { workspace = true }
 rapidhash = { workspace = true }
+crc-fast = { version = "1.10.0", default-features = false, features = ["std"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
