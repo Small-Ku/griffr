@@ -1076,6 +1076,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fearless_simd"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4beca3cb2444e3304ac30843cc091f44ed58932353cd492ce740067bfce6b12"
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1278,7 +1284,7 @@ dependencies = [
  "griffr-runtime",
  "griffr-yostar-api",
  "indicatif",
- "md-5",
+ "md5-many",
  "rapidhash",
  "serde",
  "serde_json",
@@ -1327,7 +1333,7 @@ dependencies = [
  "compio 0.19.1",
  "cyper",
  "griffr-core",
- "md-5",
+ "md5-many",
  "serde",
  "serde_json",
  "tempfile",
@@ -1350,7 +1356,7 @@ dependencies = [
  "griffr-yostar-api",
  "hdiffpatch-rs",
  "libc",
- "md-5",
+ "md5-many",
  "rapidhash",
  "serde",
  "serde_json",
@@ -1369,7 +1375,7 @@ dependencies = [
  "cyper",
  "futures-util",
  "griffr-core",
- "md-5",
+ "md5-many",
  "serde",
  "serde_json",
  "thiserror",
@@ -1859,13 +1865,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "md-5"
-version = "0.11.0"
+name = "md5-many"
+version = "0.1.0-alpha.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
+checksum = "2a7875b6bd3d372d8092c43ebf9f22ec29d8ce2831e0c73bcb13d1df81aa7642"
 dependencies = [
- "cfg-if",
  "digest 0.11.3",
+ "fearless_simd",
 ]
 
 [[package]]

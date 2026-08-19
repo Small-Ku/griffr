@@ -14,7 +14,7 @@ client = [
   "dep:futures-util",
   "dep:serde",
   "dep:serde_json",
-  "dep:md-5",
+  "dep:md5",
   "dep:url",
 ]
 
@@ -25,7 +25,7 @@ futures-util = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 thiserror = { workspace = true }
-md-5 = { workspace = true, optional = true }
+md5 = { workspace = true, optional = true }
 url = { version = "2", optional = true }
 
 [dev-dependencies]

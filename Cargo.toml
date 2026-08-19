@@ -44,7 +44,7 @@ indicatif = "0.18"
 
 # File/Archive
 zip = "8.6"
-md-5 = "0.11"
+md5 = { package = "md5-many", version = "0.1.0-alpha.4" }
 
 # Platform
 dirs = "6.0"
