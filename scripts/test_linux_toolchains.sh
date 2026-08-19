@@ -64,10 +64,16 @@ RUSTC="$nightly_root/bin/rustc" \
 CARGO_TARGET_DIR="$nightly_target" \
     "$nightly_root/bin/cargo" -Zcodegen-backend \
     --config 'profile.dev.codegen-backend="cranelift"' \
+    --config 'profile.dev.package.md5-many.codegen-backend="llvm"' \
+    --config 'profile.dev.package.crc-fast.codegen-backend="llvm"' \
+    --config 'profile.dev.package.griffr-runtime.codegen-backend="llvm"' \
     check --workspace --all-targets --locked --offline
 PATH="$nightly_root/bin:$PATH" \
 RUSTC="$nightly_root/bin/rustc" \
 CARGO_TARGET_DIR="$nightly_target" \
     "$nightly_root/bin/cargo" -Zcodegen-backend \
     --config 'profile.test.codegen-backend="cranelift"' \
+    --config 'profile.test.package.md5-many.codegen-backend="llvm"' \
+    --config 'profile.test.package.crc-fast.codegen-backend="llvm"' \
+    --config 'profile.test.package.griffr-runtime.codegen-backend="llvm"' \
     test -p griffr-cli --test cli_e2e --locked --offline -- --nocapture

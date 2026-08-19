@@ -88,8 +88,21 @@ or `GRIFFR_NIGHTLY_TARGET_DIR` to override them.
 With a rustup-managed nightly, the corresponding manual check is:
 
 ```powershell
-cargo +nightly -Zcodegen-backend --config 'profile.dev.codegen-backend="cranelift"' check --workspace --all-targets
+cargo +nightly -Zcodegen-backend \
+  --config 'profile.dev.codegen-backend="cranelift"' \
+  --config 'profile.dev.package.md5-many.codegen-backend="llvm"' \
+  --config 'profile.dev.package.crc-fast.codegen-backend="llvm"' \
+  --config 'profile.dev.package.griffr-runtime.codegen-backend="llvm"' \
+  check --workspace --all-targets
 ```
+
+The SIMD hashing path is the exception to the Cranelift backend in this matrix.
+The pinned nightly Cranelift backend does not yet lower all AVX-512/PCLMUL
+intrinsics used by `md5-many` and `crc-fast`; cross-crate inlining can also move
+those operations into `griffr-runtime`. The script therefore compiles those two
+dependencies and `griffr-runtime` with LLVM while the rest of the nightly
+workspace remains on Cranelift. This avoids silently replacing unsupported SIMD
+intrinsics with traps in the nightly E2E binary.
 
 Do not commit an unconditional `profile.dev.codegen-backend` setting to
 `.cargo/config.toml`: stable Cargo rejects that configuration before it can run
