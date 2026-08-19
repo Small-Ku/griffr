@@ -2,11 +2,22 @@ use super::{AdmissionSnapshot, ResourceState, SchedulerQueue};
 use crate::task_pool::scheduler::routing::{ResourceRequest, RunClass};
 use crate::task_pool::scheduler::TaskPriority;
 use crate::task_pool::{NodeId, Task, TaskPoolConfig, VolumeIoPolicy, VolumeStreamingMode};
+use crate::ContentHash;
 use std::path::PathBuf;
 
 fn task(name: &str) -> Task {
     Task::ApplyDeleteManifest {
         install_root: PathBuf::from(name),
+    }
+}
+
+fn md5_verify(name: &str) -> Task {
+    Task::Verify {
+        path: PathBuf::from(name),
+        logical_path: name.to_string(),
+        expected_hash: ContentHash::Md5("00".repeat(16)),
+        expected_size: Some(1),
+        on_fail: None,
     }
 }
 
@@ -79,6 +90,78 @@ fn unavailable_blocking_pool_does_not_stall_async_admission() {
         Task::ApplyDeleteManifest { ref install_root } if install_root == &PathBuf::from("blocking")
     ));
     queue.release(&selected.resources);
+}
+
+#[test]
+fn md5_batch_members_share_one_cpu_slot_but_keep_volume_pressure() {
+    let mut queue = SchedulerQueue::default();
+    let mut config = TaskPoolConfig {
+        cpu_slots: 1,
+        default_volume_policy: VolumeIoPolicy::new(2, 1, 1, 2, VolumeStreamingMode::Mixed),
+        ..TaskPoolConfig::default()
+    };
+    config.fit_blocking_pool();
+    for index in 0..3 {
+        queue.push(
+            NodeId::from_index(index),
+            md5_verify(&format!("{index}.bin")),
+            ResourceRequest {
+                run: RunClass::Cpu,
+                read_volumes: vec!["volume-a".to_string()],
+                ..ResourceRequest::default()
+            },
+            TaskPriority::Bulk,
+        );
+    }
+
+    let first = queue.pop_next(&config, true).unwrap();
+    assert_eq!(first.resources.run, RunClass::Cpu);
+    let second = queue.pop_md5_verify_batch_member(&config).unwrap();
+    assert_eq!(second.resources.run, RunClass::AsyncIo);
+    assert!(queue.pop_md5_verify_batch_member(&config).is_none());
+
+    queue.release(&second.resources);
+    let third = queue.pop_md5_verify_batch_member(&config).unwrap();
+    assert_eq!(third.resources.run, RunClass::AsyncIo);
+    queue.release(&third.resources);
+    queue.release(&first.resources);
+}
+
+#[test]
+fn restoring_md5_batch_member_recovers_cpu_run_class() {
+    let mut queue = SchedulerQueue::default();
+    let mut config = TaskPoolConfig {
+        cpu_slots: 1,
+        default_volume_policy: VolumeIoPolicy::new(2, 1, 1, 2, VolumeStreamingMode::Mixed),
+        ..TaskPoolConfig::default()
+    };
+    config.fit_blocking_pool();
+    for index in 0..2 {
+        queue.push(
+            NodeId::from_index(index),
+            md5_verify(&format!("{index}.bin")),
+            ResourceRequest {
+                run: RunClass::Cpu,
+                read_volumes: vec!["volume-a".to_string()],
+                ..ResourceRequest::default()
+            },
+            TaskPriority::Bulk,
+        );
+    }
+
+    let first = queue.pop_next(&config, true).unwrap();
+    let follower = queue.pop_md5_verify_batch_member(&config).unwrap();
+    assert_eq!(follower.resources.run, RunClass::AsyncIo);
+    queue.restore_front(follower);
+
+    // The first task still owns the only CPU slot. A correctly restored follower
+    // cannot be dispatched through the async executor while that slot is busy.
+    assert!(queue.pop_next(&config, true).is_none());
+    queue.release(&first.resources);
+
+    let restored = queue.pop_next(&config, true).unwrap();
+    assert_eq!(restored.resources.run, RunClass::Cpu);
+    queue.release(&restored.resources);
 }
 
 #[test]

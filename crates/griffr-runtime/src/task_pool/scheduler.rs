@@ -52,7 +52,7 @@ struct TaskFinish {
 
 enum DispatchAttempt {
     Submitted,
-    BlockingPoolBusy(Box<ScheduledTask>),
+    BlockingPoolBusy(Vec<ScheduledTask>),
 }
 
 #[derive(Debug)]
@@ -334,16 +334,48 @@ impl TaskPoolRunner {
                     queue.release(&scheduled.resources);
                     continue;
                 }
-                let node_id = scheduled.node_id;
-                match self.dispatch_scheduled(scheduled, finish_tx.clone())? {
+
+                let mut scheduled = vec![scheduled];
+                if super::verify::is_md5_verify_task(&scheduled[0].task) {
+                    let capacity = super::verify::md5_verify_batch_capacity();
+                    while scheduled.len() < capacity {
+                        let Some(next) = queue.pop_md5_verify_batch_member(&self.config) else {
+                            break;
+                        };
+                        if graph.is_ready(next.node_id) {
+                            scheduled.push(next);
+                        } else {
+                            queue.release(&next.resources);
+                        }
+                    }
+                }
+
+                let node_ids = scheduled
+                    .iter()
+                    .map(|scheduled| scheduled.node_id)
+                    .collect::<Vec<_>>();
+                let task_count = scheduled.len();
+                let attempt = if task_count > 1 {
+                    self.dispatch_md5_verify_batch(scheduled, finish_tx.clone())?
+                } else {
+                    self.dispatch_scheduled(
+                        scheduled.pop().expect("single scheduled task missing"),
+                        finish_tx.clone(),
+                    )?
+                };
+                match attempt {
                     DispatchAttempt::Submitted => {
-                        graph.mark_running(node_id)?;
-                        in_flight = in_flight.saturating_add(1);
+                        for node_id in node_ids {
+                            graph.mark_running(node_id)?;
+                        }
+                        in_flight = in_flight.saturating_add(task_count);
                         first_task_start.get_or_insert_with(|| run_started_at.elapsed());
                         idle_blocking_dispatch_retries = 0;
                     }
                     DispatchAttempt::BlockingPoolBusy(scheduled) => {
-                        queue.restore_front(*scheduled);
+                        for scheduled in scheduled.into_iter().rev() {
+                            queue.restore_front(scheduled);
+                        }
                         blocking_pool_busy = true;
                         blocking_dispatch_available = false;
                     }
@@ -483,6 +515,76 @@ impl TaskPoolRunner {
         Ok(TaskPoolResult { outcomes, metrics })
     }
 
+    fn dispatch_md5_verify_batch(
+        &self,
+        scheduled: Vec<ScheduledTask>,
+        finish_tx: flume::Sender<TaskFinish>,
+    ) -> Result<DispatchAttempt> {
+        debug_assert!(scheduled.len() >= 2);
+        debug_assert!(scheduled
+            .iter()
+            .all(|scheduled| super::verify::is_md5_verify_task(&scheduled.task)));
+
+        let rejected_path = task_path(&scheduled[0].task);
+        let job = Arc::new(Mutex::new(Some(scheduled)));
+        let job_for_task = Arc::clone(&job);
+        let event_tx = self.event_tx.clone();
+        match self.dispatcher.dispatch_blocking(move || {
+            let mut scheduled = job_for_task
+                .lock()
+                .unwrap()
+                .take()
+                .expect("dispatched MD5 verify batch missing");
+            let started_at = Instant::now();
+            let runs = match catch_unwind(AssertUnwindSafe(|| {
+                let mut tasks = scheduled
+                    .iter_mut()
+                    .map(|scheduled| &mut scheduled.task)
+                    .collect::<Vec<_>>();
+                super::verify::run_md5_verify_batch(&mut tasks, &event_tx)
+            })) {
+                Ok(runs) => runs,
+                Err(_) => (0..scheduled.len())
+                    .map(|_| TaskRun::failed("MD5 verify batch panicked"))
+                    .collect(),
+            };
+            let run_time = started_at.elapsed();
+            for (scheduled, run) in scheduled.into_iter().zip(runs) {
+                let path = task_path(&scheduled.task);
+                let queue_wait = scheduled
+                    .started_at
+                    .saturating_duration_since(scheduled.enqueued_at);
+                let _ = finish_tx.send(TaskFinish {
+                    node_id: scheduled.node_id,
+                    path,
+                    resources: scheduled.resources,
+                    queue_wait,
+                    run_time,
+                    run,
+                });
+            }
+        }) {
+            Ok(receiver) => {
+                drop(receiver);
+                Ok(DispatchAttempt::Submitted)
+            }
+            Err(error) => {
+                drop(error);
+                let scheduled = job
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("rejected MD5 verify batch missing");
+                debug!(
+                    batch_size = scheduled.len(),
+                    first_path = %rejected_path,
+                    "MD5 verify batch rejected because blocking pool is full"
+                );
+                Ok(DispatchAttempt::BlockingPoolBusy(scheduled))
+            }
+        }
+    }
+
     fn dispatch_scheduled(
         &self,
         scheduled: ScheduledTask,
@@ -594,7 +696,7 @@ impl TaskPoolRunner {
                             .unwrap()
                             .take()
                             .expect("rejected blocking task missing");
-                        Ok(DispatchAttempt::BlockingPoolBusy(Box::new(scheduled)))
+                        Ok(DispatchAttempt::BlockingPoolBusy(vec![scheduled]))
                     }
                 }
             }

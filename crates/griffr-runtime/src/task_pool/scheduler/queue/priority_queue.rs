@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use rapidhash::{RapidHashMap as HashMap, RapidHashSet as HashSet};
 
-use super::super::routing::{NetworkClass, ResourceRequest, RunClass};
+use super::super::routing::{run_class, NetworkClass, ResourceRequest, RunClass};
 use super::super::TaskPriority;
 use super::resources::{AdmissionSnapshot, ResourceState};
 use crate::task_pool::{NodeId, Task, TaskPoolConfig};
@@ -276,6 +276,47 @@ impl QueueState {
         None
     }
 
+    fn pop_md5_verify_for_batch(&mut self, config: &TaskPoolConfig) -> Option<QueuedTask> {
+        self.ensure_admission_cache(config);
+
+        let continuation_index = {
+            let cache = self
+                .admission_cache
+                .as_ref()
+                .expect("admission cache must exist while selecting MD5 verify batch");
+            md5_verify_batch_index(&self.continuation, &self.resources, config, &cache.snapshot)
+        };
+        if let Some(index) = continuation_index {
+            let queued = self
+                .continuation
+                .remove(index)
+                .expect("selected continuation task must exist");
+            self.admission_cache
+                .as_mut()
+                .expect("admission cache must exist while selecting MD5 verify batch")
+                .remove_task(TaskPriority::Continuation, &queued);
+            return Some(queued);
+        }
+
+        let bulk_index = {
+            let cache = self
+                .admission_cache
+                .as_ref()
+                .expect("admission cache must exist while selecting MD5 verify batch");
+            md5_verify_batch_index(&self.bulk, &self.resources, config, &cache.snapshot)
+        };
+        let index = bulk_index?;
+        let queued = self
+            .bulk
+            .remove(index)
+            .expect("selected bulk task must exist");
+        self.admission_cache
+            .as_mut()
+            .expect("admission cache must exist while selecting MD5 verify batch")
+            .remove_task(TaskPriority::Bulk, &queued);
+        Some(queued)
+    }
+
     fn pop_runnable(&mut self, class: RunClass, config: &TaskPoolConfig) -> Option<QueuedTask> {
         let class_index = run_index(class);
         let force_bulk = self.continuation_streak[class_index] >= CONTINUATION_BURST;
@@ -460,6 +501,25 @@ fn runnable_index(
         })
 }
 
+fn md5_verify_batch_index(
+    queue: &VecDeque<QueuedTask>,
+    resources: &ResourceState,
+    config: &TaskPoolConfig,
+    admission: &AdmissionSnapshot,
+) -> Option<usize> {
+    queue.iter().position(|queued| {
+        if !crate::task_pool::verify::is_md5_verify_task(&queued.task) {
+            return false;
+        }
+        let mut batch_resources = queued.resources.clone();
+        // The whole SIMD batch runs on one blocking worker. Additional streams
+        // reserve only their I/O pressure; the first stream already owns the
+        // batch's single CPU slot.
+        batch_resources.run = RunClass::AsyncIo;
+        resources.can_acquire(&batch_resources, config, admission)
+    })
+}
+
 fn run_index(class: RunClass) -> usize {
     match class {
         RunClass::AsyncIo => 0,
@@ -524,8 +584,12 @@ impl SchedulerQueue {
         self.state.invalidate_admission_cache();
     }
 
-    pub(crate) fn restore_front(&mut self, scheduled: ScheduledTask) {
+    pub(crate) fn restore_front(&mut self, mut scheduled: ScheduledTask) {
         self.state.resources.release(&scheduled.resources);
+        // Batched MD5 followers temporarily borrow AsyncIo admission so one SIMD
+        // worker owns the CPU slot. If dispatch is rejected, restore the task
+        // with its canonical run class before putting it back on the queue.
+        scheduled.resources.run = run_class(&scheduled.task);
         self.state.continuation.push_front(QueuedTask {
             node_id: scheduled.node_id,
             task: scheduled.task,
@@ -546,6 +610,23 @@ impl SchedulerQueue {
             node_id: queued.node_id,
             task: queued.task,
             resources: queued.resources,
+            enqueued_at: queued.enqueued_at,
+            started_at: Instant::now(),
+        })
+    }
+
+    pub(crate) fn pop_md5_verify_batch_member(
+        &mut self,
+        config: &TaskPoolConfig,
+    ) -> Option<ScheduledTask> {
+        let queued = self.state.pop_md5_verify_for_batch(config)?;
+        let mut resources = queued.resources;
+        resources.run = RunClass::AsyncIo;
+        self.state.resources.acquire(&resources);
+        Some(ScheduledTask {
+            node_id: queued.node_id,
+            task: queued.task,
+            resources,
             enqueued_at: queued.enqueued_at,
             started_at: Instant::now(),
         })
