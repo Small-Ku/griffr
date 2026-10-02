@@ -913,3 +913,6 @@ mod admission_config_tests {
         assert!(error.contains("reserved compio fallback lanes"));
     }
 }
+
+#[cfg(test)]
+mod work_unit_research;

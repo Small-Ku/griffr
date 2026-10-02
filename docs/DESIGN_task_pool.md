@@ -415,3 +415,5 @@ DAG nodes represent meaningful restartable work:
 Network chunks, read buffers, and individual hashing blocks are intentionally not nodes. Fine-grained byte processing stays inside one runner to avoid millions of scheduler entries.
 
 Patch apply ordering and recovery are documented in [`DESIGN_patch_steps.md`](DESIGN_patch_steps.md). File allocation and Windows storage strategy are documented in [`DESIGN_optimizations.md`](DESIGN_optimizations.md).
+
+The test-only [Issue #1 WorkUnit pilot](research/issue-1-work-units.md) records quantum and soft-deadline candidates, safe resume boundaries, measured costs, and rollout limits.
