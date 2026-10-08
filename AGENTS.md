@@ -1,8 +1,12 @@
 # Griffr Agent Instructions
 
-Griffr is in active prerelease development. Prefer a clean, maintainable design over backward compatibility. Breaking changes are expected when they remove duplication, improve correctness, or simplify the architecture.
+Griffr is in active prerelease development.
 
-Do not add migration, compatibility, or deprecation layers unless the user explicitly requests them. In prerelease code, obsolete models and APIs should normally be removed instead of preserved beside their replacements.
+Prefer a clean, maintainable design over backward compatibility. Breaking changes are expected when they remove duplication, improve correctness, or simplify the architecture.
+
+Do not add migration, compatibility, or deprecation layers unless the user explicitly requests them.
+
+In prerelease code, remove obsolete models and APIs instead of preserving them beside their replacements.
 
 ## Repository Scope
 
@@ -15,7 +19,13 @@ Primary workspace crates:
 - `crates/griffr-cli`: command parsing, terminal presentation, and CLI-specific orchestration.
 - `crates/griffr-gui` / `crates/griffr-gui-macros`: GUI frontend and code generation.
 
-Dependency direction is one-way: provider APIs may depend on `griffr-core` but not on each other or `griffr-runtime`; runtime may consume both provider APIs; frontends compose the library crates. Shared library crates must not gain terminal- or GUI-specific dependencies.
+Dependency direction is one-way:
+
+- Provider APIs may depend on `griffr-core`.
+- Provider APIs must not depend on each other or on `griffr-runtime`.
+- `griffr-runtime` may consume both provider APIs.
+- Frontends compose the library crates.
+- Shared library crates must not gain terminal- or GUI-specific dependencies.
 
 Reference material:
 - `docs/WORDING.md`: controlled project terms and direct naming rules.
@@ -39,16 +49,27 @@ Always obey the closest nested `AGENTS.md` when working inside a subdirectory.
 8. Package only after the working tree passes the available checks.
 9. Re-extract the package and verify the extracted artifact again.
 
-For large refactors, keep intermediate changes internally consistent. Do not leave both old callback APIs and new channel APIs active unless a short-lived adapter is strictly required to land the migration safely.
+### Milestone delivery (Scientific-Spiral)
+
+Keep experiments local or on branches while feasibility or value is unknown.
+Open the first correct authority PR when evidence shows the direction is technically feasible, materially useful for its goal, and has no known blocker likely to overturn it.
+Continue validation, cleanup, and review on that PR. PR-ready does not mean the milestone is complete or accepted. Add corrections and evidence as the review continues.
+Canonical `main` records accepted milestone conclusions, not every experiment. The maintainer finalizes the accepted tree under the repository's squash-oriented merge policy.
+
+For large refactors, keep every intermediate state internally consistent.
+
+Do not leave old callback APIs and new channel APIs active together unless a short-lived adapter is required to land the migration safely.
 
 ## Single Source of Truth
 
 Every domain fact should have one authoritative representation.
 
-- Do not introduce parallel structs that describe the same game, target, server, profile, catalog entry, channel, or installation identity without a demonstrated semantic difference.
+- Do not introduce parallel domain structs without a demonstrated semantic difference.
+- This rule applies to game, target, server, profile, catalog entry, channel, and installation identity models.
 - Derive views and serialization formats from the canonical model.
 - Remove obsolete storage keys, serialized keys, configuration objects, and compatibility fields when no longer used.
-- If code or helper functions are only used in unit tests, move them to test scope (`#[cfg(test)]` or test modules) rather than keeping them in production code with `#[allow(dead_code)]`.
+- Move test-only code or helpers to test scope (`#[cfg(test)]` or test modules).
+- Do not keep test-only production code alive with `#[allow(dead_code)]`.
 - Do not copy canonical constants into CLI or GUI code. Re-export or consume them from their owning module.
 - When two values look similar, find out if they are different concepts before you keep separate types.
 
@@ -79,7 +100,8 @@ Shared APIs must expose domain semantics, not frontend mechanics.
 8. Preserve correctness barriers:
    - archive and game-file ensure finish before dependent verification;
    - do not verify files before their ensure dependencies finish unless those dependencies are represented in the same DAG.
-9. New install/update/verify phases should integrate with the shared runner and DAG model by default. Other pools require a code comment that explains why the shared runner cannot be used.
+9. Integrate new install/update/verify phases with the shared runner and DAG model by default.
+   - If another pool is required, add a code comment that explains why the shared runner cannot be used.
 10. Preserve forward-only patch apply barriers:
     - check the archive and save the selected plan before staged files change the install;
     - defer `config.ini` and other finish markers until VFS patch application and cleanup succeed;
