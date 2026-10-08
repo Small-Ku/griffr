@@ -52,11 +52,11 @@ cargo check -p griffr-runtime --no-default-features
 
 `griffr-hypergryph-api` enables `client` by default; `client` includes `crypto`. `griffr-yostar-api` enables its `client` feature by default. `griffr-runtime` enables `hdiff-patch` by default; disabling it removes the HDiff engine while preserving planning/model code.
 
-Format/Lint:
+Format/Lint (install repository tools with `mise install` first):
 ```bash
 cargo fmt --all
 cargo clippy --all-targets --all-features
-python scripts/check_repo.py .
+mise run repo-check
 ```
 
 Release build:

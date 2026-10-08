@@ -3,7 +3,7 @@ min_version = "2026.9.15"
 
 [settings]
 lockfile = true
-lockfile_platforms = ["windows-x64"]
+lockfile_platforms = ["windows-x64", "linux-x64"]
 
 [settings.task]
 run_auto_install = false
@@ -11,9 +11,10 @@ run_auto_install = false
 [tools]
 rust = [
   { version = "stable", components = ["clippy", "rustfmt"], profile = "minimal", mr_boxington = true },
-  { version = "nightly", profile = "minimal", mr_boxington = true },
+  { version = "nightly", components = ["rustc-codegen-cranelift-preview"], profile = "minimal", mr_boxington = true },
 ]
 mr-boxington = "1.14.0"
+pixi = "0.81.0"
 
 [env]
 CARGO_TERM_COLOR = "always"
@@ -37,9 +38,10 @@ tools = { rust = { version = "nightly", profile = "minimal", mr_boxington = true
 run = "mbx check --locked --workspace --all-targets"
 
 [tasks.build]
-description = "Build all workspace targets through Mr Boxington using nightly LLVM"
-tools = { rust = { version = "nightly", profile = "minimal", mr_boxington = true } }
-run = "mbx build --locked --workspace --all-targets"
+description = "Build all targets with LLVM dependencies and Cranelift for the CLI"
+tools = { rust = { version = "nightly", components = ["rustc-codegen-cranelift-preview"], profile = "minimal", mr_boxington = true } }
+# Keep griffr-runtime on LLVM: the SIMD intrinsic path does not support Cranelift.
+run = 'mbx build --locked --workspace --all-targets -Z codegen-backend --config "profile.dev.codegen-backend=\"llvm\"" --config "profile.dev.package.griffr-cli.codegen-backend=\"cranelift\""'
 
 [tasks.clippy]
 description = "Run Clippy with warnings denied through Mr Boxington"
@@ -50,8 +52,8 @@ description = "Run all workspace tests through Mr Boxington"
 run = "mbx test --locked --workspace"
 
 [tasks.repo-check]
-description = "Run repository policy checks and regression suite"
-run = "python scripts/check_repo.py . && python -m unittest discover -s scripts/tests -v && python -m compileall -q scripts"
+description = "Run the Pixi-managed Python policy checks and regression suite"
+run = "pixi run --locked repo-check"
 
 [tasks.ci]
 description = "Run repository validation gates"

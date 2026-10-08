@@ -11,8 +11,7 @@ Set-Location $repoRoot
 rustup toolchain install $Toolchain --profile minimal --component rustfmt,clippy
 $env:RUSTUP_TOOLCHAIN = $Toolchain
 
-python scripts/check_repo.py .
-python -m unittest discover -s scripts/tests -v
+mise run repo-check
 
 $env:CARGO_TARGET_DIR = $TargetDir
 cargo fmt --all -- --check

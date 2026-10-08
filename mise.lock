@@ -7,11 +7,34 @@ version = "1.14.0"
 backend = "packslip:github.com/jdx/mr-boxington"
 specifiers = ["1.14.0"]
 
+[tools.mr-boxington."platforms.linux-x64"]
+checksum = "sha256:fc32cc431a9e022519b16348962f99ca84626ff25196bc11e61cb05df66fb069"
+url = "https://github.com/jdx/mr-boxington/releases/download/v1.14.0/mbx-x86_64-unknown-linux-gnu.tar.gz"
+signer = "sigstore-oidc:https://github.com/jdx/mr-boxington/.github/workflows/release.yml"
+repository_ids = { repository = "1340721957" }
+
 [tools.mr-boxington."platforms.windows-x64"]
 checksum = "sha256:5d102168bd30ac480da37b663edde883501aee4778bd757a547773d36cbcabfe"
 url = "https://github.com/jdx/mr-boxington/releases/download/v1.14.0/mbx-x86_64-pc-windows-msvc.zip"
 signer = "sigstore-oidc:https://github.com/jdx/mr-boxington/.github/workflows/release.yml"
 repository_ids = { repository = "1340721957" }
+
+[[tools.pixi]]
+version = "0.81.0"
+backend = "github:prefix-dev/pixi"
+specifiers = ["0.81.0"]
+
+[tools.pixi."platforms.linux-x64"]
+checksum = "sha256:7aa3ec39aecceff9062fa2ed4d42cbaa0bdc25ddea727d048e061cf188d434f6"
+url = "https://github.com/prefix-dev/pixi/releases/download/v0.81.0/pixi-x86_64-unknown-linux-musl.tar.gz"
+url_api = "https://api.github.com/repos/prefix-dev/pixi/releases/assets/565929985"
+provenance = "github-attestations"
+
+[tools.pixi."platforms.windows-x64"]
+checksum = "sha256:1fc82219c96d539e6a856bd1bb2643ec9e1753f5b3af61b0c3158921aca89de3"
+url = "https://github.com/prefix-dev/pixi/releases/download/v0.81.0/pixi-x86_64-pc-windows-msvc.zip"
+url_api = "https://api.github.com/repos/prefix-dev/pixi/releases/assets/565929952"
+provenance = "github-attestations"
 
 [[tools.rust]]
 version = "nightly-2026-10-07"
@@ -19,6 +42,7 @@ backend = "core:rust"
 specifiers = ["nightly"]
 
 [tools.rust.options]
+components = "rustc-codegen-cranelift-preview"
 profile = "minimal"
 
 [[tools.rust]]

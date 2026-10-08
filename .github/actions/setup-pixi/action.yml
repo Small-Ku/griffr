@@ -1,0 +1,8 @@
+name: Set up Pixi with mise
+description: Install the repository-pinned Pixi tool for Python CI helpers.
+runs:
+  using: composite
+  steps:
+    - uses: jdx/mise-action@v4
+      with:
+        install_args: pixi

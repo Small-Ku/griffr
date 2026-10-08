@@ -8,6 +8,7 @@
 /rust-toolchain.toml
 
 .ruff_cache
+/.pixi/
 .pytest_cache
 .mypy_cache
 __pycache__

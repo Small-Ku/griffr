@@ -26,12 +26,9 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-      - name: Check repository policy
-        run: python scripts/check_repo.py .
-      - name: Run checker regression tests
-        run: python -m unittest discover -s scripts/tests -v
-      - name: Compile Python tooling
-        run: python -m compileall -q scripts
+      - uses: ./.github/actions/setup-pixi
+      - name: Validate repository policy and Python tools
+        run: mise run repo-check
       - name: Install actionlint
         shell: bash
         env:
@@ -62,7 +59,7 @@ jobs:
           elif ! git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
             git fetch --no-tags --depth=1 origin "$BEFORE_SHA"
           fi
-          python scripts/ci/live_e2e_policy.py --base "$BEFORE_SHA" --head "$HEAD_SHA" > live-e2e-policy.json
+          pixi run --locked python scripts/ci/live_e2e_policy.py --base "$BEFORE_SHA" --head "$HEAD_SHA" > live-e2e-policy.json
           cat live-e2e-policy.json
       - name: Publish live policy for post-CI workflow
         if: github.event_name == 'push'
@@ -80,9 +77,9 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          report=$(python scripts/ci/live_e2e_policy.py --base "$BASE_SHA" --head "$HEAD_SHA")
+          report=$(pixi run --locked python scripts/ci/live_e2e_policy.py --base "$BASE_SHA" --head "$HEAD_SHA")
           echo "$report"
-          recommendation=$(python -c 'import json,sys; print(json.load(sys.stdin)["recommended"])' <<<"$report")
+          recommendation=$(pixi run --locked python -c 'import json,sys; print(json.load(sys.stdin)["recommended"])' <<<"$report")
           {
             echo '### Live E2E recommendation'
             echo

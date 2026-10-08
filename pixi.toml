@@ -1,0 +1,14 @@
+[workspace]
+name = "griffr-tools"
+channels = ["conda-forge"]
+platforms = ["win-64", "linux-64"]
+requires-pixi = ">=0.81,<0.82"
+
+[dependencies]
+python = "3.13.*"
+
+[tasks]
+policy = "python scripts/check_repo.py ."
+tests = "python -m unittest discover -s scripts/tests -v"
+compile = "python -m compileall -q scripts"
+repo-check = "python scripts/check_repo.py . && python -m unittest discover -s scripts/tests -v && python -m compileall -q scripts"

@@ -1,15 +1,20 @@
 # Repository checks
 
+Install the tools with `mise install`, then run `mise run repo-check` from the
+repository root. Mise owns the command entry point and Pixi supplies the locked
+Python environment on Windows and Linux. The commands below run each check
+separately. These Python checks do not replace Rust tests or runtime acceptance.
+
 Run the dependency-free repository policy checker from the repository root:
 
 ```bash
-python scripts/check_repo.py .
+pixi run --locked policy
 ```
 
 Run its regression suite with:
 
 ```bash
-python -m unittest discover -s scripts/tests -v
+pixi run --locked tests
 ```
 
 The checker intentionally covers only policies that Rust's normal tools do not
@@ -45,7 +50,7 @@ cargo test --workspace
 Classify a change without contacting production services:
 
 ```bash
-python scripts/ci/live_e2e_policy.py --base origin/main --head HEAD
+pixi run --locked python scripts/ci/live_e2e_policy.py --base origin/main --head HEAD
 ```
 
 The output recommends `smoke`, `archive-sample`, `lifecycle`, and/or `streaming`. `smoke` is

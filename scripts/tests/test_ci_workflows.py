@@ -64,6 +64,45 @@ class CiWorkflowTopologyTests(unittest.TestCase):
         self.assertNotIn("rustup default", action)
         self.assertNotIn("target/", action)
 
+    def test_python_policy_runs_pixi_through_mise(self) -> None:
+        workflow = read(".github/workflows/ci.yml")
+        policy = job_block(workflow, "repository-policy")
+        setup = read(".github/actions/setup-pixi/action.yml")
+        mise = read("mise.toml")
+        pixi = read("pixi.toml")
+        self.assertIn("uses: jdx/mise-action@v4", setup)
+        self.assertIn("install_args: pixi", setup)
+        self.assertIn("pixi = \"0.81.0\"", mise)
+        self.assertIn("run = \"pixi run --locked repo-check\"", mise)
+        self.assertIn("python = \"3.13.*\"", pixi)
+        self.assertTrue((ROOT / "pixi.lock").is_file())
+        self.assertIn('lockfile_platforms = ["windows-x64", "linux-x64"]', mise)
+        mise_lock = read("mise.lock")
+        self.assertIn('[tools.pixi."platforms.linux-x64"]', mise_lock)
+        self.assertIn('[tools.pixi."platforms.windows-x64"]', mise_lock)
+        self.assertIn("uses: ./.github/actions/setup-pixi", policy)
+        self.assertIn("run: mise run repo-check", policy)
+        self.assertIn("pixi run --locked python scripts/ci/live_e2e_policy.py", policy)
+        self.assertNotIn("run: python scripts/check_repo.py .", policy)
+
+    def test_live_helpers_use_pixi_without_changing_plan_job(self) -> None:
+        workflow = read(".github/workflows/live-e2e.yml")
+        for lane in ("archive-sample", "lifecycle", "streaming"):
+            for os_name in ("linux", "windows"):
+                block = job_block(workflow, f"{lane}-{os_name}")
+                self.assertIn("uses: ./.github/actions/setup-pixi", block)
+                self.assertIn(
+                    "uses: actions/checkout@v7.0.1\n        with:\n          ref: ${{ needs.plan.outputs.live_ref }}\n      - uses: ./.github/actions/setup-pixi",
+                    block,
+                )
+                self.assertIn(
+                    f"pixi run --locked python scripts/ci/prepare_live_workspace.py --lane {lane} --github-output",
+                    block,
+                )
+        plan = job_block(workflow, "plan")
+        self.assertNotIn("uses: ./.github/actions/setup-pixi", plan)
+        self.assertIn("python - <<'PY_MATRIX'", plan)
+
     def test_repository_policy_installs_actionlint_from_pinned_release(self) -> None:
         workflow = read(".github/workflows/ci.yml")
         policy = job_block(workflow, "repository-policy")

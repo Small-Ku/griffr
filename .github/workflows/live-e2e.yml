@@ -331,6 +331,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: ./.github/actions/setup-pixi
       - uses: taiki-e/install-action@v2.85.13
         with:
           tool: cargo-nextest@0.9.143
@@ -342,7 +343,7 @@ jobs:
         env:
           GRIFFR_LIVE_ROOT_INPUT: ${{ inputs.root }}
           GRIFFR_LIVE_MIN_FREE_GIB: ${{ inputs.minimum_free_gib }}
-        run: python scripts/ci/prepare_live_workspace.py --lane archive-sample --github-output
+        run: pixi run --locked python scripts/ci/prepare_live_workspace.py --lane archive-sample --github-output
       - name: Sample current official multi-volume archive
         env:
           GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
@@ -359,6 +360,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: ./.github/actions/setup-pixi
       - uses: taiki-e/install-action@v2.85.13
         with:
           tool: cargo-nextest@0.9.143
@@ -370,7 +372,7 @@ jobs:
         env:
           GRIFFR_LIVE_ROOT_INPUT: ${{ inputs.root }}
           GRIFFR_LIVE_MIN_FREE_GIB: ${{ inputs.minimum_free_gib }}
-        run: python scripts/ci/prepare_live_workspace.py --lane archive-sample --github-output
+        run: pixi run --locked python scripts/ci/prepare_live_workspace.py --lane archive-sample --github-output
       - name: Sample current official multi-volume archive
         env:
           GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
@@ -391,6 +393,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: ./.github/actions/setup-pixi
       - uses: taiki-e/install-action@v2.85.13
         with:
           tool: cargo-nextest@0.9.143
@@ -402,7 +405,7 @@ jobs:
         env:
           GRIFFR_LIVE_ROOT_INPUT: ${{ inputs.root }}
           GRIFFR_LIVE_MIN_FREE_GIB: ${{ inputs.minimum_free_gib }}
-        run: python scripts/ci/prepare_live_workspace.py --lane lifecycle --github-output
+        run: pixi run --locked python scripts/ci/prepare_live_workspace.py --lane lifecycle --github-output
       - name: Check current install footprint against hosted disk
         env:
           GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
@@ -440,6 +443,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: ./.github/actions/setup-pixi
       - uses: taiki-e/install-action@v2.85.13
         with:
           tool: cargo-nextest@0.9.143
@@ -451,7 +455,7 @@ jobs:
         env:
           GRIFFR_LIVE_ROOT_INPUT: ${{ inputs.root }}
           GRIFFR_LIVE_MIN_FREE_GIB: ${{ inputs.minimum_free_gib }}
-        run: python scripts/ci/prepare_live_workspace.py --lane lifecycle --github-output
+        run: pixi run --locked python scripts/ci/prepare_live_workspace.py --lane lifecycle --github-output
       - name: Check current install footprint against hosted disk
         env:
           GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
@@ -489,6 +493,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: ./.github/actions/setup-pixi
       - uses: taiki-e/install-action@v2.85.13
         with:
           tool: cargo-nextest@0.9.143
@@ -500,7 +505,7 @@ jobs:
         env:
           GRIFFR_LIVE_ROOT_INPUT: ${{ inputs.root }}
           GRIFFR_LIVE_MIN_FREE_GIB: ${{ inputs.minimum_free_gib }}
-        run: python scripts/ci/prepare_live_workspace.py --lane streaming --github-output
+        run: pixi run --locked python scripts/ci/prepare_live_workspace.py --lane streaming --github-output
       - name: Stream and discard official package parts
         env:
           GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}
@@ -527,6 +532,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.plan.outputs.live_ref }}
+      - uses: ./.github/actions/setup-pixi
       - uses: taiki-e/install-action@v2.85.13
         with:
           tool: cargo-nextest@0.9.143
@@ -538,7 +544,7 @@ jobs:
         env:
           GRIFFR_LIVE_ROOT_INPUT: ${{ inputs.root }}
           GRIFFR_LIVE_MIN_FREE_GIB: ${{ inputs.minimum_free_gib }}
-        run: python scripts/ci/prepare_live_workspace.py --lane streaming --github-output
+        run: pixi run --locked python scripts/ci/prepare_live_workspace.py --lane streaming --github-output
       - name: Stream and discard official package parts
         env:
           GRIFFR_LIVE_E2E_ROOT: ${{ steps.live-root.outputs.root }}

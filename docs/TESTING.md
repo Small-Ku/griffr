@@ -159,7 +159,7 @@ should not make normal CI red.
 To inspect the recommendation locally:
 
 ```bash
-python scripts/ci/live_e2e_policy.py --base origin/main --head HEAD
+pixi run --locked python scripts/ci/live_e2e_policy.py --base origin/main --head HEAD
 ```
 
 ## Official-server content lifecycle

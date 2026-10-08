@@ -154,9 +154,12 @@ Run targeted tests while iterating, then run the workspace-level commands before
 Repository policy check and its regression suite:
 
 ```powershell
-python scripts/check_repo.py .
-python -m unittest discover -s scripts/tests -v
-python -m compileall -q scripts
+mise run repo-check
+
+# To run individual checks through the locked Pixi Python environment:
+pixi run --locked policy
+pixi run --locked tests
+pixi run --locked compile
 ```
 
 Also run `ruff check scripts` when Ruff is available. If Cargo or the Rust

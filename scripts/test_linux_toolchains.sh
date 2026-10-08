@@ -34,8 +34,11 @@ done
 
 cd "$repo_root"
 
-python3 scripts/check_repo.py .
-python3 -m unittest discover -s scripts/tests -v
+if ! command -v pixi >/dev/null 2>&1; then
+    printf 'Install Pixi with mise before running the repository Python checks.\n' >&2
+    exit 2
+fi
+pixi run --locked repo-check
 
 stable_target=${GRIFFR_STABLE_TARGET_DIR:-target/toolchain-stable}
 nightly_target=${GRIFFR_NIGHTLY_TARGET_DIR:-target/toolchain-nightly-cranelift}
