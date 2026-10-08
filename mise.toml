@@ -1,0 +1,63 @@
+#:schema https://mise.jdx.dev/schema/mise.json
+min_version = "2026.9.15"
+
+[settings]
+lockfile = true
+lockfile_platforms = ["windows-x64"]
+
+[settings.task]
+run_auto_install = false
+
+[tools]
+rust = [
+  { version = "stable", components = ["clippy", "rustfmt"], profile = "minimal", mr_boxington = true },
+  { version = "nightly", profile = "minimal", mr_boxington = true },
+]
+mr-boxington = "1.14.0"
+
+[env]
+CARGO_TERM_COLOR = "always"
+RUST_BACKTRACE = "1"
+
+[tasks.doctor]
+description = "Check the Rust and Mr Boxington toolchain"
+run = "mbx doctor"
+
+[tasks.fmt]
+description = "Check Rust formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.fmt-fix]
+description = "Format Rust sources"
+run = "cargo fmt --all"
+
+[tasks.check]
+description = "Type-check all workspace targets through Mr Boxington using nightly LLVM"
+tools = { rust = { version = "nightly", profile = "minimal", mr_boxington = true } }
+run = "mbx check --locked --workspace --all-targets"
+
+[tasks.build]
+description = "Build all workspace targets through Mr Boxington using nightly LLVM"
+tools = { rust = { version = "nightly", profile = "minimal", mr_boxington = true } }
+run = "mbx build --locked --workspace --all-targets"
+
+[tasks.clippy]
+description = "Run Clippy with warnings denied through Mr Boxington"
+run = "mbx clippy --locked --workspace --all-targets -- -D warnings"
+
+[tasks.test]
+description = "Run all workspace tests through Mr Boxington"
+run = "mbx test --locked --workspace"
+
+[tasks.repo-check]
+description = "Run repository policy checks and regression suite"
+run = "python scripts/check_repo.py . && python -m unittest discover -s scripts/tests -v && python -m compileall -q scripts"
+
+[tasks.ci]
+description = "Run repository validation gates"
+run = [
+  { task = "fmt" },
+  { task = "clippy" },
+  { task = "test" },
+  { task = "repo-check" },
+]
